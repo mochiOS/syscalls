@@ -1,0 +1,6 @@
+name = "Kagami"
+bundle_id = "os.mochi.kagami"
+version = "0.1.0"
+developer = "mochiOS Project"
+entry = "entry.elf"
+description = "mochiOS向けウィンドウサーバー Kagami（現在はHello, world!のみ）"
