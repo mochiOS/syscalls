@@ -5,6 +5,26 @@ const WINDOW_POS_X: i32 = 96;
 const WINDOW_POS_Y: i32 = 96;
 const WINDOW_STEP_X: i32 = 14;
 const WINDOW_STEP_Y: i32 = 10;
+const STATUS_BAR_HEIGHT: i32 = 28;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowLayer {
+    Wallpaper,
+    App,
+    Status,
+    System,
+}
+
+impl WindowLayer {
+    fn order(self) -> i32 {
+        match self {
+            Self::Wallpaper => 0,
+            Self::App => 1,
+            Self::Status => 2,
+            Self::System => 3,
+        }
+    }
+}
 
 include!(concat!(env!("OUT_DIR"), "/cursor_pixels.rs"));
 
@@ -29,6 +49,7 @@ pub struct WindowSurface {
     pub x: i32,
     pub y: i32,
     pub z: i32,
+    pub layer: WindowLayer,
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<u32>,
@@ -65,7 +86,14 @@ impl Renderer {
         self.render_full();
     }
 
-    pub fn create_window(&mut self, id: u32, width: usize, height: usize, pixels: Vec<u32>) {
+    pub fn create_window(
+        &mut self,
+        id: u32,
+        layer: WindowLayer,
+        width: usize,
+        height: usize,
+        pixels: Vec<u32>,
+    ) {
         if self.windows.iter().any(|w| w.id == id) {
             self.update_window_pixels(id, width, height, pixels);
             return;
@@ -78,6 +106,7 @@ impl Renderer {
             x,
             y,
             z,
+            layer,
             width,
             height,
             pixels,
@@ -97,7 +126,18 @@ impl Renderer {
             self.render_full();
             return;
         }
-        self.create_window(id, width, height, pixels);
+        self.create_window(id, WindowLayer::App, width, height, pixels);
+    }
+
+    pub fn layer_of_window(&self, id: u32) -> Option<WindowLayer> {
+        self.windows.iter().find(|w| w.id == id).map(|w| w.layer)
+    }
+
+    pub fn top_layer(&self) -> Option<WindowLayer> {
+        self.windows
+            .iter()
+            .max_by_key(|w| (w.layer.order(), w.z))
+            .map(|w| w.layer)
     }
 
     pub fn move_cursor_by(&mut self, dx: i32, dy: i32) {
@@ -113,6 +153,7 @@ impl Renderer {
 
     fn render_full(&mut self) {
         self.clear_back_buffer(BG_COLOR);
+        self.draw_status_bar_base();
         self.draw_windows_to_back_buffer();
         self.draw_cursor_to_back_buffer(self.cursor_x, self.cursor_y);
         self.present_back_buffer();
@@ -125,6 +166,18 @@ impl Renderer {
         }
     }
 
+    fn draw_status_bar_base(&mut self) {
+        for y in 0..STATUS_BAR_HEIGHT {
+            if y >= self.height {
+                break;
+            }
+            for x in 0..self.width {
+                let idx = (y * self.stride + x) as usize;
+                self.back_buffer[idx] = 0xFF1A_1A24;
+            }
+        }
+    }
+
     fn draw_windows_to_back_buffer(&mut self) {
         for surface in &self.windows {
             for sy in 0..surface.height {
@@ -132,6 +185,10 @@ impl Renderer {
                     let x = surface.x + sx as i32;
                     let y = surface.y + sy as i32;
                     if x < 0 || y < 0 || x >= self.width || y >= self.height {
+                        continue;
+                    }
+                    // App Layer は Status Layer 領域へ描画できない（クリッピング）。
+                    if surface.layer == WindowLayer::App && y < STATUS_BAR_HEIGHT {
                         continue;
                     }
                     let bb_idx = (y * self.stride + x) as usize;
@@ -169,7 +226,7 @@ impl Renderer {
     }
 
     fn sort_windows_by_z(&mut self) {
-        self.windows.sort_by_key(|w| w.z);
+        self.windows.sort_by_key(|w| (w.layer.order(), w.z));
     }
 
     fn next_z(&self) -> i32 {

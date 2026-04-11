@@ -1,8 +1,11 @@
 use swiftlib::{ipc, keyboard, mouse, task};
 
 use crate::input::InputState;
-use crate::ipc_proto::{IPC_BUF_SIZE, OP_REQ_CREATE_WINDOW, OP_REQ_FLUSH, OP_RES_WINDOW_CREATED};
-use crate::renderer::Renderer;
+use crate::ipc_proto::{
+    IPC_BUF_SIZE, LAYER_APP, LAYER_STATUS, LAYER_SYSTEM, LAYER_WALLPAPER, OP_REQ_CREATE_WINDOW,
+    OP_REQ_FLUSH, OP_RES_WINDOW_CREATED,
+};
+use crate::renderer::{Renderer, WindowLayer};
 
 pub struct KagamiApp {
     renderer: Renderer,
@@ -11,6 +14,7 @@ pub struct KagamiApp {
     ipc_buf: [u8; IPC_BUF_SIZE],
     next_window_id: u32,
     demo_windows_created: bool,
+    secure_input_mode: bool,
 }
 
 impl KagamiApp {
@@ -22,6 +26,7 @@ impl KagamiApp {
             ipc_buf: [0u8; IPC_BUF_SIZE],
             next_window_id: 1,
             demo_windows_created: false,
+            secure_input_mode: false,
         }
     }
 
@@ -72,6 +77,8 @@ impl KagamiApp {
                 did_work = true;
             }
 
+            self.update_secure_input_mode();
+
             if !did_work {
                 task::yield_now();
             }
@@ -109,12 +116,20 @@ impl KagamiApp {
                 }
                 let req_w = u16::from_le_bytes([self.ipc_buf[4], self.ipc_buf[5]]) as usize;
                 let req_h = u16::from_le_bytes([self.ipc_buf[6], self.ipc_buf[7]]) as usize;
+                let requested_layer = if len >= 9 { self.ipc_buf[8] } else { LAYER_APP };
                 let width = req_w.clamp(8, 96);
                 let height = req_h.clamp(8, 96);
+                let privilege = task::get_thread_privilege(sender_tid);
+                let layer = sanitize_layer_request(requested_layer, privilege);
                 let window_id = self.next_window_id;
                 self.next_window_id = self.next_window_id.saturating_add(1);
-                self.renderer
-                    .create_window(window_id, width, height, vec![0x0030_3048; width * height]);
+                self.renderer.create_window(
+                    window_id,
+                    layer,
+                    width,
+                    height,
+                    vec![0x0030_3048; width * height],
+                );
                 let mut res = [0u8; 8];
                 res[0..4].copy_from_slice(&OP_RES_WINDOW_CREATED.to_le_bytes());
                 res[4..8].copy_from_slice(&window_id.to_le_bytes());
@@ -156,6 +171,19 @@ impl KagamiApp {
         }
     }
 
+    fn update_secure_input_mode(&mut self) {
+        let focused_layer = self.renderer.top_layer();
+        let next_secure = matches!(focused_layer, Some(WindowLayer::System));
+        if next_secure != self.secure_input_mode {
+            self.secure_input_mode = next_secure;
+            if self.secure_input_mode {
+                println!("[KAGAMI] secure input mode: ON");
+            } else {
+                println!("[KAGAMI] secure input mode: OFF");
+            }
+        }
+    }
+
     fn inject_demo_ipc(&mut self) {
         let self_tid = task::gettid();
         let width_a: u16 = 40;
@@ -164,16 +192,18 @@ impl KagamiApp {
         let height_b: u16 = 22;
 
         if !self.demo_windows_created {
-            let mut create_a = [0u8; 8];
+            let mut create_a = [0u8; 9];
             create_a[0..4].copy_from_slice(&OP_REQ_CREATE_WINDOW.to_le_bytes());
             create_a[4..6].copy_from_slice(&width_a.to_le_bytes());
             create_a[6..8].copy_from_slice(&height_a.to_le_bytes());
+            create_a[8] = LAYER_APP;
             let _ = ipc::ipc_send(self_tid, &create_a);
 
-            let mut create_b = [0u8; 8];
+            let mut create_b = [0u8; 9];
             create_b[0..4].copy_from_slice(&OP_REQ_CREATE_WINDOW.to_le_bytes());
             create_b[4..6].copy_from_slice(&width_b.to_le_bytes());
             create_b[6..8].copy_from_slice(&height_b.to_le_bytes());
+            create_b[8] = LAYER_APP;
             let _ = ipc::ipc_send(self_tid, &create_b);
             self.demo_windows_created = true;
         }
@@ -209,5 +239,23 @@ impl KagamiApp {
             }
         }
         let _ = ipc::ipc_send(self_tid, &flush_b);
+    }
+}
+
+fn sanitize_layer_request(requested: u8, privilege: u64) -> WindowLayer {
+    let requested_layer = match requested {
+        LAYER_WALLPAPER => WindowLayer::Wallpaper,
+        LAYER_STATUS => WindowLayer::Status,
+        LAYER_SYSTEM => WindowLayer::System,
+        _ => WindowLayer::App,
+    };
+    let is_privileged = privilege == 0 || privilege == 1;
+    if !is_privileged {
+        match requested_layer {
+            WindowLayer::Status | WindowLayer::System => WindowLayer::App,
+            other => other,
+        }
+    } else {
+        requested_layer
     }
 }
