@@ -161,7 +161,8 @@ impl KagamiApp {
                 let height = u16::from_le_bytes([self.ipc_buf[10], self.ipc_buf[11]]) as usize;
                 let pixel_count = width.saturating_mul(height);
                 let needed = 12usize.saturating_add(pixel_count.saturating_mul(4));
-                if width == 0 || height == 0 || pixel_count > 1021 || len < needed {
+                let max_pixels = (IPC_BUF_SIZE.saturating_sub(12)) / 4;
+                if width == 0 || height == 0 || pixel_count > max_pixels || len < needed {
                     return;
                 }
                 let mut pixels = Vec::with_capacity(pixel_count);
@@ -222,9 +223,9 @@ impl KagamiApp {
 
     fn inject_demo_ipc(&mut self) {
         let self_tid = task::gettid();
-        let width_a: u16 = 40;
-        let height_a: u16 = 24;
-        let width_b: u16 = 38;
+        let width_a: u16 = 46;
+        let height_a: u16 = 22;
+        let width_b: u16 = 44;
         let height_b: u16 = 22;
 
         if !self.demo_windows_created {
