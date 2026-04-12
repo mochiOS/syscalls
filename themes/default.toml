@@ -1,0 +1,14 @@
+background_color = 0x1E1E2E
+status_bar_color = 0x1A1A24
+window_border_color = 0xB9BDCB
+title_top_color = 0xE9EAF1
+title_bottom_color = 0xD7DAE5
+title_separator_color = 0xB6BAC8
+traffic_red = 0xFF5F57
+traffic_yellow = 0xFEBC2E
+traffic_green = 0x28C840
+traffic_ring = 0x9595A2
+shadow_near_alpha = 56
+shadow_far_alpha = 28
+title_bar_height = 18
+corner_radius = 4

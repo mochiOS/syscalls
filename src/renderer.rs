@@ -1,12 +1,11 @@
 use swiftlib::vga;
+use crate::theme::Theme;
 
-const BG_COLOR: u32 = 0x001E_1E2E;
 const WINDOW_POS_X: i32 = 96;
 const WINDOW_POS_Y: i32 = 96;
 const WINDOW_STEP_X: i32 = 14;
 const WINDOW_STEP_Y: i32 = 10;
 const STATUS_BAR_HEIGHT: i32 = 28;
-const TITLE_BAR_HEIGHT: i32 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowLayer {
@@ -66,10 +65,11 @@ pub struct Renderer {
     cursor_y: i32,
     cursor_sprite: CursorSprite,
     windows: Vec<WindowSurface>,
+    theme: Theme,
 }
 
 impl Renderer {
-    pub fn new(fb_ptr: *mut u32, info: vga::FbInfo) -> Self {
+    pub fn new(fb_ptr: *mut u32, info: vga::FbInfo, theme: Theme) -> Self {
         Self {
             fb_ptr,
             width: info.width as i32,
@@ -80,6 +80,7 @@ impl Renderer {
             cursor_y: (info.height / 2) as i32,
             cursor_sprite: CursorSprite::from_generated(),
             windows: Vec::new(),
+            theme,
         }
     }
 
@@ -164,7 +165,7 @@ impl Renderer {
             return false;
         }
         let right = w.x + w.width as i32;
-        let title_bottom = w.y + TITLE_BAR_HEIGHT;
+        let title_bottom = w.y + self.theme.title_bar_height as i32;
         x >= w.x && y >= w.y && x < right && y < title_bottom
     }
 
@@ -207,7 +208,7 @@ impl Renderer {
     }
 
     fn render_full(&mut self) {
-        self.clear_back_buffer(BG_COLOR);
+        self.clear_back_buffer(self.theme.background_color);
         self.draw_status_bar_base();
         self.draw_windows_to_back_buffer();
         self.draw_cursor_to_back_buffer(self.cursor_x, self.cursor_y);
@@ -228,13 +229,23 @@ impl Renderer {
             }
             for x in 0..self.width {
                 let idx = (y * self.stride + x) as usize;
-                self.back_buffer[idx] = 0xFF1A_1A24;
+                self.back_buffer[idx] = self.theme.status_bar_color;
             }
         }
     }
 
     fn draw_windows_to_back_buffer(&mut self) {
         for surface in &self.windows {
+            if surface.layer == WindowLayer::App {
+                draw_app_window_shadow(
+                    &mut self.back_buffer,
+                    self.width,
+                    self.height,
+                    self.stride,
+                    surface,
+                    &self.theme,
+                );
+            }
             for sy in 0..surface.height {
                 for sx in 0..surface.width {
                     let x = surface.x + sx as i32;
@@ -246,18 +257,18 @@ impl Renderer {
                     if surface.layer == WindowLayer::App && y < STATUS_BAR_HEIGHT {
                         continue;
                     }
+                    if surface.layer == WindowLayer::App
+                        && is_rounded_corner_pixel(sx, sy, surface.width, self.theme.corner_radius)
+                    {
+                        continue;
+                    }
                     let bb_idx = (y * self.stride + x) as usize;
                     let mut src = surface.pixels[sy * surface.width + sx];
                     if surface.layer == WindowLayer::App {
-                        if sy < TITLE_BAR_HEIGHT as usize {
-                            src = blend_argb(src | 0xFF00_0000, 0xFF20_2430);
-                        }
-                        if sy == 0
-                            || sx == 0
-                            || sy + 1 == surface.height
-                            || sx + 1 == surface.width
+                        if let Some(chrome) =
+                            app_chrome_pixel(sx, sy, surface.width, surface.height, &self.theme)
                         {
-                            src = 0xFFAA_AFC5;
+                            src = chrome;
                         }
                     }
                     self.back_buffer[bb_idx] = src | 0xFF00_0000;
@@ -325,6 +336,117 @@ fn blend_argb(dst: u32, src: u32) -> u32 {
     let g = (sg * sa + dg * inv) / 255;
     let b = (sb * sa + db * inv) / 255;
     0xFF00_0000 | (r << 16) | (g << 8) | b
+}
+
+fn draw_app_window_shadow(
+    back_buffer: &mut [u32],
+    screen_w: i32,
+    screen_h: i32,
+    stride: i32,
+    surface: &WindowSurface,
+    theme: &Theme,
+) {
+    let right = surface.x + surface.width as i32;
+    let bottom = surface.y + surface.height as i32;
+    for y in (surface.y - 2)..=(bottom + 2) {
+        if y < 0 || y >= screen_h {
+            continue;
+        }
+        if y < STATUS_BAR_HEIGHT {
+            continue;
+        }
+        for x in (surface.x - 2)..=(right + 2) {
+            if x < 0 || x >= screen_w {
+                continue;
+            }
+            let inside = x >= surface.x && x < right && y >= surface.y && y < bottom;
+            if inside {
+                continue;
+            }
+            let near_h = x >= surface.x - 1 && x <= right;
+            let near_v = y >= surface.y - 1 && y <= bottom;
+            let alpha = if near_h && near_v {
+                theme.shadow_near_alpha as u32
+            } else {
+                theme.shadow_far_alpha as u32
+            };
+            let bb_idx = (y * stride + x) as usize;
+            back_buffer[bb_idx] = blend_argb(back_buffer[bb_idx], (alpha << 24) | 0x0000_0000);
+        }
+    }
+}
+
+fn app_chrome_pixel(sx: usize, sy: usize, width: usize, height: usize, theme: &Theme) -> Option<u32> {
+    if sy == 0 || sx == 0 || sy + 1 == height || sx + 1 == width {
+        return Some(theme.window_border_color);
+    }
+    if sy < theme.title_bar_height {
+        if sy + 1 == theme.title_bar_height {
+            return Some(theme.title_separator_color);
+        }
+        let top = theme.title_top_color;
+        let bottom = theme.title_bottom_color;
+        let t = sy as u32;
+        let h = theme.title_bar_height as u32;
+        let r = lerp_channel((top >> 16) & 0xFF, (bottom >> 16) & 0xFF, t, h);
+        let g = lerp_channel((top >> 8) & 0xFF, (bottom >> 8) & 0xFF, t, h);
+        let b = lerp_channel(top & 0xFF, bottom & 0xFF, t, h);
+        if let Some(c) = traffic_light_pixel(sx, sy, theme) {
+            return Some(c);
+        }
+        return Some(0xFF00_0000 | (r << 16) | (g << 8) | b);
+    }
+    None
+}
+
+fn traffic_light_pixel(sx: usize, sy: usize, theme: &Theme) -> Option<u32> {
+    let buttons = [
+        (8isize, 8isize, theme.traffic_red),
+        (14isize, 8isize, theme.traffic_yellow),
+        (20isize, 8isize, theme.traffic_green),
+    ];
+    let px = sx as isize;
+    let py = sy as isize;
+    for (cx, cy, color) in buttons {
+        let dx = px - cx;
+        let dy = py - cy;
+        let d2 = dx * dx + dy * dy;
+        if d2 <= 7 {
+            return Some(color);
+        }
+        if d2 <= 10 {
+            return Some(theme.traffic_ring);
+        }
+    }
+    None
+}
+
+fn is_rounded_corner_pixel(sx: usize, sy: usize, width: usize, radius: usize) -> bool {
+    if sy >= radius {
+        return false;
+    }
+    let r = radius as isize;
+    let y = sy as isize;
+    if sx < radius {
+        let x = sx as isize;
+        let dx = r - x - 1;
+        let dy = r - y - 1;
+        return dx * dx + dy * dy >= r * r;
+    }
+    if sx + radius >= width {
+        let x = (width - sx - 1) as isize;
+        let dx = r - x - 1;
+        let dy = r - y - 1;
+        return dx * dx + dy * dy >= r * r;
+    }
+    false
+}
+
+fn lerp_channel(a: u32, b: u32, t: u32, max_t: u32) -> u32 {
+    if max_t == 0 {
+        return a;
+    }
+    (a * (max_t - t) + b * t) / max_t
 }
 
 fn clamp_i32(v: i32, min: i32, max: i32) -> i32 {

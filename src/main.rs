@@ -3,10 +3,12 @@ mod input;
 mod ipc_proto;
 mod mouse;
 mod renderer;
+mod theme;
 
 use app::KagamiApp;
 use renderer::Renderer;
 use swiftlib::vga;
+use theme::load_theme;
 
 pub fn main() {
     let info = match vga::get_info() {
@@ -24,7 +26,7 @@ pub fn main() {
         }
     };
 
-    let renderer = Renderer::new(fb_ptr, info);
+    let renderer = Renderer::new(fb_ptr, info, load_theme());
     let mut app = KagamiApp::new(renderer);
     app.run();
 }
