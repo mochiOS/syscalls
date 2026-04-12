@@ -20,6 +20,14 @@ struct DragState {
     grab_dy: i32,
 }
 
+#[derive(Clone, Copy)]
+struct PendingSharedAttach {
+    sender_tid: u64,
+    window_id: u32,
+    width: usize,
+    height: usize,
+}
+
 pub struct KagamiApp {
     renderer: Renderer,
     input: InputState,
@@ -31,6 +39,7 @@ pub struct KagamiApp {
     prev_left_down: bool,
     drag_state: Option<DragState>,
     viewkit_key_down: bool,
+    pending_shared_attach: Option<PendingSharedAttach>,
 }
 
 impl KagamiApp {
@@ -46,6 +55,7 @@ impl KagamiApp {
             prev_left_down: false,
             drag_state: None,
             viewkit_key_down: false,
+            pending_shared_attach: None,
         }
     }
 
@@ -127,6 +137,40 @@ impl KagamiApp {
     }
 
     fn handle_ipc_message(&mut self, sender_tid: u64, len: usize) {
+        if let Some(pending) = self.pending_shared_attach {
+            if pending.sender_tid == sender_tid && len >= 16 {
+                let mapped_addr = u64::from_ne_bytes([
+                    self.ipc_buf[0],
+                    self.ipc_buf[1],
+                    self.ipc_buf[2],
+                    self.ipc_buf[3],
+                    self.ipc_buf[4],
+                    self.ipc_buf[5],
+                    self.ipc_buf[6],
+                    self.ipc_buf[7],
+                ]);
+                let total_bytes = u64::from_ne_bytes([
+                    self.ipc_buf[8],
+                    self.ipc_buf[9],
+                    self.ipc_buf[10],
+                    self.ipc_buf[11],
+                    self.ipc_buf[12],
+                    self.ipc_buf[13],
+                    self.ipc_buf[14],
+                    self.ipc_buf[15],
+                ]);
+                if self.renderer.attach_mapped_shared_surface(
+                    pending.window_id,
+                    pending.width,
+                    pending.height,
+                    mapped_addr,
+                    total_bytes,
+                ) {
+                    self.pending_shared_attach = None;
+                    return;
+                }
+            }
+        }
         if len < 4 {
             return;
         }
@@ -240,7 +284,7 @@ impl KagamiApp {
                 );
             }
             OP_REQ_ATTACH_SHARED => {
-                if len < 16 {
+                if len < 12 {
                     return;
                 }
                 let window_id = u32::from_le_bytes([
@@ -251,36 +295,15 @@ impl KagamiApp {
                 ]);
                 let width = u16::from_le_bytes([self.ipc_buf[8], self.ipc_buf[9]]) as usize;
                 let height = u16::from_le_bytes([self.ipc_buf[10], self.ipc_buf[11]]) as usize;
-                let page_count = u16::from_le_bytes([self.ipc_buf[12], self.ipc_buf[13]]) as usize;
-                if page_count == 0 || page_count > 128 {
+                if width == 0 || height == 0 {
                     return;
                 }
-                let needed = 16usize.saturating_add(page_count.saturating_mul(8));
-                if len < needed {
-                    return;
-                }
-                let mut phys_pages = Vec::with_capacity(page_count);
-                let mut off = 16usize;
-                for _ in 0..page_count {
-                    let p = u64::from_le_bytes([
-                        self.ipc_buf[off],
-                        self.ipc_buf[off + 1],
-                        self.ipc_buf[off + 2],
-                        self.ipc_buf[off + 3],
-                        self.ipc_buf[off + 4],
-                        self.ipc_buf[off + 5],
-                        self.ipc_buf[off + 6],
-                        self.ipc_buf[off + 7],
-                    ]);
-                    phys_pages.push(p);
-                    off += 8;
-                }
-                if !self
-                    .renderer
-                    .attach_shared_surface(window_id, width, height, &phys_pages)
-                {
-                    eprintln!("[KAGAMI] attach_shared_surface failed window={}", window_id);
-                }
+                self.pending_shared_attach = Some(PendingSharedAttach {
+                    sender_tid,
+                    window_id,
+                    width,
+                    height,
+                });
             }
             OP_REQ_PRESENT_SHARED => {
                 if len < 8 {

@@ -1,5 +1,4 @@
 use swiftlib::vga;
-use swiftlib::privileged;
 
 const BG_COLOR: u32 = 0x001E_1E2E;
 const WINDOW_POS_X: i32 = 96;
@@ -215,31 +214,26 @@ impl Renderer {
         self.create_window(id, WindowLayer::App, width, height, full);
     }
 
-    pub fn attach_shared_surface(
+    pub fn attach_mapped_shared_surface(
         &mut self,
         id: u32,
         width: usize,
         height: usize,
-        phys_pages: &[u64],
+        virt_addr: u64,
+        mapped_total_bytes: u64,
     ) -> bool {
-        if width == 0 || height == 0 || phys_pages.is_empty() {
+        if width == 0 || height == 0 || virt_addr == 0 {
             return false;
         }
-        let total_bytes = match width.checked_mul(height).and_then(|v| v.checked_mul(4)) {
+        let needed_bytes = match width.checked_mul(height).and_then(|v| v.checked_mul(4)) {
             Some(v) => v as u64,
             None => return false,
         };
-        let mapped_bytes = (phys_pages.len() as u64).saturating_mul(4096);
-        if mapped_bytes < total_bytes {
+        let mapped_bytes = mapped_total_bytes;
+        if mapped_bytes < needed_bytes {
             return false;
         }
-
-        let self_tid = swiftlib::task::gettid();
-        let virt_addr = unsafe { privileged::map_physical_pages(self_tid, phys_pages, 0) };
-        if (virt_addr as i64) < 0 || virt_addr == 0 {
-            return false;
-        }
-        let page_count = phys_pages.len() as u64;
+        let page_count = mapped_bytes.div_ceil(4096);
 
         if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
             win.width = width;
