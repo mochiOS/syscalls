@@ -24,6 +24,11 @@ const TRAFFIC_OFFSET_Y: isize = 8;
 const TRAFFIC_RING_WIDTH: isize = 1;
 const SHADOW_NEAR_ALPHA: u32 = 56;
 const SHADOW_FAR_ALPHA: u32 = 28;
+const STATUS_DOCK_HIDDEN_OFFSET: i32 = 110;
+const STATUS_DOCK_REVEAL_TRIGGER: i32 = 120;
+const STATUS_DOCK_KEEP_ZONE: i32 = 220;
+const STATUS_DOCK_ANIM_STEP: i32 = 10;
+const STATUS_DOCK_AUTOHIDE: bool = false;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowLayer {
@@ -89,9 +94,19 @@ pub struct Renderer {
     cursor_y: i32,
     cursor_sprite: CursorSprite,
     windows: Vec<WindowSurface>,
+    status_dock_slide_px: i32,
+    status_dock_target_visible: bool,
 }
 
 impl Renderer {
+    fn infer_overlay_layer(width: usize, height: usize) -> WindowLayer {
+        if width <= 400 && height <= 140 {
+            WindowLayer::Status
+        } else {
+            WindowLayer::App
+        }
+    }
+
     pub fn new(fb_ptr: *mut u32, info: vga::FbInfo) -> Self {
         Self {
             fb_ptr,
@@ -103,6 +118,65 @@ impl Renderer {
             cursor_y: (info.height / 2) as i32,
             cursor_sprite: CursorSprite::from_generated(),
             windows: Vec::new(),
+            status_dock_slide_px: 0,
+            status_dock_target_visible: true,
+        }
+    }
+
+    fn status_window_y(&self, height: usize) -> i32 {
+        (self.height - height as i32 - 14 + self.status_dock_slide_px).max(0)
+    }
+
+    fn update_status_dock_target(&mut self) {
+        if !STATUS_DOCK_AUTOHIDE {
+            self.status_dock_target_visible = true;
+            return;
+        }
+        let dist_from_bottom = self.height.saturating_sub(self.cursor_y.saturating_add(1));
+        let dist_from_top = self.cursor_y.max(0);
+        let near_reveal_edge =
+            dist_from_bottom <= STATUS_DOCK_REVEAL_TRIGGER || dist_from_top <= STATUS_DOCK_REVEAL_TRIGGER;
+        let near_keep_edge =
+            dist_from_bottom <= STATUS_DOCK_KEEP_ZONE || dist_from_top <= STATUS_DOCK_KEEP_ZONE;
+        if self.status_dock_target_visible || self.status_dock_slide_px < STATUS_DOCK_HIDDEN_OFFSET {
+            self.status_dock_target_visible = near_keep_edge;
+        } else {
+            self.status_dock_target_visible = near_reveal_edge;
+        }
+    }
+
+    fn step_status_dock_animation(&mut self) -> bool {
+        let target = if self.status_dock_target_visible {
+            0
+        } else {
+            STATUS_DOCK_HIDDEN_OFFSET
+        };
+        if self.status_dock_slide_px == target {
+            return false;
+        }
+        if self.status_dock_slide_px < target {
+            self.status_dock_slide_px =
+                (self.status_dock_slide_px + STATUS_DOCK_ANIM_STEP).min(target);
+        } else {
+                self.status_dock_slide_px =
+                    (self.status_dock_slide_px - STATUS_DOCK_ANIM_STEP).max(target);
+        }
+        let y = self.status_dock_slide_px;
+        for win in &mut self.windows {
+            if win.layer == WindowLayer::Status {
+                win.y = (self.height - win.height as i32 - 14 + y).max(0);
+            }
+        }
+        true
+    }
+
+    pub fn tick_animations(&mut self) -> bool {
+        self.update_status_dock_target();
+        if self.step_status_dock_animation() {
+            self.render_full();
+            true
+        } else {
+            false
         }
     }
 
@@ -123,8 +197,18 @@ impl Renderer {
             return;
         }
         let z = self.next_z();
-        let x = WINDOW_POS_X + ((id as i32 - 1) * WINDOW_STEP_X);
-        let y = WINDOW_POS_Y + ((id as i32 - 1) * WINDOW_STEP_Y);
+        let (x, y) = match layer {
+            WindowLayer::Wallpaper => (0, 0),
+            WindowLayer::Status => (
+                ((self.width - width as i32) / 2).max(0),
+                self.status_window_y(height),
+            ),
+            WindowLayer::System => (WINDOW_POS_X, WINDOW_POS_Y),
+            WindowLayer::App => (
+                WINDOW_POS_X + ((id as i32 - 1) * WINDOW_STEP_X),
+                WINDOW_POS_Y + ((id as i32 - 1) * WINDOW_STEP_Y),
+            ),
+        };
         self.windows.push(WindowSurface {
             id,
             x,
@@ -152,7 +236,7 @@ impl Renderer {
             self.render_full();
             return;
         }
-        self.create_window(id, WindowLayer::App, width, height, pixels);
+        self.create_window(id, Self::infer_overlay_layer(width, height), width, height, pixels);
     }
 
     pub fn update_window_chunk_pixels(
@@ -182,12 +266,19 @@ impl Renderer {
             return;
         }
 
+        let is_last_chunk =
+            chunk_x.saturating_add(chunk_w) == width && chunk_y.saturating_add(chunk_h) == height;
         let new_z = self.next_z();
         if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
             if win.width != width || win.height != height {
                 win.width = width;
                 win.height = height;
-                win.pixels = vec![0xFF30_3048; width * height];
+                let fill = if matches!(win.layer, WindowLayer::Status | WindowLayer::Wallpaper) {
+                    0x0000_0000
+                } else {
+                    0xFF30_3048
+                };
+                win.pixels = vec![fill; width * height];
                 win.shared = None;
             }
             for row in 0..chunk_h {
@@ -197,13 +288,19 @@ impl Renderer {
                 let dst_end = dst_start + chunk_w;
                 win.pixels[dst_start..dst_end].copy_from_slice(&pixels[src_start..src_end]);
             }
-            win.z = new_z;
-            self.sort_windows_by_z();
-            self.render_full();
+            if matches!(win.layer, WindowLayer::Wallpaper | WindowLayer::Status) {
+                if is_last_chunk {
+                    self.render_full();
+                }
+            } else {
+                win.z = new_z;
+                self.sort_windows_by_z();
+                self.render_full();
+            }
             return;
         }
 
-        let mut full = vec![0xFF30_3048; width * height];
+        let mut full = vec![0x0000_0000; width * height];
         for row in 0..chunk_h {
             let src_start = row * chunk_w;
             let src_end = src_start + chunk_w;
@@ -211,7 +308,7 @@ impl Renderer {
             let dst_end = dst_start + chunk_w;
             full[dst_start..dst_end].copy_from_slice(&pixels[src_start..src_end]);
         }
-        self.create_window(id, WindowLayer::App, width, height, full);
+        self.create_window(id, Self::infer_overlay_layer(width, height), width, height, full);
     }
 
     pub fn attach_mapped_shared_surface(
@@ -239,7 +336,12 @@ impl Renderer {
             win.width = width;
             win.height = height;
             if win.pixels.len() != width * height {
-                win.pixels = vec![0xFF30_3048; width * height];
+                let fill = if matches!(win.layer, WindowLayer::Status | WindowLayer::Wallpaper) {
+                    0x0000_0000
+                } else {
+                    0xFF30_3048
+                };
+                win.pixels = vec![fill; width * height];
             }
             win.shared = Some(SharedSurface {
                 virt_addr,
@@ -248,19 +350,25 @@ impl Renderer {
             return true;
         }
 
-        let mut pixels = vec![0xFF30_3048; width * height];
-        if let Some(first) = pixels.get_mut(0) {
-            *first = 0xFF22_2233;
-        }
+        let pixels = vec![0x0000_0000; width * height];
         let z = self.next_z();
-        let x = WINDOW_POS_X + ((id as i32 - 1) * WINDOW_STEP_X);
-        let y = WINDOW_POS_Y + ((id as i32 - 1) * WINDOW_STEP_Y);
+        let layer = Self::infer_overlay_layer(width, height);
+        let (x, y) = match layer {
+            WindowLayer::Status => (
+                ((self.width - width as i32) / 2).max(0),
+                self.status_window_y(height),
+            ),
+            _ => (
+                WINDOW_POS_X + ((id as i32 - 1) * WINDOW_STEP_X),
+                WINDOW_POS_Y + ((id as i32 - 1) * WINDOW_STEP_Y),
+            ),
+        };
         self.windows.push(WindowSurface {
             id,
             x,
             y,
             z,
-            layer: WindowLayer::App,
+            layer,
             width,
             height,
             pixels,
@@ -291,7 +399,7 @@ impl Renderer {
             win.pixels.resize(total_pixels, 0xFF30_3048);
         }
         for (dst, s) in win.pixels.iter_mut().zip(src.iter()) {
-            *dst = *s | 0xFF00_0000;
+            *dst = *s;
         }
         win.z = new_z;
         self.sort_windows_by_z();
@@ -371,6 +479,8 @@ impl Renderer {
         }
         self.cursor_x = next_x;
         self.cursor_y = next_y;
+        self.update_status_dock_target();
+        self.step_status_dock_animation();
         self.render_full();
     }
 
@@ -436,7 +546,7 @@ impl Renderer {
                             src = chrome;
                         }
                     }
-                    self.back_buffer[bb_idx] = src | 0xFF00_0000;
+                    self.back_buffer[bb_idx] = blend_argb(self.back_buffer[bb_idx], src);
                 }
             }
         }

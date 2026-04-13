@@ -13,6 +13,7 @@ const FLUSH_CHUNK_HEADER_SIZE: usize = 20;
 const IPC_MAX_PIXELS_FULL: usize = (IPC_BUF_SIZE - FLUSH_FULL_HEADER_SIZE) / 4;
 const IPC_MAX_PIXELS_CHUNK: usize = (IPC_BUF_SIZE - FLUSH_CHUNK_HEADER_SIZE) / 4;
 const MOUSE_BURST_LIMIT: usize = 8;
+const DOCK_PROCESS_CANDIDATES: [&str; 2] = ["/Applications/Dock.app/entry.elf", "Dock.app"];
 
 #[derive(Clone, Copy)]
 struct DragState {
@@ -40,6 +41,8 @@ pub struct KagamiApp {
     prev_left_down: bool,
     drag_state: Option<DragState>,
     viewkit_key_down: bool,
+    binder_key_down: bool,
+    dock_key_down: bool,
     pending_shared_attach: Option<PendingSharedAttach>,
 }
 
@@ -56,6 +59,8 @@ impl KagamiApp {
             prev_left_down: false,
             drag_state: None,
             viewkit_key_down: false,
+            binder_key_down: false,
+            dock_key_down: false,
             pending_shared_attach: None,
         }
     }
@@ -63,9 +68,10 @@ impl KagamiApp {
     pub fn run(&mut self) {
         self.renderer.initialize();
         println!(
-            "[KAGAMI] started (ESC to exit, D demo, V ViewKit) tid={}",
+            "[KAGAMI] started (ESC to exit, D demo, V ViewKit, B Binder, O Dock) tid={}",
             task::gettid()
         );
+        self.launch_binder();
 
         loop {
             let mut did_work = false;
@@ -96,6 +102,20 @@ impl KagamiApp {
                 if sc == 0xAF {
                     self.viewkit_key_down = false;
                 }
+                if sc == 0x30 && !self.binder_key_down {
+                    self.binder_key_down = true;
+                    self.launch_binder();
+                }
+                if sc == 0xB0 {
+                    self.binder_key_down = false;
+                }
+                if sc == 0x18 && !self.dock_key_down {
+                    self.dock_key_down = true;
+                    self.launch_dock();
+                }
+                if sc == 0x98 {
+                    self.dock_key_down = false;
+                }
             }
 
             if self.process_ipc_messages() {
@@ -103,6 +123,9 @@ impl KagamiApp {
             }
 
             self.update_secure_input_mode();
+            if self.renderer.tick_animations() {
+                did_work = true;
+            }
 
             if !did_work {
                 task::yield_now();
@@ -215,19 +238,26 @@ impl KagamiApp {
                 }
                 let req_w = u16::from_le_bytes([self.ipc_buf[4], self.ipc_buf[5]]) as usize;
                 let req_h = u16::from_le_bytes([self.ipc_buf[6], self.ipc_buf[7]]) as usize;
-                let requested_layer = if len >= 9 { self.ipc_buf[8] } else { LAYER_APP };
+                let mut requested_layer = if len >= 9 { self.ipc_buf[8] } else { LAYER_APP };
                 let width = req_w.clamp(8, 1024);
                 let height = req_h.clamp(8, 1024);
                 let privilege = task::get_thread_privilege(sender_tid);
+                if is_sender_dock(sender_tid) {
+                    requested_layer = LAYER_STATUS;
+                }
+                if privilege <= 1 && width <= 400 && height <= 140 {
+                    requested_layer = LAYER_STATUS;
+                }
                 let layer = sanitize_layer_request(requested_layer, privilege);
                 let window_id = self.next_window_id;
                 self.next_window_id = self.next_window_id.saturating_add(1);
+                let init_color = if layer == WindowLayer::Status { 0x0000_0000 } else { 0xFF30_3048 };
                 self.renderer.create_window(
                     window_id,
                     layer,
                     width,
                     height,
-                    vec![0x0030_3048; width * height],
+                    vec![init_color; width * height],
                 );
                 let mut res = [0u8; 8];
                 res[0..4].copy_from_slice(&OP_RES_WINDOW_CREATED.to_le_bytes());
@@ -260,7 +290,7 @@ impl KagamiApp {
                         self.ipc_buf[off + 2],
                         self.ipc_buf[off + 3],
                     ]);
-                    pixels.push(px | 0xFF00_0000);
+                    pixels.push(normalize_alpha(px));
                     off += 4;
                 }
                 self.renderer
@@ -304,7 +334,7 @@ impl KagamiApp {
                         self.ipc_buf[off + 2],
                         self.ipc_buf[off + 3],
                     ]);
-                    pixels.push(px | 0xFF00_0000);
+                    pixels.push(normalize_alpha(px));
                     off += 4;
                 }
                 self.renderer.update_window_chunk_pixels(
@@ -466,6 +496,26 @@ impl KagamiApp {
             Err(_) => eprintln!("[KAGAMI] failed to launch ViewKit ui_test"),
         }
     }
+
+    fn launch_binder(&self) {
+        let kagami_tid = task::gettid();
+        let arg_tid = format!("--kagami-tid={}", kagami_tid);
+        let args = [arg_tid.as_str()];
+        match process::exec_with_args("/Applications/Binder.app/entry.elf", &args) {
+            Ok(pid) => println!("[KAGAMI] launched Binder pid={}", pid),
+            Err(_) => eprintln!("[KAGAMI] failed to launch Binder"),
+        }
+    }
+
+    fn launch_dock(&self) {
+        let kagami_tid = task::gettid();
+        let arg_tid = format!("--kagami-tid={}", kagami_tid);
+        let args = [arg_tid.as_str()];
+        match process::exec_with_args("/Applications/Dock.app/entry.elf", &args) {
+            Ok(pid) => println!("[KAGAMI] launched Dock pid={}", pid),
+            Err(_) => eprintln!("[KAGAMI] failed to launch Dock"),
+        }
+    }
 }
 
 fn sanitize_layer_request(requested: u8, privilege: u64) -> WindowLayer {
@@ -478,10 +528,30 @@ fn sanitize_layer_request(requested: u8, privilege: u64) -> WindowLayer {
     let is_privileged = privilege == 0 || privilege == 1;
     if !is_privileged {
         match requested_layer {
-            WindowLayer::Status | WindowLayer::System => WindowLayer::App,
+            WindowLayer::System => WindowLayer::App,
             other => other,
         }
     } else {
         requested_layer
     }
+}
+
+#[inline]
+fn normalize_alpha(px: u32) -> u32 {
+    if (px & 0xFF00_0000) == 0 && (px & 0x00FF_FFFF) != 0 {
+        px | 0xFF00_0000
+    } else {
+        px
+    }
+}
+
+fn is_sender_dock(sender_tid: u64) -> bool {
+    for name in DOCK_PROCESS_CANDIDATES {
+        if let Some(tid) = task::find_process_by_name(name)
+            && tid == sender_tid
+        {
+            return true;
+        }
+    }
+    false
 }
