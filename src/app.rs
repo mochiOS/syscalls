@@ -1,9 +1,9 @@
-use swiftlib::{ipc, keyboard, process, mouse, task};
+use swiftlib::{ipc, keyboard, mouse, process, task};
 
 use crate::input::InputState;
 use crate::ipc_proto::{
-    IPC_BUF_SIZE, LAYER_APP, LAYER_STATUS, LAYER_SYSTEM, LAYER_WALLPAPER, OP_REQ_CREATE_WINDOW,
-    OP_REQ_ATTACH_SHARED, OP_REQ_FLUSH, OP_REQ_FLUSH_CHUNK, OP_REQ_PRESENT_SHARED,
+    IPC_BUF_SIZE, LAYER_APP, LAYER_STATUS, LAYER_SYSTEM, LAYER_WALLPAPER, OP_REQ_ATTACH_SHARED,
+    OP_REQ_CREATE_WINDOW, OP_REQ_FLUSH, OP_REQ_FLUSH_CHUNK, OP_REQ_PRESENT_SHARED,
     OP_RES_SHARED_ATTACHED, OP_RES_WINDOW_CREATED,
 };
 use crate::renderer::{Renderer, WindowLayer};

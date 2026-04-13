@@ -1,7 +1,7 @@
+use resvg::{tiny_skia, usvg};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use resvg::{tiny_skia, usvg};
 
 fn find_project_root(manifest_dir: &Path) -> PathBuf {
     if let Ok(workspace_dir) = env::var("CARGO_WORKSPACE_DIR") {

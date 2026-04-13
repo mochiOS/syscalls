@@ -158,8 +158,8 @@ impl Renderer {
             self.status_dock_slide_px =
                 (self.status_dock_slide_px + STATUS_DOCK_ANIM_STEP).min(target);
         } else {
-                self.status_dock_slide_px =
-                    (self.status_dock_slide_px - STATUS_DOCK_ANIM_STEP).max(target);
+            self.status_dock_slide_px =
+                (self.status_dock_slide_px - STATUS_DOCK_ANIM_STEP).max(target);
         }
         let y = self.status_dock_slide_px;
         for win in &mut self.windows {
