@@ -43,6 +43,7 @@ pub struct KagamiApp {
     viewkit_key_down: bool,
     binder_key_down: bool,
     dock_key_down: bool,
+    terminal_key_down: bool,
     pending_shared_attach: Option<PendingSharedAttach>,
 }
 
@@ -61,6 +62,7 @@ impl KagamiApp {
             viewkit_key_down: false,
             binder_key_down: false,
             dock_key_down: false,
+            terminal_key_down: false,
             pending_shared_attach: None,
         }
     }
@@ -68,7 +70,7 @@ impl KagamiApp {
     pub fn run(&mut self) {
         self.renderer.initialize();
         println!(
-            "[KAGAMI] started (ESC to exit, D demo, V ViewKit, B Binder, O Dock) tid={}",
+            "[KAGAMI] started (ESC to exit, D demo, V ViewKit, B Binder, O Dock, T Terminal) tid={}",
             task::gettid()
         );
         self.launch_binder();
@@ -115,6 +117,13 @@ impl KagamiApp {
                 }
                 if sc == 0x98 {
                     self.dock_key_down = false;
+                }
+                if sc == 0x14 && !self.terminal_key_down {
+                    self.terminal_key_down = true;
+                    self.launch_terminal();
+                }
+                if sc == 0x94 {
+                    self.terminal_key_down = false;
                 }
             }
 
@@ -552,6 +561,16 @@ impl KagamiApp {
         match process::exec_with_args("/Applications/Dock.app/entry.elf", &args) {
             Ok(pid) => println!("[KAGAMI] launched Dock pid={}", pid),
             Err(_) => eprintln!("[KAGAMI] failed to launch Dock"),
+        }
+    }
+
+    fn launch_terminal(&self) {
+        let kagami_tid = task::gettid();
+        let arg_tid = format!("--kagami-tid={}", kagami_tid);
+        let args = [arg_tid.as_str()];
+        match process::exec_with_args("/Applications/Terminal.app/entry.elf", &args) {
+            Ok(pid) => println!("[KAGAMI] launched Terminal pid={}", pid),
+            Err(_) => eprintln!("[KAGAMI] failed to launch Terminal"),
         }
     }
 }
