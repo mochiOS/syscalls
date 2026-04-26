@@ -215,6 +215,7 @@ impl KagamiApp {
                     self.ipc_buf[14],
                     self.ipc_buf[15],
                 ]);
+                println!("[KAGAMI] received map header from {} mapped=0x{:x} total_bytes={}", sender_tid, mapped_addr, total_bytes);
                 if self.renderer.attach_mapped_shared_surface(
                     pending.window_id,
                     pending.width,
@@ -222,12 +223,16 @@ impl KagamiApp {
                     mapped_addr,
                     total_bytes,
                 ) {
+                    println!("[KAGAMI] attach_mapped_shared_surface OK for window {}", pending.window_id);
                     self.pending_shared_attach = None;
                     let mut res = [0u8; 8];
                     res[0..4].copy_from_slice(&OP_RES_SHARED_ATTACHED.to_le_bytes());
                     res[4..8].copy_from_slice(&pending.window_id.to_le_bytes());
                     let _ = ipc::ipc_send(sender_tid, &res);
+                    println!("[KAGAMI] sent OP_RES_SHARED_ATTACHED to {} for window {}", sender_tid, pending.window_id);
                     return;
+                } else {
+                    println!("[KAGAMI] attach_mapped_shared_surface failed for window {}", pending.window_id);
                 }
             }
         }
@@ -351,7 +356,9 @@ impl KagamiApp {
                 );
             }
             OP_REQ_ATTACH_SHARED => {
+                println!("[KAGAMI] OP_REQ_ATTACH_SHARED received from {} (len={})", sender_tid, len);
                 if len < 12 {
+                    println!("[KAGAMI] OP_REQ_ATTACH_SHARED: message too short (len={})", len);
                     return;
                 }
                 let window_id = u32::from_le_bytes([
@@ -363,9 +370,11 @@ impl KagamiApp {
                 let width = u16::from_le_bytes([self.ipc_buf[8], self.ipc_buf[9]]) as usize;
                 let height = u16::from_le_bytes([self.ipc_buf[10], self.ipc_buf[11]]) as usize;
                 if width == 0 || height == 0 {
+                    println!("[KAGAMI] OP_REQ_ATTACH_SHARED: invalid size {}x{}", width, height);
                     return;
                 }
                 let sender_priv = task::get_thread_privilege(sender_tid);
+                println!("[KAGAMI] OP_REQ_ATTACH_SHARED: sender_priv={}, window={}, {}x{}", sender_priv, window_id, width, height);
                 if sender_priv <= 1 {
                     // Service/Core 側は従来どおり「送信元がページを用意して送る」方式
                     self.pending_shared_attach = Some(PendingSharedAttach {
@@ -374,6 +383,7 @@ impl KagamiApp {
                         width,
                         height,
                     });
+                    println!("[KAGAMI] pending_shared_attach set for sender {} window {}", sender_tid, window_id);
                 } else {
                     // User 側は Kagami が共有面を確保し、ipc_send_pages でユーザーへ配布する
                     let total_bytes = match width.checked_mul(height).and_then(|v| v.checked_mul(4)) {
@@ -385,10 +395,13 @@ impl KagamiApp {
                         return;
                     }
                     let mut phys_pages = vec![0u64; page_count];
+                    println!("[KAGAMI] allocating {} pages for user-shared surface", page_count);
                     let mapped = unsafe {
                         privileged::alloc_shared_pages(page_count as u64, Some(phys_pages.as_mut_slice()), 0)
                     };
+                    println!("[KAGAMI] alloc_shared_pages returned mapped=0x{:x}", mapped);
                     if (mapped as i64) < 0 || mapped == 0 {
+                        println!("[KAGAMI] alloc_shared_pages failed");
                         return;
                     }
                     if !self.renderer.attach_mapped_shared_surface(
@@ -398,10 +411,14 @@ impl KagamiApp {
                         mapped,
                         (page_count * 4096) as u64,
                     ) {
+                        println!("[KAGAMI] attach_mapped_shared_surface failed");
                         return;
                     }
+                    println!("[KAGAMI] calling ipc_send_pages to sender {}", sender_tid);
                     let send_ret = unsafe { privileged::ipc_send_pages(sender_tid, phys_pages.as_slice(), 0) };
+                    println!("[KAGAMI] ipc_send_pages returned {}", send_ret);
                     if (send_ret as i64) < 0 {
+                        println!("[KAGAMI] ipc_send_pages failed: {}", send_ret);
                         return;
                     }
                     let mut res = [0u8; 8];
