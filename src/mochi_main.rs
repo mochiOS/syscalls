@@ -7,6 +7,7 @@ use swiftlib::{
     task::{find_process_by_name, yield_now},
     vga,
 };
+use viewkit::{render_component_to_pixmap, VComponent};
 
 const IPC_BUF_SIZE: usize = 4128;
 const KAGAMI_PROCESS_CANDIDATES: [&str; 3] =
@@ -33,6 +34,14 @@ struct SharedSurface {
     virt_addr: u64,
     page_count: u64,
     total_pixels: usize,
+}
+
+struct DesktopWindow {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    title: String,
 }
 
 impl Font {
@@ -96,7 +105,10 @@ pub fn main() {
             None
         }
     };
-    let pixels = render_desktop(width as usize, height as usize, 0);
+
+    let mut desktop_windows = Vec::new();
+    let pixels = render_desktop(width as usize, height as usize, 0, &desktop_windows);
+
     let render_res = if let Some(shared) = shared_surface.as_ref() {
         blit_shared_surface(shared, &pixels);
         println!("[Binder] blit_shared_surface done");
@@ -113,21 +125,35 @@ pub fn main() {
         eprintln!("[Binder] render failed: {}", e);
         return;
     }
+
     println!("[Binder] desktop shown");
     launch_dock(kagami_tid);
+
     loop {
         let sc_opt = read_scancode_tap().ok().flatten();
         if let Some(sc) = sc_opt {
-            if sc == 0x14 {
-                launch_terminal(kagami_tid);
-            }
-
             if sc == 0x01 {
                 println!("[Binder] exit");
                 return;
             }
         }
         yield_now();
+    }
+}
+
+fn redraw_desktop(
+    kagami_tid: u64,
+    window_id: u32,
+    width: u16,
+    height: u16,
+    shared_surface: Option<&SharedSurface>,
+    windows: &[DesktopWindow],
+) {
+    let pixels = render_desktop(width as usize, height as usize, 0, windows);
+
+    if let Some(shared) = shared_surface {
+        blit_shared_surface(shared, &pixels);
+        let _ = present_shared(kagami_tid, window_id);
     }
 }
 
@@ -315,34 +341,36 @@ fn flush_window_chunked(
     Ok(())
 }
 
-fn render_desktop(width: usize, height: usize, dock_offset: i32) -> Vec<u32> {
-    let mut px = vec![0u32; width * height];
-    for y in 0..height {
-        let t = y as u32 * 255 / height as u32;
-        let r = 220u32.saturating_sub(t / 3);
-        let g = 232u32.saturating_sub(t / 5);
-        let b = 244u32.saturating_sub(t / 7);
-        let c = 0xFF00_0000 | (r << 16) | (g << 8) | b;
-        let row = y * width;
-        for x in 0..width {
-            px[row + x] = c;
-        }
+fn render_desktop(width: usize, height: usize, _dock_offset: i32, windows: &[DesktopWindow]) -> Vec<u32> {
+    let mut px: Vec<u32> = (0..height)
+        .flat_map(|y| {
+            let r = (198 * (height - y) + 137 * y) / height;
+            let g = (222 * (height - y) + 180 * y) / height;
+            let b = (234 * (height - y) + 204 * y) / height;
+            
+            let color = 0xFF00_0000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+            std::iter::repeat(color).take(width)
+        })
+        .collect();
+
+    for window in windows {
+        draw_window(&mut px, width, window);
     }
-
-    fill_rect(&mut px, width, 0, 0, width as i32, 32, 0xFFF4_F7FA);
-    draw_text(&mut px, width, 24, 10, "mochiOS", 0xFF47_5569);
-    draw_text(
-        &mut px,
-        width,
-        width as i32 - 86,
-        10,
-        "12:45 PM",
-        0xFF47_5569,
-    );
-
-    let _ = dock_offset;
-
+    draw_info_bar(&mut px, width);
+    
     px
+}
+
+fn draw_info_bar(px: &mut [u32], stride: usize) {
+    const INFO_BAR_HEIGHT: i32 = 28;
+    fill_rect(px, stride, 0, 0, stride as i32, INFO_BAR_HEIGHT, 0xFFF4_F7FA);
+    fill_rect(px, stride, 0, INFO_BAR_HEIGHT - 1, stride as i32, 1, 0xFFE0_E5EE);
+    draw_text(px, stride, 10, 8, "mochiOS", 0xFF3A_3F4B);
+}
+
+fn draw_window(px: &mut [u32], stride: usize, window: &DesktopWindow) {
+    let pixmap = render_window_pixmap(&window.title, window.width as u32, window.height as u32);
+    blit_pixmap(px, stride, window.x, window.y, window.width as usize, window.height as usize, &pixmap);
 }
 
 fn fill_rect(px: &mut [u32], stride: usize, x: i32, y: i32, w: i32, h: i32, color: u32) {
@@ -574,16 +602,86 @@ fn launch_dock(kagami_tid: u64) {
     let args = [arg_tid.as_str()];
     match process::exec_with_args("/applications/Dock.app/entry.elf", &args) {
         Ok(pid) => println!("[Binder] launched Dock pid={}", pid),
-        Err(_) => eprintln!("[Binder] failed to launch Dock"),
+        Err(_) => {
+            eprintln!("[Binder] failed to launch Dock");
+        }
     }
 }
 
-fn launch_terminal(kagami_tid: u64) {
+fn launch_app_window(
+    kagami_tid: u64,
+    exec_path: &str,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Option<DesktopWindow> {
     let arg_tid = format!("--kagami-tid={}", kagami_tid);
     let args = [arg_tid.as_str()];
-    match process::exec_with_args("/applications/Terminal.app/entry.elf", &args) {
-        Ok(pid) => println!("[Binder] launched Terminal pid={}", pid),
-        Err(_) => eprintln!("[Binder] failed to launch Terminal"),
+    match process::exec_with_args(exec_path, &args) {
+        Ok(pid) => {
+            println!("[Binder] launched {} pid={}", app_title_from_exec_path(exec_path), pid);
+            Some(DesktopWindow {
+                x,
+                y,
+                width,
+                height,
+                title: app_title_from_exec_path(exec_path),
+            })
+        }
+        Err(_) => {
+            eprintln!("[Binder] failed to launch {}", app_title_from_exec_path(exec_path));
+            None
+        }
+    }
+}
+
+fn app_title_from_exec_path(exec_path: &str) -> String {
+    let parent = exec_path.trim_end_matches("/entry.elf");
+    let stem = parent.rsplit('/').next().unwrap_or(parent);
+    let stem = stem.strip_suffix(".app").unwrap_or(stem);
+    if stem.is_empty() {
+        "App".to_string()
+    } else {
+        stem.to_string()
+    }
+}
+
+fn render_window_pixmap(title: &str, width: u32, height: u32) -> Vec<u32> {
+    let component = VComponent::from_str(include_str!("components/window.html"))
+        .width(width)
+        .height(height)
+        .text(title.to_string());
+    render_component_to_pixmap(&component, width, height)
+}
+
+fn blit_pixmap(
+    dst: &mut [u32],
+    dst_stride: usize,
+    dst_x: i32,
+    dst_y: i32,
+    src_width: usize,
+    src_height: usize,
+    src: &[u32],
+) {
+    for sy in 0..src_height {
+        for sx in 0..src_width {
+            let dx = dst_x + sx as i32;
+            let dy = dst_y + sy as i32;
+            if dx < 0 || dy < 0 {
+                continue;
+            }
+            let dx = dx as usize;
+            let dy = dy as usize;
+            if dx >= dst_stride || dy * dst_stride + dx >= dst.len() {
+                continue;
+            }
+            let src_idx = sy * src_width + sx;
+            if src_idx >= src.len() {
+                continue;
+            }
+            dst[dy * dst_stride + dx] = src[src_idx];
+        }
     }
 }
 
