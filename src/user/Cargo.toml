@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-mnu-abi = { path = "../abi" }
+mnu-abi = { path = "../core/crates/abi" }
 
 [features]
 default = ["library"]
