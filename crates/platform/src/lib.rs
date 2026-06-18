@@ -73,6 +73,21 @@ pub mod process {
     }
 }
 
+pub mod service {
+    use super::syscall::{self, SysResult};
+
+    pub fn spawn(path: &str) -> SysResult<u64> {
+        let mut path_buf = [0u8; 128];
+        let bytes = path.as_bytes();
+        if bytes.len() + 1 > path_buf.len() {
+            return Err(syscall::SysError::from_raw(syscall::EINVAL as i64));
+        }
+        path_buf[..bytes.len()].copy_from_slice(bytes);
+        path_buf[bytes.len()] = 0;
+        syscall::call1(syscall::SyscallNumber::ServiceSpawn, path_buf.as_ptr() as u64)
+    }
+}
+
 pub mod time {
     use super::syscall::{self, SysResult};
 
