@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-mnu-abi = { path = "../../../core/crates/abi" }
+mnu-abi = {
+    git = "https://github.com/mochiOS/mnu",
+    package = "abi"
+}
 
 [features]
 default = []
