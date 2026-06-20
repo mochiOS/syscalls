@@ -4,6 +4,7 @@ members = [
     "crates/syscall",
     "crates/runtime",
     "crates/platform",
+    "crates/newlib-runtime",
 ]
 
 [workspace.package]
