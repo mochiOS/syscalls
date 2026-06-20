@@ -174,9 +174,10 @@ unsafe extern "C" {
     static __init_array_end: InitFn;
     static __fini_array_start: InitFn;
     static __fini_array_end: InitFn;
-    static _end: u8;
 
     fn main(argc: c_int, argv: *mut *mut c_char, envp: *mut *mut c_char) -> c_int;
+    fn exit(code: c_int) -> !;
+    fn atexit(func: extern "C" fn()) -> c_int;
 }
 
 #[panic_handler]
@@ -289,6 +290,15 @@ unsafe fn call_init_array(start: *const InitFn, end: *const InitFn) {
     }
 }
 
+extern "C" fn run_fini_array() {
+    unsafe {
+        call_init_array(
+            ptr::addr_of!(__fini_array_start),
+            ptr::addr_of!(__fini_array_end),
+        );
+    }
+}
+
 unsafe fn initialize_runtime(stack: StackView) {
     let state = unsafe { state_mut() };
     if state.initialized {
@@ -302,14 +312,15 @@ unsafe fn initialize_runtime(stack: StackView) {
     state.fds[1] = FdEntry::stdio(1, FdKind::Stdout);
     state.fds[2] = FdEntry::stdio(2, FdKind::Stderr);
 
-    let heap_base = align_up(ptr::addr_of!(_end) as usize, PAGE_SIZE).unwrap_or(PAGE_SIZE);
     let stack_limit = align_down(stack.stack_top, PAGE_SIZE).saturating_sub(PAGE_SIZE);
     state.heap = HeapState {
         initialized: true,
-        base: heap_base,
-        current_break: heap_base,
-        mapped_end: heap_base,
-        maximum_end: stack_limit.max(heap_base),
+        // Kernel owns the initial user heap placement. Delay heap bootstrap
+        // until _sbrk() so userland does not guess a virtual address.
+        base: 0,
+        current_break: 0,
+        mapped_end: 0,
+        maximum_end: stack_limit,
         page_size: PAGE_SIZE,
     };
 
@@ -317,6 +328,8 @@ unsafe fn initialize_runtime(stack: StackView) {
         environ = stack.envp;
         __env = stack.envp;
     }
+
+    let _ = unsafe { atexit(run_fini_array) };
 }
 
 fn with_fd_entry(fd: c_int) -> Result<FdEntry, c_int> {
@@ -422,13 +435,7 @@ pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
         )
     };
     let code = unsafe { main(stack.argc as c_int, stack.argv, stack.envp) };
-    unsafe {
-        call_init_array(
-            ptr::addr_of!(__fini_array_start),
-            ptr::addr_of!(__fini_array_end),
-        )
-    };
-    _exit(code)
+    unsafe { exit(code) }
 }
 
 #[unsafe(no_mangle)]
@@ -463,8 +470,10 @@ pub extern "C" fn _write(fd: c_int, buffer: *const c_void, length: usize) -> isi
     result_with_errno(result, -1)
 }
 
-#[unsafe(export_name = "write")]
-pub extern "C" fn write_alias(fd: c_int, buffer: *const c_void, length: usize) -> isize {
+// This newlib configuration omits libc/syscalls/sys*.c connectors, and some
+// reentrant wrappers still resolve through the plain POSIX spellings.
+#[unsafe(no_mangle)]
+pub extern "C" fn write(fd: c_int, buffer: *const c_void, length: usize) -> isize {
     _write(fd, buffer, length)
 }
 
@@ -481,8 +490,8 @@ pub extern "C" fn _read(fd: c_int, buffer: *mut c_void, length: usize) -> isize 
     result_with_errno(result, -1)
 }
 
-#[unsafe(export_name = "read")]
-pub extern "C" fn read_alias(fd: c_int, buffer: *mut c_void, length: usize) -> isize {
+#[unsafe(no_mangle)]
+pub extern "C" fn read(fd: c_int, buffer: *mut c_void, length: usize) -> isize {
     _read(fd, buffer, length)
 }
 
@@ -514,8 +523,8 @@ pub extern "C" fn _open(path: *const c_char, flags: c_int, mode: c_int) -> c_int
     result_with_errno(result, -1)
 }
 
-#[unsafe(export_name = "open")]
-pub extern "C" fn open_alias(path: *const c_char, flags: c_int, mode: c_int) -> c_int {
+#[unsafe(no_mangle)]
+pub extern "C" fn open(path: *const c_char, flags: c_int, mode: c_int) -> c_int {
     _open(path, flags, mode)
 }
 
@@ -537,8 +546,8 @@ pub extern "C" fn _close(fd: c_int) -> c_int {
     result_with_errno(result, -1)
 }
 
-#[unsafe(export_name = "close")]
-pub extern "C" fn close_alias(fd: c_int) -> c_int {
+#[unsafe(no_mangle)]
+pub extern "C" fn close(fd: c_int) -> c_int {
     _close(fd)
 }
 
@@ -561,8 +570,8 @@ pub extern "C" fn _lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
     result_with_errno(result, -1)
 }
 
-#[unsafe(export_name = "lseek")]
-pub extern "C" fn lseek_alias(fd: c_int, offset: i64, whence: c_int) -> i64 {
+#[unsafe(no_mangle)]
+pub extern "C" fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
     _lseek(fd, offset, whence)
 }
 
@@ -584,8 +593,8 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
     result_with_errno(result, -1)
 }
 
-#[unsafe(export_name = "fstat")]
-pub extern "C" fn fstat_alias(fd: c_int, stat_buf: *mut c_void) -> c_int {
+#[unsafe(no_mangle)]
+pub extern "C" fn fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
     _fstat(fd, stat_buf)
 }
 
@@ -608,8 +617,8 @@ pub extern "C" fn _stat(path: *const c_char, stat_buf: *mut c_void) -> c_int {
     result_with_errno(result, -1)
 }
 
-#[unsafe(export_name = "stat")]
-pub extern "C" fn stat_alias(path: *const c_char, stat_buf: *mut c_void) -> c_int {
+#[unsafe(no_mangle)]
+pub extern "C" fn stat(path: *const c_char, stat_buf: *mut c_void) -> c_int {
     _stat(path, stat_buf)
 }
 
@@ -628,8 +637,8 @@ pub extern "C" fn _isatty(fd: c_int) -> c_int {
     result_with_errno(result, -1)
 }
 
-#[unsafe(export_name = "isatty")]
-pub extern "C" fn isatty_alias(fd: c_int) -> c_int {
+#[unsafe(no_mangle)]
+pub extern "C" fn isatty(fd: c_int) -> c_int {
     _isatty(fd)
 }
 
@@ -640,6 +649,26 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
         let heap = &mut state.heap;
         if !heap.initialized {
             return Err(ENOMEM);
+        }
+        if heap.base == 0 {
+            if increment < 0 {
+                return Err(EINVAL);
+            }
+            let mapped = syscall_errno(syscall::raw_syscall5(
+                syscall::SyscallNumber::MemoryMap,
+                0,
+                heap.page_size as u64,
+                PROT_READ_WRITE,
+                MAP_PRIVATE_ANON,
+                0,
+            ))? as usize;
+            let mapped_end = mapped.checked_add(heap.page_size).ok_or(ENOMEM)?;
+            if mapped_end > heap.maximum_end {
+                return Err(ENOMEM);
+            }
+            heap.base = mapped;
+            heap.current_break = mapped;
+            heap.mapped_end = mapped_end;
         }
         let old_break = heap.current_break;
         let new_break = if increment >= 0 {
@@ -679,8 +708,8 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
     result_with_errno(result, (-1isize) as *mut c_void)
 }
 
-#[unsafe(export_name = "sbrk")]
-pub extern "C" fn sbrk_alias(increment: isize) -> *mut c_void {
+#[unsafe(no_mangle)]
+pub extern "C" fn sbrk(increment: isize) -> *mut c_void {
     _sbrk(increment)
 }
 
@@ -690,8 +719,8 @@ pub extern "C" fn _getpid() -> c_int {
     -1
 }
 
-#[unsafe(export_name = "getpid")]
-pub extern "C" fn getpid_alias() -> c_int {
+#[unsafe(no_mangle)]
+pub extern "C" fn getpid() -> c_int {
     _getpid()
 }
 
@@ -701,8 +730,8 @@ pub extern "C" fn _kill(_pid: c_int, _sig: c_int) -> c_int {
     -1
 }
 
-#[unsafe(export_name = "kill")]
-pub extern "C" fn kill_alias(pid: c_int, sig: c_int) -> c_int {
+#[unsafe(no_mangle)]
+pub extern "C" fn kill(pid: c_int, sig: c_int) -> c_int {
     _kill(pid, sig)
 }
 
@@ -723,8 +752,8 @@ pub extern "C" fn _times(buf: *mut Tms) -> i64 {
     result_with_errno(result, -1)
 }
 
-#[unsafe(export_name = "times")]
-pub extern "C" fn times_alias(buf: *mut Tms) -> i64 {
+#[unsafe(no_mangle)]
+pub extern "C" fn times(buf: *mut Tms) -> i64 {
     _times(buf)
 }
 
@@ -744,8 +773,8 @@ pub extern "C" fn _unlink(path: *const c_char) -> c_int {
     result_with_errno(result, -1)
 }
 
-#[unsafe(export_name = "unlink")]
-pub extern "C" fn unlink_alias(path: *const c_char) -> c_int {
+#[unsafe(no_mangle)]
+pub extern "C" fn unlink(path: *const c_char) -> c_int {
     _unlink(path)
 }
 
@@ -768,8 +797,8 @@ pub extern "C" fn _rename(old_path: *const c_char, new_path: *const c_char) -> c
     result_with_errno(result, -1)
 }
 
-#[unsafe(export_name = "rename")]
-pub extern "C" fn rename_alias(old_path: *const c_char, new_path: *const c_char) -> c_int {
+#[unsafe(no_mangle)]
+pub extern "C" fn rename(old_path: *const c_char, new_path: *const c_char) -> c_int {
     _rename(old_path, new_path)
 }
 

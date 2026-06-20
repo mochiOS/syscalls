@@ -122,6 +122,7 @@ RUNTIME_LIB="${RUNTIME_TARGET_DIR}/${FINAL_TARGET}/release/libmochi_user_newlib_
 CRT0_O="${HELLO_DIR}/crt0.o"
 HELLO_O="${HELLO_DIR}/hello.o"
 HELLO_ELF="${HELLO_DIR}/hello.elf"
+HELLO_MAP="${HELLO_DIR}/hello.map"
 
 need_file "${RUNTIME_LIB}"
 
@@ -146,6 +147,8 @@ x86_64-elf-gcc \
     -nostartfiles \
     -Wl,-T,"${LINKER_SCRIPT}" \
     -Wl,-no-pie \
+    -Wl,-z,noexecstack \
+    -Wl,-Map,"${HELLO_MAP}" \
     -Wl,--start-group \
     "${CRT0_O}" \
     "${HELLO_O}" \

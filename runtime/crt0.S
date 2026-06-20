@@ -10,3 +10,5 @@ _start:
 .Lhang:
     hlt
     jmp .Lhang
+
+.section .note.GNU-stack,"",@progbits
