@@ -12,6 +12,13 @@ const PROT_READ_WRITE: u64 = 0x3;
 const MAP_PRIVATE_ANON: u64 = 0x22;
 const AT_FDCWD: i64 = -100;
 const SEEK_CUR: c_int = 1;
+const WNOHANG: c_int = 1;
+const SPAWN_FAIL_EXIT_STATUS: c_int = 127;
+const FD_STATE_ENV_PREFIX: &[u8] = b"MOCHIOS_FDSTATE=";
+const MAX_FD_STATE_LEN: usize = 4096;
+const MAX_ENV_POINTERS: usize = 128;
+const MAX_SPAWN_FILE_ACTIONS: usize = 8;
+const MAX_SPAWN_FILE_ACTION_ENTRIES: usize = 32;
 
 const EPERM: c_int = 1;
 const ENOENT: c_int = 2;
@@ -45,6 +52,112 @@ pub struct Tms {
 pub struct LockOpaque {
     _private: u8,
 }
+
+#[repr(C)]
+pub struct PosixSpawnAttr {
+    sa_flags: i16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PosixSpawnFileActions {
+    fa_list: StailqHead<PosixSpawnFileActionsEntry>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct StailqHead<T> {
+    stqh_first: *mut T,
+    stqh_last: *mut *mut T,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct StailqEntry<T> {
+    stqe_next: *mut T,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+union PosixSpawnFileActionData {
+    open: PosixSpawnFileActionOpen,
+    dup2: PosixSpawnFileActionDup2,
+    dir: *mut c_char,
+    dirfd: c_int,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PosixSpawnFileActionOpen {
+    path: *mut c_char,
+    oflag: c_int,
+    mode: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PosixSpawnFileActionDup2 {
+    newfildes: c_int,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PosixSpawnFileActionsEntry {
+    fae_list: StailqEntry<PosixSpawnFileActionsEntry>,
+    fae_action: c_int,
+    fae_fildes: c_int,
+    fae_data: PosixSpawnFileActionData,
+}
+
+#[derive(Clone, Copy)]
+struct FileActionsSlot {
+    in_use: bool,
+    value: PosixSpawnFileActions,
+}
+
+impl FileActionsSlot {
+    const fn new() -> Self {
+        Self {
+            in_use: false,
+            value: PosixSpawnFileActions {
+                fa_list: StailqHead {
+                    stqh_first: ptr::null_mut(),
+                    stqh_last: ptr::null_mut(),
+                },
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FileActionEntrySlot {
+    in_use: bool,
+    value: PosixSpawnFileActionsEntry,
+}
+
+impl FileActionEntrySlot {
+    const fn new() -> Self {
+        Self {
+            in_use: false,
+            value: PosixSpawnFileActionsEntry {
+                fae_list: StailqEntry {
+                    stqe_next: ptr::null_mut(),
+                },
+                fae_action: 0,
+                fae_fildes: 0,
+                fae_data: PosixSpawnFileActionData {
+                    dirfd: 0,
+                },
+            },
+        }
+    }
+}
+
+const FAE_OPEN: c_int = 0;
+const FAE_DUP2: c_int = 1;
+const FAE_CLOSE: c_int = 2;
+const FAE_CHDIR: c_int = 3;
+const FAE_FCHDIR: c_int = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -210,6 +323,11 @@ unsafe impl<T> Sync for SingleThreadCell<T> {}
 
 static STATE: SingleThreadCell<RuntimeState> = SingleThreadCell::new(RuntimeState::new());
 static DUMMY_LOCK: LockOpaque = LockOpaque { _private: 0 };
+static FILE_ACTIONS_POOL: SingleThreadCell<[FileActionsSlot; MAX_SPAWN_FILE_ACTIONS]> =
+    SingleThreadCell::new([FileActionsSlot::new(); MAX_SPAWN_FILE_ACTIONS]);
+static FILE_ACTION_ENTRIES_POOL: SingleThreadCell<
+    [FileActionEntrySlot; MAX_SPAWN_FILE_ACTION_ENTRIES],
+> = SingleThreadCell::new([FileActionEntrySlot::new(); MAX_SPAWN_FILE_ACTION_ENTRIES]);
 
 #[unsafe(no_mangle)]
 pub static mut errno: c_int = 0;
@@ -377,6 +495,178 @@ unsafe fn call_init_array(start: *const InitFn, end: *const InitFn) {
     }
 }
 
+unsafe fn c_strlen(mut ptr_value: *const c_char) -> usize {
+    let mut len = 0usize;
+    while unsafe { ptr_value.read() } != 0 {
+        len += 1;
+        ptr_value = unsafe { ptr_value.add(1) };
+    }
+    len
+}
+
+unsafe fn c_bytes<'a>(ptr_value: *const c_char) -> &'a [u8] {
+    let len = unsafe { c_strlen(ptr_value) };
+    // Safety: callers only pass valid C strings from the current process image.
+    unsafe { core::slice::from_raw_parts(ptr_value.cast::<u8>(), len) }
+}
+
+fn push_decimal(mut value: usize, out: &mut [u8], length: &mut usize) -> Result<(), c_int> {
+    let mut digits = [0u8; 20];
+    let mut index = digits.len();
+    if value == 0 {
+        if *length >= out.len() {
+            return Err(ENOMEM);
+        }
+        out[*length] = b'0';
+        *length += 1;
+        return Ok(());
+    }
+    while value != 0 {
+        index -= 1;
+        digits[index] = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+    let needed = digits.len() - index;
+    if *length + needed > out.len() {
+        return Err(ENOMEM);
+    }
+    out[*length..*length + needed].copy_from_slice(&digits[index..]);
+    *length += needed;
+    Ok(())
+}
+
+fn parse_decimal(mut bytes: &[u8]) -> Option<usize> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut value = 0usize;
+    while let Some((&head, tail)) = bytes.split_first() {
+        if !head.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add((head - b'0') as usize)?;
+        bytes = tail;
+    }
+    Some(value)
+}
+
+fn find_fd_state_env(envp: *mut *mut c_char) -> Option<&'static [u8]> {
+    if envp.is_null() {
+        return None;
+    }
+    let mut cursor = envp;
+    loop {
+        // Safety: envp is the kernel-provided environment vector for the current process.
+        let entry = unsafe { cursor.read() };
+        if entry.is_null() {
+            return None;
+        }
+        let bytes = unsafe { c_bytes(entry.cast_const()) };
+        if let Some(rest) = bytes.strip_prefix(FD_STATE_ENV_PREFIX) {
+            return Some(rest);
+        }
+        // Safety: cursor is advanced within the NUL-terminated envp vector.
+        cursor = unsafe { cursor.add(1) };
+    }
+}
+
+fn restore_fd_state_from_env(envp: *mut *mut c_char, fds: &mut [FdEntry; MAX_FDS]) -> bool {
+    let Some(raw) = find_fd_state_env(envp) else {
+        return false;
+    };
+    *fds = [FdEntry::unused(); MAX_FDS];
+    for record in raw.split(|byte| *byte == b';') {
+        if record.is_empty() {
+            continue;
+        }
+        let mut fields = record.split(|byte| *byte == b',');
+        let Some(fd) = fields.next().and_then(parse_decimal) else {
+            return false;
+        };
+        let Some(kind_code) = fields.next().and_then(parse_decimal) else {
+            return false;
+        };
+        let Some(lower_handle) = fields.next().and_then(parse_decimal) else {
+            return false;
+        };
+        let Some(open_flags) = fields.next().and_then(parse_decimal) else {
+            return false;
+        };
+        let Some(position) = fields.next().and_then(parse_decimal) else {
+            return false;
+        };
+        let Some(close_owned) = fields.next().and_then(parse_decimal) else {
+            return false;
+        };
+        if fd >= MAX_FDS {
+            return false;
+        }
+        let kind = match kind_code {
+            1 => FdKind::Stdin,
+            2 => FdKind::Stdout,
+            3 => FdKind::Stderr,
+            4 => FdKind::File,
+            _ => return false,
+        };
+        fds[fd] = FdEntry {
+            in_use: true,
+            lower_handle: lower_handle as u64,
+            kind,
+            open_flags: open_flags as c_int,
+            position: position as u64,
+            close_owned: close_owned != 0,
+        };
+    }
+    true
+}
+
+fn push_byte(out: &mut [u8], length: &mut usize, value: u8) -> Result<(), c_int> {
+    if *length >= out.len() {
+        return Err(ENOMEM);
+    }
+    out[*length] = value;
+    *length += 1;
+    Ok(())
+}
+
+fn serialize_fd_state(
+    fds: &[FdEntry; MAX_FDS],
+    encoded: &mut [u8; MAX_FD_STATE_LEN],
+) -> Result<usize, c_int> {
+    let mut length = 0usize;
+    if FD_STATE_ENV_PREFIX.len() > encoded.len() {
+        return Err(ENOMEM);
+    }
+    encoded[..FD_STATE_ENV_PREFIX.len()].copy_from_slice(FD_STATE_ENV_PREFIX);
+    length += FD_STATE_ENV_PREFIX.len();
+    for (fd, entry) in fds.iter().enumerate() {
+        if !entry.in_use {
+            continue;
+        }
+        let kind_code = match entry.kind {
+            FdKind::Unused => continue,
+            FdKind::Stdin => 1usize,
+            FdKind::Stdout => 2usize,
+            FdKind::Stderr => 3usize,
+            FdKind::File => 4usize,
+        };
+        push_decimal(fd, encoded, &mut length)?;
+        push_byte(encoded, &mut length, b',')?;
+        push_decimal(kind_code, encoded, &mut length)?;
+        push_byte(encoded, &mut length, b',')?;
+        push_decimal(entry.lower_handle as usize, encoded, &mut length)?;
+        push_byte(encoded, &mut length, b',')?;
+        push_decimal(entry.open_flags.max(0) as usize, encoded, &mut length)?;
+        push_byte(encoded, &mut length, b',')?;
+        push_decimal(entry.position as usize, encoded, &mut length)?;
+        push_byte(encoded, &mut length, b',')?;
+        push_decimal(entry.close_owned as usize, encoded, &mut length)?;
+        push_byte(encoded, &mut length, b';')?;
+    }
+    push_byte(encoded, &mut length, 0)?;
+    Ok(length)
+}
+
 extern "C" fn run_fini_array() {
     unsafe {
         call_init_array(
@@ -395,9 +685,11 @@ unsafe fn initialize_runtime(stack: StackView) {
     state.initialized = true;
     state.argv = stack.argv;
     state.envp = stack.envp;
-    state.fds[0] = FdEntry::stdio(0, FdKind::Stdin);
-    state.fds[1] = FdEntry::stdio(1, FdKind::Stdout);
-    state.fds[2] = FdEntry::stdio(2, FdKind::Stderr);
+    if !restore_fd_state_from_env(stack.envp, &mut state.fds) {
+        state.fds[0] = FdEntry::stdio(0, FdKind::Stdin);
+        state.fds[1] = FdEntry::stdio(1, FdKind::Stdout);
+        state.fds[2] = FdEntry::stdio(2, FdKind::Stderr);
+    }
 
     let stack_limit = align_down(stack.stack_top, PAGE_SIZE).saturating_sub(PAGE_SIZE);
     state.heap = HeapState {
@@ -417,6 +709,229 @@ unsafe fn initialize_runtime(stack: StackView) {
     }
 
     let _ = unsafe { atexit(run_fini_array) };
+}
+
+unsafe fn init_file_actions_list(value: *mut PosixSpawnFileActions) {
+    // Safety: caller passes a pointer to a live pool slot owned by this runtime.
+    unsafe {
+        (*value).fa_list.stqh_first = ptr::null_mut();
+        (*value).fa_list.stqh_last = ptr::addr_of_mut!((*value).fa_list.stqh_first);
+    }
+}
+
+unsafe fn allocate_file_actions_object() -> Result<*mut PosixSpawnFileActions, c_int> {
+    // Safety: bootstrap runtime is single-threaded, so pool mutation is serialized.
+    let pool = unsafe { &mut *FILE_ACTIONS_POOL.get() };
+    for slot in pool.iter_mut() {
+        if !slot.in_use {
+            slot.in_use = true;
+            let value = ptr::addr_of_mut!(slot.value);
+            unsafe { init_file_actions_list(value) };
+            return Ok(value);
+        }
+    }
+    Err(ENOMEM)
+}
+
+unsafe fn release_file_actions_object(target: *mut PosixSpawnFileActions) {
+    // Safety: bootstrap runtime is single-threaded, so pool mutation is serialized.
+    let pool = unsafe { &mut *FILE_ACTIONS_POOL.get() };
+    for slot in pool.iter_mut() {
+        let slot_ptr = ptr::addr_of_mut!(slot.value);
+        if slot_ptr == target {
+            slot.in_use = false;
+            unsafe { init_file_actions_list(slot_ptr) };
+            return;
+        }
+    }
+}
+
+unsafe fn allocate_file_action_entry() -> Result<*mut PosixSpawnFileActionsEntry, c_int> {
+    // Safety: bootstrap runtime is single-threaded, so pool mutation is serialized.
+    let pool = unsafe { &mut *FILE_ACTION_ENTRIES_POOL.get() };
+    for slot in pool.iter_mut() {
+        if !slot.in_use {
+            slot.in_use = true;
+            slot.value.fae_list.stqe_next = ptr::null_mut();
+            return Ok(ptr::addr_of_mut!(slot.value));
+        }
+    }
+    Err(ENOMEM)
+}
+
+unsafe fn release_file_action_entry(target: *mut PosixSpawnFileActionsEntry) {
+    // Safety: bootstrap runtime is single-threaded, so pool mutation is serialized.
+    let pool = unsafe { &mut *FILE_ACTION_ENTRIES_POOL.get() };
+    for slot in pool.iter_mut() {
+        let slot_ptr = ptr::addr_of_mut!(slot.value);
+        if slot_ptr == target {
+            slot.in_use = false;
+            slot.value.fae_list.stqe_next = ptr::null_mut();
+            slot.value.fae_action = 0;
+            slot.value.fae_fildes = 0;
+            slot.value.fae_data.dirfd = 0;
+            return;
+        }
+    }
+}
+
+unsafe fn append_file_action(
+    actions: *mut PosixSpawnFileActions,
+    entry: *mut PosixSpawnFileActionsEntry,
+) {
+    // Safety: caller provides pointers to live pool slots exclusively owned here.
+    unsafe {
+        (*entry).fae_list.stqe_next = ptr::null_mut();
+        *(*actions).fa_list.stqh_last = entry;
+        (*actions).fa_list.stqh_last = ptr::addr_of_mut!((*entry).fae_list.stqe_next);
+    }
+}
+
+fn clone_current_fd_table() -> [FdEntry; MAX_FDS] {
+    // Safety: bootstrap runtime is single-threaded, so copying the table is race-free.
+    unsafe { state_mut().fds }
+}
+
+fn clear_fd_entry(fds: &mut [FdEntry; MAX_FDS], fd: c_int) {
+    if fd >= 0 && (fd as usize) < MAX_FDS {
+        fds[fd as usize] = FdEntry::unused();
+    }
+}
+
+fn rewrite_fd_entry(
+    fds: &mut [FdEntry; MAX_FDS],
+    old_fd: c_int,
+    new_fd: c_int,
+) -> Result<(), c_int> {
+    if old_fd < 0 || new_fd < 0 || old_fd as usize >= MAX_FDS || new_fd as usize >= MAX_FDS {
+        return Err(EBADF);
+    }
+    let old_entry = fds[old_fd as usize];
+    if !old_entry.in_use {
+        return Err(EBADF);
+    }
+    if old_fd == new_fd {
+        return Ok(());
+    }
+    let new_index = new_fd as usize;
+    let mut new_entry = old_entry;
+    // posix_spawn の child-side file actions は fork 後・execve 前の一時 FD table を
+    // 組み替えるだけでよい。kernel の dup2 syscall は process-local FD 番号を要求するため、
+    // runtime 内部の lower_handle を渡してはいけない。
+    new_entry.close_owned = old_entry.close_owned;
+    fds[new_index] = new_entry;
+    Ok(())
+}
+
+fn apply_spawn_file_actions(
+    fds: &mut [FdEntry; MAX_FDS],
+    actions: *const *mut PosixSpawnFileActions,
+) -> Result<(), c_int> {
+    if actions.is_null() {
+        return Ok(());
+    }
+    // Safety: file_actions is a pointer to the caller's posix_spawn_file_actions_t handle.
+    let actions = unsafe { *actions };
+    if actions.is_null() {
+        return Ok(());
+    }
+    // Safety: actions points to a live queue object allocated by this runtime.
+    let mut current = unsafe { (*actions).fa_list.stqh_first };
+    while !current.is_null() {
+        // Safety: current walks the STAILQ built by newlib's posix_spawn_file_actions APIs.
+        let entry = unsafe { &*current };
+        match entry.fae_action {
+            FAE_CLOSE => clear_fd_entry(fds, entry.fae_fildes),
+            FAE_DUP2 => {
+                // Safety: the active union field is determined by fae_action.
+                let new_fd = unsafe { entry.fae_data.dup2.newfildes };
+                rewrite_fd_entry(fds, entry.fae_fildes, new_fd)?;
+            }
+            FAE_OPEN | FAE_CHDIR | FAE_FCHDIR => return Err(ENOSYS),
+            _ => return Err(EINVAL),
+        }
+        // Safety: advance within the same STAILQ.
+        current = entry.fae_list.stqe_next;
+    }
+    Ok(())
+}
+
+fn collect_envp_with_fd_state(
+    envp: *const *const c_char,
+    fd_state: *const c_char,
+    out: &mut [*const c_char; MAX_ENV_POINTERS],
+) -> Result<(), c_int> {
+    let source_envp = if envp.is_null() {
+        // Safety: environ is initialized from the process startup stack before main().
+        unsafe { environ as *const *const c_char }
+    } else {
+        envp
+    };
+    let mut length = 0usize;
+    if !source_envp.is_null() {
+        let mut cursor = source_envp;
+        loop {
+            // Safety: source_envp is a NUL-terminated environment pointer array.
+            let entry = unsafe { cursor.read() };
+            if entry.is_null() {
+                break;
+            }
+            let keep = unsafe { c_bytes(entry) }
+                .strip_prefix(FD_STATE_ENV_PREFIX)
+                .is_none();
+            if keep {
+                if length + 2 > out.len() {
+                    return Err(ENOMEM);
+                }
+                out[length] = entry;
+                length += 1;
+            }
+            // Safety: cursor advances within the envp array.
+            cursor = unsafe { cursor.add(1) };
+        }
+    }
+    if length + 2 > out.len() {
+        return Err(ENOMEM);
+    }
+    out[length] = fd_state;
+    out[length + 1] = ptr::null();
+    Ok(())
+}
+
+fn execve_raw(
+    path: *const c_char,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> Result<(), c_int> {
+    let _ = syscall_errno(syscall::raw_syscall3(
+        syscall::SyscallNumber::Execve,
+        path as u64,
+        argv as u64,
+        envp as u64,
+    ))?;
+    Ok(())
+}
+
+#[inline(never)]
+fn process_spawn_raw() -> u64 {
+    syscall::raw_syscall2(syscall::SyscallNumber::ProcessSpawn, 0, 0).raw()
+}
+
+fn unsupported_spawn_attr(attr: *const *mut PosixSpawnAttr) -> Result<(), c_int> {
+    if attr.is_null() {
+        return Ok(());
+    }
+    // Safety: attr points to the caller's posix_spawnattr_t handle.
+    let attr = unsafe { *attr };
+    if attr.is_null() {
+        return Ok(());
+    }
+    // Safety: attr points to the caller's posix_spawnattr object.
+    let flags = unsafe { (*attr).sa_flags };
+    if flags != 0 {
+        return Err(ENOSYS);
+    }
+    Ok(())
 }
 
 fn with_fd_entry(fd: c_int) -> Result<FdEntry, c_int> {
@@ -926,6 +1441,254 @@ pub extern "C" fn _rename(old_path: *const c_char, new_path: *const c_char) -> c
 #[unsafe(no_mangle)]
 pub extern "C" fn rename(old_path: *const c_char, new_path: *const c_char) -> c_int {
     _rename(old_path, new_path)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _execve(
+    path: *const c_char,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> c_int {
+    if path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    let result = execve_raw(path, argv, envp);
+    result_with_errno(result.map(|()| 0), -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn execve(
+    path: *const c_char,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> c_int {
+    _execve(path, argv, envp)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int {
+    let result = (|| {
+        if options & !WNOHANG != 0 {
+            return Err(EINVAL);
+        }
+        let waited = syscall_errno(syscall::raw_syscall3(
+            syscall::SyscallNumber::ProcessWait,
+            pid as i64 as u64,
+            status as u64,
+            options as u64,
+        ))?;
+        Ok(waited as c_int)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int {
+    _waitpid(pid, status, options)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawn_file_actions_init(
+    actions: *mut *mut PosixSpawnFileActions,
+) -> c_int {
+    if actions.is_null() {
+        return EINVAL;
+    }
+    match unsafe { allocate_file_actions_object() } {
+        Ok(value) => {
+            // Safety: actions points to writable caller storage.
+            unsafe { *actions = value };
+            0
+        }
+        Err(errno_value) => errno_value,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawn_file_actions_destroy(
+    actions: *mut *mut PosixSpawnFileActions,
+) -> c_int {
+    if actions.is_null() {
+        return EINVAL;
+    }
+    // Safety: actions points to the caller's handle storage.
+    let actions_ptr = unsafe { *actions };
+    if actions_ptr.is_null() {
+        return EINVAL;
+    }
+    // Safety: actions_ptr is the queue object previously allocated by init().
+    let mut current = unsafe { (*actions_ptr).fa_list.stqh_first };
+    while !current.is_null() {
+        // Safety: current walks the action queue owned by actions_ptr.
+        let next = unsafe { (*current).fae_list.stqe_next };
+        unsafe { release_file_action_entry(current) };
+        current = next;
+    }
+    unsafe {
+        init_file_actions_list(actions_ptr);
+        release_file_actions_object(actions_ptr);
+        *actions = ptr::null_mut();
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawn_file_actions_addclose(
+    actions: *mut *mut PosixSpawnFileActions,
+    fildes: c_int,
+) -> c_int {
+    if actions.is_null() {
+        return EINVAL;
+    }
+    if fildes < 0 {
+        return EBADF;
+    }
+    // Safety: actions points to the caller's handle storage.
+    let actions_ptr = unsafe { *actions };
+    if actions_ptr.is_null() {
+        return EINVAL;
+    }
+    let entry = match unsafe { allocate_file_action_entry() } {
+        Ok(value) => value,
+        Err(errno_value) => return errno_value,
+    };
+    unsafe {
+        (*entry).fae_action = FAE_CLOSE;
+        (*entry).fae_fildes = fildes;
+        append_file_action(actions_ptr, entry);
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawn_file_actions_adddup2(
+    actions: *mut *mut PosixSpawnFileActions,
+    fildes: c_int,
+    newfildes: c_int,
+) -> c_int {
+    if actions.is_null() {
+        return EINVAL;
+    }
+    if fildes < 0 || newfildes < 0 {
+        return EBADF;
+    }
+    // Safety: actions points to the caller's handle storage.
+    let actions_ptr = unsafe { *actions };
+    if actions_ptr.is_null() {
+        return EINVAL;
+    }
+    let entry = match unsafe { allocate_file_action_entry() } {
+        Ok(value) => value,
+        Err(errno_value) => return errno_value,
+    };
+    unsafe {
+        (*entry).fae_action = FAE_DUP2;
+        (*entry).fae_fildes = fildes;
+        (*entry).fae_data.dup2 = PosixSpawnFileActionDup2 { newfildes };
+        append_file_action(actions_ptr, entry);
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _posix_spawn(
+    pid: *mut c_int,
+    path: *const c_char,
+    file_actions: *const *mut PosixSpawnFileActions,
+    attrp: *const *mut PosixSpawnAttr,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> c_int {
+    if pid.is_null() || path.is_null() {
+        return EINVAL;
+    }
+    if let Err(errno_value) = unsupported_spawn_attr(attrp) {
+        return errno_value;
+    }
+
+    let pid_ptr = pid;
+    let file_actions_ptr = file_actions;
+    let argv_ptr = argv;
+    let envp_ptr = envp;
+
+    let child_pid = match syscall_errno(syscall::RawSyscallResult::new(process_spawn_raw())) {
+        Ok(value) => value,
+        Err(errno_value) => return errno_value,
+    };
+
+    if child_pid == 0 {
+        let mut desired_fds = clone_current_fd_table();
+        if apply_spawn_file_actions(&mut desired_fds, file_actions_ptr).is_err() {
+            process_exit(SPAWN_FAIL_EXIT_STATUS);
+        }
+        let mut fd_state = [0u8; MAX_FD_STATE_LEN];
+        let fd_state_len = match serialize_fd_state(&desired_fds, &mut fd_state) {
+            Ok(value) => value,
+            Err(_) => process_exit(SPAWN_FAIL_EXIT_STATUS),
+        };
+        let mut env_ptrs = [ptr::null(); MAX_ENV_POINTERS];
+        if collect_envp_with_fd_state(
+            envp_ptr,
+            fd_state[..fd_state_len].as_ptr().cast::<c_char>(),
+            &mut env_ptrs,
+        )
+        .is_err()
+        {
+            process_exit(SPAWN_FAIL_EXIT_STATUS);
+        }
+        if execve_raw(path, argv_ptr, env_ptrs.as_ptr()).is_err() {
+            process_exit(SPAWN_FAIL_EXIT_STATUS);
+        }
+        process_exit(SPAWN_FAIL_EXIT_STATUS);
+    }
+
+    // Safety: pid points to writable storage supplied by the caller.
+    unsafe { *pid_ptr = child_pid as c_int };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawn(
+    pid: *mut c_int,
+    path: *const c_char,
+    file_actions: *const *mut PosixSpawnFileActions,
+    attrp: *const *mut PosixSpawnAttr,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> c_int {
+    _posix_spawn(pid, path, file_actions, attrp, argv, envp)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _posix_spawnp(
+    pid: *mut c_int,
+    file: *const c_char,
+    file_actions: *const *mut PosixSpawnFileActions,
+    attrp: *const *mut PosixSpawnAttr,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> c_int {
+    if file.is_null() {
+        return EFAULT;
+    }
+    let file_bytes = unsafe { c_bytes(file) };
+    if !file_bytes.contains(&b'/') {
+        return ENOSYS;
+    }
+    _posix_spawn(pid, file, file_actions, attrp, argv, envp)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnp(
+    pid: *mut c_int,
+    file: *const c_char,
+    file_actions: *const *mut PosixSpawnFileActions,
+    attrp: *const *mut PosixSpawnAttr,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> c_int {
+    _posix_spawnp(pid, file, file_actions, attrp, argv, envp)
 }
 
 #[unsafe(no_mangle)]
