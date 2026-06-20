@@ -102,6 +102,59 @@ struct HeapState {
     page_size: usize,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KernelTimespec {
+    sec: i64,
+    nsec: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KernelStat {
+    st_dev: u64,
+    st_ino: u64,
+    st_nlink: u64,
+    st_mode: u32,
+    st_uid: u32,
+    st_gid: u32,
+    __pad0: u32,
+    st_rdev: u64,
+    st_size: i64,
+    st_blksize: i64,
+    st_blocks: i64,
+    st_atim: KernelTimespec,
+    st_mtim: KernelTimespec,
+    st_ctim: KernelTimespec,
+    __unused: [u8; 24],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NewlibTimespec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NewlibStat {
+    st_dev: u16,
+    st_ino: u16,
+    st_mode: u32,
+    st_nlink: u16,
+    st_uid: u16,
+    st_gid: u16,
+    st_rdev: u16,
+    st_size: i64,
+    st_atim: NewlibTimespec,
+    st_mtim: NewlibTimespec,
+    st_ctim: NewlibTimespec,
+    st_blksize: i64,
+    st_blocks: i64,
+    st_spare4: [i64; 2],
+}
+
 impl HeapState {
     const fn new() -> Self {
         Self {
@@ -174,10 +227,12 @@ unsafe extern "C" {
     static __init_array_end: InitFn;
     static __fini_array_start: InitFn;
     static __fini_array_end: InitFn;
+    static mut _impure_ptr: *mut c_void;
 
     fn main(argc: c_int, argv: *mut *mut c_char, envp: *mut *mut c_char) -> c_int;
     fn exit(code: c_int) -> !;
     fn atexit(func: extern "C" fn()) -> c_int;
+    fn __sinit(reent: *mut c_void);
 }
 
 #[panic_handler]
@@ -211,6 +266,38 @@ unsafe fn state_mut() -> &'static mut RuntimeState {
 fn set_errno(value: c_int) {
     unsafe {
         errno = value;
+    }
+}
+
+fn truncate_u16(value: u64) -> u16 {
+    core::cmp::min(value, u16::MAX as u64) as u16
+}
+
+fn translate_stat(kernel: &KernelStat) -> NewlibStat {
+    NewlibStat {
+        st_dev: truncate_u16(kernel.st_dev),
+        st_ino: truncate_u16(kernel.st_ino),
+        st_mode: kernel.st_mode,
+        st_nlink: truncate_u16(kernel.st_nlink),
+        st_uid: truncate_u16(kernel.st_uid as u64),
+        st_gid: truncate_u16(kernel.st_gid as u64),
+        st_rdev: truncate_u16(kernel.st_rdev),
+        st_size: kernel.st_size,
+        st_atim: NewlibTimespec {
+            tv_sec: kernel.st_atim.sec,
+            tv_nsec: kernel.st_atim.nsec,
+        },
+        st_mtim: NewlibTimespec {
+            tv_sec: kernel.st_mtim.sec,
+            tv_nsec: kernel.st_mtim.nsec,
+        },
+        st_ctim: NewlibTimespec {
+            tv_sec: kernel.st_ctim.sec,
+            tv_nsec: kernel.st_ctim.nsec,
+        },
+        st_blksize: kernel.st_blksize,
+        st_blocks: kernel.st_blocks,
+        st_spare4: [0; 2],
     }
 }
 
@@ -422,6 +509,7 @@ fn syscall_read(
 pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
     let stack = unsafe { parse_stack(initial_sp) };
     unsafe { initialize_runtime(stack) };
+    unsafe { __sinit(_impure_ptr) };
     unsafe {
         call_init_array(
             ptr::addr_of!(__preinit_array_start),
@@ -583,11 +671,30 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
     }
     let result = (|| {
         let entry = with_fd_entry(fd)?;
+        let mut kernel_stat = KernelStat {
+            st_dev: 0,
+            st_ino: 0,
+            st_nlink: 0,
+            st_mode: 0,
+            st_uid: 0,
+            st_gid: 0,
+            __pad0: 0,
+            st_rdev: 0,
+            st_size: 0,
+            st_blksize: 0,
+            st_blocks: 0,
+            st_atim: KernelTimespec { sec: 0, nsec: 0 },
+            st_mtim: KernelTimespec { sec: 0, nsec: 0 },
+            st_ctim: KernelTimespec { sec: 0, nsec: 0 },
+            __unused: [0; 24],
+        };
         let _ = syscall_errno(syscall::raw_syscall2(
             syscall::SyscallNumber::FileFstat,
             entry.lower_handle,
-            stat_buf as u64,
+            (&mut kernel_stat as *mut KernelStat).cast::<c_void>() as u64,
         ))?;
+        let translated = translate_stat(&kernel_stat);
+        unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), translated) };
         Ok(0)
     })();
     result_with_errno(result, -1)
@@ -605,13 +712,32 @@ pub extern "C" fn _stat(path: *const c_char, stat_buf: *mut c_void) -> c_int {
         return -1;
     }
     let result = (|| {
+        let mut kernel_stat = KernelStat {
+            st_dev: 0,
+            st_ino: 0,
+            st_nlink: 0,
+            st_mode: 0,
+            st_uid: 0,
+            st_gid: 0,
+            __pad0: 0,
+            st_rdev: 0,
+            st_size: 0,
+            st_blksize: 0,
+            st_blocks: 0,
+            st_atim: KernelTimespec { sec: 0, nsec: 0 },
+            st_mtim: KernelTimespec { sec: 0, nsec: 0 },
+            st_ctim: KernelTimespec { sec: 0, nsec: 0 },
+            __unused: [0; 24],
+        };
         let _ = syscall_errno(syscall::raw_syscall4(
             syscall::SyscallNumber::FileStatAt,
             AT_FDCWD as u64,
             path as u64,
-            stat_buf as u64,
+            (&mut kernel_stat as *mut KernelStat).cast::<c_void>() as u64,
             0,
         ))?;
+        let translated = translate_stat(&kernel_stat);
+        unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), translated) };
         Ok(0)
     })();
     result_with_errno(result, -1)
