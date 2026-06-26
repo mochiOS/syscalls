@@ -147,6 +147,10 @@ pub mod memory {
     pub fn map_physical_range(virt: u64, phys: u64, len: u64) -> SysResult<u64> {
         syscall::call3(syscall::SyscallNumber::MapPhysicalRange, virt, phys, len)
     }
+
+    pub fn get_physical_addr(virt: u64) -> SysResult<u64> {
+        syscall::call1(syscall::SyscallNumber::GetPhysicalAddr, virt)
+    }
 }
 
 pub mod file {
