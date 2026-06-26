@@ -9,6 +9,40 @@ use core::fmt::{self, Write};
 pub use mochi_user_runtime as runtime;
 pub use mochi_user_syscall as syscall;
 
+fn debug_stderr(message: &'static [u8]) {
+    let _ = syscall::raw_syscall3(
+        syscall::SyscallNumber::Write,
+        io::STDERR,
+        message.as_ptr() as u64,
+        message.len() as u64,
+    );
+}
+
+pub mod path {
+    use super::syscall::{self, SysError, SysResult};
+
+    pub struct CPath<const N: usize> {
+        buf: [u8; N],
+    }
+
+    impl<const N: usize> CPath<N> {
+        pub fn new(path: &str) -> SysResult<Self> {
+            let bytes = path.as_bytes();
+            if bytes.len() + 1 > N {
+                return Err(SysError::from_raw(syscall::EINVAL as i64));
+            }
+            let mut buf = [0u8; N];
+            buf[..bytes.len()].copy_from_slice(bytes);
+            buf[bytes.len()] = 0;
+            Ok(Self { buf })
+        }
+
+        pub fn as_ptr(&self) -> u64 {
+            self.buf.as_ptr() as u64
+        }
+    }
+}
+
 pub mod io {
     use super::syscall::SysResult;
 
@@ -77,14 +111,8 @@ pub mod service {
     use super::syscall::{self, SysResult};
 
     pub fn spawn(path: &str) -> SysResult<u64> {
-        let mut path_buf = [0u8; 128];
-        let bytes = path.as_bytes();
-        if bytes.len() + 1 > path_buf.len() {
-            return Err(syscall::SysError::from_raw(syscall::EINVAL as i64));
-        }
-        path_buf[..bytes.len()].copy_from_slice(bytes);
-        path_buf[bytes.len()] = 0;
-        syscall::call1(syscall::SyscallNumber::ServiceSpawn, path_buf.as_ptr() as u64)
+        let path = super::path::CPath::<256>::new(path)?;
+        syscall::call1(syscall::SyscallNumber::ServiceSpawn, path.as_ptr())
     }
 }
 
@@ -122,6 +150,15 @@ pub mod file {
         syscall::call2(syscall::SyscallNumber::FileOpen, path_ptr, flags)
     }
 
+    pub fn open_path(path: &str, flags: u64) -> SysResult<u64> {
+        super::debug_stderr(b"platform::file::open_path begin\n");
+        let path = super::path::CPath::<256>::new(path)?;
+        super::debug_stderr(b"platform::file::open_path cpath_ok\n");
+        let result = open(path.as_ptr(), flags);
+        super::debug_stderr(b"platform::file::open_path syscall_ret\n");
+        result
+    }
+
     pub fn openat(dirfd: i64, path_ptr: u64, flags: u64, mode: u64) -> SysResult<u64> {
         syscall::call4(
             syscall::SyscallNumber::FileOpenAt,
@@ -130,6 +167,15 @@ pub mod file {
             flags,
             mode,
         )
+    }
+
+    pub fn openat_path(dirfd: i64, path: &str, flags: u64, mode: u64) -> SysResult<u64> {
+        super::debug_stderr(b"platform::file::openat_path begin\n");
+        let path = super::path::CPath::<256>::new(path)?;
+        super::debug_stderr(b"platform::file::openat_path cpath_ok\n");
+        let result = openat(dirfd, path.as_ptr(), flags, mode);
+        super::debug_stderr(b"platform::file::openat_path syscall_ret\n");
+        result
     }
 
     pub fn close(fd: u64) -> SysResult<u64> {

@@ -7,6 +7,7 @@ extern crate std;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ffi::c_void;
+use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use mochi_user_syscall as syscall;
@@ -138,17 +139,29 @@ unsafe impl GlobalAlloc for UserAllocator {
 #[global_allocator]
 static GLOBAL_ALLOCATOR: UserAllocator = UserAllocator::new();
 
+fn emergency_stderr(message: &'static [u8]) {
+    let _ = syscall::raw_syscall3(
+        syscall::SyscallNumber::Write,
+        2,
+        message.as_ptr() as u64,
+        message.len() as u64,
+    );
+}
+
 #[alloc_error_handler]
 fn alloc_error(_layout: Layout) -> ! {
+    emergency_stderr(b"user runtime: allocation failed\n");
     abort()
 }
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
+    emergency_stderr(b"user runtime: panic\n");
     abort()
 }
 
 pub fn abort() -> ! {
+    let _ = syscall::raw_syscall1(syscall::SyscallNumber::ProcessExit, 127);
     loop {
         core::hint::spin_loop();
     }
@@ -241,4 +254,79 @@ pub fn stdout_write(bytes: &[u8]) -> syscall::SysResult<()> {
 
 pub fn stderr_write(bytes: &[u8]) -> syscall::SysResult<()> {
     write_all(2, bytes)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memcpy(dest: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
+    if dest.is_null() || src.is_null() || n == 0 {
+        return dest;
+    }
+    // SAFETY: The caller promises non-overlapping readable/writable regions for memcpy.
+    unsafe {
+        let mut i = 0usize;
+        let dst = dest.cast::<u8>();
+        let src = src.cast::<u8>();
+        while i < n {
+            dst.add(i).write(src.add(i).read());
+            i += 1;
+        }
+    }
+    dest
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memmove(dest: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
+    if dest.is_null() || src.is_null() || n == 0 {
+        return dest;
+    }
+    // SAFETY: The caller provides valid readable/writable regions of n bytes.
+    unsafe {
+        let dst = dest.cast::<u8>();
+        let src = src.cast::<u8>();
+        if (dst as usize) <= (src as usize) || (dst as usize) >= (src as usize + n) {
+            let mut i = 0usize;
+            while i < n {
+                dst.add(i).write(src.add(i).read());
+                i += 1;
+            }
+        } else {
+            let mut i = n;
+            while i != 0 {
+                i -= 1;
+                dst.add(i).write(src.add(i).read());
+            }
+        }
+    }
+    dest
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memset(dest: *mut c_void, value: i32, n: usize) -> *mut c_void {
+    if dest.is_null() || n == 0 {
+        return dest;
+    }
+    // SAFETY: The caller provides a valid writable region of n bytes.
+    unsafe {
+        ptr::write_bytes(dest.cast::<u8>(), value as u8, n);
+    }
+    dest
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memcmp(a: *const c_void, b: *const c_void, n: usize) -> i32 {
+    if n == 0 {
+        return 0;
+    }
+    if a.is_null() || b.is_null() {
+        return 1;
+    }
+    // SAFETY: The caller provides valid readable regions of n bytes.
+    let left = unsafe { core::slice::from_raw_parts(a.cast::<u8>(), n) };
+    let right = unsafe { core::slice::from_raw_parts(b.cast::<u8>(), n) };
+    for (lhs, rhs) in left.iter().zip(right.iter()) {
+        if lhs != rhs {
+            return *lhs as i32 - *rhs as i32;
+        }
+    }
+    0
 }
