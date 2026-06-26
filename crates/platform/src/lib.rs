@@ -143,6 +143,10 @@ pub mod memory {
     pub fn munmap(addr: u64, len: u64) -> SysResult<u64> {
         syscall::call2(syscall::SyscallNumber::MemoryUnmap, addr, len)
     }
+
+    pub fn map_physical_range(virt: u64, phys: u64, len: u64) -> SysResult<u64> {
+        syscall::call3(syscall::SyscallNumber::MapPhysicalRange, virt, phys, len)
+    }
 }
 
 pub mod file {
