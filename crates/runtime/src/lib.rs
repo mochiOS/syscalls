@@ -307,7 +307,13 @@ pub unsafe extern "C" fn memset(dest: *mut c_void, value: i32, n: usize) -> *mut
     }
     // SAFETY: The caller provides a valid writable region of n bytes.
     unsafe {
-        ptr::write_bytes(dest.cast::<u8>(), value as u8, n);
+        let mut i = 0usize;
+        let dst = dest.cast::<u8>();
+        let byte = value as u8;
+        while i < n {
+            dst.add(i).write(byte);
+            i += 1;
+        }
     }
     dest
 }

@@ -9,15 +9,6 @@ use core::fmt::{self, Write};
 pub use mochi_user_runtime as runtime;
 pub use mochi_user_syscall as syscall;
 
-fn debug_stderr(message: &'static [u8]) {
-    let _ = syscall::raw_syscall3(
-        syscall::SyscallNumber::Write,
-        io::STDERR,
-        message.as_ptr() as u64,
-        message.len() as u64,
-    );
-}
-
 pub mod path {
     use super::syscall::{self, SysError, SysResult};
 
@@ -109,10 +100,21 @@ pub mod process {
 
 pub mod service {
     use super::syscall::{self, SysResult};
+    pub const DELEGATE_SERVICE_SPAWN: u64 = 1;
+    pub const DELEGATE_DRIVER_SPAWN: u64 = 2;
 
     pub fn spawn(path: &str) -> SysResult<u64> {
         let path = super::path::CPath::<256>::new(path)?;
         syscall::call1(syscall::SyscallNumber::ServiceSpawn, path.as_ptr())
+    }
+
+    pub fn spawn_driver(path: &str) -> SysResult<u64> {
+        let path = super::path::CPath::<256>::new(path)?;
+        syscall::call1(syscall::SyscallNumber::DriverSpawn, path.as_ptr())
+    }
+
+    pub fn register_delegate(kind: u64, pid: u64) -> SysResult<u64> {
+        syscall::call2(syscall::SyscallNumber::ServiceDelegateRegister, kind, pid)
     }
 }
 
@@ -151,12 +153,8 @@ pub mod file {
     }
 
     pub fn open_path(path: &str, flags: u64) -> SysResult<u64> {
-        super::debug_stderr(b"platform::file::open_path begin\n");
         let path = super::path::CPath::<256>::new(path)?;
-        super::debug_stderr(b"platform::file::open_path cpath_ok\n");
-        let result = open(path.as_ptr(), flags);
-        super::debug_stderr(b"platform::file::open_path syscall_ret\n");
-        result
+        open(path.as_ptr(), flags)
     }
 
     pub fn openat(dirfd: i64, path_ptr: u64, flags: u64, mode: u64) -> SysResult<u64> {
@@ -170,12 +168,8 @@ pub mod file {
     }
 
     pub fn openat_path(dirfd: i64, path: &str, flags: u64, mode: u64) -> SysResult<u64> {
-        super::debug_stderr(b"platform::file::openat_path begin\n");
         let path = super::path::CPath::<256>::new(path)?;
-        super::debug_stderr(b"platform::file::openat_path cpath_ok\n");
-        let result = openat(dirfd, path.as_ptr(), flags, mode);
-        super::debug_stderr(b"platform::file::openat_path syscall_ret\n");
-        result
+        openat(dirfd, path.as_ptr(), flags, mode)
     }
 
     pub fn close(fd: u64) -> SysResult<u64> {
