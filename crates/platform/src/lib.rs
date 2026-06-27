@@ -8,6 +8,7 @@ use core::fmt::{self, Write};
 
 pub use mochi_user_runtime as runtime;
 pub use mochi_user_syscall as syscall;
+pub use mnu_abi::DmaAllocation;
 
 pub mod path {
     use super::syscall::{self, SysError, SysResult};
@@ -128,6 +129,7 @@ pub mod time {
 
 pub mod memory {
     use super::syscall::{self, SysResult};
+    use crate::DmaAllocation;
 
     pub fn mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64) -> SysResult<u64> {
         syscall::call5(
@@ -150,6 +152,20 @@ pub mod memory {
 
     pub fn get_physical_addr(virt: u64) -> SysResult<u64> {
         syscall::call1(syscall::SyscallNumber::GetPhysicalAddr, virt)
+    }
+
+    pub fn dma_alloc(len: u64) -> SysResult<DmaAllocation> {
+        let mut alloc = DmaAllocation::default();
+        syscall::call2(
+            syscall::SyscallNumber::DmaAlloc,
+            len,
+            (&mut alloc as *mut DmaAllocation) as u64,
+        )?;
+        Ok(alloc)
+    }
+
+    pub fn dma_free(handle: u64) -> SysResult<u64> {
+        syscall::call1(syscall::SyscallNumber::DmaFree, handle)
     }
 }
 

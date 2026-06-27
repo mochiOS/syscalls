@@ -17,6 +17,7 @@ dependencies = [
 name = "mochi-user-platform"
 version = "0.1.0"
 dependencies = [
+ "mnu-abi",
  "mochi-user-runtime",
  "mochi-user-syscall",
 ]

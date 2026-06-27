@@ -7,7 +7,6 @@ extern crate std;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ffi::c_void;
-use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use mochi_user_syscall as syscall;

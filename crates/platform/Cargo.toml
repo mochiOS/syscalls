@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+mnu-abi = { path = "../../../core/crates/abi" }
 mochi-user-syscall = { path = "../syscall" }
 mochi-user-runtime = { path = "../runtime" }
 
