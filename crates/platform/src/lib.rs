@@ -103,6 +103,12 @@ pub mod service {
     use super::syscall::{self, SysResult};
     pub const DELEGATE_SERVICE_SPAWN: u64 = 1;
     pub const DELEGATE_DRIVER_SPAWN: u64 = 2;
+    pub const ROLE_CORE_SERVICE: u64 = 1;
+    pub const ROLE_SERVICE: u64 = 2;
+    pub const ROLE_APPLICATION: u64 = 3;
+    pub const ROLE_DRIVER: u64 = 4;
+    pub const ROLE_TOOL: u64 = 5;
+    pub const ROLE_UNKNOWN: u64 = 6;
 
     pub fn spawn(path: &str) -> SysResult<u64> {
         let path = super::path::CPath::<256>::new(path)?;
@@ -112,6 +118,31 @@ pub mod service {
     pub fn spawn_driver(path: &str) -> SysResult<u64> {
         let path = super::path::CPath::<256>::new(path)?;
         syscall::call1(syscall::SyscallNumber::DriverSpawn, path.as_ptr())
+    }
+
+    pub fn spawn_manifest(
+        path: &str,
+        role: u64,
+        args_nul: Option<&[u8]>,
+        caps_nul: Option<&[u8]>,
+    ) -> SysResult<u64> {
+        let path = super::path::CPath::<256>::new(path)?;
+        let (args_ptr, _args_len) = match args_nul {
+            Some(bytes) if !bytes.is_empty() => (bytes.as_ptr() as u64, bytes.len() as u64),
+            _ => (0, 0),
+        };
+        let (caps_ptr, caps_len) = match caps_nul {
+            Some(bytes) if !bytes.is_empty() => (bytes.as_ptr() as u64, bytes.len() as u64),
+            _ => (0, 0),
+        };
+        syscall::call5(
+            syscall::SyscallNumber::ExecManifest,
+            path.as_ptr(),
+            args_ptr,
+            caps_ptr,
+            caps_len,
+            role,
+        )
     }
 
     pub fn register_delegate(kind: u64, pid: u64) -> SysResult<u64> {
@@ -200,6 +231,7 @@ pub mod memory {
 
 pub mod file {
     use super::syscall::{self, SysResult};
+    use alloc::vec::Vec;
 
     pub fn open(path_ptr: u64, flags: u64) -> SysResult<u64> {
         syscall::call2(syscall::SyscallNumber::FileOpen, path_ptr, flags)
@@ -239,6 +271,24 @@ pub mod file {
 
     pub fn seek(fd: u64, offset: i64, whence: u64) -> SysResult<u64> {
         syscall::call3(syscall::SyscallNumber::FileSeek, fd, offset as u64, whence)
+    }
+
+    pub fn read_to_end_path(path: &str) -> SysResult<Vec<u8>> {
+        let fd = open_path(path, 0)?;
+        let mut out = Vec::new();
+        let mut buf = [0u8; 512];
+        loop {
+            let read = read(fd, buf.as_mut_ptr() as u64, buf.len() as u64)?;
+            if read == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..read as usize]);
+            if (read as usize) < buf.len() {
+                break;
+            }
+        }
+        let _ = close(fd);
+        Ok(out)
     }
 }
 
