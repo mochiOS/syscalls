@@ -127,6 +127,35 @@ pub mod time {
     }
 }
 
+pub mod port {
+    use super::syscall::{self, SysResult};
+
+    pub fn in_u8(port: u16) -> SysResult<u8> {
+        syscall::call2(syscall::SyscallNumber::PortIn, port as u64, 1).map(|v| v as u8)
+    }
+
+    pub fn out_u8(port: u16, value: u8) -> SysResult<u64> {
+        syscall::call3(
+            syscall::SyscallNumber::PortOut,
+            port as u64,
+            value as u64,
+            1,
+        )
+    }
+}
+
+pub mod input {
+    use super::syscall::{self, SysResult};
+
+    pub fn keyboard_read_tap() -> SysResult<u8> {
+        syscall::call0(syscall::SyscallNumber::KeyboardReadTap).map(|v| v as u8)
+    }
+
+    pub fn mouse_read() -> SysResult<u32> {
+        syscall::call0(syscall::SyscallNumber::MouseRead).map(|v| v as u32)
+    }
+}
+
 pub mod memory {
     use super::syscall::{self, SysResult};
     use crate::DmaAllocation;
@@ -247,7 +276,7 @@ pub mod capability {
 }
 
 pub mod env {
-    use super::syscall::{ENOSYS, SysError, SysResult};
+    use super::syscall::{SysError, SysResult, ENOSYS};
 
     pub fn args() -> SysResult<&'static [&'static [u8]]> {
         Err(SysError::from_raw(ENOSYS as i64))
