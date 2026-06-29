@@ -94,8 +94,45 @@ pub mod thread {
 }
 
 pub mod process {
+    use super::syscall::{self, SysResult};
+
+    pub fn find_by_name(name: &str) -> SysResult<u64> {
+        let bytes = name.as_bytes();
+        syscall::call2(
+            syscall::SyscallNumber::FindProcessByName,
+            bytes.as_ptr() as u64,
+            bytes.len() as u64,
+        )
+    }
+
     pub fn exit(code: u64) -> ! {
         super::runtime::process_exit(code)
+    }
+}
+
+pub mod ipc {
+    use super::syscall::{self, SysResult};
+
+    pub fn create() -> SysResult<u64> {
+        syscall::call2(syscall::SyscallNumber::IpcCreate, 0, 0)
+    }
+
+    pub fn send(endpoint: u64, bytes: &[u8]) -> SysResult<u64> {
+        syscall::call3(
+            syscall::SyscallNumber::IpcSend,
+            endpoint,
+            bytes.as_ptr() as u64,
+            bytes.len() as u64,
+        )
+    }
+
+    pub fn wait(endpoint: u64, buf: &mut [u8]) -> SysResult<u64> {
+        syscall::call3(
+            syscall::SyscallNumber::IpcWait,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            endpoint,
+        )
     }
 }
 
