@@ -175,18 +175,6 @@ pub mod port {
     }
 }
 
-pub mod input {
-    use super::syscall::{self, SysResult};
-
-    pub fn keyboard_read_tap() -> SysResult<u8> {
-        syscall::call0(syscall::SyscallNumber::KeyboardReadTap).map(|v| v as u8)
-    }
-
-    pub fn mouse_read() -> SysResult<u32> {
-        syscall::call0(syscall::SyscallNumber::MouseRead).map(|v| v as u32)
-    }
-}
-
 pub mod memory {
     use super::syscall::{self, SysResult};
     use crate::DmaAllocation;
