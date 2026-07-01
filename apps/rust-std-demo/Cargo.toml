@@ -1,0 +1,15 @@
+[package]
+name = "rust-std-demo"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[patch.crates-io]
+libc = { path = "../../../libraries/libc" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

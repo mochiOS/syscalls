@@ -330,13 +330,13 @@ static FILE_ACTION_ENTRIES_POOL: SingleThreadCell<
 > = SingleThreadCell::new([FileActionEntrySlot::new(); MAX_SPAWN_FILE_ACTION_ENTRIES]);
 
 #[unsafe(no_mangle)]
-pub static mut errno: c_int = 0;
-
-#[unsafe(no_mangle)]
-pub static mut environ: *mut *mut c_char = ptr::null_mut();
-
-#[unsafe(no_mangle)]
 pub static mut __env: *mut *mut c_char = ptr::null_mut();
+
+#[repr(C)]
+struct IoVec {
+    iov_base: *const c_void,
+    iov_len: usize,
+}
 
 unsafe extern "C" {
     static __preinit_array_start: InitFn;
@@ -346,11 +346,16 @@ unsafe extern "C" {
     static __fini_array_start: InitFn;
     static __fini_array_end: InitFn;
     static mut _impure_ptr: *mut c_void;
+    static mut environ: *mut *mut c_char;
+    fn __errno() -> *mut c_int;
 
     fn main(argc: c_int, argv: *mut *mut c_char, envp: *mut *mut c_char) -> c_int;
     fn exit(code: c_int) -> !;
     fn atexit(func: extern "C" fn()) -> c_int;
     fn __sinit(reent: *mut c_void);
+    fn malloc(size: usize) -> *mut c_void;
+    fn free(ptr: *mut c_void);
+    fn memalign(alignment: usize, size: usize) -> *mut c_void;
 }
 
 #[panic_handler]
@@ -383,7 +388,7 @@ unsafe fn state_mut() -> &'static mut RuntimeState {
 
 fn set_errno(value: c_int) {
     unsafe {
-        errno = value;
+        *__errno() = value;
     }
 }
 
@@ -1042,11 +1047,6 @@ pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __errno() -> *mut c_int {
-    core::ptr::addr_of_mut!(errno)
-}
-
-#[unsafe(no_mangle)]
 pub extern "C" fn _exit(status: c_int) -> ! {
     process_exit(status)
 }
@@ -1078,6 +1078,43 @@ pub extern "C" fn _write(fd: c_int, buffer: *const c_void, length: usize) -> isi
 #[unsafe(no_mangle)]
 pub extern "C" fn write(fd: c_int, buffer: *const c_void, length: usize) -> isize {
     _write(fd, buffer, length)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn writev(fd: c_int, iov: *const IoVec, iovcnt: c_int) -> isize {
+    if iovcnt < 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    if iovcnt != 0 && iov.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+
+    let mut total = 0usize;
+    for index in 0..(iovcnt as usize) {
+        let entry = unsafe { &*iov.add(index) };
+        if entry.iov_len == 0 {
+            continue;
+        }
+        if entry.iov_base.is_null() {
+            set_errno(EFAULT);
+            return -1;
+        }
+
+        let written = _write(fd, entry.iov_base, entry.iov_len);
+        if written < 0 {
+            return if total == 0 { -1 } else { total as isize };
+        }
+
+        let written = written as usize;
+        total = total.saturating_add(written);
+        if written != entry.iov_len {
+            break;
+        }
+    }
+
+    total as isize
 }
 
 #[unsafe(no_mangle)]
@@ -1439,8 +1476,116 @@ pub extern "C" fn _rename(old_path: *const c_char, new_path: *const c_char) -> c
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn rename(old_path: *const c_char, new_path: *const c_char) -> c_int {
-    _rename(old_path, new_path)
+pub extern "C" fn chdir(path: *const c_char) -> c_int {
+    if path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    let result = (|| {
+        let _ = syscall_errno(syscall::raw_syscall1(
+            syscall::SyscallNumber::Chdir,
+            path as u64,
+        ))?;
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn getcwd(buffer: *mut c_char, size: usize) -> *mut c_char {
+    if buffer.is_null() || size == 0 {
+        set_errno(EINVAL);
+        return ptr::null_mut();
+    }
+    let result = (|| {
+        let _ = syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::Getcwd,
+            buffer as u64,
+            size as u64,
+        ))?;
+        Ok(buffer)
+    })();
+    result_with_errno(result, ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn realpath(path: *const c_char, resolved_path: *mut c_char) -> *mut c_char {
+    if path.is_null() {
+        set_errno(EFAULT);
+        return ptr::null_mut();
+    }
+    let result = (|| {
+        let path_bytes = unsafe { c_bytes(path) };
+        let mut cwd_storage = [0u8; 4096];
+        let out_len = if path_bytes.first() == Some(&b'/') {
+            path_bytes.len()
+        } else {
+            let _ = syscall_errno(syscall::raw_syscall2(
+                syscall::SyscallNumber::Getcwd,
+                cwd_storage.as_mut_ptr() as u64,
+                cwd_storage.len() as u64,
+            ))?;
+            let cwd_len = cwd_storage
+                .iter()
+                .position(|byte| *byte == 0)
+                .ok_or(EIO)?;
+            cwd_len + usize::from(cwd_len != 1) + path_bytes.len()
+        };
+        let out_ptr = if resolved_path.is_null() {
+            unsafe { malloc(out_len + 1) as *mut c_char }
+        } else {
+            resolved_path
+        };
+        if out_ptr.is_null() {
+            return Err(ENOMEM);
+        }
+        let out = out_ptr.cast::<u8>();
+        if path_bytes.first() == Some(&b'/') {
+            unsafe {
+                ptr::copy_nonoverlapping(path_bytes.as_ptr(), out, path_bytes.len());
+                out.add(path_bytes.len()).write(0);
+            }
+            return Ok(out_ptr);
+        }
+        let cwd_len = cwd_storage
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or(EIO)?;
+        unsafe {
+            ptr::copy_nonoverlapping(cwd_storage.as_ptr(), out, cwd_len);
+            let mut written = cwd_len;
+            if cwd_len != 1 {
+                out.add(written).write(b'/');
+                written += 1;
+            }
+            ptr::copy_nonoverlapping(path_bytes.as_ptr(), out.add(written), path_bytes.len());
+            out.add(written + path_bytes.len()).write(0);
+        }
+        Ok(out_ptr)
+    })();
+    result_with_errno(result, ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_memalign(
+    memptr: *mut *mut c_void,
+    alignment: usize,
+    size: usize,
+) -> c_int {
+    if memptr.is_null() {
+        return EINVAL;
+    }
+    if !alignment.is_power_of_two() || alignment < core::mem::size_of::<*mut c_void>() {
+        return EINVAL;
+    }
+    let ptr_value = unsafe { memalign(alignment, size) };
+    if ptr_value.is_null() {
+        return ENOMEM;
+    }
+    unsafe {
+        *memptr = ptr_value;
+    }
+    0
 }
 
 #[unsafe(no_mangle)]

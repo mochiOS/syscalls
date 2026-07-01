@@ -35,3 +35,7 @@ version = "0.1.0"
 dependencies = [
  "mnu-abi",
 ]
+
+[[patch.unused]]
+name = "libc"
+version = "0.2.185"

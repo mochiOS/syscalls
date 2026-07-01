@@ -1,0 +1,11 @@
+api_version = 1
+id = "com.mochios.rust.std.demo"
+name = "Rust Std Demo"
+version = "0.1.0"
+entry = "/bin/rust-std-demo"
+role = "application"
+
+[capabilities]
+requires = [
+    "fs.write.all",
+]
