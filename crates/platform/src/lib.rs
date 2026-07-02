@@ -186,6 +186,10 @@ pub mod process {
     pub fn exit(code: u64) -> ! {
         super::runtime::process_exit(code)
     }
+
+    pub fn wait(pid: i64, status_ptr: u64, options: u64) -> SysResult<u64> {
+        syscall::call3(syscall::SyscallNumber::ProcessWait, pid as u64, status_ptr, options)
+    }
 }
 
 pub mod ipc {
@@ -508,6 +512,28 @@ pub mod file {
 
     pub fn seek(fd: u64, offset: i64, whence: u64) -> SysResult<u64> {
         syscall::call3(syscall::SyscallNumber::FileSeek, fd, offset as u64, whence)
+    }
+
+    pub fn create_dir(path: &str, mode: u64) -> SysResult<u64> {
+        let path = super::path::CPath::<256>::new(path)?;
+        syscall::call2(syscall::SyscallNumber::FileCreateDir, path.as_ptr(), mode)
+    }
+
+    pub fn remove(path: &str) -> SysResult<u64> {
+        let path = super::path::CPath::<256>::new(path)?;
+        syscall::call1(syscall::SyscallNumber::FileRemove, path.as_ptr())
+    }
+
+    pub fn rename(src: &str, dst: &str) -> SysResult<u64> {
+        let src = super::path::CPath::<256>::new(src)?;
+        let dst = super::path::CPath::<256>::new(dst)?;
+        syscall::call4(
+            syscall::SyscallNumber::FileRename,
+            (-100i64) as u64,
+            src.as_ptr(),
+            (-100i64) as u64,
+            dst.as_ptr(),
+        )
     }
 
     pub fn read_to_end_path(path: &str) -> SysResult<Vec<u8>> {

@@ -21,6 +21,9 @@ pub struct PackageManifest {
     pub package_name: String,
     pub package_version: String,
     pub vendor: Option<String>,
+    pub package_kind: Option<String>,
+    pub package_architecture: Option<String>,
+    pub package_abi: Option<String>,
     pub binaries: Vec<PackageBinary>,
 }
 
@@ -100,11 +103,21 @@ fn parse_array_values(value: &str) -> Option<Vec<String>> {
     }
     let mut out = Vec::new();
     for item in inner.split(',') {
-        let trimmed = item.trim();
+        let trimmed = item.trim().trim_end_matches(']').trim();
+        if trimmed.is_empty() {
+            continue;
+        }
         let unquoted = trimmed.strip_prefix('"')?.strip_suffix('"')?;
         out.push(unquoted.to_string());
     }
     Some(out)
+}
+
+fn is_valid_package_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+        .bytes()
+        .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-'))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -122,6 +135,7 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
     let mut current_binary: Option<PackageBinary> = None;
     let mut legacy_entry: Option<String> = None;
     let mut legacy_requires: Vec<String> = Vec::new();
+    let mut pending_array: Option<(Section, String, String)> = None;
 
     let push_binary = |current_binary: &mut Option<PackageBinary>, binaries: &mut Vec<PackageBinary>| {
         if let Some(binary) = current_binary.take() {
@@ -134,6 +148,38 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
         if line.is_empty() {
             continue;
         }
+
+        if let Some((pending_section, pending_key, pending_value)) = pending_array.as_mut() {
+            if !pending_value.is_empty() {
+                pending_value.push(' ');
+            }
+            pending_value.push_str(line);
+            if !line.contains(']') {
+                continue;
+            }
+
+            let collected = pending_value.clone();
+            let parsed = parse_array_values(&collected)?;
+            match pending_section {
+                Section::Binary => {
+                    let binary = current_binary.as_mut()?;
+                    match pending_key.as_str() {
+                        "requires" => binary.requires = parsed,
+                        _ => {}
+                    }
+                }
+                Section::LegacyCapabilities => {
+                    match pending_key.as_str() {
+                        "requires" => legacy_requires = parsed,
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+            pending_array = None;
+            continue;
+        }
+
         if line == "[[binary]]" {
             push_binary(&mut current_binary, &mut package.binaries);
             current_binary = Some(PackageBinary::default());
@@ -166,6 +212,16 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
                 }
                 "vendor" | "developer" => {
                     package.vendor = Some(unquote(value).unwrap_or_else(|| value.to_string()))
+                }
+                "kind" => {
+                    package.package_kind = Some(unquote(value).unwrap_or_else(|| value.to_string()))
+                }
+                "architecture" => {
+                    package.package_architecture =
+                        Some(unquote(value).unwrap_or_else(|| value.to_string()))
+                }
+                "abi" => {
+                    package.package_abi = Some(unquote(value).unwrap_or_else(|| value.to_string()))
                 }
                 "entry" if section == Section::LegacyPackage => {
                     legacy_entry = Some(unquote(value).unwrap_or_else(|| value.to_string()))
@@ -200,6 +256,10 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
                             Some(unquote(value).unwrap_or_else(|| value.to_string()))
                     }
                     "requires" => {
+                        if value.trim_start().starts_with('[') && !value.contains(']') {
+                            pending_array = Some((section, key.to_string(), value.to_string()));
+                            continue;
+                        }
                         binary.requires = parse_array_values(value)?;
                     }
                     "entry" if binary.path.is_empty() => {
@@ -211,6 +271,10 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
             Section::None => {}
             Section::LegacyCapabilities => {
                 if key == "requires" {
+                    if value.trim_start().starts_with('[') && !value.contains(']') {
+                        pending_array = Some((section, key.to_string(), value.to_string()));
+                        continue;
+                    }
                     legacy_requires = parse_array_values(value)?;
                 }
             }
@@ -223,6 +287,9 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
         || package.package_name.is_empty()
         || package.package_version.is_empty()
     {
+        return None;
+    }
+    if !is_valid_package_id(&package.package_id) {
         return None;
     }
 
@@ -242,6 +309,14 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
         }
     }
 
+    for (idx, left) in package.binaries.iter().enumerate() {
+        for right in package.binaries.iter().skip(idx + 1) {
+            if left.path == right.path {
+                return None;
+            }
+        }
+    }
+
     Some(package)
 }
 
@@ -253,4 +328,56 @@ pub fn read_manifest(path: &str) -> Option<PackageManifest> {
     let bytes = crate::file::read_to_end_path(path).ok()?;
     let text = core::str::from_utf8(&bytes).ok()?;
     parse_manifest(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_multiline_binary_requires() {
+        let manifest = r#"
+            [package]
+            id = "org.mochios.logger"
+            name = "Logger Service"
+            version = "1"
+
+            [[binary]]
+            path = "/system/services/logger.service"
+            kind = "service"
+            requires = [
+                "fs.write.all",
+                "ipc.client",
+                "ipc.server",
+            ]
+        "#;
+
+        let parsed = parse_manifest(manifest).expect("manifest should parse");
+        assert_eq!(parsed.package_id, "org.mochios.logger");
+        assert_eq!(parsed.binaries.len(), 1);
+        assert_eq!(parsed.binary("/system/services/logger.service").unwrap().requires.len(), 3);
+        assert_eq!(
+            parsed.binary("/system/services/logger.service").unwrap().requires[0],
+            "fs.write.all"
+        );
+    }
+
+    #[test]
+    fn parses_multiline_legacy_capabilities_requires() {
+        let manifest = r#"
+            [service]
+            entry = "/system/services/logger.service"
+
+            [capabilities]
+            requires = [
+                "fs.write.all",
+                "ipc.client",
+            ]
+        "#;
+
+        let parsed = parse_manifest(manifest).expect("manifest should parse");
+        assert_eq!(parsed.binaries.len(), 1);
+        assert_eq!(parsed.binaries[0].path, "/system/services/logger.service");
+        assert_eq!(parsed.binaries[0].requires.len(), 2);
+    }
 }
