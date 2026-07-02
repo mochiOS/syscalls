@@ -225,6 +225,26 @@ pub mod ipc {
             0,
         )
     }
+
+    pub fn call(dest_thread_id: u64, request: &[u8], reply: &mut [u8]) -> SysResult<u64> {
+        syscall::call5(
+            syscall::SyscallNumber::IpcCall,
+            dest_thread_id,
+            request.as_ptr() as u64,
+            request.len() as u64,
+            reply.as_mut_ptr() as u64,
+            reply.len() as u64,
+        )
+    }
+
+    pub fn reply(sender_handle: u64, bytes: &[u8]) -> SysResult<u64> {
+        syscall::call3(
+            syscall::SyscallNumber::IpcReply,
+            sender_handle,
+            bytes.as_ptr() as u64,
+            bytes.len() as u64,
+        )
+    }
 }
 
 pub mod input {
