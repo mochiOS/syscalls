@@ -19,6 +19,8 @@ const MAX_FD_STATE_LEN: usize = 4096;
 const MAX_ENV_POINTERS: usize = 128;
 const MAX_SPAWN_FILE_ACTIONS: usize = 8;
 const MAX_SPAWN_FILE_ACTION_ENTRIES: usize = 32;
+const DIR_BUFFER_SIZE: usize = 4096;
+const DIRENT_NAME_MAX: usize = 256;
 
 const EPERM: c_int = 1;
 const ENOENT: c_int = 2;
@@ -268,6 +270,45 @@ struct NewlibStat {
     st_spare4: [i64; 2],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct NewlibDirent {
+    d_ino: u32,
+    d_type: u8,
+    d_name: [c_char; DIRENT_NAME_MAX],
+}
+
+impl NewlibDirent {
+    const fn empty() -> Self {
+        Self {
+            d_ino: 0,
+            d_type: 0,
+            d_name: [0; DIRENT_NAME_MAX],
+        }
+    }
+}
+
+#[repr(C)]
+struct DirStream {
+    fd: c_int,
+    buffer: [u8; DIR_BUFFER_SIZE],
+    buffer_offset: usize,
+    buffer_len: usize,
+    current: NewlibDirent,
+}
+
+impl DirStream {
+    const fn new(fd: c_int) -> Self {
+        Self {
+            fd,
+            buffer: [0; DIR_BUFFER_SIZE],
+            buffer_offset: 0,
+            buffer_len: 0,
+            current: NewlibDirent::empty(),
+        }
+    }
+}
+
 impl HeapState {
     const fn new() -> Self {
         Self {
@@ -328,6 +369,8 @@ static FILE_ACTIONS_POOL: SingleThreadCell<[FileActionsSlot; MAX_SPAWN_FILE_ACTI
 static FILE_ACTION_ENTRIES_POOL: SingleThreadCell<
     [FileActionEntrySlot; MAX_SPAWN_FILE_ACTION_ENTRIES],
 > = SingleThreadCell::new([FileActionEntrySlot::new(); MAX_SPAWN_FILE_ACTION_ENTRIES]);
+static SPAWN_SNAPSHOT: SingleThreadCell<SpawnSnapshot> =
+    SingleThreadCell::new(SpawnSnapshot::empty());
 
 #[unsafe(no_mangle)]
 pub static mut __env: *mut *mut c_char = ptr::null_mut();
@@ -336,6 +379,25 @@ pub static mut __env: *mut *mut c_char = ptr::null_mut();
 struct IoVec {
     iov_base: *const c_void,
     iov_len: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SpawnSnapshot {
+    path: *const c_char,
+    file_actions: *const c_void,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+}
+
+impl SpawnSnapshot {
+    const fn empty() -> Self {
+        Self {
+            path: ptr::null(),
+            file_actions: ptr::null(),
+            argv: ptr::null(),
+            envp: ptr::null(),
+        }
+    }
 }
 
 unsafe extern "C" {
@@ -828,18 +890,11 @@ fn rewrite_fd_entry(
     Ok(())
 }
 
-fn apply_spawn_file_actions(
-    fds: &mut [FdEntry; MAX_FDS],
-    actions: *const *mut PosixSpawnFileActions,
-) -> Result<(), c_int> {
+fn apply_spawn_file_actions(fds: &mut [FdEntry; MAX_FDS], actions: *const c_void) -> Result<(), c_int> {
     if actions.is_null() {
         return Ok(());
     }
-    // Safety: file_actions is a pointer to the caller's posix_spawn_file_actions_t handle.
-    let actions = unsafe { *actions };
-    if actions.is_null() {
-        return Ok(());
-    }
+    let actions = actions.cast::<PosixSpawnFileActions>() as *mut PosixSpawnFileActions;
     // Safety: actions points to a live queue object allocated by this runtime.
     let mut current = unsafe { (*actions).fa_list.stqh_first };
     while !current.is_null() {
@@ -922,15 +977,11 @@ fn process_spawn_raw() -> u64 {
     syscall::raw_syscall2(syscall::SyscallNumber::ProcessSpawn, 0, 0).raw()
 }
 
-fn unsupported_spawn_attr(attr: *const *mut PosixSpawnAttr) -> Result<(), c_int> {
+fn unsupported_spawn_attr(attr: *const c_void) -> Result<(), c_int> {
     if attr.is_null() {
         return Ok(());
     }
-    // Safety: attr points to the caller's posix_spawnattr_t handle.
-    let attr = unsafe { *attr };
-    if attr.is_null() {
-        return Ok(());
-    }
+    let attr = attr.cast::<PosixSpawnAttr>();
     // Safety: attr points to the caller's posix_spawnattr object.
     let flags = unsafe { (*attr).sa_flags };
     if flags != 0 {
@@ -1023,6 +1074,76 @@ fn syscall_read(
         advance_position(fd, read);
     }
     Ok(read as isize)
+}
+
+fn read_u16_ne(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_ne_bytes([bytes[offset], bytes[offset + 1]])
+}
+
+fn read_u64_ne(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_ne_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+        bytes[offset + 4],
+        bytes[offset + 5],
+        bytes[offset + 6],
+        bytes[offset + 7],
+    ])
+}
+
+fn refill_dir_stream(stream: &mut DirStream) -> Result<bool, c_int> {
+    let entry = with_fd_entry(stream.fd)?;
+    if entry.kind != FdKind::File {
+        return Err(EBADF);
+    }
+    let read = syscall_errno(syscall::raw_syscall3(
+        syscall::SyscallNumber::FileReadDir,
+        entry.lower_handle,
+        stream.buffer.as_mut_ptr() as u64,
+        stream.buffer.len() as u64,
+    ))?;
+    stream.buffer_offset = 0;
+    stream.buffer_len = read as usize;
+    Ok(stream.buffer_len != 0)
+}
+
+fn next_dirent(stream: &mut DirStream) -> Result<Option<NewlibDirent>, c_int> {
+    loop {
+        if stream.buffer_offset >= stream.buffer_len && !refill_dir_stream(stream)? {
+            return Ok(None);
+        }
+
+        let offset = stream.buffer_offset;
+        if stream.buffer_len.saturating_sub(offset) < 19 {
+            return Err(EIO);
+        }
+
+        let record = &stream.buffer[offset..stream.buffer_len];
+        let reclen = read_u16_ne(record, 16) as usize;
+        if reclen < 19 || offset.saturating_add(reclen) > stream.buffer_len {
+            return Err(EIO);
+        }
+
+        let inode = read_u64_ne(record, 0);
+        let dtype = record[18];
+        let name_start = offset + 19;
+        let name_end = offset + reclen;
+        let name = &stream.buffer[name_start..name_end];
+        let nul = name.iter().position(|byte| *byte == 0).unwrap_or(name.len());
+        let copy_len = core::cmp::min(nul, DIRENT_NAME_MAX - 1);
+
+        let mut out = NewlibDirent::empty();
+        out.d_ino = core::cmp::min(inode, u32::MAX as u64) as u32;
+        out.d_type = dtype;
+        for index in 0..copy_len {
+            out.d_name[index] = name[index] as c_char;
+        }
+
+        stream.buffer_offset += reclen;
+        return Ok(Some(out));
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1189,6 +1310,105 @@ pub extern "C" fn _close(fd: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn close(fd: c_int) -> c_int {
     _close(fd)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn opendir(path: *const c_char) -> *mut c_void {
+    if path.is_null() {
+        set_errno(EFAULT);
+        return ptr::null_mut();
+    }
+
+    let fd = _open(path, 0, 0);
+    if fd < 0 {
+        return ptr::null_mut();
+    }
+
+    let allocation = unsafe { malloc(core::mem::size_of::<DirStream>()) as *mut DirStream };
+    if allocation.is_null() {
+        let _ = _close(fd);
+        set_errno(ENOMEM);
+        return ptr::null_mut();
+    }
+
+    unsafe {
+        ptr::write(allocation, DirStream::new(fd));
+    }
+    allocation.cast::<c_void>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dirfd(dirp: *mut c_void) -> c_int {
+    if dirp.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    let stream = unsafe { &*(dirp as *mut DirStream) };
+    stream.fd
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn closedir(dirp: *mut c_void) -> c_int {
+    if dirp.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    let stream = unsafe { &mut *(dirp as *mut DirStream) };
+    let fd = stream.fd;
+    unsafe {
+        free(dirp);
+    }
+    _close(fd)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn readdir_r(
+    dirp: *mut c_void,
+    entry: *mut NewlibDirent,
+    result: *mut *mut NewlibDirent,
+) -> c_int {
+    if dirp.is_null() || entry.is_null() || result.is_null() {
+        set_errno(EFAULT);
+        return EFAULT;
+    }
+
+    let stream = unsafe { &mut *(dirp as *mut DirStream) };
+    match next_dirent(stream) {
+        Ok(Some(dirent)) => unsafe {
+            ptr::write(entry, dirent);
+            ptr::write(result, entry);
+            0
+        },
+        Ok(None) => unsafe {
+            ptr::write(result, ptr::null_mut());
+            0
+        },
+        Err(errno_value) => {
+            set_errno(errno_value);
+            errno_value
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn readdir(dirp: *mut c_void) -> *mut NewlibDirent {
+    if dirp.is_null() {
+        set_errno(EFAULT);
+        return ptr::null_mut();
+    }
+
+    let stream = unsafe { &mut *(dirp as *mut DirStream) };
+    match next_dirent(stream) {
+        Ok(Some(dirent)) => {
+            stream.current = dirent;
+            ptr::addr_of_mut!(stream.current)
+        }
+        Ok(None) => ptr::null_mut(),
+        Err(errno_value) => {
+            set_errno(errno_value);
+            ptr::null_mut()
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -1454,6 +1674,28 @@ pub extern "C" fn _unlink(path: *const c_char) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn unlink(path: *const c_char) -> c_int {
     _unlink(path)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _mkdir(path: *const c_char, mode: c_int) -> c_int {
+    if path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    let result = (|| {
+        let _ = syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::FileCreateDir,
+            path as u64,
+            mode as u64,
+        ))?;
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkdir(path: *const c_char, mode: c_int) -> c_int {
+    _mkdir(path, mode)
 }
 
 #[unsafe(no_mangle)]
@@ -1740,8 +1982,8 @@ pub extern "C" fn posix_spawn_file_actions_adddup2(
 pub extern "C" fn _posix_spawn(
     pid: *mut c_int,
     path: *const c_char,
-    file_actions: *const *mut PosixSpawnFileActions,
-    attrp: *const *mut PosixSpawnAttr,
+    file_actions: *const c_void,
+    attrp: *const c_void,
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> c_int {
@@ -1752,10 +1994,17 @@ pub extern "C" fn _posix_spawn(
         return errno_value;
     }
 
-    let pid_ptr = pid;
-    let file_actions_ptr = file_actions;
-    let argv_ptr = argv;
-    let envp_ptr = envp;
+    unsafe {
+        ptr::write(
+            SPAWN_SNAPSHOT.get(),
+            SpawnSnapshot {
+                path,
+                file_actions,
+                argv,
+                envp,
+            },
+        );
+    }
 
     let child_pid = match syscall_errno(syscall::RawSyscallResult::new(process_spawn_raw())) {
         Ok(value) => value,
@@ -1763,8 +2012,9 @@ pub extern "C" fn _posix_spawn(
     };
 
     if child_pid == 0 {
+        let snapshot = unsafe { ptr::read_volatile(SPAWN_SNAPSHOT.get()) };
         let mut desired_fds = clone_current_fd_table();
-        if apply_spawn_file_actions(&mut desired_fds, file_actions_ptr).is_err() {
+        if apply_spawn_file_actions(&mut desired_fds, snapshot.file_actions).is_err() {
             process_exit(SPAWN_FAIL_EXIT_STATUS);
         }
         let mut fd_state = [0u8; MAX_FD_STATE_LEN];
@@ -1774,7 +2024,7 @@ pub extern "C" fn _posix_spawn(
         };
         let mut env_ptrs = [ptr::null(); MAX_ENV_POINTERS];
         if collect_envp_with_fd_state(
-            envp_ptr,
+            snapshot.envp,
             fd_state[..fd_state_len].as_ptr().cast::<c_char>(),
             &mut env_ptrs,
         )
@@ -1782,14 +2032,14 @@ pub extern "C" fn _posix_spawn(
         {
             process_exit(SPAWN_FAIL_EXIT_STATUS);
         }
-        if execve_raw(path, argv_ptr, env_ptrs.as_ptr()).is_err() {
+        if execve_raw(snapshot.path, snapshot.argv, env_ptrs.as_ptr()).is_err() {
             process_exit(SPAWN_FAIL_EXIT_STATUS);
         }
         process_exit(SPAWN_FAIL_EXIT_STATUS);
     }
 
     // Safety: pid points to writable storage supplied by the caller.
-    unsafe { *pid_ptr = child_pid as c_int };
+    unsafe { *pid = child_pid as c_int };
     0
 }
 
@@ -1797,8 +2047,8 @@ pub extern "C" fn _posix_spawn(
 pub extern "C" fn posix_spawn(
     pid: *mut c_int,
     path: *const c_char,
-    file_actions: *const *mut PosixSpawnFileActions,
-    attrp: *const *mut PosixSpawnAttr,
+    file_actions: *const c_void,
+    attrp: *const c_void,
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> c_int {
@@ -1809,8 +2059,8 @@ pub extern "C" fn posix_spawn(
 pub extern "C" fn _posix_spawnp(
     pid: *mut c_int,
     file: *const c_char,
-    file_actions: *const *mut PosixSpawnFileActions,
-    attrp: *const *mut PosixSpawnAttr,
+    file_actions: *const c_void,
+    attrp: *const c_void,
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> c_int {
@@ -1828,8 +2078,8 @@ pub extern "C" fn _posix_spawnp(
 pub extern "C" fn posix_spawnp(
     pid: *mut c_int,
     file: *const c_char,
-    file_actions: *const *mut PosixSpawnFileActions,
-    attrp: *const *mut PosixSpawnAttr,
+    file_actions: *const c_void,
+    attrp: *const c_void,
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> c_int {
