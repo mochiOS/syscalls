@@ -1,5 +1,5 @@
 api_version = 1
-id = "com.mochios.rust.std.demo"
+id = "org.mochios.rust.std.demo"
 name = "Rust Std Demo"
 version = "0.1.0"
 entry = "/bin/rust-std-demo"
