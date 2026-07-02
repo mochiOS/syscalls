@@ -1,0 +1,12 @@
+[package]
+id = "org.mochios.rust.std.demo"
+name = "Rust Std Demo"
+version = "0.1.0"
+vendor = "mochiOS"
+
+[[binary]]
+path = "/bin/rust-std-demo"
+kind = "application"
+requires = [
+    "fs.write.all",
+]
