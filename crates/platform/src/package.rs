@@ -4,6 +4,7 @@ use alloc::vec::Vec;
 #[derive(Clone, Debug, Default)]
 pub struct PackageBinary {
     pub path: String,
+    pub file: Option<String>,
     pub capability_profile: Option<String>,
     pub requires: Vec<String>,
     pub kind: Option<String>,
@@ -16,6 +17,15 @@ pub struct PackageBinary {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct PackageFile {
+    pub id: String,
+    pub path: String,
+    pub digest: String,
+    pub size: u64,
+    pub mode: u32,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct PackageManifest {
     pub package_id: String,
     pub package_name: String,
@@ -24,6 +34,7 @@ pub struct PackageManifest {
     pub package_kind: Option<String>,
     pub package_architecture: Option<String>,
     pub package_abi: Option<String>,
+    pub files: Vec<PackageFile>,
     pub binaries: Vec<PackageBinary>,
 }
 
@@ -95,6 +106,33 @@ fn parse_u32_like(value: &str) -> Option<u32> {
     value.parse::<u32>().ok()
 }
 
+fn parse_u64_like(value: &str) -> Option<u64> {
+    let value = if value.trim().starts_with('"') {
+        unquote(value)?
+    } else {
+        value.trim().to_string()
+    };
+    if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        return u64::from_str_radix(hex, 16).ok();
+    }
+    value.parse::<u64>().ok()
+}
+
+fn parse_octal_mode(value: &str) -> Option<u32> {
+    let value = if value.trim().starts_with('"') {
+        unquote(value)?
+    } else {
+        value.trim().to_string()
+    };
+    if value.is_empty() || value.len() > 4 {
+        return None;
+    }
+    u32::from_str_radix(&value, 8).ok()
+}
+
 fn parse_array_values(value: &str) -> Option<Vec<String>> {
     let value = value.trim();
     let inner = value.strip_prefix('[')?.strip_suffix(']')?.trim();
@@ -116,8 +154,8 @@ fn parse_array_values(value: &str) -> Option<Vec<String>> {
 fn is_valid_package_id(id: &str) -> bool {
     !id.is_empty()
         && id
-        .bytes()
-        .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-'))
+            .bytes()
+            .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-'))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -125,6 +163,7 @@ enum Section {
     None,
     Package,
     Binary,
+    File,
     LegacyPackage,
     LegacyCapabilities,
 }
@@ -133,13 +172,20 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
     let mut section = Section::None;
     let mut package = PackageManifest::default();
     let mut current_binary: Option<PackageBinary> = None;
+    let mut current_file: Option<PackageFile> = None;
     let mut legacy_entry: Option<String> = None;
     let mut legacy_requires: Vec<String> = Vec::new();
     let mut pending_array: Option<(Section, String, String)> = None;
 
-    let push_binary = |current_binary: &mut Option<PackageBinary>, binaries: &mut Vec<PackageBinary>| {
+    let push_binary = |current_binary: &mut Option<PackageBinary>,
+                       binaries: &mut Vec<PackageBinary>| {
         if let Some(binary) = current_binary.take() {
             binaries.push(binary);
+        }
+    };
+    let push_file = |current_file: &mut Option<PackageFile>, files: &mut Vec<PackageFile>| {
+        if let Some(file) = current_file.take() {
+            files.push(file);
         }
     };
 
@@ -168,12 +214,10 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
                         _ => {}
                     }
                 }
-                Section::LegacyCapabilities => {
-                    match pending_key.as_str() {
-                        "requires" => legacy_requires = parsed,
-                        _ => {}
-                    }
-                }
+                Section::LegacyCapabilities => match pending_key.as_str() {
+                    "requires" => legacy_requires = parsed,
+                    _ => {}
+                },
                 _ => {}
             }
             pending_array = None;
@@ -182,12 +226,21 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
 
         if line == "[[binary]]" {
             push_binary(&mut current_binary, &mut package.binaries);
+            push_file(&mut current_file, &mut package.files);
             current_binary = Some(PackageBinary::default());
             section = Section::Binary;
             continue;
         }
+        if line == "[[file]]" {
+            push_binary(&mut current_binary, &mut package.binaries);
+            push_file(&mut current_file, &mut package.files);
+            current_file = Some(PackageFile::default());
+            section = Section::File;
+            continue;
+        }
         if line.starts_with('[') && line.ends_with(']') {
             push_binary(&mut current_binary, &mut package.binaries);
+            push_file(&mut current_file, &mut package.files);
             section = match &line[1..line.len() - 1] {
                 "package" => Section::Package,
                 "service" | "driver" => Section::LegacyPackage,
@@ -232,20 +285,27 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
                 let binary = current_binary.as_mut()?;
                 match key {
                     "path" => binary.path = unquote(value).unwrap_or_else(|| value.to_string()),
+                    "file" => {
+                        binary.file = Some(unquote(value).unwrap_or_else(|| value.to_string()))
+                    }
                     "capability_profile" => {
                         binary.capability_profile =
                             Some(unquote(value).unwrap_or_else(|| value.to_string()))
                     }
-                    "kind" => binary.kind = Some(unquote(value).unwrap_or_else(|| value.to_string())),
+                    "kind" => {
+                        binary.kind = Some(unquote(value).unwrap_or_else(|| value.to_string()))
+                    }
                     "driver_class" => {
-                        binary.driver_class = Some(unquote(value).unwrap_or_else(|| value.to_string()))
+                        binary.driver_class =
+                            Some(unquote(value).unwrap_or_else(|| value.to_string()))
                     }
                     "api_version" => binary.api_version = parse_u32_like(value),
                     "match_bus" => {
                         binary.match_bus = Some(unquote(value).unwrap_or_else(|| value.to_string()))
                     }
                     "match_class" => {
-                        binary.match_class = Some(unquote(value).unwrap_or_else(|| value.to_string()))
+                        binary.match_class =
+                            Some(unquote(value).unwrap_or_else(|| value.to_string()))
                     }
                     "match_vendor_id" => {
                         binary.match_vendor_id =
@@ -268,6 +328,17 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
                     _ => {}
                 }
             }
+            Section::File => {
+                let file = current_file.as_mut()?;
+                match key {
+                    "id" => file.id = unquote(value).unwrap_or_else(|| value.to_string()),
+                    "path" => file.path = unquote(value).unwrap_or_else(|| value.to_string()),
+                    "digest" => file.digest = unquote(value).unwrap_or_else(|| value.to_string()),
+                    "size" => file.size = parse_u64_like(value)?,
+                    "mode" => file.mode = parse_octal_mode(value)?,
+                    _ => {}
+                }
+            }
             Section::None => {}
             Section::LegacyCapabilities => {
                 if key == "requires" {
@@ -282,6 +353,7 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
     }
 
     push_binary(&mut current_binary, &mut package.binaries);
+    push_file(&mut current_file, &mut package.files);
 
     if package.package_id.is_empty()
         || package.package_name.is_empty()
@@ -312,6 +384,19 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
     for (idx, left) in package.binaries.iter().enumerate() {
         for right in package.binaries.iter().skip(idx + 1) {
             if left.path == right.path {
+                return None;
+            }
+        }
+    }
+
+    for file in &package.files {
+        if file.id.is_empty() || file.path.is_empty() || file.digest.is_empty() || file.mode == 0 {
+            return None;
+        }
+    }
+    for (idx, left) in package.files.iter().enumerate() {
+        for right in package.files.iter().skip(idx + 1) {
+            if left.id == right.id || left.path == right.path {
                 return None;
             }
         }
@@ -355,9 +440,19 @@ mod tests {
         let parsed = parse_manifest(manifest).expect("manifest should parse");
         assert_eq!(parsed.package_id, "org.mochios.logger");
         assert_eq!(parsed.binaries.len(), 1);
-        assert_eq!(parsed.binary("/system/services/logger.service").unwrap().requires.len(), 3);
         assert_eq!(
-            parsed.binary("/system/services/logger.service").unwrap().requires[0],
+            parsed
+                .binary("/system/services/logger.service")
+                .unwrap()
+                .requires
+                .len(),
+            3
+        );
+        assert_eq!(
+            parsed
+                .binary("/system/services/logger.service")
+                .unwrap()
+                .requires[0],
             "fs.write.all"
         );
     }

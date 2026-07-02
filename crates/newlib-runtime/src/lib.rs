@@ -147,9 +147,7 @@ impl FileActionEntrySlot {
                 },
                 fae_action: 0,
                 fae_fildes: 0,
-                fae_data: PosixSpawnFileActionData {
-                    dirfd: 0,
-                },
+                fae_data: PosixSpawnFileActionData { dirfd: 0 },
             },
         }
     }
@@ -890,7 +888,10 @@ fn rewrite_fd_entry(
     Ok(())
 }
 
-fn apply_spawn_file_actions(fds: &mut [FdEntry; MAX_FDS], actions: *const c_void) -> Result<(), c_int> {
+fn apply_spawn_file_actions(
+    fds: &mut [FdEntry; MAX_FDS],
+    actions: *const c_void,
+) -> Result<(), c_int> {
     if actions.is_null() {
         return Ok(());
     }
@@ -1131,7 +1132,10 @@ fn next_dirent(stream: &mut DirStream) -> Result<Option<NewlibDirent>, c_int> {
         let name_start = offset + 19;
         let name_end = offset + reclen;
         let name = &stream.buffer[name_start..name_end];
-        let nul = name.iter().position(|byte| *byte == 0).unwrap_or(name.len());
+        let nul = name
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(name.len());
         let copy_len = core::cmp::min(nul, DIRENT_NAME_MAX - 1);
 
         let mut out = NewlibDirent::empty();
@@ -1767,10 +1771,7 @@ pub extern "C" fn realpath(path: *const c_char, resolved_path: *mut c_char) -> *
                 cwd_storage.as_mut_ptr() as u64,
                 cwd_storage.len() as u64,
             ))?;
-            let cwd_len = cwd_storage
-                .iter()
-                .position(|byte| *byte == 0)
-                .ok_or(EIO)?;
+            let cwd_len = cwd_storage.iter().position(|byte| *byte == 0).ok_or(EIO)?;
             cwd_len + usize::from(cwd_len != 1) + path_bytes.len()
         };
         let out_ptr = if resolved_path.is_null() {
@@ -1789,10 +1790,7 @@ pub extern "C" fn realpath(path: *const c_char, resolved_path: *mut c_char) -> *
             }
             return Ok(out_ptr);
         }
-        let cwd_len = cwd_storage
-            .iter()
-            .position(|byte| *byte == 0)
-            .ok_or(EIO)?;
+        let cwd_len = cwd_storage.iter().position(|byte| *byte == 0).ok_or(EIO)?;
         unsafe {
             ptr::copy_nonoverlapping(cwd_storage.as_ptr(), out, cwd_len);
             let mut written = cwd_len;
@@ -1809,11 +1807,7 @@ pub extern "C" fn realpath(path: *const c_char, resolved_path: *mut c_char) -> *
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn posix_memalign(
-    memptr: *mut *mut c_void,
-    alignment: usize,
-    size: usize,
-) -> c_int {
+pub extern "C" fn posix_memalign(memptr: *mut *mut c_void, alignment: usize, size: usize) -> c_int {
     if memptr.is_null() {
         return EINVAL;
     }
@@ -1876,9 +1870,7 @@ pub extern "C" fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_i
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn posix_spawn_file_actions_init(
-    actions: *mut *mut PosixSpawnFileActions,
-) -> c_int {
+pub extern "C" fn posix_spawn_file_actions_init(actions: *mut *mut PosixSpawnFileActions) -> c_int {
     if actions.is_null() {
         return EINVAL;
     }

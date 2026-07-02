@@ -6,9 +6,9 @@ extern crate std;
 
 use core::fmt::{self, Write};
 
+pub use mnu_abi::DmaAllocation;
 pub use mochi_user_runtime as runtime;
 pub use mochi_user_syscall as syscall;
-pub use mnu_abi::DmaAllocation;
 
 pub mod path {
     use super::syscall::{self, SysError, SysResult};
@@ -56,7 +56,7 @@ pub mod io {
 }
 
 pub mod logger {
-    use super::{alloc, ipc, runtime, syscall, Write};
+    use super::{Write, alloc, ipc, runtime, syscall};
     use core::fmt;
     use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -94,11 +94,7 @@ pub mod logger {
 
     pub fn endpoint() -> Option<u64> {
         let endpoint = LOGGER_ENDPOINT.load(Ordering::Relaxed);
-        if endpoint == 0 {
-            None
-        } else {
-            Some(endpoint)
-        }
+        if endpoint == 0 { None } else { Some(endpoint) }
     }
 
     pub unsafe fn init_from_initial_stack(sp: *const usize) -> Option<u64> {
@@ -188,7 +184,12 @@ pub mod process {
     }
 
     pub fn wait(pid: i64, status_ptr: u64, options: u64) -> SysResult<u64> {
-        syscall::call3(syscall::SyscallNumber::ProcessWait, pid as u64, status_ptr, options)
+        syscall::call3(
+            syscall::SyscallNumber::ProcessWait,
+            pid as u64,
+            status_ptr,
+            options,
+        )
     }
 }
 
@@ -363,10 +364,7 @@ pub mod input {
 
     pub fn bytes_of<T>(value: &T) -> &[u8] {
         unsafe {
-            core::slice::from_raw_parts(
-                (value as *const T).cast::<u8>(),
-                core::mem::size_of::<T>(),
-            )
+            core::slice::from_raw_parts((value as *const T).cast::<u8>(), core::mem::size_of::<T>())
         }
     }
 }
@@ -593,7 +591,10 @@ pub mod file {
                 let name_start = offset + 19;
                 let name_end = offset + reclen;
                 let name_bytes = &buf[name_start..name_end];
-                let name_len = name_bytes.iter().position(|&b| b == 0).unwrap_or(name_bytes.len());
+                let name_len = name_bytes
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(name_bytes.len());
                 if name_len > 0
                     && let Ok(name) = core::str::from_utf8(&name_bytes[..name_len])
                     && name != "."
@@ -646,7 +647,7 @@ pub mod capability {
 }
 
 pub mod env {
-    use super::syscall::{SysError, SysResult, ENOSYS};
+    use super::syscall::{ENOSYS, SysError, SysResult};
 
     pub fn args() -> SysResult<&'static [&'static [u8]]> {
         Err(SysError::from_raw(ENOSYS as i64))
