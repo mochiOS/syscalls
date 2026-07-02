@@ -55,6 +55,84 @@ pub mod io {
     }
 }
 
+pub mod logger {
+    use super::{alloc, ipc, runtime, syscall, Write};
+    use core::fmt;
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    static LOGGER_ENDPOINT: AtomicU64 = AtomicU64::new(0);
+
+    fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
+        if bytes.is_empty() {
+            return None;
+        }
+        let mut out = 0u64;
+        for &b in bytes {
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            out = out.checked_mul(10)?;
+            out = out.checked_add(u64::from(b - b'0'))?;
+        }
+        Some(out)
+    }
+
+    unsafe fn c_string_len(ptr: *const u8) -> usize {
+        let mut len = 0usize;
+        loop {
+            let ch = unsafe { core::ptr::read_volatile(ptr.add(len)) };
+            if ch == 0 {
+                return len;
+            }
+            len += 1;
+        }
+    }
+
+    pub fn init(endpoint: u64) {
+        LOGGER_ENDPOINT.store(endpoint, Ordering::Relaxed);
+    }
+
+    pub fn endpoint() -> Option<u64> {
+        let endpoint = LOGGER_ENDPOINT.load(Ordering::Relaxed);
+        if endpoint == 0 {
+            None
+        } else {
+            Some(endpoint)
+        }
+    }
+
+    pub unsafe fn init_from_initial_stack(sp: *const usize) -> Option<u64> {
+        let stack = unsafe { runtime::InitialStack::parse(sp) };
+        let mut last_numeric = None;
+        for &arg_ptr in stack.argv {
+            if arg_ptr.is_null() {
+                continue;
+            }
+            let len = unsafe { c_string_len(arg_ptr) };
+            let arg = unsafe { core::slice::from_raw_parts(arg_ptr, len) };
+            if let Some(value) = parse_decimal_u64(arg) {
+                last_numeric = Some(value);
+            }
+        }
+        if let Some(endpoint) = last_numeric {
+            init(endpoint);
+        }
+        last_numeric
+    }
+
+    pub fn write_fmt(args: fmt::Arguments<'_>) -> syscall::SysResult<()> {
+        if let Some(endpoint) = endpoint() {
+            let mut buf = alloc::string::String::new();
+            buf.write_fmt(args)
+                .map_err(|_| syscall::SysError::from_raw(syscall::EINVAL as i64))?;
+            let _ = ipc::send(endpoint, buf.as_bytes());
+            Ok(())
+        } else {
+            super::write_fmt(super::io::STDOUT, args)
+        }
+    }
+}
+
 struct FmtWriter(u64);
 
 impl Write for FmtWriter {
@@ -73,17 +151,17 @@ pub fn write_fmt(fd: u64, args: fmt::Arguments<'_>) -> syscall::SysResult<()> {
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => {{
-        let _ = $crate::write_fmt($crate::io::STDOUT, format_args!($($arg)*));
+        let _ = $crate::logger::write_fmt(format_args!($($arg)*));
     }};
 }
 
 #[macro_export]
 macro_rules! println {
     () => {{
-        let _ = $crate::write_fmt($crate::io::STDOUT, format_args!("\n"));
+        let _ = $crate::logger::write_fmt(format_args!("\n"));
     }};
     ($($arg:tt)*) => {{
-        let _ = $crate::write_fmt($crate::io::STDOUT, format_args!("{}\n", format_args!($($arg)*)));
+        let _ = $crate::logger::write_fmt(format_args!("{}\n", format_args!($($arg)*)));
     }};
 }
 

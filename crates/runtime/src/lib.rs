@@ -184,6 +184,7 @@ impl<'a> InitialStack<'a> {
             cursor = cursor.add(1);
         }
         let argv_slice = core::slice::from_raw_parts(argv, argc);
+        cursor = cursor.add(1);
         let mut env_cursor = cursor;
         while !env_cursor.read().is_null() {
             env_cursor = env_cursor.add(1);
