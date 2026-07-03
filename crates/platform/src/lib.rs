@@ -649,6 +649,7 @@ pub mod capability {
     pub const CAPABILITY_PROMPT_OPCODE: u32 = 0x4350_5251;
     pub const CAPABILITY_RESPONSE_OPCODE: u32 = 0x4350_5252;
     pub const CAPABILITY_DECISION_OPCODE: u32 = 0x4350_5244;
+    pub const CAPABILITY_PERSISTENT_QUERY_OPCODE: u32 = 0x4350_5150;
 
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     #[repr(u32)]

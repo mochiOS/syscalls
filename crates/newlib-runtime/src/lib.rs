@@ -138,6 +138,8 @@ impl Default for CapabilityPromptRequest {
 }
 
 const CAPABILITY_PROMPT_OPCODE: u32 = 0x4350_5251;
+const CAPABILITY_PERSISTENT_QUERY_OPCODE: u32 = 0x4350_5150;
+const CAPABILITY_SERVICE_NAME: &[u8] = b"capability.service";
 
 #[repr(C)]
 pub struct Tms {
@@ -911,6 +913,107 @@ fn request_capability_from_shell(
     }
 }
 
+fn fill_capability_request(
+    opcode: u32,
+    capability: &str,
+    resource: Option<&str>,
+    reason: Option<&str>,
+    interactive: bool,
+) -> Option<CapabilityPromptRequest> {
+    let executable = read_env_path(b"MOCHI_EXECUTABLE_PATH")?;
+    let executable_len = executable.iter().position(|b| *b == 0).unwrap_or(executable.len());
+    let executable_path = core::str::from_utf8(&executable[..executable_len]).ok()?;
+    let class = capability_class_from_string(capability);
+    let mut request = CapabilityPromptRequest {
+        opcode,
+        process_id: syscall::call0(syscall::SyscallNumber::GetPid).unwrap_or(0),
+        executable: CapabilityExecutableIdentity::default(),
+        capability_class: class,
+        capability_len: 0,
+        resource: CapabilityResourceDescriptor::default(),
+        reason_len: 0,
+        interactive: interactive as u8,
+        decision_scope: 0,
+        reserved0: 0,
+        capability: [0; 64],
+        reason: [0; 128],
+    };
+    let exec_bytes = executable_path.as_bytes();
+    if exec_bytes.len() > request.executable.path.len() {
+        return None;
+    }
+    request.executable.path_len = exec_bytes.len() as u16;
+    request.executable.path[..exec_bytes.len()].copy_from_slice(exec_bytes);
+    let cap_bytes = capability.as_bytes();
+    if cap_bytes.len() > request.capability.len() {
+        return None;
+    }
+    request.capability_len = cap_bytes.len() as u16;
+    request.capability[..cap_bytes.len()].copy_from_slice(cap_bytes);
+    if let Some(resource) = resource {
+        let res_bytes = resource.as_bytes();
+        if res_bytes.len() > request.resource.path.len() {
+            return None;
+        }
+        request.resource.kind = 1;
+        request.resource.path_len = res_bytes.len() as u16;
+        request.resource.path[..res_bytes.len()].copy_from_slice(res_bytes);
+    }
+    if let Some(reason) = reason {
+        let reason_bytes = reason.as_bytes();
+        if reason_bytes.len() > request.reason.len() {
+            return None;
+        }
+        request.reason_len = reason_bytes.len() as u16;
+        request.reason[..reason_bytes.len()].copy_from_slice(reason_bytes);
+    }
+    Some(request)
+}
+
+fn request_persistent_capability(
+    capability: &str,
+    resource: Option<&str>,
+    reason: Option<&str>,
+) -> bool {
+    let request = match fill_capability_request(
+        CAPABILITY_PERSISTENT_QUERY_OPCODE,
+        capability,
+        resource,
+        reason,
+        false,
+    ) {
+        Some(request) => request,
+        None => return false,
+    };
+    let endpoint = match syscall::call2(
+        syscall::SyscallNumber::FindProcessByName,
+        CAPABILITY_SERVICE_NAME.as_ptr() as u64,
+        CAPABILITY_SERVICE_NAME.len() as u64,
+    ) {
+        Ok(endpoint) if endpoint != 0 => endpoint,
+        _ => return false,
+    };
+    let mut reply = [0u8; 8];
+    let msg = match syscall::call5(
+        syscall::SyscallNumber::IpcCall,
+        endpoint,
+        (&request as *const CapabilityPromptRequest) as u64,
+        core::mem::size_of::<CapabilityPromptRequest>() as u64,
+        reply.as_mut_ptr() as u64,
+        reply.len() as u64,
+    ) {
+        Ok(msg) => msg,
+        Err(_) => return false,
+    };
+    let len = (msg & 0xffff_ffff) as usize;
+    if len < 8 {
+        return false;
+    }
+    let mut raw = [0u8; 8];
+    raw.copy_from_slice(&reply[..8]);
+    u64::from_le_bytes(raw) == 0
+}
+
 fn drop_capability(capability: &str) {
     let bytes = capability.as_bytes();
     let _ = syscall::raw_syscall2(
@@ -933,9 +1036,12 @@ fn retry_open_with_prompt(path: *const c_char, flags: c_int, mode: c_int) -> Res
     } else {
         "fs.read.user"
     };
-    let decision =
+    let decision = if request_persistent_capability(capability, Some(path_str), Some("file access")) {
+        CapabilityDecision::AllowForProcess
+    } else {
         request_capability_from_shell(capability, Some(path_str), Some("file access"))
-            .unwrap_or(CapabilityDecision::Deny);
+            .unwrap_or(CapabilityDecision::Deny)
+    };
     match decision {
         CapabilityDecision::AllowOnce
         | CapabilityDecision::AllowForProcess
