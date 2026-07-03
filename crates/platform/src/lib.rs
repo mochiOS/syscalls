@@ -934,6 +934,86 @@ pub mod capability {
     pub fn query(ptr: u64, len: u64) -> SysResult<u64> {
         syscall::call2(syscall::SyscallNumber::CapQuery, ptr, len)
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn builds_capability_request_with_resource_and_reason() {
+            let request = CapabilityRequest::new(
+                42,
+                "/bin/tool",
+                [7; 32],
+                "fs.read.user",
+                Some("/home/user/file.txt"),
+                Some("file access"),
+                true,
+                CapabilityClass::UserGrantable,
+            )
+            .expect("request should fit ABI buffers");
+
+            assert_eq!(request.opcode, CAPABILITY_PROMPT_OPCODE);
+            assert_eq!(request.process_id, 42);
+            assert_eq!(request.executable_path(), "/bin/tool");
+            assert_eq!(request.executable.digest, [7; 32]);
+            assert_eq!(request.capability(), "fs.read.user");
+            assert_eq!(request.resource_path(), Some("/home/user/file.txt"));
+            assert_eq!(request.reason(), Some("file access"));
+            assert_eq!(request.interactive, 1);
+        }
+
+        #[test]
+        fn rejects_oversized_capability_request_fields() {
+            let mut long_path = alloc::string::String::new();
+            for _ in 0..257 {
+                long_path.push('x');
+            }
+            assert!(CapabilityRequest::new(
+                1,
+                &long_path,
+                [0; 32],
+                "fs.read.user",
+                None,
+                None,
+                false,
+                CapabilityClass::UserGrantable,
+            )
+            .is_none());
+
+            let mut long_capability = alloc::string::String::new();
+            for _ in 0..65 {
+                long_capability.push('x');
+            }
+            assert!(CapabilityRequest::new(
+                1,
+                "/bin/tool",
+                [0; 32],
+                &long_capability,
+                None,
+                None,
+                false,
+                CapabilityClass::UserGrantable,
+            )
+            .is_none());
+        }
+
+        #[test]
+        fn classifies_user_grantable_and_protected_capabilities() {
+            assert_eq!(
+                capability_from_string("fs.read.user"),
+                CapabilityClass::UserGrantable
+            );
+            assert_eq!(
+                capability_from_string("package.install"),
+                CapabilityClass::Privileged
+            );
+            assert_eq!(
+                capability_from_string("capabilities.manage"),
+                CapabilityClass::SystemOnly
+            );
+        }
+    }
 }
 
 pub mod env {
