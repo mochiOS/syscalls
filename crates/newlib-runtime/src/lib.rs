@@ -727,9 +727,7 @@ fn find_env_value_bytes(name: &[u8], out: &mut [u8]) -> Option<usize> {
             return None;
         }
         let bytes = unsafe { c_bytes(entry.cast_const()) };
-        if bytes.len() > prefix_len + 1
-            && bytes[..prefix_len] == *name
-            && bytes[prefix_len] == b'='
+        if bytes.len() > prefix_len + 1 && bytes[..prefix_len] == *name && bytes[prefix_len] == b'='
         {
             let value = &bytes[prefix_len + 1..];
             let copy_len = core::cmp::min(out.len(), value.len());
@@ -834,9 +832,20 @@ fn request_capability_from_shell(
     resource: Option<&str>,
     reason: Option<&str>,
 ) -> Option<CapabilityDecision> {
+    let prompt_mode = read_env_path(b"MOCHI_PROMPT_MODE")?;
+    let prompt_mode_len = prompt_mode
+        .iter()
+        .position(|b| *b == 0)
+        .unwrap_or(prompt_mode.len());
+    if &prompt_mode[..prompt_mode_len] != b"interactive" {
+        return Some(CapabilityDecision::Deny);
+    }
     let shell_endpoint = read_env_u64(b"MOCHI_SHELL_ENDPOINT")?;
     let executable = read_env_path(b"MOCHI_EXECUTABLE_PATH")?;
-    let executable_len = executable.iter().position(|b| *b == 0).unwrap_or(executable.len());
+    let executable_len = executable
+        .iter()
+        .position(|b| *b == 0)
+        .unwrap_or(executable.len());
     let executable_path = core::str::from_utf8(&executable[..executable_len]).ok()?;
     let class = capability_class_from_string(capability);
     let mut request = CapabilityPromptRequest {
@@ -921,7 +930,10 @@ fn fill_capability_request(
     interactive: bool,
 ) -> Option<CapabilityPromptRequest> {
     let executable = read_env_path(b"MOCHI_EXECUTABLE_PATH")?;
-    let executable_len = executable.iter().position(|b| *b == 0).unwrap_or(executable.len());
+    let executable_len = executable
+        .iter()
+        .position(|b| *b == 0)
+        .unwrap_or(executable.len());
     let executable_path = core::str::from_utf8(&executable[..executable_len]).ok()?;
     let class = capability_class_from_string(capability);
     let mut request = CapabilityPromptRequest {
@@ -1036,7 +1048,8 @@ fn retry_open_with_prompt(path: *const c_char, flags: c_int, mode: c_int) -> Res
     } else {
         "fs.read.user"
     };
-    let decision = if request_persistent_capability(capability, Some(path_str), Some("file access")) {
+    let decision = if request_persistent_capability(capability, Some(path_str), Some("file access"))
+    {
         CapabilityDecision::AllowForProcess
     } else {
         request_capability_from_shell(capability, Some(path_str), Some("file access"))

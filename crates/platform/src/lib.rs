@@ -773,7 +773,9 @@ pub mod capability {
                 reason: [0; 128],
             };
             let exec_bytes = executable_path.as_bytes();
-            if exec_bytes.len() > request.executable.path.len() || exec_bytes.len() > u16::MAX as usize {
+            if exec_bytes.len() > request.executable.path.len()
+                || exec_bytes.len() > u16::MAX as usize
+            {
                 return None;
             }
             request.executable.path_len = exec_bytes.len() as u16;
@@ -789,7 +791,9 @@ pub mod capability {
 
             if let Some(resource_path) = resource_path {
                 let res_bytes = resource_path.as_bytes();
-                if res_bytes.len() > request.resource.path.len() || res_bytes.len() > u16::MAX as usize {
+                if res_bytes.len() > request.resource.path.len()
+                    || res_bytes.len() > u16::MAX as usize
+                {
                     return None;
                 }
                 request.resource.kind = 1;
@@ -799,7 +803,9 @@ pub mod capability {
 
             if let Some(reason) = reason {
                 let reason_bytes = reason.as_bytes();
-                if reason_bytes.len() > request.reason.len() || reason_bytes.len() > u16::MAX as usize {
+                if reason_bytes.len() > request.reason.len()
+                    || reason_bytes.len() > u16::MAX as usize
+                {
                     return None;
                 }
                 request.reason_len = reason_bytes.len() as u16;
