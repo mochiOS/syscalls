@@ -42,6 +42,103 @@ const ENOSYS: c_int = 38;
 
 type InitFn = unsafe extern "C" fn();
 
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CapabilityDecision {
+    AllowOnce = 1,
+    AllowForProcess = 2,
+    AllowPersistently = 3,
+    AllowAllUserGrantable = 4,
+    Deny = 5,
+}
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum CapabilityClass {
+    #[default]
+    UserGrantable = 1,
+    Privileged = 2,
+    SystemOnly = 3,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapabilityExecutableIdentity {
+    path_len: u16,
+    reserved: u16,
+    digest: [u8; 32],
+    path: [u8; 256],
+}
+
+impl Default for CapabilityExecutableIdentity {
+    fn default() -> Self {
+        Self {
+            path_len: 0,
+            reserved: 0,
+            digest: [0; 32],
+            path: [0; 256],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapabilityResourceDescriptor {
+    kind: u32,
+    path_len: u16,
+    reserved: u16,
+    path: [u8; 256],
+}
+
+impl Default for CapabilityResourceDescriptor {
+    fn default() -> Self {
+        Self {
+            kind: 0,
+            path_len: 0,
+            reserved: 0,
+            path: [0; 256],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapabilityPromptRequest {
+    opcode: u32,
+    process_id: u64,
+    executable: CapabilityExecutableIdentity,
+    capability_class: CapabilityClass,
+    capability_len: u16,
+    resource: CapabilityResourceDescriptor,
+    reason_len: u16,
+    interactive: u8,
+    decision_scope: u8,
+    reserved0: u16,
+    capability: [u8; 64],
+    reason: [u8; 128],
+}
+
+impl Default for CapabilityPromptRequest {
+    fn default() -> Self {
+        Self {
+            opcode: 0,
+            process_id: 0,
+            executable: CapabilityExecutableIdentity::default(),
+            capability_class: CapabilityClass::UserGrantable,
+            capability_len: 0,
+            resource: CapabilityResourceDescriptor::default(),
+            reason_len: 0,
+            interactive: 0,
+            decision_scope: 0,
+            reserved0: 0,
+            capability: [0; 64],
+            reason: [0; 128],
+        }
+    }
+}
+
+const CAPABILITY_PROMPT_OPCODE: u32 = 0x4350_5251;
+
 #[repr(C)]
 pub struct Tms {
     tms_utime: i64,
@@ -613,6 +710,260 @@ fn parse_decimal(mut bytes: &[u8]) -> Option<usize> {
         bytes = tail;
     }
     Some(value)
+}
+
+fn find_env_value_bytes(name: &[u8], out: &mut [u8]) -> Option<usize> {
+    let environ_ptr = unsafe { environ };
+    if environ_ptr.is_null() {
+        return None;
+    }
+    let mut cursor = environ_ptr;
+    let prefix_len = name.len();
+    loop {
+        let entry = unsafe { cursor.read() };
+        if entry.is_null() {
+            return None;
+        }
+        let bytes = unsafe { c_bytes(entry.cast_const()) };
+        if bytes.len() > prefix_len + 1
+            && bytes[..prefix_len] == *name
+            && bytes[prefix_len] == b'='
+        {
+            let value = &bytes[prefix_len + 1..];
+            let copy_len = core::cmp::min(out.len(), value.len());
+            out[..copy_len].copy_from_slice(&value[..copy_len]);
+            return Some(copy_len);
+        }
+        cursor = unsafe { cursor.add(1) };
+    }
+}
+
+fn read_env_u64(name: &[u8]) -> Option<u64> {
+    let mut buf = [0u8; 32];
+    let len = find_env_value_bytes(name, &mut buf)?;
+    parse_decimal(&buf[..len]).map(|v| v as u64)
+}
+
+fn read_env_path(name: &[u8]) -> Option<[u8; 256]> {
+    let mut buf = [0u8; 256];
+    let len = find_env_value_bytes(name, &mut buf)?;
+    let mut out = [0u8; 256];
+    out[..len].copy_from_slice(&buf[..len]);
+    Some(out)
+}
+
+fn capability_class_from_string(name: &str) -> CapabilityClass {
+    match name {
+        "fs.read.user.documents"
+        | "fs.write.user.documents"
+        | "fs.read.user.downloads"
+        | "fs.write.user.downloads"
+        | "fs.read.user.desktop"
+        | "fs.write.user.desktop"
+        | "fs.read.user.pictures"
+        | "fs.write.user.pictures"
+        | "fs.read.user.music"
+        | "fs.write.user.music"
+        | "fs.read.user.videos"
+        | "fs.write.user.videos"
+        | "fs.read.user"
+        | "fs.write.user"
+        | "fs.read.tmp"
+        | "fs.write.tmp"
+        | "fs.read.removable"
+        | "fs.write.removable"
+        | "net.connect"
+        | "net.listen"
+        | "window.create"
+        | "window.overlay"
+        | "display.read"
+        | "input.keyboard"
+        | "input.pointer"
+        | "audio.playback"
+        | "audio.record"
+        | "clipboard.read"
+        | "clipboard.write"
+        | "notification.send"
+        | "system.time.read"
+        | "system.info.read"
+        | "system.logs.read"
+        | "account.self.read"
+        | "account.self.modify"
+        | "settings.read" => CapabilityClass::UserGrantable,
+        "fs.read.all"
+        | "fs.write.all"
+        | "net.raw"
+        | "window.capture"
+        | "display.capture"
+        | "input.keyboard.global"
+        | "input.pointer.global"
+        | "input.gamepad"
+        | "camera.access"
+        | "microphone.access"
+        | "location.access"
+        | "bluetooth.access"
+        | "usb.access"
+        | "serial.access"
+        | "power.shutdown"
+        | "power.reboot"
+        | "power.suspend"
+        | "system.time.set"
+        | "package.install"
+        | "package.remove"
+        | "package.update"
+        | "service.register"
+        | "service.control"
+        | "vm.create"
+        | "vm.control"
+        | "device.gpu"
+        | "device.audio"
+        | "device.input"
+        | "device.storage"
+        | "device.net"
+        | "account.other.read"
+        | "account.other.modify"
+        | "settings.write" => CapabilityClass::Privileged,
+        _ => CapabilityClass::SystemOnly,
+    }
+}
+
+fn request_capability_from_shell(
+    capability: &str,
+    resource: Option<&str>,
+    reason: Option<&str>,
+) -> Option<CapabilityDecision> {
+    let shell_endpoint = read_env_u64(b"MOCHI_SHELL_ENDPOINT")?;
+    let executable = read_env_path(b"MOCHI_EXECUTABLE_PATH")?;
+    let executable_len = executable.iter().position(|b| *b == 0).unwrap_or(executable.len());
+    let executable_path = core::str::from_utf8(&executable[..executable_len]).ok()?;
+    let class = capability_class_from_string(capability);
+    let mut request = CapabilityPromptRequest {
+        opcode: CAPABILITY_PROMPT_OPCODE,
+        process_id: syscall::call0(syscall::SyscallNumber::GetPid).unwrap_or(0),
+        executable: CapabilityExecutableIdentity::default(),
+        capability_class: class,
+        capability_len: 0,
+        resource: CapabilityResourceDescriptor::default(),
+        reason_len: 0,
+        interactive: 1,
+        decision_scope: 0,
+        reserved0: 0,
+        capability: [0; 64],
+        reason: [0; 128],
+    };
+    let exec_bytes = executable_path.as_bytes();
+    if exec_bytes.len() > request.executable.path.len() {
+        return None;
+    }
+    request.executable.path_len = exec_bytes.len() as u16;
+    request.executable.path[..exec_bytes.len()].copy_from_slice(exec_bytes);
+    let cap_bytes = capability.as_bytes();
+    if cap_bytes.len() > request.capability.len() {
+        return None;
+    }
+    request.capability_len = cap_bytes.len() as u16;
+    request.capability[..cap_bytes.len()].copy_from_slice(cap_bytes);
+    if let Some(resource) = resource {
+        let res_bytes = resource.as_bytes();
+        if res_bytes.len() > request.resource.path.len() {
+            return None;
+        }
+        request.resource.kind = 1;
+        request.resource.path_len = res_bytes.len() as u16;
+        request.resource.path[..res_bytes.len()].copy_from_slice(res_bytes);
+    }
+    if let Some(reason) = reason {
+        let reason_bytes = reason.as_bytes();
+        if reason_bytes.len() > request.reason.len() {
+            return None;
+        }
+        request.reason_len = reason_bytes.len() as u16;
+        request.reason[..reason_bytes.len()].copy_from_slice(reason_bytes);
+    }
+    let mut reply = [0u8; 8];
+    let msg = syscall::call5(
+        syscall::SyscallNumber::IpcCall,
+        shell_endpoint,
+        (&request as *const CapabilityPromptRequest) as u64,
+        core::mem::size_of::<CapabilityPromptRequest>() as u64,
+        reply.as_mut_ptr() as u64,
+        reply.len() as u64,
+    )
+    .ok()?;
+    let len = (msg & 0xffff_ffff) as usize;
+    if len < 4 {
+        return None;
+    }
+    let mut raw = [0u8; 4];
+    raw.copy_from_slice(&reply[..4]);
+    match u32::from_le_bytes(raw) {
+        x if x == CapabilityDecision::AllowOnce as u32 => Some(CapabilityDecision::AllowOnce),
+        x if x == CapabilityDecision::AllowForProcess as u32 => {
+            Some(CapabilityDecision::AllowForProcess)
+        }
+        x if x == CapabilityDecision::AllowPersistently as u32 => {
+            Some(CapabilityDecision::AllowPersistently)
+        }
+        x if x == CapabilityDecision::AllowAllUserGrantable as u32 => {
+            Some(CapabilityDecision::AllowAllUserGrantable)
+        }
+        _ => Some(CapabilityDecision::Deny),
+    }
+}
+
+fn drop_capability(capability: &str) {
+    let bytes = capability.as_bytes();
+    let _ = syscall::raw_syscall2(
+        syscall::SyscallNumber::CapDrop,
+        bytes.as_ptr() as u64,
+        bytes.len() as u64,
+    );
+}
+
+fn open_requires_write_access(flags: c_int) -> bool {
+    let access_mode = flags & 0x3;
+    access_mode != 0
+}
+
+fn retry_open_with_prompt(path: *const c_char, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
+    let path_bytes = unsafe { c_bytes(path) };
+    let path_str = core::str::from_utf8(path_bytes).map_err(|_| EACCES)?;
+    let capability = if open_requires_write_access(flags) {
+        "fs.write.user"
+    } else {
+        "fs.read.user"
+    };
+    let decision =
+        request_capability_from_shell(capability, Some(path_str), Some("file access"))
+            .unwrap_or(CapabilityDecision::Deny);
+    match decision {
+        CapabilityDecision::AllowOnce
+        | CapabilityDecision::AllowForProcess
+        | CapabilityDecision::AllowPersistently
+        | CapabilityDecision::AllowAllUserGrantable => {
+            let lower = syscall_errno(syscall::raw_syscall4(
+                syscall::SyscallNumber::FileOpenAt,
+                AT_FDCWD as u64,
+                path as u64,
+                flags as u64,
+                mode as u64,
+            ))?;
+            let fd = allocate_fd(lower, flags)?;
+            let offset = syscall_errno(syscall::raw_syscall3(
+                syscall::SyscallNumber::FileSeek,
+                lower,
+                0,
+                SEEK_CUR as u64,
+            ))
+            .unwrap_or(0);
+            store_position(fd, offset);
+            if decision == CapabilityDecision::AllowOnce {
+                drop_capability(capability);
+            }
+            Ok(fd)
+        }
+        CapabilityDecision::Deny => Err(EACCES),
+    }
 }
 
 fn find_fd_state_env(envp: *mut *mut c_char) -> Option<&'static [u8]> {
@@ -1285,7 +1636,16 @@ pub extern "C" fn _open(path: *const c_char, flags: c_int, mode: c_int) -> c_int
         store_position(fd, offset);
         Ok(fd)
     })();
-    result_with_errno(result, -1)
+    match result {
+        Ok(fd) => fd,
+        Err(errno) if errno == EACCES || errno == EPERM => {
+            result_with_errno(retry_open_with_prompt(path, flags, mode), -1)
+        }
+        Err(errno) => {
+            set_errno(errno);
+            -1
+        }
+    }
 }
 
 #[unsafe(no_mangle)]

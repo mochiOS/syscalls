@@ -577,7 +577,12 @@ pub mod file {
         let mut out = Vec::new();
         let mut buf = [0u8; 1024];
         loop {
-            let read = read(fd, buf.as_mut_ptr() as u64, buf.len() as u64)?;
+            let read = syscall::call3(
+                syscall::SyscallNumber::FileReadDir,
+                fd,
+                buf.as_mut_ptr() as u64,
+                buf.len() as u64,
+            )?;
             if read == 0 {
                 break;
             }
@@ -640,6 +645,284 @@ pub mod event {
 
 pub mod capability {
     use super::syscall::{self, SysResult};
+
+    pub const CAPABILITY_PROMPT_OPCODE: u32 = 0x4350_5251;
+    pub const CAPABILITY_RESPONSE_OPCODE: u32 = 0x4350_5252;
+    pub const CAPABILITY_DECISION_OPCODE: u32 = 0x4350_5244;
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    #[repr(u32)]
+    pub enum CapabilityDecision {
+        AllowOnce = 1,
+        AllowForProcess = 2,
+        AllowPersistently = 3,
+        AllowAllUserGrantable = 4,
+        #[default]
+        Deny = 5,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    #[repr(u32)]
+    pub enum CapabilityClass {
+        #[default]
+        UserGrantable = 1,
+        Privileged = 2,
+        SystemOnly = 3,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ExecutableIdentity {
+        pub path_len: u16,
+        pub reserved: u16,
+        pub digest: [u8; 32],
+        pub path: [u8; 256],
+    }
+
+    impl Default for ExecutableIdentity {
+        fn default() -> Self {
+            Self {
+                path_len: 0,
+                reserved: 0,
+                digest: [0; 32],
+                path: [0; 256],
+            }
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ResourceDescriptor {
+        pub kind: u32,
+        pub path_len: u16,
+        pub reserved: u16,
+        pub path: [u8; 256],
+    }
+
+    impl Default for ResourceDescriptor {
+        fn default() -> Self {
+            Self {
+                kind: 0,
+                path_len: 0,
+                reserved: 0,
+                path: [0; 256],
+            }
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct CapabilityRequest {
+        pub opcode: u32,
+        pub process_id: u64,
+        pub executable: ExecutableIdentity,
+        pub capability_class: CapabilityClass,
+        pub capability_len: u16,
+        pub resource: ResourceDescriptor,
+        pub reason_len: u16,
+        pub interactive: u8,
+        pub decision_scope: u8,
+        pub reserved0: u16,
+        pub capability: [u8; 64],
+        pub reason: [u8; 128],
+    }
+
+    impl Default for CapabilityRequest {
+        fn default() -> Self {
+            Self {
+                opcode: 0,
+                process_id: 0,
+                executable: ExecutableIdentity::default(),
+                capability_class: CapabilityClass::UserGrantable,
+                capability_len: 0,
+                resource: ResourceDescriptor::default(),
+                reason_len: 0,
+                interactive: 0,
+                decision_scope: 0,
+                reserved0: 0,
+                capability: [0; 64],
+                reason: [0; 128],
+            }
+        }
+    }
+
+    impl CapabilityRequest {
+        pub fn new(
+            process_id: u64,
+            executable_path: &str,
+            digest: [u8; 32],
+            capability: &str,
+            resource_path: Option<&str>,
+            reason: Option<&str>,
+            interactive: bool,
+            capability_class: CapabilityClass,
+        ) -> Option<Self> {
+            let mut request = Self {
+                opcode: CAPABILITY_PROMPT_OPCODE,
+                process_id,
+                executable: ExecutableIdentity::default(),
+                capability_class,
+                capability_len: 0,
+                resource: ResourceDescriptor::default(),
+                reason_len: 0,
+                interactive: interactive as u8,
+                decision_scope: 0,
+                reserved0: 0,
+                capability: [0; 64],
+                reason: [0; 128],
+            };
+            let exec_bytes = executable_path.as_bytes();
+            if exec_bytes.len() > request.executable.path.len() || exec_bytes.len() > u16::MAX as usize {
+                return None;
+            }
+            request.executable.path_len = exec_bytes.len() as u16;
+            request.executable.path[..exec_bytes.len()].copy_from_slice(exec_bytes);
+            request.executable.digest = digest;
+
+            let cap_bytes = capability.as_bytes();
+            if cap_bytes.len() > request.capability.len() || cap_bytes.len() > u16::MAX as usize {
+                return None;
+            }
+            request.capability_len = cap_bytes.len() as u16;
+            request.capability[..cap_bytes.len()].copy_from_slice(cap_bytes);
+
+            if let Some(resource_path) = resource_path {
+                let res_bytes = resource_path.as_bytes();
+                if res_bytes.len() > request.resource.path.len() || res_bytes.len() > u16::MAX as usize {
+                    return None;
+                }
+                request.resource.kind = 1;
+                request.resource.path_len = res_bytes.len() as u16;
+                request.resource.path[..res_bytes.len()].copy_from_slice(res_bytes);
+            }
+
+            if let Some(reason) = reason {
+                let reason_bytes = reason.as_bytes();
+                if reason_bytes.len() > request.reason.len() || reason_bytes.len() > u16::MAX as usize {
+                    return None;
+                }
+                request.reason_len = reason_bytes.len() as u16;
+                request.reason[..reason_bytes.len()].copy_from_slice(reason_bytes);
+            }
+            Some(request)
+        }
+
+        pub fn capability(&self) -> &str {
+            let len = self.capability_len as usize;
+            core::str::from_utf8(&self.capability[..len]).unwrap_or("")
+        }
+
+        pub fn executable_path(&self) -> &str {
+            let len = self.executable.path_len as usize;
+            core::str::from_utf8(&self.executable.path[..len]).unwrap_or("")
+        }
+
+        pub fn resource_path(&self) -> Option<&str> {
+            if self.resource.path_len == 0 {
+                return None;
+            }
+            let len = self.resource.path_len as usize;
+            core::str::from_utf8(&self.resource.path[..len]).ok()
+        }
+
+        pub fn reason(&self) -> Option<&str> {
+            if self.reason_len == 0 {
+                return None;
+            }
+            let len = self.reason_len as usize;
+            core::str::from_utf8(&self.reason[..len]).ok()
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct CapabilityDecisionRequest {
+        pub opcode: u32,
+        pub decision: CapabilityDecision,
+        pub reserved: u64,
+        pub request: CapabilityRequest,
+    }
+
+    pub fn bytes_of<T>(value: &T) -> &[u8] {
+        unsafe {
+            core::slice::from_raw_parts((value as *const T).cast::<u8>(), core::mem::size_of::<T>())
+        }
+    }
+
+    pub fn capability_from_string(name: &str) -> CapabilityClass {
+        match name {
+            "fs.read.user.documents"
+            | "fs.write.user.documents"
+            | "fs.read.user.downloads"
+            | "fs.write.user.downloads"
+            | "fs.read.user.desktop"
+            | "fs.write.user.desktop"
+            | "fs.read.user.pictures"
+            | "fs.write.user.pictures"
+            | "fs.read.user.music"
+            | "fs.write.user.music"
+            | "fs.read.user.videos"
+            | "fs.write.user.videos"
+            | "fs.read.user"
+            | "fs.write.user"
+            | "fs.read.tmp"
+            | "fs.write.tmp"
+            | "fs.read.removable"
+            | "fs.write.removable"
+            | "net.connect"
+            | "net.listen"
+            | "window.create"
+            | "window.overlay"
+            | "display.read"
+            | "input.keyboard"
+            | "input.pointer"
+            | "audio.playback"
+            | "audio.record"
+            | "clipboard.read"
+            | "clipboard.write"
+            | "notification.send"
+            | "system.time.read"
+            | "system.info.read"
+            | "system.logs.read"
+            | "account.self.read"
+            | "account.self.modify"
+            | "settings.read" => CapabilityClass::UserGrantable,
+            "fs.read.all"
+            | "fs.write.all"
+            | "net.raw"
+            | "window.capture"
+            | "display.capture"
+            | "input.keyboard.global"
+            | "input.pointer.global"
+            | "input.gamepad"
+            | "camera.access"
+            | "microphone.access"
+            | "location.access"
+            | "bluetooth.access"
+            | "usb.access"
+            | "serial.access"
+            | "power.shutdown"
+            | "power.reboot"
+            | "power.suspend"
+            | "system.time.set"
+            | "package.install"
+            | "package.remove"
+            | "package.update"
+            | "service.register"
+            | "service.control"
+            | "vm.create"
+            | "vm.control"
+            | "device.gpu"
+            | "device.audio"
+            | "device.input"
+            | "device.storage"
+            | "device.net"
+            | "account.other.read"
+            | "account.other.modify"
+            | "settings.write" => CapabilityClass::Privileged,
+            _ => CapabilityClass::SystemOnly,
+        }
+    }
 
     pub fn query(ptr: u64, len: u64) -> SysResult<u64> {
         syscall::call2(syscall::SyscallNumber::CapQuery, ptr, len)
