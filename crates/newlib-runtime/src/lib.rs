@@ -11,6 +11,12 @@ const MAX_FDS: usize = 64;
 const PROT_READ_WRITE: u64 = 0x3;
 const MAP_PRIVATE_ANON: u64 = 0x22;
 const AT_FDCWD: i64 = -100;
+const O_CLOEXEC: c_int = 0x80000;
+const FD_CLOEXEC: c_int = 1;
+const F_GETFD: c_int = 1;
+const F_SETFD: c_int = 2;
+const F_GETFL: c_int = 3;
+const F_SETFL: c_int = 4;
 const SEEK_CUR: c_int = 1;
 const WNOHANG: c_int = 1;
 const SPAWN_FAIL_EXIT_STATUS: c_int = 127;
@@ -28,6 +34,7 @@ const ESRCH: c_int = 3;
 const EINTR: c_int = 4;
 const EIO: c_int = 5;
 const EBADF: c_int = 9;
+const ECHILD: c_int = 10;
 const EAGAIN: c_int = 11;
 const ENOMEM: c_int = 12;
 const EACCES: c_int = 13;
@@ -38,6 +45,7 @@ const EISDIR: c_int = 21;
 const EINVAL: c_int = 22;
 const ESPIPE: c_int = 29;
 const EPIPE: c_int = 32;
+const ENAMETOOLONG: c_int = 36;
 const ENOSYS: c_int = 38;
 
 type InitFn = unsafe extern "C" fn();
@@ -275,6 +283,7 @@ struct FdEntry {
     lower_handle: u64,
     kind: FdKind,
     open_flags: c_int,
+    fd_flags: c_int,
     position: u64,
     close_owned: bool,
 }
@@ -286,6 +295,7 @@ impl FdEntry {
             lower_handle: 0,
             kind: FdKind::Unused,
             open_flags: 0,
+            fd_flags: 0,
             position: 0,
             close_owned: false,
         }
@@ -297,6 +307,7 @@ impl FdEntry {
             lower_handle: fd,
             kind,
             open_flags: 0,
+            fd_flags: 0,
             position: 0,
             close_owned: false,
         }
@@ -594,6 +605,7 @@ fn map_kernel_errno(raw: i64) -> c_int {
         EACCES => EACCES,
         EINVAL => EINVAL,
         EBADF => EBADF,
+        ECHILD => ECHILD,
         EAGAIN => EAGAIN,
         EEXIST => EEXIST,
         ENOTDIR => ENOTDIR,
@@ -1133,6 +1145,7 @@ fn restore_fd_state_from_env(envp: *mut *mut c_char, fds: &mut [FdEntry; MAX_FDS
         let Some(close_owned) = fields.next().and_then(parse_decimal) else {
             return false;
         };
+        let fd_flags = fields.next().and_then(parse_decimal).unwrap_or(0);
         if fd >= MAX_FDS {
             return false;
         }
@@ -1148,6 +1161,7 @@ fn restore_fd_state_from_env(envp: *mut *mut c_char, fds: &mut [FdEntry; MAX_FDS
             lower_handle: lower_handle as u64,
             kind,
             open_flags: open_flags as c_int,
+            fd_flags: fd_flags as c_int,
             position: position as u64,
             close_owned: close_owned != 0,
         };
@@ -1178,6 +1192,9 @@ fn serialize_fd_state(
         if !entry.in_use {
             continue;
         }
+        if entry.fd_flags & FD_CLOEXEC != 0 {
+            continue;
+        }
         let kind_code = match entry.kind {
             FdKind::Unused => continue,
             FdKind::Stdin => 1usize,
@@ -1196,6 +1213,8 @@ fn serialize_fd_state(
         push_decimal(entry.position as usize, encoded, &mut length)?;
         push_byte(encoded, &mut length, b',')?;
         push_decimal(entry.close_owned as usize, encoded, &mut length)?;
+        push_byte(encoded, &mut length, b',')?;
+        push_decimal(entry.fd_flags.max(0) as usize, encoded, &mut length)?;
         push_byte(encoded, &mut length, b';')?;
     }
     push_byte(encoded, &mut length, 0)?;
@@ -1354,8 +1373,48 @@ fn rewrite_fd_entry(
     // 組み替えるだけでよい。kernel の dup2 syscall は process-local FD 番号を要求するため、
     // runtime 内部の lower_handle を渡してはいけない。
     new_entry.close_owned = old_entry.close_owned;
+    new_entry.fd_flags &= !FD_CLOEXEC;
     fds[new_index] = new_entry;
     Ok(())
+}
+
+fn duplicate_live_fd(old_fd: c_int, new_fd: c_int) -> Result<c_int, c_int> {
+    if old_fd < 0 || new_fd < 0 || old_fd as usize >= MAX_FDS || new_fd as usize >= MAX_FDS {
+        return Err(EBADF);
+    }
+    let state = unsafe { state_mut() };
+    let old_entry = state.fds[old_fd as usize];
+    if !old_entry.in_use {
+        return Err(EBADF);
+    }
+    if old_fd == new_fd {
+        return Ok(new_fd);
+    }
+
+    if state.fds[new_fd as usize].in_use {
+        let existing = state.fds[new_fd as usize];
+        if existing.close_owned {
+            let _ = syscall_errno(syscall::raw_syscall1(
+                syscall::SyscallNumber::FileClose,
+                existing.lower_handle,
+            ));
+        }
+        state.fds[new_fd as usize] = FdEntry::unused();
+    }
+
+    let lower = syscall_errno(syscall::raw_syscall1(
+        syscall::SyscallNumber::Dup,
+        old_entry.lower_handle,
+    ))?;
+    let mut new_entry = old_entry;
+    new_entry.lower_handle = lower;
+    new_entry.fd_flags &= !FD_CLOEXEC;
+    new_entry.close_owned = true;
+    state.fds[new_fd as usize] = FdEntry {
+        lower_handle: lower,
+        ..new_entry
+    };
+    Ok(new_fd)
 }
 
 fn apply_spawn_file_actions(
@@ -1429,7 +1488,7 @@ fn collect_envp_with_fd_state(
     Ok(())
 }
 
-fn execve_raw(
+fn execve_syscall_raw(
     path: *const c_char,
     argv: *const *const c_char,
     envp: *const *const c_char,
@@ -1441,6 +1500,23 @@ fn execve_raw(
         envp as u64,
     ))?;
     Ok(())
+}
+
+fn execve_with_fd_state(
+    path: *const c_char,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> Result<(), c_int> {
+    let mut fd_state = [0u8; MAX_FD_STATE_LEN];
+    let state = unsafe { state_mut() };
+    let fd_state_len = serialize_fd_state(&state.fds, &mut fd_state)?;
+    let mut env_ptrs = [ptr::null(); MAX_ENV_POINTERS];
+    collect_envp_with_fd_state(
+        envp,
+        fd_state[..fd_state_len].as_ptr().cast::<c_char>(),
+        &mut env_ptrs,
+    )?;
+    execve_syscall_raw(path, argv, env_ptrs.as_ptr())
 }
 
 #[inline(never)]
@@ -1481,6 +1557,11 @@ fn allocate_fd(lower_handle: u64, flags: c_int) -> Result<c_int, c_int> {
                 lower_handle,
                 kind: FdKind::File,
                 open_flags: flags,
+                fd_flags: if flags & O_CLOEXEC != 0 {
+                    FD_CLOEXEC
+                } else {
+                    0
+                },
                 position: 0,
                 close_owned: true,
             };
@@ -1793,6 +1874,151 @@ pub extern "C" fn _close(fd: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn close(fd: c_int) -> c_int {
     _close(fd)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _pipe2(fds: *mut c_int, flags: c_int) -> c_int {
+    if fds.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    if flags & !O_CLOEXEC != 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let result = (|| {
+        let mut lower = [0i32; 2];
+        let _ = syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::Pipe2,
+            lower.as_mut_ptr() as u64,
+            flags as u64,
+        ))?;
+        let read_fd = match allocate_fd(lower[0] as u64, flags) {
+            Ok(fd) => fd,
+            Err(errno) => {
+                let _ = syscall_errno(syscall::raw_syscall1(
+                    syscall::SyscallNumber::FileClose,
+                    lower[0] as u64,
+                ));
+                let _ = syscall_errno(syscall::raw_syscall1(
+                    syscall::SyscallNumber::FileClose,
+                    lower[1] as u64,
+                ));
+                return Err(errno);
+            }
+        };
+        let write_fd = match allocate_fd(lower[1] as u64, flags) {
+            Ok(fd) => fd,
+            Err(errno) => {
+                let _ = _close(read_fd);
+                let _ = syscall_errno(syscall::raw_syscall1(
+                    syscall::SyscallNumber::FileClose,
+                    lower[1] as u64,
+                ));
+                return Err(errno);
+            }
+        };
+        unsafe {
+            fds.write(read_fd);
+            fds.add(1).write(write_fd);
+        }
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pipe2(fds: *mut c_int, flags: c_int) -> c_int {
+    _pipe2(fds, flags)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _pipe(fds: *mut c_int) -> c_int {
+    _pipe2(fds, 0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pipe(fds: *mut c_int) -> c_int {
+    _pipe(fds)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fork() -> c_int {
+    let result = syscall_errno(syscall::RawSyscallResult::new(process_spawn_raw()));
+    result_with_errno(result.map(|pid| pid as c_int), -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dup2(old_fd: c_int, new_fd: c_int) -> c_int {
+    result_with_errno(duplicate_live_fd(old_fd, new_fd), -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
+    let result = (|| {
+        let entry = with_fd_entry(fd)?;
+        match cmd {
+            F_GETFD => Ok(entry.fd_flags),
+            F_SETFD => {
+                let _ = syscall_errno(syscall::raw_syscall3(
+                    syscall::SyscallNumber::Fcntl,
+                    entry.lower_handle,
+                    F_SETFD as u64,
+                    (arg & FD_CLOEXEC) as u64,
+                ))?;
+                unsafe {
+                    state_mut().fds[fd as usize].fd_flags = arg & FD_CLOEXEC;
+                }
+                Ok(0)
+            }
+            F_GETFL => Ok(entry.open_flags),
+            F_SETFL => {
+                unsafe {
+                    state_mut().fds[fd as usize].open_flags = arg;
+                }
+                let _ = syscall_errno(syscall::raw_syscall3(
+                    syscall::SyscallNumber::Fcntl,
+                    entry.lower_handle,
+                    F_SETFL as u64,
+                    arg as u64,
+                ))?;
+                Ok(0)
+            }
+            _ => Err(EINVAL),
+        }
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn setgroups(_ngroups: c_int, _grouplist: *const c_int) -> c_int {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn setgid(_gid: c_int) -> c_int {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn setuid(_uid: c_int) -> c_int {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn setpgid(_pid: c_int, _pgid: c_int) -> c_int {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn setsid() -> c_int {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn chroot(_path: *const c_char) -> c_int {
+    set_errno(ENOSYS);
+    -1
 }
 
 #[unsafe(no_mangle)]
@@ -2317,7 +2543,7 @@ pub extern "C" fn _execve(
         set_errno(EFAULT);
         return -1;
     }
-    let result = execve_raw(path, argv, envp);
+    let result = execve_with_fd_state(path, argv, envp);
     result_with_errno(result.map(|()| 0), -1)
 }
 
@@ -2328,6 +2554,41 @@ pub extern "C" fn execve(
     envp: *const *const c_char,
 ) -> c_int {
     _execve(path, argv, envp)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn execvp(file: *const c_char, argv: *const *mut c_char) -> c_int {
+    if file.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+
+    let argv = argv as *const *const c_char;
+    let envp = unsafe { environ as *const *const c_char };
+    let name = unsafe { c_bytes(file) };
+    if name.iter().any(|byte| *byte == b'/') {
+        return result_with_errno(execve_with_fd_state(file, argv, envp).map(|()| 0), -1);
+    }
+
+    let direct = execve_with_fd_state(file, argv, envp);
+    if !matches!(direct, Err(errno) if errno == ENOENT) {
+        return result_with_errno(direct.map(|()| 0), -1);
+    }
+
+    const BIN_PREFIX: &[u8] = b"/bin/";
+    let total_len = BIN_PREFIX.len().saturating_add(name.len()).saturating_add(1);
+    if total_len > 256 {
+        set_errno(ENAMETOOLONG);
+        return -1;
+    }
+    let mut path = [0u8; 256];
+    path[..BIN_PREFIX.len()].copy_from_slice(BIN_PREFIX);
+    path[BIN_PREFIX.len()..BIN_PREFIX.len() + name.len()].copy_from_slice(name);
+
+    result_with_errno(
+        execve_with_fd_state(path.as_ptr().cast::<c_char>(), argv, envp).map(|()| 0),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -2507,7 +2768,7 @@ pub extern "C" fn _posix_spawn(
         {
             process_exit(SPAWN_FAIL_EXIT_STATUS);
         }
-        if execve_raw(snapshot.path, snapshot.argv, env_ptrs.as_ptr()).is_err() {
+        if execve_syscall_raw(snapshot.path, snapshot.argv, env_ptrs.as_ptr()).is_err() {
             process_exit(SPAWN_FAIL_EXIT_STATUS);
         }
         process_exit(SPAWN_FAIL_EXIT_STATUS);
