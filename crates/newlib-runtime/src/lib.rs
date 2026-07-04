@@ -1886,7 +1886,10 @@ pub extern "C" fn readdir(dirp: *mut c_void) -> *mut NewlibDirent {
             stream.current = dirent;
             ptr::addr_of_mut!(stream.current)
         }
-        Ok(None) => ptr::null_mut(),
+        Ok(None) => {
+            set_errno(0);
+            ptr::null_mut()
+        }
         Err(errno_value) => {
             set_errno(errno_value);
             ptr::null_mut()
