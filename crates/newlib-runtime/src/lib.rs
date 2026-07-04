@@ -370,7 +370,7 @@ struct NewlibStat {
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct NewlibDirent {
-    d_ino: u32,
+    d_ino: u64,
     d_type: u8,
     d_name: [c_char; DIRENT_NAME_MAX],
 }
@@ -1609,7 +1609,7 @@ fn next_dirent(stream: &mut DirStream) -> Result<Option<NewlibDirent>, c_int> {
         let copy_len = core::cmp::min(nul, DIRENT_NAME_MAX - 1);
 
         let mut out = NewlibDirent::empty();
-        out.d_ino = core::cmp::min(inode, u32::MAX as u64) as u32;
+        out.d_ino = inode;
         out.d_type = dtype;
         for index in 0..copy_len {
             out.d_name[index] = name[index] as c_char;
@@ -1863,6 +1863,7 @@ pub extern "C" fn readdir_r(
             0
         },
         Ok(None) => unsafe {
+            set_errno(0);
             ptr::write(result, ptr::null_mut());
             0
         },
