@@ -449,6 +449,17 @@ pub mod memory {
     use super::syscall::{self, SysResult};
     use crate::DmaAllocation;
 
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct FramebufferInfo {
+        pub addr: u64,
+        pub size: u64,
+        pub width: u32,
+        pub height: u32,
+        pub stride: u32,
+        pub format: u32,
+    }
+
     pub fn mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64) -> SysResult<u64> {
         syscall::call5(
             syscall::SyscallNumber::MemoryMap,
@@ -466,6 +477,19 @@ pub mod memory {
 
     pub fn map_physical_range(virt: u64, phys: u64, len: u64) -> SysResult<u64> {
         syscall::call3(syscall::SyscallNumber::MapPhysicalRange, virt, phys, len)
+    }
+
+    pub fn framebuffer_info() -> SysResult<FramebufferInfo> {
+        let mut info = FramebufferInfo::default();
+        syscall::call1(
+            syscall::SyscallNumber::GetFramebufferInfo,
+            (&mut info as *mut FramebufferInfo) as u64,
+        )?;
+        Ok(info)
+    }
+
+    pub fn map_framebuffer(virt: u64, len: u64) -> SysResult<u64> {
+        syscall::call2(syscall::SyscallNumber::MapFramebuffer, virt, len)
     }
 
     pub fn get_physical_addr(virt: u64) -> SysResult<u64> {
