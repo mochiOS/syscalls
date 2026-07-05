@@ -2585,7 +2585,10 @@ pub extern "C" fn execvp(file: *const c_char, argv: *const *mut c_char) -> c_int
     }
 
     const BIN_PREFIX: &[u8] = b"/bin/";
-    let total_len = BIN_PREFIX.len().saturating_add(name.len()).saturating_add(1);
+    let total_len = BIN_PREFIX
+        .len()
+        .saturating_add(name.len())
+        .saturating_add(1);
     if total_len > 256 {
         set_errno(ENAMETOOLONG);
         return -1;
