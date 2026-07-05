@@ -165,6 +165,7 @@ pub struct LockOpaque {
 #[repr(C)]
 pub struct PosixSpawnAttr {
     sa_flags: i16,
+    sa_pgroup: c_int,
 }
 
 #[repr(C)]
@@ -265,6 +266,8 @@ const FAE_DUP2: c_int = 1;
 const FAE_CLOSE: c_int = 2;
 const FAE_CHDIR: c_int = 3;
 const FAE_FCHDIR: c_int = 4;
+const POSIX_SPAWN_SETPGROUP: i16 = 0x01;
+const POSIX_SPAWN_SETSIGDEF: i16 = 0x04;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -1424,7 +1427,12 @@ fn apply_spawn_file_actions(
     if actions.is_null() {
         return Ok(());
     }
-    let actions = actions.cast::<PosixSpawnFileActions>() as *mut PosixSpawnFileActions;
+    let actions_handle = actions.cast::<*mut PosixSpawnFileActions>();
+    // Safety: posix_spawn receives a pointer to the opaque file-actions handle.
+    let actions = unsafe { actions_handle.read() };
+    if actions.is_null() {
+        return Ok(());
+    }
     // Safety: actions points to a live queue object allocated by this runtime.
     let mut current = unsafe { (*actions).fa_list.stqh_first };
     while !current.is_null() {
@@ -1531,7 +1539,8 @@ fn unsupported_spawn_attr(attr: *const c_void) -> Result<(), c_int> {
     let attr = attr.cast::<PosixSpawnAttr>();
     // Safety: attr points to the caller's posix_spawnattr object.
     let flags = unsafe { (*attr).sa_flags };
-    if flags != 0 {
+    let supported = POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETPGROUP;
+    if flags & !supported != 0 {
         return Err(ENOSYS);
     }
     Ok(())
@@ -2611,6 +2620,67 @@ pub extern "C" fn _waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_
 #[unsafe(no_mangle)]
 pub extern "C" fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int {
     _waitpid(pid, status, options)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_init(attr: *mut PosixSpawnAttr) -> c_int {
+    if attr.is_null() {
+        return EINVAL;
+    }
+    unsafe {
+        (*attr).sa_flags = 0;
+        (*attr).sa_pgroup = 0;
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_destroy(attr: *mut PosixSpawnAttr) -> c_int {
+    if attr.is_null() {
+        return EINVAL;
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_setflags(attr: *mut PosixSpawnAttr, flags: i16) -> c_int {
+    if attr.is_null() {
+        return EINVAL;
+    }
+    let supported = POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETPGROUP;
+    if flags & !supported != 0 {
+        return ENOSYS;
+    }
+    unsafe {
+        (*attr).sa_flags = flags;
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_setpgroup(attr: *mut PosixSpawnAttr, pgroup: c_int) -> c_int {
+    if attr.is_null() {
+        return EINVAL;
+    }
+    unsafe {
+        (*attr).sa_pgroup = pgroup;
+        (*attr).sa_flags |= POSIX_SPAWN_SETPGROUP;
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_setsigdefault(
+    attr: *mut PosixSpawnAttr,
+    _sigdefault: *const c_void,
+) -> c_int {
+    if attr.is_null() {
+        return EINVAL;
+    }
+    unsafe {
+        (*attr).sa_flags |= POSIX_SPAWN_SETSIGDEF;
+    }
+    0
 }
 
 #[unsafe(no_mangle)]
