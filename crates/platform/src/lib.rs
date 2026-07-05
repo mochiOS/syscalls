@@ -559,7 +559,13 @@ pub mod file {
         let mut out = Vec::new();
         let mut buf = [0u8; 512];
         loop {
-            let read = read(fd, buf.as_mut_ptr() as u64, buf.len() as u64)?;
+            let read = match read(fd, buf.as_mut_ptr() as u64, buf.len() as u64) {
+                Ok(read) => read,
+                Err(err) => {
+                    let _ = close(fd);
+                    return Err(err);
+                }
+            };
             if read == 0 {
                 break;
             }
