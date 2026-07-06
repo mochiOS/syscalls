@@ -256,6 +256,16 @@ pub mod ipc {
             local_base,
         )
     }
+
+    pub fn send_page_count(endpoint: u64, page_count: usize, local_base: u64) -> SysResult<u64> {
+        syscall::call4(
+            syscall::SyscallNumber::IpcSendPages,
+            endpoint,
+            0,
+            page_count as u64,
+            local_base,
+        )
+    }
 }
 
 pub mod input {
