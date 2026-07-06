@@ -246,6 +246,16 @@ pub mod ipc {
             bytes.len() as u64,
         )
     }
+
+    pub fn send_pages(endpoint: u64, phys_pages: &[u64], local_base: u64) -> SysResult<u64> {
+        syscall::call4(
+            syscall::SyscallNumber::IpcSendPages,
+            endpoint,
+            phys_pages.as_ptr() as u64,
+            phys_pages.len() as u64,
+            local_base,
+        )
+    }
 }
 
 pub mod input {
@@ -494,6 +504,16 @@ pub mod memory {
 
     pub fn get_physical_addr(virt: u64) -> SysResult<u64> {
         syscall::call1(syscall::SyscallNumber::GetPhysicalAddr, virt)
+    }
+
+    pub fn alloc_shared_pages(phys_pages: &mut [u64]) -> SysResult<u64> {
+        syscall::call4(
+            syscall::SyscallNumber::AllocSharedPages,
+            phys_pages.len() as u64,
+            phys_pages.as_mut_ptr() as u64,
+            phys_pages.len() as u64,
+            0,
+        )
     }
 
     pub fn dma_alloc(len: u64) -> SysResult<DmaAllocation> {
