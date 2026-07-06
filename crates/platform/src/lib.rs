@@ -251,7 +251,7 @@ pub mod ipc {
         syscall::call4(
             syscall::SyscallNumber::IpcSendPages,
             endpoint,
-            phys_pages.as_ptr() as u64,
+            0,
             phys_pages.len() as u64,
             local_base,
         )
@@ -512,6 +512,16 @@ pub mod memory {
             phys_pages.len() as u64,
             phys_pages.as_mut_ptr() as u64,
             phys_pages.len() as u64,
+            0,
+        )
+    }
+
+    pub fn alloc_shared_page_count(page_count: usize) -> SysResult<u64> {
+        syscall::call4(
+            syscall::SyscallNumber::AllocSharedPages,
+            page_count as u64,
+            0,
+            0,
             0,
         )
     }
