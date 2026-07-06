@@ -227,6 +227,10 @@ pub mod ipc {
         )
     }
 
+    pub fn endpoint_alive(endpoint: u64) -> bool {
+        syscall::call1(syscall::SyscallNumber::IpcEndpointAlive, endpoint).is_ok()
+    }
+
     pub fn call(dest_thread_id: u64, request: &[u8], reply: &mut [u8]) -> SysResult<u64> {
         syscall::call5(
             syscall::SyscallNumber::IpcCall,
