@@ -971,6 +971,7 @@ pub mod capability {
             "fs.read.all"
             | "fs.write.all"
             | "net.raw"
+            | "window.decorate"
             | "window.capture"
             | "display.capture"
             | "input.keyboard.global"
@@ -1007,6 +1008,16 @@ pub mod capability {
 
     pub fn query(ptr: u64, len: u64) -> SysResult<u64> {
         syscall::call2(syscall::SyscallNumber::CapQuery, ptr, len)
+    }
+
+    pub fn check_thread(thread_id: u64, capability: &str) -> SysResult<u64> {
+        let bytes = capability.as_bytes();
+        syscall::call3(
+            syscall::SyscallNumber::CheckThreadCapability,
+            thread_id,
+            bytes.as_ptr() as u64,
+            bytes.len() as u64,
+        )
     }
 }
 
