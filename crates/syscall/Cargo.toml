@@ -2,9 +2,11 @@
 name = "mochi-user-syscall"
 version = "0.1.0"
 edition = "2024"
+description = "mochiOS user-space syscall interface"
+license = "Apache-2.0"
 
 [dependencies]
-mnu-abi = { path = "../../../core/crates/abi" }
+mnu-abi = "0.1.0"
 
 [features]
 default = []

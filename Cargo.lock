@@ -7,6 +7,12 @@ name = "mnu-abi"
 version = "0.1.0"
 
 [[package]]
+name = "mnu-abi"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "522a13d1239f1c600ea0cb0c871d48a98986ba36d5802417fe37c177a1245324"
+
+[[package]]
 name = "mochi-user-newlib-runtime"
 version = "0.1.0"
 dependencies = [
@@ -17,7 +23,7 @@ dependencies = [
 name = "mochi-user-platform"
 version = "0.1.0"
 dependencies = [
- "mnu-abi",
+    "mnu-abi 0.1.0",
  "mochi-user-runtime",
  "mochi-user-syscall",
 ]
@@ -33,7 +39,7 @@ dependencies = [
 name = "mochi-user-syscall"
 version = "0.1.0"
 dependencies = [
- "mnu-abi",
+    "mnu-abi 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[patch.unused]]

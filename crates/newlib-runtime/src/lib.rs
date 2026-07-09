@@ -49,6 +49,7 @@ const ENAMETOOLONG: c_int = 36;
 const ENOSYS: c_int = 38;
 
 type InitFn = unsafe extern "C" fn();
+type CLong = i64;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -490,6 +491,18 @@ pub static mut __env: *mut *mut c_char = ptr::null_mut();
 struct IoVec {
     iov_base: *const c_void,
     iov_len: usize,
+}
+
+#[repr(C)]
+struct IoVecMut {
+    iov_base: *mut c_void,
+    iov_len: usize,
+}
+
+#[repr(C)]
+struct Timespec {
+    tv_sec: CLong,
+    tv_nsec: CLong,
 }
 
 #[derive(Clone, Copy)]
@@ -1821,6 +1834,46 @@ pub extern "C" fn read(fd: c_int, buffer: *mut c_void, length: usize) -> isize {
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn readv(fd: c_int, iov: *const IoVecMut, iovcnt: c_int) -> isize {
+    if iovcnt < 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    if iovcnt != 0 && iov.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+
+    let mut total = 0usize;
+    for index in 0..(iovcnt as usize) {
+        let entry = unsafe { &*iov.add(index) };
+        if entry.iov_len == 0 {
+            continue;
+        }
+        if entry.iov_base.is_null() {
+            set_errno(EFAULT);
+            return -1;
+        }
+
+        let read = _read(fd, entry.iov_base, entry.iov_len);
+        if read < 0 {
+            return if total == 0 { -1 } else { total as isize };
+        }
+        if read == 0 {
+            break;
+        }
+
+        let read = read as usize;
+        total = total.saturating_add(read);
+        if read != entry.iov_len {
+            break;
+        }
+    }
+
+    total as isize
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn _open(path: *const c_char, flags: c_int, mode: c_int) -> c_int {
     if path.is_null() {
         set_errno(EFAULT);
@@ -2375,6 +2428,28 @@ pub extern "C" fn _times(buf: *mut Tms) -> i64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn times(buf: *mut Tms) -> i64 {
     _times(buf)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn clock_gettime(_clock_id: c_int, tp: *mut Timespec) -> c_int {
+    if tp.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+
+    let result =
+        syscall_errno(syscall::raw_syscall0(syscall::SyscallNumber::TimeNow)).map(|ticks| {
+            let seconds = ticks / 1_000_000_000;
+            let nanos = ticks % 1_000_000_000;
+            unsafe {
+                *tp = Timespec {
+                    tv_sec: seconds as CLong,
+                    tv_nsec: nanos as CLong,
+                };
+            }
+            0
+        });
+    result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
