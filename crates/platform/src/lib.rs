@@ -348,6 +348,15 @@ pub mod input {
     pub const KEY_COMMA: u16 = 76;
     pub const KEY_DOT: u16 = 77;
     pub const KEY_SLASH: u16 = 78;
+    pub const KEY_DELETE: u16 = 79;
+    pub const KEY_HOME: u16 = 80;
+    pub const KEY_END: u16 = 81;
+    pub const KEY_LEFT: u16 = 82;
+    pub const KEY_RIGHT: u16 = 83;
+    pub const KEY_UP: u16 = 84;
+    pub const KEY_DOWN: u16 = 85;
+    pub const KEY_PAGE_UP: u16 = 86;
+    pub const KEY_PAGE_DOWN: u16 = 87;
 
     pub const POINTER_BUTTON_LEFT: u16 = 1;
     pub const POINTER_BUTTON_RIGHT: u16 = 2;
