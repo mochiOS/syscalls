@@ -149,6 +149,7 @@ impl Default for CapabilityPromptRequest {
 const CAPABILITY_PROMPT_OPCODE: u32 = 0x4350_5251;
 const CAPABILITY_PERSISTENT_QUERY_OPCODE: u32 = 0x4350_5150;
 const CAPABILITY_SERVICE_NAME: &[u8] = b"capability.service";
+const STDIO_ENDPOINT_ENV_NAME: &[u8] = b"MOCHI_STDIO_ENDPOINT";
 
 #[repr(C)]
 pub struct Tms {
@@ -1694,6 +1695,21 @@ fn advance_position(fd: c_int, amount: u64) {
 }
 
 fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result<isize, c_int> {
+    if matches!(entry.kind, FdKind::Stdout | FdKind::Stderr) {
+        if let Some(endpoint) = read_env_u64(STDIO_ENDPOINT_ENV_NAME) {
+            if endpoint != 0
+                && syscall_errno(syscall::raw_syscall3(
+                    syscall::SyscallNumber::IpcSend,
+                    endpoint,
+                    buffer as u64,
+                    length as u64,
+                ))
+                .is_ok()
+            {
+                return Ok(length as isize);
+            }
+        }
+    }
     let number = match entry.kind {
         FdKind::Stdout | FdKind::Stderr => syscall::SyscallNumber::Write,
         FdKind::File => syscall::SyscallNumber::FileWrite,
