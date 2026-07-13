@@ -150,6 +150,9 @@ const CAPABILITY_PROMPT_OPCODE: u32 = 0x4350_5251;
 const CAPABILITY_PERSISTENT_QUERY_OPCODE: u32 = 0x4350_5150;
 const CAPABILITY_SERVICE_NAME: &[u8] = b"capability.service";
 const STDIO_ENDPOINT_ENV_NAME: &[u8] = b"MOCHI_STDIO_ENDPOINT";
+const TTY_SERVICE_NAME: &[u8] = b"tty.service";
+const TTY_OUTPUT_MAGIC: &[u8; 4] = b"TOUT";
+const TTY_OUTPUT_PACKET_SIZE: usize = 2048;
 
 #[repr(C)]
 pub struct Tms {
@@ -1694,6 +1697,51 @@ fn advance_position(fd: c_int, amount: u64) {
     }
 }
 
+fn write_stdio_to_tty(buffer: *const c_void, length: usize) -> bool {
+    let endpoint = match syscall_errno(syscall::raw_syscall2(
+        syscall::SyscallNumber::FindProcessByName,
+        TTY_SERVICE_NAME.as_ptr() as u64,
+        TTY_SERVICE_NAME.len() as u64,
+    )) {
+        Ok(endpoint) if endpoint != 0 => endpoint,
+        _ => return false,
+    };
+
+    let src = buffer.cast::<u8>();
+    let mut packet = [0u8; TTY_OUTPUT_PACKET_SIZE];
+    packet[..TTY_OUTPUT_MAGIC.len()].copy_from_slice(TTY_OUTPUT_MAGIC);
+    let payload_capacity = packet.len() - TTY_OUTPUT_MAGIC.len();
+    let mut offset = 0usize;
+    while offset < length {
+        let chunk_len = core::cmp::min(length - offset, payload_capacity);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src.add(offset),
+                packet[TTY_OUTPUT_MAGIC.len()..].as_mut_ptr(),
+                chunk_len,
+            );
+        }
+        let packet_len = TTY_OUTPUT_MAGIC.len() + chunk_len;
+        let mut reply = [0u8; 8];
+        let msg = match syscall_errno(syscall::raw_syscall5(
+            syscall::SyscallNumber::IpcCall,
+            endpoint,
+            packet.as_ptr() as u64,
+            packet_len as u64,
+            reply.as_mut_ptr() as u64,
+            reply.len() as u64,
+        )) {
+            Ok(msg) => msg,
+            Err(_) => return false,
+        };
+        if (msg & 0xffff_ffff) < reply.len() as u64 || u64::from_le_bytes(reply) != 0 {
+            return false;
+        }
+        offset += chunk_len;
+    }
+    true
+}
+
 fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result<isize, c_int> {
     if matches!(entry.kind, FdKind::Stdout | FdKind::Stderr) {
         if let Some(endpoint) = read_env_u64(STDIO_ENDPOINT_ENV_NAME) {
@@ -1708,6 +1756,9 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
             {
                 return Ok(length as isize);
             }
+        }
+        if write_stdio_to_tty(buffer, length) {
+            return Ok(length as isize);
         }
     }
     let number = match entry.kind {
