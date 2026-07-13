@@ -777,6 +777,19 @@ fn read_env_u64(name: &[u8]) -> Option<u64> {
     parse_decimal(&buf[..len]).map(|v| v as u64)
 }
 
+fn current_process_is_shell() -> bool {
+    let argv = unsafe { state_mut().argv };
+    if argv.is_null() {
+        return false;
+    }
+    let argv0 = unsafe { argv.read() };
+    if argv0.is_null() {
+        return false;
+    }
+    let bytes = unsafe { c_bytes(argv0.cast_const()) };
+    bytes == b"msh" || bytes == b"/bin/msh"
+}
+
 fn read_env_path(name: &[u8]) -> Option<[u8; 256]> {
     let mut buf = [0u8; 256];
     let len = find_env_value_bytes(name, &mut buf)?;
@@ -1746,7 +1759,9 @@ fn write_stdio_to_tty(buffer: *const c_void, length: usize) -> bool {
 fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result<isize, c_int> {
     if matches!(entry.kind, FdKind::Stdout | FdKind::Stderr) {
         let mut direct_env = [0u8; 1];
-        if find_env_value_bytes(STDIO_DIRECT_ENV_NAME, &mut direct_env).is_none() {
+        if find_env_value_bytes(STDIO_DIRECT_ENV_NAME, &mut direct_env).is_none()
+            && !current_process_is_shell()
+        {
             if let Some(endpoint) = read_env_u64(STDIO_ENDPOINT_ENV_NAME) {
                 if endpoint != 0
                     && syscall_errno(syscall::raw_syscall3(
