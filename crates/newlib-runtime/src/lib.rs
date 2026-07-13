@@ -150,6 +150,7 @@ const CAPABILITY_PROMPT_OPCODE: u32 = 0x4350_5251;
 const CAPABILITY_PERSISTENT_QUERY_OPCODE: u32 = 0x4350_5150;
 const CAPABILITY_SERVICE_NAME: &[u8] = b"capability.service";
 const STDIO_ENDPOINT_ENV_NAME: &[u8] = b"MOCHI_STDIO_ENDPOINT";
+const STDIO_DIRECT_ENV_NAME: &[u8] = b"MOCHI_STDIO_DIRECT";
 const TTY_SERVICE_NAME: &[u8] = b"tty.service";
 const TTY_OUTPUT_MAGIC: &[u8; 4] = b"TOUT";
 const TTY_OUTPUT_PACKET_SIZE: usize = 2048;
@@ -1744,21 +1745,24 @@ fn write_stdio_to_tty(buffer: *const c_void, length: usize) -> bool {
 
 fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result<isize, c_int> {
     if matches!(entry.kind, FdKind::Stdout | FdKind::Stderr) {
-        if let Some(endpoint) = read_env_u64(STDIO_ENDPOINT_ENV_NAME) {
-            if endpoint != 0
-                && syscall_errno(syscall::raw_syscall3(
-                    syscall::SyscallNumber::IpcSend,
-                    endpoint,
-                    buffer as u64,
-                    length as u64,
-                ))
-                .is_ok()
-            {
+        let mut direct_env = [0u8; 1];
+        if find_env_value_bytes(STDIO_DIRECT_ENV_NAME, &mut direct_env).is_none() {
+            if let Some(endpoint) = read_env_u64(STDIO_ENDPOINT_ENV_NAME) {
+                if endpoint != 0
+                    && syscall_errno(syscall::raw_syscall3(
+                        syscall::SyscallNumber::IpcSend,
+                        endpoint,
+                        buffer as u64,
+                        length as u64,
+                    ))
+                    .is_ok()
+                {
+                    return Ok(length as isize);
+                }
+            }
+            if write_stdio_to_tty(buffer, length) {
                 return Ok(length as isize);
             }
-        }
-        if write_stdio_to_tty(buffer, length) {
-            return Ok(length as isize);
         }
     }
     let number = match entry.kind {
