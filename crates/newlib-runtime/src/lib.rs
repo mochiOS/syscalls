@@ -1,7 +1,7 @@
 #![no_std]
 
 use core::cell::UnsafeCell;
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_int, c_long, c_void};
 use core::ptr;
 
 use mochi_user_syscall as syscall;
@@ -10,6 +10,20 @@ const PAGE_SIZE: usize = 4096;
 const MAX_FDS: usize = 64;
 const PROT_READ_WRITE: u64 = 0x3;
 const MAP_PRIVATE_ANON: u64 = 0x22;
+const AT_SYMLINK_NOFOLLOW: u64 = 0x2;
+const PROT_NONE: c_int = 0x0;
+const PROT_READ: c_int = 0x1;
+const PROT_WRITE: c_int = 0x2;
+const MS_ASYNC: c_int = 0x1;
+const MS_SYNC: c_int = 0x2;
+const SC_OPEN_MAX: c_int = 4;
+const SC_PAGESIZE: c_int = 8;
+const SC_PAGE_SIZE: c_int = SC_PAGESIZE;
+const SC_NPROCESSORS_CONF: c_int = 9;
+const SC_NPROCESSORS_ONLN: c_int = 10;
+const SC_THREAD_STACK_MIN: c_int = 39;
+const SC_GETPW_R_SIZE_MAX: c_int = 51;
+const SC_HOST_NAME_MAX: c_int = 65;
 const AT_FDCWD: i64 = -100;
 const O_CLOEXEC: c_int = 0x80000;
 const FD_CLOEXEC: c_int = 1;
@@ -656,6 +670,54 @@ fn result_with_errno<T>(result: Result<T, c_int>, error_value: T) -> T {
             error_value
         }
     }
+}
+
+fn mmap_raw(
+    addr: *mut c_void,
+    len: usize,
+    prot: c_int,
+    flags: c_int,
+    fd: c_int,
+    _offset: i64,
+) -> Result<*mut c_void, c_int> {
+    let result = syscall_errno(syscall::raw_syscall5(
+        syscall::SyscallNumber::MemoryMap,
+        addr as u64,
+        len as u64,
+        prot as u64,
+        flags as u64,
+        fd as u64,
+    ))?;
+    Ok(result as *mut c_void)
+}
+
+fn munmap_raw(addr: *mut c_void, len: usize) -> Result<c_int, c_int> {
+    syscall_errno(syscall::raw_syscall2(
+        syscall::SyscallNumber::MemoryUnmap,
+        addr as u64,
+        len as u64,
+    ))?;
+    Ok(0)
+}
+
+fn mprotect_raw(addr: *mut c_void, len: usize, prot: c_int) -> Result<c_int, c_int> {
+    syscall_errno(syscall::raw_syscall3(
+        syscall::SyscallNumber::MemoryProtect,
+        addr as u64,
+        len as u64,
+        prot as u64,
+    ))?;
+    Ok(0)
+}
+
+fn msync_raw(addr: *mut c_void, len: usize, flags: c_int) -> Result<c_int, c_int> {
+    syscall_errno(syscall::raw_syscall3(
+        syscall::SyscallNumber::MemorySync,
+        addr as u64,
+        len as u64,
+        flags as u64,
+    ))?;
+    Ok(0)
 }
 
 unsafe fn parse_stack(sp: *const usize) -> StackView {
@@ -2296,6 +2358,65 @@ pub extern "C" fn stat(path: *const c_char, stat_buf: *mut c_void) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn _lstat(path: *const c_char, stat_buf: *mut c_void) -> c_int {
+    if path.is_null() || stat_buf.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    let result = (|| {
+        let mut kernel_stat = KernelStat {
+            st_dev: 0,
+            st_ino: 0,
+            st_nlink: 0,
+            st_mode: 0,
+            st_uid: 0,
+            st_gid: 0,
+            __pad0: 0,
+            st_rdev: 0,
+            st_size: 0,
+            st_blksize: 0,
+            st_blocks: 0,
+            st_atim: KernelTimespec { sec: 0, nsec: 0 },
+            st_mtim: KernelTimespec { sec: 0, nsec: 0 },
+            st_ctim: KernelTimespec { sec: 0, nsec: 0 },
+            __unused: [0; 24],
+        };
+        let _ = syscall_errno(syscall::raw_syscall4(
+            syscall::SyscallNumber::FileStatAt,
+            AT_FDCWD as u64,
+            path as u64,
+            (&mut kernel_stat as *mut KernelStat).cast::<c_void>() as u64,
+            AT_SYMLINK_NOFOLLOW as u64,
+        ))?;
+        let translated = translate_stat(&kernel_stat);
+        unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), translated) };
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lstat(path: *const c_char, stat_buf: *mut c_void) -> c_int {
+    _lstat(path, stat_buf)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn sysconf(name: c_int) -> c_long {
+    match name {
+        SC_PAGESIZE | SC_PAGE_SIZE => PAGE_SIZE as c_long,
+        SC_NPROCESSORS_CONF | SC_NPROCESSORS_ONLN => 4,
+        SC_OPEN_MAX => MAX_FDS as c_long,
+        SC_GETPW_R_SIZE_MAX => 512,
+        SC_HOST_NAME_MAX => 255,
+        SC_THREAD_STACK_MIN => 16384,
+        _ => {
+            set_errno(EINVAL);
+            -1
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn _isatty(fd: c_int) -> c_int {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
@@ -2384,6 +2505,49 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
 #[unsafe(no_mangle)]
 pub extern "C" fn sbrk(increment: isize) -> *mut c_void {
     _sbrk(increment)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mmap(
+    addr: *mut c_void,
+    len: usize,
+    prot: c_int,
+    flags: c_int,
+    fd: c_int,
+    offset: i64,
+) -> *mut c_void {
+    let result = if offset != 0 {
+        Err(EINVAL)
+    } else {
+        mmap_raw(addr, len, prot, flags, fd, offset)
+    };
+    result_with_errno(result, (-1isize) as *mut c_void)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn munmap(addr: *mut c_void, len: usize) -> c_int {
+    result_with_errno(munmap_raw(addr, len), -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mprotect(addr: *mut c_void, len: usize, prot: c_int) -> c_int {
+    result_with_errno(mprotect_raw(addr, len, prot), -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn madvise(_addr: *mut c_void, _len: usize, _advice: c_int) -> c_int {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c_int {
+    match flags {
+        MS_ASYNC | MS_SYNC => result_with_errno(msync_raw(addr, len, flags), -1),
+        _ => {
+            set_errno(EINVAL);
+            -1
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
