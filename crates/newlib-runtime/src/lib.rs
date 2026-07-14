@@ -163,6 +163,7 @@ impl Default for CapabilityPromptRequest {
 const CAPABILITY_PROMPT_OPCODE: u32 = 0x4350_5251;
 const CAPABILITY_PERSISTENT_QUERY_OPCODE: u32 = 0x4350_5150;
 const CAPABILITY_SERVICE_NAME: &[u8] = b"capability.service";
+const STDIO_ENDPOINT_ENV_NAME: &[u8] = b"MOCHI_STDIO_ENDPOINT";
 
 #[repr(C)]
 pub struct Tms {
@@ -1576,13 +1577,94 @@ fn execve_syscall_raw(
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> Result<(), c_int> {
-    let _ = syscall_errno(syscall::raw_syscall3(
+    let trace_app_exec = unsafe { cstr_contains_bytes(path, b"test.app") }
+        || unsafe { cstr_contains_bytes(path, b"Binder.app") };
+    if trace_app_exec {
+        raw_debug_write(b"newlib execve raw begin\n");
+    }
+    let raw = syscall::raw_syscall3(
         syscall::SyscallNumber::Execve,
         path as u64,
         argv as u64,
         envp as u64,
-    ))?;
+    );
+    if trace_app_exec {
+        raw_debug_write(b"newlib execve raw ret=");
+        raw_debug_write_i64(raw.raw() as i64);
+        raw_debug_write(b"\n");
+    }
+    let _ = syscall_errno(raw)?;
     Ok(())
+}
+
+unsafe fn cstr_contains_bytes(path: *const c_char, needle: &[u8]) -> bool {
+    if path.is_null() || needle.is_empty() {
+        return false;
+    }
+    let mut haystack = [0u8; 256];
+    let mut len = 0usize;
+    while len < haystack.len() {
+        let byte = unsafe { *path.add(len) as u8 };
+        if byte == 0 {
+            break;
+        }
+        haystack[len] = byte;
+        len += 1;
+    }
+    if needle.len() > len {
+        return false;
+    }
+    let last_start = len - needle.len();
+    let mut start = 0usize;
+    while start <= last_start {
+        let mut matched = true;
+        let mut offset = 0usize;
+        while offset < needle.len() {
+            if haystack[start + offset] != needle[offset] {
+                matched = false;
+                break;
+            }
+            offset += 1;
+        }
+        if matched {
+            return true;
+        }
+        start += 1;
+    }
+    false
+}
+
+fn raw_debug_write(bytes: &[u8]) {
+    let _ = syscall::raw_syscall3(
+        syscall::SyscallNumber::Write,
+        2,
+        bytes.as_ptr() as u64,
+        bytes.len() as u64,
+    );
+}
+
+fn raw_debug_write_i64(value: i64) {
+    let mut buf = [0u8; 20];
+    let mut len = 0usize;
+    let mut n = if value < 0 {
+        raw_debug_write(b"-");
+        value.saturating_neg() as u64
+    } else {
+        value as u64
+    };
+    if n == 0 {
+        raw_debug_write(b"0");
+        return;
+    }
+    while n != 0 && len < buf.len() {
+        buf[len] = b'0' + (n % 10) as u8;
+        n /= 10;
+        len += 1;
+    }
+    while len != 0 {
+        len -= 1;
+        raw_debug_write(&buf[len..len + 1]);
+    }
 }
 
 fn execve_with_fd_state(
@@ -1675,6 +1757,21 @@ fn advance_position(fd: c_int, amount: u64) {
 }
 
 fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result<isize, c_int> {
+    if matches!(entry.kind, FdKind::Stdout | FdKind::Stderr) {
+        if let Some(endpoint) = read_env_u64(STDIO_ENDPOINT_ENV_NAME) {
+            if endpoint != 0
+                && syscall_errno(syscall::raw_syscall3(
+                    syscall::SyscallNumber::IpcSend,
+                    endpoint,
+                    buffer as u64,
+                    length as u64,
+                ))
+                .is_ok()
+            {
+                return Ok(length as isize);
+            }
+        }
+    }
     let number = match entry.kind {
         FdKind::Stdout | FdKind::Stderr => syscall::SyscallNumber::Write,
         FdKind::File => syscall::SyscallNumber::FileWrite,

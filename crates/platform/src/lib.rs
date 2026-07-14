@@ -56,7 +56,7 @@ pub mod io {
 }
 
 pub mod logger {
-    use super::{Write, alloc, ipc, runtime, syscall};
+    use super::{alloc, ipc, runtime, syscall, Write};
     use core::fmt;
     use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -275,11 +275,13 @@ pub mod ipc {
 pub mod input {
     pub const RAW_KIND_KEYBOARD: u8 = 1;
     pub const RAW_KIND_MOUSE_PACKET: u8 = 2;
+    pub const RAW_KIND_POINTER_ABSOLUTE: u8 = 3;
 
     pub const EVENT_KIND_KEY: u16 = 1;
     pub const EVENT_KIND_POINTER_MOVE: u16 = 2;
     pub const EVENT_KIND_POINTER_BUTTON: u16 = 3;
     pub const EVENT_KIND_POINTER_WHEEL: u16 = 4;
+    pub const EVENT_KIND_POINTER_ABSOLUTE: u16 = 5;
 
     pub const FLAG_PRESS: u16 = 1 << 0;
     pub const FLAG_RELEASE: u16 = 1 << 1;
@@ -1031,7 +1033,7 @@ pub mod capability {
 }
 
 pub mod env {
-    use super::syscall::{ENOSYS, SysError, SysResult};
+    use super::syscall::{SysError, SysResult, ENOSYS};
 
     pub fn args() -> SysResult<&'static [&'static [u8]]> {
         Err(SysError::from_raw(ENOSYS as i64))
