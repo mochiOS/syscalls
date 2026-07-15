@@ -10,7 +10,15 @@ const PAGE_SIZE: usize = 4096;
 const MAX_FDS: usize = 64;
 const PROT_READ_WRITE: u64 = 0x3;
 const MAP_PRIVATE_ANON: u64 = 0x22;
+const MAP_FAILED: *mut c_void = (-1isize) as *mut c_void;
 const AT_FDCWD: i64 = -100;
+const SC_OPEN_MAX: c_int = 4;
+const SC_PAGESIZE: c_int = 8;
+const SC_NPROCESSORS_CONF: c_int = 9;
+const SC_NPROCESSORS_ONLN: c_int = 10;
+const SC_THREAD_STACK_MIN: c_int = 39;
+const SC_GETPW_R_SIZE_MAX: c_int = 51;
+const SC_HOST_NAME_MAX: c_int = 65;
 const O_CLOEXEC: c_int = 0x80000;
 const FD_CLOEXEC: c_int = 1;
 const F_GETFD: c_int = 1;
@@ -2384,6 +2392,63 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
 #[unsafe(no_mangle)]
 pub extern "C" fn sbrk(increment: isize) -> *mut c_void {
     _sbrk(increment)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mmap(
+    addr: *mut c_void,
+    len: usize,
+    prot: c_int,
+    flags: c_int,
+    fd: c_int,
+    offset: CLong,
+) -> *mut c_void {
+    let result = (|| {
+        if len == 0 || offset != 0 {
+            return Err(EINVAL);
+        }
+        let mapped = syscall_errno(syscall::raw_syscall5(
+            syscall::SyscallNumber::MemoryMap,
+            addr as u64,
+            len as u64,
+            prot as u64,
+            flags as u64,
+            fd as u64,
+        ))?;
+        Ok(mapped as *mut c_void)
+    })();
+    result_with_errno(result, MAP_FAILED)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn munmap(addr: *mut c_void, len: usize) -> c_int {
+    let result = (|| {
+        if addr.is_null() || len == 0 {
+            return Err(EINVAL);
+        }
+        let _ = syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::MemoryUnmap,
+            addr as u64,
+            len as u64,
+        ))?;
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn sysconf(name: c_int) -> CLong {
+    match name {
+        SC_OPEN_MAX => MAX_FDS as CLong,
+        SC_PAGESIZE => PAGE_SIZE as CLong,
+        SC_NPROCESSORS_CONF | SC_NPROCESSORS_ONLN => 1,
+        SC_THREAD_STACK_MIN => 16 * 1024,
+        SC_GETPW_R_SIZE_MAX | SC_HOST_NAME_MAX => 256,
+        _ => {
+            set_errno(EINVAL);
+            -1
+        }
+    }
 }
 
 #[unsafe(no_mangle)]

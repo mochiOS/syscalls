@@ -275,11 +275,13 @@ pub mod ipc {
 pub mod input {
     pub const RAW_KIND_KEYBOARD: u8 = 1;
     pub const RAW_KIND_MOUSE_PACKET: u8 = 2;
+    pub const RAW_KIND_POINTER_ABSOLUTE: u8 = 3;
 
     pub const EVENT_KIND_KEY: u16 = 1;
     pub const EVENT_KIND_POINTER_MOVE: u16 = 2;
     pub const EVENT_KIND_POINTER_BUTTON: u16 = 3;
     pub const EVENT_KIND_POINTER_WHEEL: u16 = 4;
+    pub const EVENT_KIND_POINTER_ABSOLUTE: u16 = 5;
 
     pub const FLAG_PRESS: u16 = 1 << 0;
     pub const FLAG_RELEASE: u16 = 1 << 1;

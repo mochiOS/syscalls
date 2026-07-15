@@ -20,6 +20,7 @@
   "no-default-libraries": false,
   "main-needs-argc-argv": true,
   "has-thread-local": false,
+  "singlethread": true,
   "target-family": "unix",
   "binary-format": "elf",
   "max-atomic-width": 64
