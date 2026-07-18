@@ -126,7 +126,7 @@ unsafe impl GlobalAlloc for UserAllocator {
 
     #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if layout.size() == 0 {
+        if ptr.is_null() || layout.size() == 0 {
             return;
         }
         let header_ptr = ptr.sub(HEADER_SIZE);
