@@ -455,6 +455,8 @@ pub mod service {
     }
 }
 
+pub mod service_ready;
+
 pub mod time {
     use super::syscall::{self, SysResult};
 
