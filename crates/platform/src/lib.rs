@@ -461,7 +461,7 @@ pub mod time {
     use super::syscall::{self, SysResult};
 
     pub fn ticks() -> SysResult<u64> {
-        syscall::call0(syscall::SyscallNumber::GetTicks)
+        syscall::call0(syscall::SyscallNumber::TimeNow)
     }
 }
 
