@@ -8,3 +8,4 @@ crate-type = ["staticlib"]
 
 [dependencies]
 mochi-user-syscall = { path = "../syscall" }
+mochios-capability-protocol = { path = "../capability-protocol", default-features = false }

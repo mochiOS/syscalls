@@ -5,6 +5,11 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use mochi_user_syscall as syscall;
+use mochios_capability_protocol::{
+    CAPABILITY_PERSISTENT_QUERY_OPCODE, CAPABILITY_PROMPT_OPCODE, CapabilityClass,
+    CapabilityDecision, CapabilityExecutableIdentity, CapabilityPromptRequest,
+    CapabilityResourceDescriptor, MAX_CAPABILITY_NAME_LEN, MAX_REASON_LEN,
+};
 
 const PAGE_SIZE: usize = 4096;
 const MAX_FDS: usize = 64;
@@ -59,103 +64,6 @@ const ENOSYS: c_int = 38;
 type InitFn = unsafe extern "C" fn();
 type CLong = i64;
 
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CapabilityDecision {
-    AllowOnce = 1,
-    AllowForProcess = 2,
-    AllowPersistently = 3,
-    AllowAllUserGrantable = 4,
-    Deny = 5,
-}
-
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum CapabilityClass {
-    #[default]
-    UserGrantable = 1,
-    Privileged = 2,
-    SystemOnly = 3,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CapabilityExecutableIdentity {
-    path_len: u16,
-    reserved: u16,
-    digest: [u8; 32],
-    path: [u8; 256],
-}
-
-impl Default for CapabilityExecutableIdentity {
-    fn default() -> Self {
-        Self {
-            path_len: 0,
-            reserved: 0,
-            digest: [0; 32],
-            path: [0; 256],
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CapabilityResourceDescriptor {
-    kind: u32,
-    path_len: u16,
-    reserved: u16,
-    path: [u8; 256],
-}
-
-impl Default for CapabilityResourceDescriptor {
-    fn default() -> Self {
-        Self {
-            kind: 0,
-            path_len: 0,
-            reserved: 0,
-            path: [0; 256],
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CapabilityPromptRequest {
-    opcode: u32,
-    process_id: u64,
-    executable: CapabilityExecutableIdentity,
-    capability_class: CapabilityClass,
-    capability_len: u16,
-    resource: CapabilityResourceDescriptor,
-    reason_len: u16,
-    interactive: u8,
-    decision_scope: u8,
-    reserved0: u16,
-    capability: [u8; 64],
-    reason: [u8; 128],
-}
-
-impl Default for CapabilityPromptRequest {
-    fn default() -> Self {
-        Self {
-            opcode: 0,
-            process_id: 0,
-            executable: CapabilityExecutableIdentity::default(),
-            capability_class: CapabilityClass::UserGrantable,
-            capability_len: 0,
-            resource: CapabilityResourceDescriptor::default(),
-            reason_len: 0,
-            interactive: 0,
-            decision_scope: 0,
-            reserved0: 0,
-            capability: [0; 64],
-            reason: [0; 128],
-        }
-    }
-}
-
-const CAPABILITY_PROMPT_OPCODE: u32 = 0x4350_5251;
-const CAPABILITY_PERSISTENT_QUERY_OPCODE: u32 = 0x4350_5150;
 const CAPABILITY_SERVICE_NAME: &[u8] = b"capability.service";
 
 #[repr(C)]
@@ -895,8 +803,8 @@ fn request_capability_from_shell(
         interactive: 1,
         decision_scope: 0,
         reserved0: 0,
-        capability: [0; 64],
-        reason: [0; 128],
+        capability: [0; MAX_CAPABILITY_NAME_LEN],
+        reason: [0; MAX_REASON_LEN],
     };
     let exec_bytes = executable_path.as_bytes();
     if exec_bytes.len() > request.executable.path.len() {
@@ -983,8 +891,8 @@ fn fill_capability_request(
         interactive: interactive as u8,
         decision_scope: 0,
         reserved0: 0,
-        capability: [0; 64],
-        reason: [0; 128],
+        capability: [0; MAX_CAPABILITY_NAME_LEN],
+        reason: [0; MAX_REASON_LEN],
     };
     let exec_bytes = executable_path.as_bytes();
     if exec_bytes.len() > request.executable.path.len() {

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/capability-protocol",
     "crates/syscall",
     "crates/runtime",
     "crates/platform",
@@ -13,3 +14,9 @@ version = "0.1.0"
 
 [patch.crates-io]
 libc = { path = "../libraries/libc" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
