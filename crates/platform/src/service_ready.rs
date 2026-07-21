@@ -17,6 +17,27 @@ pub struct Target {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OneShotStatus(Option<i32>);
+
+impl OneShotStatus {
+    pub const fn new() -> Self {
+        Self(None)
+    }
+
+    pub const fn get(self) -> Option<i32> {
+        self.0
+    }
+
+    pub fn record(&mut self, status: i32) -> bool {
+        if self.0.is_some() {
+            return false;
+        }
+        self.0 = Some(status);
+        true
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecodeError {
     InvalidLength,
     InvalidMagic,
@@ -238,5 +259,13 @@ mod tests {
         assert_eq!(take_bootstrap_target(), None);
         capture_bootstrap_arg(b"--service-ready=42:not-a-token");
         assert_eq!(take_bootstrap_target(), None);
+    }
+
+    #[test]
+    fn duplicate_notification_keeps_first_status() {
+        let mut status = OneShotStatus::new();
+        assert!(status.record(0));
+        assert!(!status.record(-5));
+        assert_eq!(status.get(), Some(0));
     }
 }
