@@ -13,6 +13,12 @@ pub enum DecodeError {
     InvalidKind,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResultError {
+    InvalidMessage(DecodeError),
+    Failed(i32),
+}
+
 fn encode(kind: u16, status: i32) -> [u8; MESSAGE_LEN] {
     let mut message = [0u8; MESSAGE_LEN];
     message[0..4].copy_from_slice(&MAGIC.to_le_bytes());
@@ -62,6 +68,14 @@ pub fn decode_result(message: &[u8]) -> Result<i32, DecodeError> {
     decode(message, KIND_RESULT)
 }
 
+pub fn validate_result(message: &[u8]) -> Result<(), ResultError> {
+    let status = decode_result(message).map_err(ResultError::InvalidMessage)?;
+    if status != 0 {
+        return Err(ResultError::Failed(status));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,6 +92,8 @@ mod tests {
     fn result_round_trips_success_and_failure() {
         assert_eq!(decode_result(&result(0)), Ok(0));
         assert_eq!(decode_result(&result(-5)), Ok(-5));
+        assert_eq!(validate_result(&result(0)), Ok(()));
+        assert_eq!(validate_result(&result(-5)), Err(ResultError::Failed(-5)));
     }
 
     #[test]
