@@ -106,6 +106,7 @@ pub mod logger {
             }
             let len = unsafe { c_string_len(arg_ptr) };
             let arg = unsafe { core::slice::from_raw_parts(arg_ptr, len) };
+            crate::service_ready::capture_bootstrap_arg(arg);
             if let Some(value) = parse_decimal_u64(arg) {
                 last_numeric = Some(value);
             }
