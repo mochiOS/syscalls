@@ -75,6 +75,7 @@ pub unsafe fn syscall0(number: u64) -> u64 {
     inlateout("rax") number => ret,
     lateout("rcx") _,
     lateout("r11") _,
+    clobber_abi("C"),
     options(nostack)
     );
     ret
@@ -90,6 +91,7 @@ pub unsafe fn syscall1(number: u64, arg0: u64) -> u64 {
     in("rdi") arg0,
     lateout("rcx") _,
     lateout("r11") _,
+    clobber_abi("C"),
     options(nostack)
     );
     ret
@@ -106,6 +108,7 @@ pub unsafe fn syscall2(number: u64, arg0: u64, arg1: u64) -> u64 {
     in("rsi") arg1,
     lateout("rcx") _,
     lateout("r11") _,
+    clobber_abi("C"),
     options(nostack)
     );
     ret
@@ -123,6 +126,7 @@ pub unsafe fn syscall3(number: u64, arg0: u64, arg1: u64, arg2: u64) -> u64 {
     in("rdx") arg2,
     lateout("rcx") _,
     lateout("r11") _,
+    clobber_abi("C"),
     options(nostack)
     );
     ret
@@ -141,6 +145,7 @@ pub unsafe fn syscall4(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) 
     inlateout("r10") arg3 => _,
     lateout("rcx") _,
     lateout("r11") _,
+    clobber_abi("C"),
     options(nostack)
     );
     ret
@@ -160,6 +165,7 @@ pub unsafe fn syscall5(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, 
     in("r8") arg4,
     lateout("rcx") _,
     lateout("r11") _,
+    clobber_abi("C"),
     options(nostack)
     );
     ret
@@ -188,6 +194,7 @@ pub unsafe fn syscall6(
     in("r9") arg5,
     lateout("rcx") _,
     lateout("r11") _,
+    clobber_abi("C"),
     options(nostack)
     );
     ret
