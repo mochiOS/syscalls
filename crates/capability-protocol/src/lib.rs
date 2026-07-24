@@ -13,7 +13,11 @@ pub const CAPABILITY_PROMPT_OPCODE: u32 = 0x4350_5251;
 pub const CAPABILITY_RESPONSE_OPCODE: u32 = 0x4350_5252;
 pub const CAPABILITY_DECISION_OPCODE: u32 = 0x4350_5244;
 pub const CAPABILITY_PERSISTENT_QUERY_OPCODE: u32 = 0x4350_5150;
+pub const RESOLVE_CAPABILITIES_OPCODE: u32 = 0x4341_5053;
 pub const PROTOCOL_VERSION: u32 = 1;
+
+pub const RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN: usize = size_of::<u32>();
+pub const RESOLVE_CAPABILITIES_REPLY_STATUS_LEN: usize = size_of::<u64>();
 
 pub const MAX_CAPABILITY_NAME_LEN: usize = 64;
 pub const MAX_EXECUTABLE_PATH_LEN: usize = 256;
@@ -50,6 +54,68 @@ impl fmt::Display for ProtocolError {
 
 #[cfg(feature = "std")]
 impl std::error::Error for ProtocolError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolveCapabilitiesReply<'a> {
+    pub status: u64,
+    pub capabilities: &'a [u8],
+}
+
+fn resolve_capabilities_path(bytes: &[u8]) -> Result<&str, ProtocolError> {
+    if bytes.is_empty() {
+        return Err(ProtocolError::InvalidLength);
+    }
+    if bytes.contains(&0) {
+        return Err(ProtocolError::InvalidField);
+    }
+    let path = core::str::from_utf8(bytes).map_err(|_| ProtocolError::InvalidUtf8)?;
+    if !path.starts_with('/') {
+        return Err(ProtocolError::InvalidField);
+    }
+    Ok(path)
+}
+
+#[cfg(feature = "alloc")]
+pub fn encode_resolve_capabilities_request(path: &str) -> Result<Vec<u8>, ProtocolError> {
+    resolve_capabilities_path(path.as_bytes())?;
+    let mut request = Vec::with_capacity(RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN + path.len());
+    request.extend_from_slice(&RESOLVE_CAPABILITIES_OPCODE.to_le_bytes());
+    request.extend_from_slice(path.as_bytes());
+    Ok(request)
+}
+
+pub fn decode_resolve_capabilities_request(bytes: &[u8]) -> Result<&str, ProtocolError> {
+    if bytes.len() < RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN {
+        return Err(ProtocolError::TooShort);
+    }
+    let opcode = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    if opcode != RESOLVE_CAPABILITIES_OPCODE {
+        return Err(ProtocolError::UnknownOpcode);
+    }
+    resolve_capabilities_path(&bytes[RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN..])
+}
+
+#[cfg(feature = "alloc")]
+pub fn encode_resolve_capabilities_reply(status: u64, capabilities: &[u8]) -> Vec<u8> {
+    let mut reply = Vec::with_capacity(RESOLVE_CAPABILITIES_REPLY_STATUS_LEN + capabilities.len());
+    reply.extend_from_slice(&status.to_le_bytes());
+    reply.extend_from_slice(capabilities);
+    reply
+}
+
+pub fn decode_resolve_capabilities_reply(
+    bytes: &[u8],
+) -> Result<ResolveCapabilitiesReply<'_>, ProtocolError> {
+    if bytes.len() < RESOLVE_CAPABILITIES_REPLY_STATUS_LEN {
+        return Err(ProtocolError::TooShort);
+    }
+    Ok(ResolveCapabilitiesReply {
+        status: u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]),
+        capabilities: &bytes[RESOLVE_CAPABILITIES_REPLY_STATUS_LEN..],
+    })
+}
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -751,6 +817,108 @@ mod tests {
         assert_eq!(CAPABILITY_RESPONSE_OPCODE, 0x4350_5252);
         assert_eq!(CAPABILITY_DECISION_OPCODE, 0x4350_5244);
         assert_eq!(CAPABILITY_PERSISTENT_QUERY_OPCODE, 0x4350_5150);
+        assert_eq!(RESOLVE_CAPABILITIES_OPCODE, 0x4341_5053);
+    }
+
+    #[test]
+    fn resolve_request_encoding_matches_legacy_golden_bytes() {
+        assert_eq!(RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN, 4);
+        let encoded = match encode_resolve_capabilities_request("/bin/tool") {
+            Ok(encoded) => encoded,
+            Err(err) => panic!("resolve request encoding failed: {err:?}"),
+        };
+        assert_eq!(encoded, b"SPAC/bin/tool");
+        assert_eq!(
+            decode_resolve_capabilities_request(&encoded),
+            Ok("/bin/tool")
+        );
+    }
+
+    #[test]
+    fn resolve_request_decode_accepts_unaligned_input() {
+        let encoded = match encode_resolve_capabilities_request("/system/service") {
+            Ok(encoded) => encoded,
+            Err(err) => panic!("resolve request encoding failed: {err:?}"),
+        };
+        let mut storage = vec![0u8; encoded.len() + 1];
+        storage[1..].copy_from_slice(&encoded);
+        assert_eq!(
+            decode_resolve_capabilities_request(&storage[1..]),
+            Ok("/system/service")
+        );
+    }
+
+    #[test]
+    fn resolve_request_rejects_invalid_messages() {
+        assert_eq!(
+            decode_resolve_capabilities_request(&[0; 3]),
+            Err(ProtocolError::TooShort)
+        );
+        assert_eq!(
+            decode_resolve_capabilities_request(&RESOLVE_CAPABILITIES_OPCODE.to_le_bytes()),
+            Err(ProtocolError::InvalidLength)
+        );
+
+        let mut unknown = b"SPAC/bin/tool".to_vec();
+        unknown[..4].copy_from_slice(&0xdead_beefu32.to_le_bytes());
+        assert_eq!(
+            decode_resolve_capabilities_request(&unknown),
+            Err(ProtocolError::UnknownOpcode)
+        );
+
+        let relative = b"SPACbin/tool";
+        assert_eq!(
+            decode_resolve_capabilities_request(relative),
+            Err(ProtocolError::InvalidField)
+        );
+        let nul = b"SPAC/bin/\0tool";
+        assert_eq!(
+            decode_resolve_capabilities_request(nul),
+            Err(ProtocolError::InvalidField)
+        );
+        let invalid_utf8 = [b'S', b'P', b'A', b'C', b'/', 0xff];
+        assert_eq!(
+            decode_resolve_capabilities_request(&invalid_utf8),
+            Err(ProtocolError::InvalidUtf8)
+        );
+    }
+
+    #[test]
+    fn resolve_reply_encoding_matches_legacy_golden_bytes() {
+        assert_eq!(RESOLVE_CAPABILITIES_REPLY_STATUS_LEN, 8);
+        let encoded = encode_resolve_capabilities_reply(0, b"ipc.client\0ipc.server\0");
+        let mut expected = vec![0u8; 8];
+        expected.extend_from_slice(b"ipc.client\0ipc.server\0");
+        assert_eq!(encoded, expected);
+
+        let decoded = match decode_resolve_capabilities_reply(&encoded) {
+            Ok(decoded) => decoded,
+            Err(err) => panic!("resolve reply decoding failed: {err:?}"),
+        };
+        assert_eq!(decoded.status, 0);
+        assert_eq!(decoded.capabilities, b"ipc.client\0ipc.server\0");
+
+        assert_eq!(
+            encode_resolve_capabilities_reply(22, &[]),
+            22u64.to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn resolve_reply_decode_handles_unaligned_and_short_input() {
+        let encoded = encode_resolve_capabilities_reply(5, &[]);
+        let mut storage = vec![0u8; encoded.len() + 1];
+        storage[1..].copy_from_slice(&encoded);
+        let decoded = match decode_resolve_capabilities_reply(&storage[1..]) {
+            Ok(decoded) => decoded,
+            Err(err) => panic!("resolve reply decoding failed: {err:?}"),
+        };
+        assert_eq!(decoded.status, 5);
+        assert!(decoded.capabilities.is_empty());
+        assert_eq!(
+            decode_resolve_capabilities_reply(&[0; 7]),
+            Err(ProtocolError::TooShort)
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@ edition = "2024"
 mnu-abi = { path = "../../../core/crates/abi" }
 mochi-user-syscall = { path = "../syscall" }
 mochi-user-runtime = { path = "../runtime" }
-mochios-capability-protocol = { path = "../capability-protocol", default-features = false }
+mochios-capability-protocol = { path = "../capability-protocol", default-features = false, features = ["alloc"] }
 
 [features]
 default = []

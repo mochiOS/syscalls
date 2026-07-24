@@ -734,12 +734,16 @@ pub mod event {
 pub mod capability {
     use super::syscall::{self, SysResult};
     pub use mochios_capability_protocol::{
-        decode_decision_request, decode_request, encode_decision_request, encode_request,
-        CapabilityClass, CapabilityDecision, CapabilityDecisionRequest, CapabilityRequest,
-        ExecutableIdentity, ProtocolError, ResourceDescriptor, CAPABILITY_DECISION_OPCODE,
+        decode_decision_request, decode_request, decode_resolve_capabilities_reply,
+        decode_resolve_capabilities_request, encode_decision_request, encode_request,
+        encode_resolve_capabilities_reply, encode_resolve_capabilities_request, CapabilityClass,
+        CapabilityDecision, CapabilityDecisionRequest, CapabilityRequest, ExecutableIdentity,
+        ProtocolError, ResolveCapabilitiesReply, ResourceDescriptor, CAPABILITY_DECISION_OPCODE,
         CAPABILITY_PERSISTENT_QUERY_OPCODE, CAPABILITY_PROMPT_OPCODE, CAPABILITY_RESPONSE_OPCODE,
         MAX_CAPABILITY_NAME_LEN, MAX_DECISION_PAYLOAD_SIZE, MAX_EXECUTABLE_PATH_LEN,
         MAX_PAYLOAD_SIZE, MAX_REASON_LEN, MAX_RESOURCE_PATH_LEN, PROTOCOL_VERSION,
+        RESOLVE_CAPABILITIES_OPCODE, RESOLVE_CAPABILITIES_REPLY_STATUS_LEN,
+        RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN,
     };
 
     pub fn capability_from_string(name: &str) -> CapabilityClass {
