@@ -981,7 +981,35 @@ fn drop_capability(capability: &str) {
 
 fn open_requires_write_access(flags: c_int) -> bool {
     let access_mode = flags & 0x3;
-    access_mode != 0
+    access_mode != 0 || (flags & (0x0008 | 0x0200 | 0x0400)) != 0
+}
+
+fn kernel_open_flags(flags: c_int) -> u64 {
+    const NEWLIB_O_APPEND: u64 = 0x0008;
+    const NEWLIB_O_CREAT: u64 = 0x0200;
+    const NEWLIB_O_TRUNC: u64 = 0x0400;
+    const NEWLIB_O_EXCL: u64 = 0x0800;
+    const NEWLIB_MASK: u64 = NEWLIB_O_APPEND | NEWLIB_O_CREAT | NEWLIB_O_TRUNC | NEWLIB_O_EXCL;
+    const KERNEL_O_CREAT: u64 = 0o100;
+    const KERNEL_O_EXCL: u64 = 0o200;
+    const KERNEL_O_TRUNC: u64 = 0o1000;
+    const KERNEL_O_APPEND: u64 = 0o2000;
+
+    let input = flags as u64;
+    let mut output = input & !NEWLIB_MASK;
+    if (input & NEWLIB_O_APPEND) != 0 {
+        output |= KERNEL_O_APPEND;
+    }
+    if (input & NEWLIB_O_CREAT) != 0 {
+        output |= KERNEL_O_CREAT;
+    }
+    if (input & NEWLIB_O_TRUNC) != 0 {
+        output |= KERNEL_O_TRUNC;
+    }
+    if (input & NEWLIB_O_EXCL) != 0 {
+        output |= KERNEL_O_EXCL;
+    }
+    output
 }
 
 fn retry_open_with_prompt(path: *const c_char, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
@@ -1008,7 +1036,7 @@ fn retry_open_with_prompt(path: *const c_char, flags: c_int, mode: c_int) -> Res
                 syscall::SyscallNumber::FileOpenAt,
                 AT_FDCWD as u64,
                 path as u64,
-                flags as u64,
+                kernel_open_flags(flags),
                 mode as u64,
             ))?;
             let fd = allocate_fd(lower, flags)?;
@@ -1800,7 +1828,7 @@ pub extern "C" fn _open(path: *const c_char, flags: c_int, mode: c_int) -> c_int
             syscall::SyscallNumber::FileOpenAt,
             AT_FDCWD as u64,
             path as u64,
-            flags as u64,
+            kernel_open_flags(flags),
             mode as u64,
         ))?;
         let fd = allocate_fd(lower, flags)?;
@@ -2124,6 +2152,82 @@ pub extern "C" fn _lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
     _lseek(fd, offset, whence)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _fsync(fd: c_int) -> c_int {
+    let result = (|| {
+        let entry = with_fd_entry(fd)?;
+        if !matches!(entry.kind, FdKind::File) {
+            return Err(EBADF);
+        }
+        syscall_errno(syscall::raw_syscall1(
+            syscall::SyscallNumber::Fsync,
+            entry.lower_handle,
+        ))?;
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fsync(fd: c_int) -> c_int {
+    _fsync(fd)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fdatasync(fd: c_int) -> c_int {
+    _fsync(fd)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _ftruncate(fd: c_int, length: i64) -> c_int {
+    if length < 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let result = (|| {
+        let entry = with_fd_entry(fd)?;
+        if !matches!(entry.kind, FdKind::File) {
+            return Err(EBADF);
+        }
+        syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::Ftruncate,
+            entry.lower_handle,
+            length as u64,
+        ))?;
+        if entry.position > length as u64 {
+            store_position(fd, length as u64);
+        }
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ftruncate(fd: c_int, length: i64) -> c_int {
+    _ftruncate(fd, length)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn truncate(path: *const c_char, length: i64) -> c_int {
+    if path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    if length < 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    result_with_errno(
+        syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::Truncate,
+            path as u64,
+            length as u64,
+        ))
+        .map(|_| 0),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]
