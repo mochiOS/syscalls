@@ -48,6 +48,10 @@ dependencies = [
 name = "mochios-capability-protocol"
 version = "0.1.0"
 
+[[package]]
+name = "mochios-driver-control-protocol"
+version = "0.1.0"
+
 [[patch.unused]]
 name = "libc"
 version = "0.2.185"

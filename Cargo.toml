@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/capability-protocol",
+    "crates/driver-control-protocol",
     "crates/syscall",
     "crates/runtime",
     "crates/platform",
