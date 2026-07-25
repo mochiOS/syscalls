@@ -52,6 +52,10 @@ version = "0.1.0"
 name = "mochios-driver-control-protocol"
 version = "0.1.0"
 
+[[package]]
+name = "mochios-virtio-gpu-protocol"
+version = "0.1.0"
+
 [[patch.unused]]
 name = "libc"
 version = "0.2.185"
