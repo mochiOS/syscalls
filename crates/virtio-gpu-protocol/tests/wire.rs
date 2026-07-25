@@ -230,6 +230,39 @@ fn rejects_invalid_backing_and_encode_buffer() {
 }
 
 #[test]
+fn scanout_zero_resource_is_reserved_for_disable() {
+    let disable = encode::<48>(Command::SetScanout(SetScanout {
+        rect: Rect::default(),
+        scanout_id: 0,
+        resource_id: 0,
+    }));
+    assert!(matches!(
+        DecodedCommand::decode(&disable),
+        Ok(DecodedCommand::SetScanout(SetScanout {
+            rect: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
+            scanout_id: 0,
+            resource_id: 0,
+        }))
+    ));
+
+    let mut invalid = [0u8; 48];
+    assert_eq!(
+        Command::SetScanout(SetScanout {
+            rect: rect(),
+            scanout_id: 0,
+            resource_id: 0,
+        })
+        .encode(&mut invalid),
+        Err(EncodeError::InvalidValue)
+    );
+}
+
+#[test]
 fn response_round_trip_golden_and_validation() {
     let mut no_data = [0u8; 24];
     assert_eq!(

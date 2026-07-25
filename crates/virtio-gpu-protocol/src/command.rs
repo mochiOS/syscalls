@@ -196,8 +196,13 @@ impl Command<'_> {
                 encode_resource_operation(buffer, TYPE_RESOURCE_UNREF, command)?;
             }
             Self::SetScanout(command) => {
-                validate_resource_id(command.resource_id)?;
-                command.rect.validate_nonempty()?;
+                if command.resource_id == 0 {
+                    if command.rect != Rect::default() {
+                        return Err(EncodeError::InvalidValue);
+                    }
+                } else {
+                    command.rect.validate_nonempty()?;
+                }
                 if command.scanout_id > MAX_SCANOUT_ID {
                     return Err(EncodeError::InvalidValue);
                 }
@@ -305,10 +310,28 @@ impl<'a> DecodedCommand<'a> {
                         actual: u64::from(scanout_id),
                     });
                 }
+                let resource_id = read_u32(buffer, 44)?;
+                let rect = Rect::decode_at(buffer, 24)?;
+                if resource_id == 0 {
+                    if rect != Rect::default() {
+                        return Err(DecodeError::InvalidValue {
+                            offset: 24,
+                            actual: 0,
+                        });
+                    }
+                } else if !rect.is_nonempty()
+                    || rect.x.checked_add(rect.width).is_none()
+                    || rect.y.checked_add(rect.height).is_none()
+                {
+                    return Err(DecodeError::InvalidValue {
+                        offset: 24,
+                        actual: 0,
+                    });
+                }
                 Ok(Self::SetScanout(SetScanout {
-                    rect: Rect::decode_nonempty_at(buffer, 24)?,
+                    rect,
                     scanout_id,
-                    resource_id: decode_resource_id(buffer, 44)?,
+                    resource_id,
                 }))
             }
             TYPE_RESOURCE_FLUSH => {
