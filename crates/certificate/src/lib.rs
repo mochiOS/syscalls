@@ -416,6 +416,12 @@ impl DeveloperCertificate {
         if key_id(root_public_key) != self.issuer_key_id {
             return Err(VerifyError::IssuerKeyIdMismatch);
         }
+        let message = self
+            .signing_message()
+            .map_err(|_| VerifyError::InvalidSignature)?;
+        verifier
+            .verify_strict(&message, &Signature::from_bytes(&self.signature))
+            .map_err(|_| VerifyError::InvalidSignature)?;
         if unix_time < self.not_before {
             return Err(VerifyError::NotYetValid);
         }
@@ -430,12 +436,6 @@ impl DeveloperCertificate {
         {
             return Err(VerifyError::PackageIdNotAllowed);
         }
-        let message = self
-            .signing_message()
-            .map_err(|_| VerifyError::InvalidSignature)?;
-        verifier
-            .verify_strict(&message, &Signature::from_bytes(&self.signature))
-            .map_err(|_| VerifyError::InvalidSignature)?;
         Ok(VerifiedDeveloper { certificate: self })
     }
 

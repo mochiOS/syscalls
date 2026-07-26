@@ -176,6 +176,16 @@ fn root_and_signature_must_match() {
 }
 
 #[test]
+fn root_signature_is_checked_before_validity_and_scope() {
+    let (mut certificate, root_public) = signed_certificate();
+    certificate.signature[0] ^= 1;
+    assert_eq!(
+        certificate.verify(&root_public, certificate.not_after, "org.invalid"),
+        Err(VerifyError::InvalidSignature)
+    );
+}
+
+#[test]
 fn encode_reports_small_buffer() {
     let (certificate, _) = signed_certificate();
     let required = certificate.encoded_len().unwrap();
