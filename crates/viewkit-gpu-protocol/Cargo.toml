@@ -1,0 +1,8 @@
+[package]
+name = "mochios-viewkit-gpu-protocol"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+

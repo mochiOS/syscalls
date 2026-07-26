@@ -38,9 +38,67 @@ fn command_types_and_lengths_match_specification() {
     assert_eq!(TYPE_TRANSFER_TO_HOST_3D, 0x0205);
     assert_eq!(TYPE_TRANSFER_FROM_HOST_3D, 0x0206);
     assert_eq!(TYPE_SUBMIT_3D, 0x0207);
+    assert_eq!(TYPE_UPDATE_CURSOR, 0x0300);
+    assert_eq!(TYPE_MOVE_CURSOR, 0x0301);
     assert_eq!(VIRTIO_GPU_F_VIRGL, 1);
     assert_eq!(COMMAND_HEADER_LEN, 24);
     assert_eq!(DISPLAY_INFO_LEN, 408);
+}
+
+#[test]
+fn cursor_commands_round_trip_and_match_golden_bytes() {
+    let position = CursorPosition {
+        scanout_id: 3,
+        x: 0x1122_3344,
+        y: 0x5566_7788,
+    };
+    let update = encode::<56>(Command::UpdateCursor(CursorUpdate {
+        position,
+        resource_id: 7,
+        hotspot_x: 1,
+        hotspot_y: 2,
+    }));
+    assert_eq!(&update[0..4], &[0, 3, 0, 0]);
+    assert_eq!(
+        &update[24..56],
+        &[
+            3, 0, 0, 0, 0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55, 0, 0, 0, 0, 7, 0, 0, 0, 1,
+            0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0,
+        ]
+    );
+    assert_eq!(
+        DecodedCommand::decode(&update),
+        Ok(DecodedCommand::UpdateCursor(CursorUpdate {
+            position,
+            resource_id: 7,
+            hotspot_x: 1,
+            hotspot_y: 2,
+        }))
+    );
+
+    let hide = encode::<56>(Command::UpdateCursor(CursorUpdate {
+        position,
+        resource_id: 0,
+        hotspot_x: 0,
+        hotspot_y: 0,
+    }));
+    assert_eq!(
+        DecodedCommand::decode(&hide),
+        Ok(DecodedCommand::UpdateCursor(CursorUpdate {
+            position,
+            resource_id: 0,
+            hotspot_x: 0,
+            hotspot_y: 0,
+        }))
+    );
+
+    let movement = encode::<56>(Command::MoveCursor(position));
+    assert_eq!(&movement[0..4], &[1, 3, 0, 0]);
+    assert!(movement[36..].iter().all(|byte| *byte == 0));
+    assert_eq!(
+        DecodedCommand::decode(&movement),
+        Ok(DecodedCommand::MoveCursor(position))
+    );
 }
 
 #[test]

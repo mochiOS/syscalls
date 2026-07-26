@@ -2,6 +2,7 @@ use core::fmt;
 
 use crate::codec::{read_u32, read_u64, write_u32, write_u64};
 
+pub const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
 pub const VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +62,7 @@ impl fmt::Display for DecodeError {
 pub struct PixelFormat(u32);
 
 impl PixelFormat {
+    pub const B8G8R8A8_UNORM: Self = Self(VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM);
     pub const B8G8R8X8_UNORM: Self = Self(VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM);
 
     pub const fn wire_value(self) -> u32 {
@@ -68,7 +70,10 @@ impl PixelFormat {
     }
 
     pub const fn from_wire(value: u32) -> Option<Self> {
-        if value == VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM {
+        if matches!(
+            value,
+            VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM | VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM
+        ) {
             Some(Self(value))
         } else {
             None

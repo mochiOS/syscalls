@@ -7,9 +7,9 @@ mod types;
 
 pub use command::{
     AttachBacking, AttachBackingView, COMMAND_HEADER_LEN, Command, ContextCreate,
-    ContextCreateView, ContextResource, DecodedCommand, GetCapset, ResourceCreate2d,
-    ResourceCreate3d, ResourceOperation, SetScanout, Submit3d, Submit3dView, TransferHost3d,
-    TransferToHost2d,
+    ContextCreateView, ContextResource, CursorPosition, CursorUpdate, DecodedCommand, GetCapset,
+    ResourceCreate2d, ResourceCreate3d, ResourceOperation, SetScanout, Submit3d, Submit3dView,
+    TransferHost3d, TransferToHost2d,
 };
 pub use response::{
     CAPSET_INFO_LEN, CapsetInfo, DISPLAY_INFO_LEN, DISPLAY_MODE_COUNT, DisplayInfo,
@@ -17,7 +17,7 @@ pub use response::{
 };
 pub use types::{
     Box3d, DecodeError, EncodeError, MemoryEntry, PixelFormat, Rect,
-    VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM,
+    VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM, VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM,
 };
 
 pub const VIRTIO_GPU_F_VIRGL: u64 = 1 << 0;
@@ -43,6 +43,8 @@ pub const TYPE_RESOURCE_CREATE_3D: u32 = 0x0204;
 pub const TYPE_TRANSFER_TO_HOST_3D: u32 = 0x0205;
 pub const TYPE_TRANSFER_FROM_HOST_3D: u32 = 0x0206;
 pub const TYPE_SUBMIT_3D: u32 = 0x0207;
+pub const TYPE_UPDATE_CURSOR: u32 = 0x0300;
+pub const TYPE_MOVE_CURSOR: u32 = 0x0301;
 
 pub const TYPE_RESP_OK_NODATA: u32 = 0x1100;
 pub const TYPE_RESP_OK_DISPLAY_INFO: u32 = 0x1101;

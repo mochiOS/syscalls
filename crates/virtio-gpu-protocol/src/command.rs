@@ -4,10 +4,11 @@ use crate::codec::{
 use crate::{
     Box3d, DecodeError, EncodeError, MemoryEntry, PixelFormat, Rect, TYPE_CTX_ATTACH_RESOURCE,
     TYPE_CTX_CREATE, TYPE_CTX_DESTROY, TYPE_CTX_DETACH_RESOURCE, TYPE_GET_CAPSET,
-    TYPE_GET_CAPSET_INFO, TYPE_GET_DISPLAY_INFO, TYPE_RESOURCE_ATTACH_BACKING,
+    TYPE_GET_CAPSET_INFO, TYPE_GET_DISPLAY_INFO, TYPE_MOVE_CURSOR, TYPE_RESOURCE_ATTACH_BACKING,
     TYPE_RESOURCE_CREATE_2D, TYPE_RESOURCE_CREATE_3D, TYPE_RESOURCE_DETACH_BACKING,
     TYPE_RESOURCE_FLUSH, TYPE_RESOURCE_UNREF, TYPE_SET_SCANOUT, TYPE_SUBMIT_3D,
     TYPE_TRANSFER_FROM_HOST_3D, TYPE_TRANSFER_TO_HOST_2D, TYPE_TRANSFER_TO_HOST_3D,
+    TYPE_UPDATE_CURSOR,
 };
 
 pub const COMMAND_HEADER_LEN: usize = 24;
@@ -26,6 +27,7 @@ const CONTEXT_DEBUG_NAME_LEN: usize = 64;
 const MAX_SUBMIT_3D_SIZE: usize = 16 * 1024 * 1024;
 const MAX_BACKING_ENTRIES: usize = 4096;
 const MAX_SCANOUT_ID: u32 = 15;
+const CURSOR_COMMAND_LEN: usize = 56;
 
 fn encode_header(buffer: &mut [u8], command_type: u32) {
     encode_context_header(buffer, command_type, 0);
@@ -128,6 +130,21 @@ pub struct TransferToHost2d {
     pub rect: Rect,
     pub offset: u64,
     pub resource_id: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorPosition {
+    pub scanout_id: u32,
+    pub x: u32,
+    pub y: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorUpdate {
+    pub position: CursorPosition,
+    pub resource_id: u32,
+    pub hotspot_x: u32,
+    pub hotspot_y: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -247,6 +264,8 @@ pub enum Command<'a> {
     TransferToHost3d(TransferHost3d),
     TransferFromHost3d(TransferHost3d),
     Submit3d(Submit3d<'a>),
+    UpdateCursor(CursorUpdate),
+    MoveCursor(CursorPosition),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -269,6 +288,8 @@ pub enum DecodedCommand<'a> {
     TransferToHost3d(TransferHost3d),
     TransferFromHost3d(TransferHost3d),
     Submit3d(Submit3dView<'a>),
+    UpdateCursor(CursorUpdate),
+    MoveCursor(CursorPosition),
 }
 
 impl Command<'_> {
@@ -322,6 +343,7 @@ impl Command<'_> {
                     .checked_add(SUBMIT_3D_PREFIX_LEN)
                     .ok_or(EncodeError::LengthOverflow)
             }
+            Self::UpdateCursor(_) | Self::MoveCursor(_) => Ok(CURSOR_COMMAND_LEN),
         }
     }
 
@@ -474,6 +496,16 @@ impl Command<'_> {
                 write_u32(buffer, 28, 0);
                 buffer[SUBMIT_3D_PREFIX_LEN..].copy_from_slice(command.commands);
             }
+            Self::UpdateCursor(command) => {
+                encode_cursor_position(buffer, TYPE_UPDATE_CURSOR, command.position)?;
+                write_u32(buffer, 40, command.resource_id);
+                write_u32(buffer, 44, command.hotspot_x);
+                write_u32(buffer, 48, command.hotspot_y);
+                write_u32(buffer, 52, 0);
+            }
+            Self::MoveCursor(position) => {
+                encode_cursor_position(buffer, TYPE_MOVE_CURSOR, position)?;
+            }
         }
         Ok(length)
     }
@@ -614,7 +646,7 @@ impl<'a> DecodedCommand<'a> {
                 decode_reserved_u32(buffer, 44)?;
                 Ok(Self::ResourceFlush {
                     rect: Rect::decode_nonempty_at(buffer, 24)?,
-                    resource_id: decode_resource_id(buffer, 40)?,
+                    resource_id: read_u32(buffer, 40)?,
                 })
             }
             TYPE_TRANSFER_TO_HOST_2D => {
@@ -776,11 +808,60 @@ impl<'a> DecodedCommand<'a> {
                     commands: &buffer[SUBMIT_3D_PREFIX_LEN..],
                 }))
             }
+            TYPE_UPDATE_CURSOR => {
+                require_decode(buffer, CURSOR_COMMAND_LEN)?;
+                decode_reserved_u32(buffer, 36)?;
+                decode_reserved_u32(buffer, 52)?;
+                Ok(Self::UpdateCursor(CursorUpdate {
+                    position: decode_cursor_position(buffer)?,
+                    resource_id: read_u32(buffer, 40)?,
+                    hotspot_x: read_u32(buffer, 44)?,
+                    hotspot_y: read_u32(buffer, 48)?,
+                }))
+            }
+            TYPE_MOVE_CURSOR => {
+                require_decode(buffer, CURSOR_COMMAND_LEN)?;
+                for offset in [36, 40, 44, 48, 52] {
+                    decode_reserved_u32(buffer, offset)?;
+                }
+                Ok(Self::MoveCursor(decode_cursor_position(buffer)?))
+            }
             _ => Err(DecodeError::UnknownCommand {
                 actual: command_type,
             }),
         }
     }
+}
+
+fn encode_cursor_position(
+    buffer: &mut [u8],
+    command_type: u32,
+    position: CursorPosition,
+) -> Result<(), EncodeError> {
+    if position.scanout_id > MAX_SCANOUT_ID {
+        return Err(EncodeError::InvalidValue);
+    }
+    encode_header(buffer, command_type);
+    write_u32(buffer, 24, position.scanout_id);
+    write_u32(buffer, 28, position.x);
+    write_u32(buffer, 32, position.y);
+    write_u32(buffer, 36, 0);
+    Ok(())
+}
+
+fn decode_cursor_position(buffer: &[u8]) -> Result<CursorPosition, DecodeError> {
+    let scanout_id = read_u32(buffer, 24)?;
+    if scanout_id > MAX_SCANOUT_ID {
+        return Err(DecodeError::InvalidValue {
+            offset: 24,
+            actual: u64::from(scanout_id),
+        });
+    }
+    Ok(CursorPosition {
+        scanout_id,
+        x: read_u32(buffer, 28)?,
+        y: read_u32(buffer, 32)?,
+    })
 }
 
 fn decode_resource_operation<'a>(

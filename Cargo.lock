@@ -53,6 +53,10 @@ name = "mochios-driver-control-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "mochios-viewkit-gpu-protocol"
+version = "0.1.0"
+
+[[package]]
 name = "mochios-virtio-gpu-protocol"
 version = "0.1.0"
 
