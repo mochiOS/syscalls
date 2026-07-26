@@ -2,9 +2,12 @@ use crate::codec::{
     read_u8, read_u32, read_u64, require_decode, require_encode, write_u8, write_u32, write_u64,
 };
 use crate::{
-    DecodeError, EncodeError, MemoryEntry, PixelFormat, Rect, TYPE_GET_DISPLAY_INFO,
-    TYPE_RESOURCE_ATTACH_BACKING, TYPE_RESOURCE_CREATE_2D, TYPE_RESOURCE_DETACH_BACKING,
-    TYPE_RESOURCE_FLUSH, TYPE_RESOURCE_UNREF, TYPE_SET_SCANOUT, TYPE_TRANSFER_TO_HOST_2D,
+    Box3d, DecodeError, EncodeError, MemoryEntry, PixelFormat, Rect, TYPE_CTX_ATTACH_RESOURCE,
+    TYPE_CTX_CREATE, TYPE_CTX_DESTROY, TYPE_CTX_DETACH_RESOURCE, TYPE_GET_CAPSET,
+    TYPE_GET_CAPSET_INFO, TYPE_GET_DISPLAY_INFO, TYPE_RESOURCE_ATTACH_BACKING,
+    TYPE_RESOURCE_CREATE_2D, TYPE_RESOURCE_CREATE_3D, TYPE_RESOURCE_DETACH_BACKING,
+    TYPE_RESOURCE_FLUSH, TYPE_RESOURCE_UNREF, TYPE_SET_SCANOUT, TYPE_SUBMIT_3D,
+    TYPE_TRANSFER_FROM_HOST_3D, TYPE_TRANSFER_TO_HOST_2D, TYPE_TRANSFER_TO_HOST_3D,
 };
 
 pub const COMMAND_HEADER_LEN: usize = 24;
@@ -14,19 +17,30 @@ const SET_SCANOUT_LEN: usize = 48;
 const RESOURCE_FLUSH_LEN: usize = 48;
 const TRANSFER_TO_HOST_2D_LEN: usize = 56;
 const ATTACH_BACKING_PREFIX_LEN: usize = 32;
+const CONTEXT_CREATE_LEN: usize = 96;
+const CONTEXT_RESOURCE_LEN: usize = 32;
+const RESOURCE_CREATE_3D_LEN: usize = 72;
+const TRANSFER_HOST_3D_LEN: usize = 72;
+const SUBMIT_3D_PREFIX_LEN: usize = 32;
+const CONTEXT_DEBUG_NAME_LEN: usize = 64;
+const MAX_SUBMIT_3D_SIZE: usize = 16 * 1024 * 1024;
 const MAX_BACKING_ENTRIES: usize = 4096;
 const MAX_SCANOUT_ID: u32 = 15;
 
 fn encode_header(buffer: &mut [u8], command_type: u32) {
+    encode_context_header(buffer, command_type, 0);
+}
+
+fn encode_context_header(buffer: &mut [u8], command_type: u32, context_id: u32) {
     write_u32(buffer, 0, command_type);
     write_u32(buffer, 4, 0);
     write_u64(buffer, 8, 0);
-    write_u32(buffer, 16, 0);
+    write_u32(buffer, 16, context_id);
     write_u8(buffer, 20, 0);
     buffer[21..24].fill(0);
 }
 
-fn decode_header(buffer: &[u8]) -> Result<u32, DecodeError> {
+fn decode_header(buffer: &[u8]) -> Result<(u32, u32), DecodeError> {
     let command_type = read_u32(buffer, 0)?;
     let flags = read_u32(buffer, 4)?;
     let fence_id = read_u64(buffer, 8)?;
@@ -38,7 +52,6 @@ fn decode_header(buffer: &[u8]) -> Result<u32, DecodeError> {
     for (offset, value) in [
         (4, u64::from(flags)),
         (8, fence_id),
-        (16, u64::from(context_id)),
         (20, u64::from(ring_index)),
         (21, u64::from(padding)),
     ] {
@@ -49,7 +62,29 @@ fn decode_header(buffer: &[u8]) -> Result<u32, DecodeError> {
             });
         }
     }
-    Ok(command_type)
+    Ok((command_type, context_id))
+}
+
+fn require_context(context_id: u32) -> Result<u32, DecodeError> {
+    if context_id == 0 {
+        Err(DecodeError::InvalidValue {
+            offset: 16,
+            actual: 0,
+        })
+    } else {
+        Ok(context_id)
+    }
+}
+
+fn require_no_context(context_id: u32) -> Result<(), DecodeError> {
+    if context_id == 0 {
+        Ok(())
+    } else {
+        Err(DecodeError::NonZeroReserved {
+            offset: 16,
+            actual: u64::from(context_id),
+        })
+    }
 }
 
 fn validate_resource_id(resource_id: u32) -> Result<(), EncodeError> {
@@ -108,6 +143,70 @@ pub struct AttachBackingView<'a> {
     bytes: &'a [u8],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GetCapset {
+    pub capset_id: u32,
+    pub version: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ContextCreate<'a> {
+    pub context_id: u32,
+    pub context_init: u32,
+    pub debug_name: &'a [u8],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContextCreateView<'a> {
+    pub context_id: u32,
+    pub context_init: u32,
+    pub debug_name: &'a [u8],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContextResource {
+    pub context_id: u32,
+    pub resource_id: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResourceCreate3d {
+    pub resource_id: u32,
+    pub target: u32,
+    pub format: u32,
+    pub bind: u32,
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub array_size: u32,
+    pub last_level: u32,
+    pub samples: u32,
+    pub flags: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransferHost3d {
+    pub context_id: u32,
+    pub box_3d: Box3d,
+    pub offset: u64,
+    pub resource_id: u32,
+    pub level: u32,
+    pub stride: u32,
+    pub layer_stride: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Submit3d<'a> {
+    pub context_id: u32,
+    pub commands: &'a [u8],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Submit3dView<'a> {
+    pub context_id: u32,
+    pub commands: &'a [u8],
+}
+
 impl<'a> AttachBackingView<'a> {
     pub const fn resource_id(self) -> u32 {
         self.resource_id
@@ -138,6 +237,16 @@ pub enum Command<'a> {
     TransferToHost2d(TransferToHost2d),
     ResourceAttachBacking(AttachBacking<'a>),
     ResourceDetachBacking(ResourceOperation),
+    GetCapsetInfo { index: u32 },
+    GetCapset(GetCapset),
+    ContextCreate(ContextCreate<'a>),
+    ContextDestroy { context_id: u32 },
+    ContextAttachResource(ContextResource),
+    ContextDetachResource(ContextResource),
+    ResourceCreate3d(ResourceCreate3d),
+    TransferToHost3d(TransferHost3d),
+    TransferFromHost3d(TransferHost3d),
+    Submit3d(Submit3d<'a>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,6 +259,16 @@ pub enum DecodedCommand<'a> {
     TransferToHost2d(TransferToHost2d),
     ResourceAttachBacking(AttachBackingView<'a>),
     ResourceDetachBacking(ResourceOperation),
+    GetCapsetInfo { index: u32 },
+    GetCapset(GetCapset),
+    ContextCreate(ContextCreateView<'a>),
+    ContextDestroy { context_id: u32 },
+    ContextAttachResource(ContextResource),
+    ContextDetachResource(ContextResource),
+    ResourceCreate3d(ResourceCreate3d),
+    TransferToHost3d(TransferHost3d),
+    TransferFromHost3d(TransferHost3d),
+    Submit3d(Submit3dView<'a>),
 }
 
 impl Command<'_> {
@@ -169,6 +288,38 @@ impl Command<'_> {
                     .len()
                     .checked_mul(MemoryEntry::ENCODED_LEN)
                     .and_then(|length| length.checked_add(ATTACH_BACKING_PREFIX_LEN))
+                    .ok_or(EncodeError::LengthOverflow)
+            }
+            Self::GetCapsetInfo { .. }
+            | Self::GetCapset(_)
+            | Self::ContextAttachResource(_)
+            | Self::ContextDetachResource(_) => Ok(CONTEXT_RESOURCE_LEN),
+            Self::ContextCreate(command) => {
+                if command.context_id == 0 || command.debug_name.len() > CONTEXT_DEBUG_NAME_LEN {
+                    return Err(EncodeError::InvalidValue);
+                }
+                Ok(CONTEXT_CREATE_LEN)
+            }
+            Self::ContextDestroy { context_id } => {
+                if context_id == 0 {
+                    return Err(EncodeError::InvalidValue);
+                }
+                Ok(COMMAND_HEADER_LEN)
+            }
+            Self::ResourceCreate3d(_) => Ok(RESOURCE_CREATE_3D_LEN),
+            Self::TransferToHost3d(_) | Self::TransferFromHost3d(_) => Ok(TRANSFER_HOST_3D_LEN),
+            Self::Submit3d(command) => {
+                if command.context_id == 0
+                    || command.commands.is_empty()
+                    || command.commands.len() > MAX_SUBMIT_3D_SIZE
+                    || command.commands.len() % 4 != 0
+                {
+                    return Err(EncodeError::InvalidValue);
+                }
+                command
+                    .commands
+                    .len()
+                    .checked_add(SUBMIT_3D_PREFIX_LEN)
                     .ok_or(EncodeError::LengthOverflow)
             }
         }
@@ -246,6 +397,83 @@ impl Command<'_> {
             Self::ResourceDetachBacking(command) => {
                 encode_resource_operation(buffer, TYPE_RESOURCE_DETACH_BACKING, command)?;
             }
+            Self::GetCapsetInfo { index } => {
+                encode_header(buffer, TYPE_GET_CAPSET_INFO);
+                write_u32(buffer, 24, index);
+                write_u32(buffer, 28, 0);
+            }
+            Self::GetCapset(command) => {
+                if command.capset_id == 0 {
+                    return Err(EncodeError::InvalidValue);
+                }
+                encode_header(buffer, TYPE_GET_CAPSET);
+                write_u32(buffer, 24, command.capset_id);
+                write_u32(buffer, 28, command.version);
+            }
+            Self::ContextCreate(command) => {
+                encode_context_header(buffer, TYPE_CTX_CREATE, command.context_id);
+                write_u32(
+                    buffer,
+                    24,
+                    u32::try_from(command.debug_name.len())
+                        .map_err(|_| EncodeError::LengthOverflow)?,
+                );
+                write_u32(buffer, 28, command.context_init);
+                buffer[32..32 + command.debug_name.len()].copy_from_slice(command.debug_name);
+            }
+            Self::ContextDestroy { context_id } => {
+                encode_context_header(buffer, TYPE_CTX_DESTROY, context_id);
+            }
+            Self::ContextAttachResource(command) => {
+                encode_context_resource(buffer, TYPE_CTX_ATTACH_RESOURCE, command)?;
+            }
+            Self::ContextDetachResource(command) => {
+                encode_context_resource(buffer, TYPE_CTX_DETACH_RESOURCE, command)?;
+            }
+            Self::ResourceCreate3d(command) => {
+                validate_resource_id(command.resource_id)?;
+                if command.width == 0
+                    || command.height == 0
+                    || command.depth == 0
+                    || command.array_size == 0
+                {
+                    return Err(EncodeError::InvalidValue);
+                }
+                encode_header(buffer, TYPE_RESOURCE_CREATE_3D);
+                for (offset, value) in [
+                    (24, command.resource_id),
+                    (28, command.target),
+                    (32, command.format),
+                    (36, command.bind),
+                    (40, command.width),
+                    (44, command.height),
+                    (48, command.depth),
+                    (52, command.array_size),
+                    (56, command.last_level),
+                    (60, command.samples),
+                    (64, command.flags),
+                    (68, 0),
+                ] {
+                    write_u32(buffer, offset, value);
+                }
+            }
+            Self::TransferToHost3d(command) => {
+                encode_transfer_host_3d(buffer, TYPE_TRANSFER_TO_HOST_3D, command)?;
+            }
+            Self::TransferFromHost3d(command) => {
+                encode_transfer_host_3d(buffer, TYPE_TRANSFER_FROM_HOST_3D, command)?;
+            }
+            Self::Submit3d(command) => {
+                encode_context_header(buffer, TYPE_SUBMIT_3D, command.context_id);
+                write_u32(
+                    buffer,
+                    24,
+                    u32::try_from(command.commands.len())
+                        .map_err(|_| EncodeError::LengthOverflow)?,
+                );
+                write_u32(buffer, 28, 0);
+                buffer[SUBMIT_3D_PREFIX_LEN..].copy_from_slice(command.commands);
+            }
         }
         Ok(length)
     }
@@ -263,6 +491,41 @@ fn encode_resource_operation(
     Ok(())
 }
 
+fn encode_context_resource(
+    buffer: &mut [u8],
+    command_type: u32,
+    command: ContextResource,
+) -> Result<(), EncodeError> {
+    if command.context_id == 0 {
+        return Err(EncodeError::InvalidValue);
+    }
+    validate_resource_id(command.resource_id)?;
+    encode_context_header(buffer, command_type, command.context_id);
+    write_u32(buffer, 24, command.resource_id);
+    write_u32(buffer, 28, 0);
+    Ok(())
+}
+
+fn encode_transfer_host_3d(
+    buffer: &mut [u8],
+    command_type: u32,
+    command: TransferHost3d,
+) -> Result<(), EncodeError> {
+    if command.context_id == 0 {
+        return Err(EncodeError::InvalidValue);
+    }
+    validate_resource_id(command.resource_id)?;
+    command.box_3d.validate_nonempty()?;
+    encode_context_header(buffer, command_type, command.context_id);
+    command.box_3d.encode_at(buffer, 24);
+    write_u64(buffer, 48, command.offset);
+    write_u32(buffer, 56, command.resource_id);
+    write_u32(buffer, 60, command.level);
+    write_u32(buffer, 64, command.stride);
+    write_u32(buffer, 68, command.layer_stride);
+    Ok(())
+}
+
 impl<'a> DecodedCommand<'a> {
     pub fn decode(buffer: &'a [u8]) -> Result<Self, DecodeError> {
         if buffer.len() < COMMAND_HEADER_LEN {
@@ -271,7 +534,19 @@ impl<'a> DecodedCommand<'a> {
                 actual: buffer.len(),
             });
         }
-        let command_type = decode_header(buffer)?;
+        let (command_type, context_id) = decode_header(buffer)?;
+        if !matches!(
+            command_type,
+            TYPE_CTX_CREATE
+                | TYPE_CTX_DESTROY
+                | TYPE_CTX_ATTACH_RESOURCE
+                | TYPE_CTX_DETACH_RESOURCE
+                | TYPE_TRANSFER_TO_HOST_3D
+                | TYPE_TRANSFER_FROM_HOST_3D
+                | TYPE_SUBMIT_3D
+        ) {
+            require_no_context(context_id)?;
+        }
         match command_type {
             TYPE_GET_DISPLAY_INFO => {
                 require_decode(buffer, COMMAND_HEADER_LEN)?;
@@ -384,6 +659,123 @@ impl<'a> DecodedCommand<'a> {
             TYPE_RESOURCE_DETACH_BACKING => {
                 decode_resource_operation(buffer, Self::ResourceDetachBacking)
             }
+            TYPE_GET_CAPSET_INFO => {
+                require_decode(buffer, CONTEXT_RESOURCE_LEN)?;
+                decode_reserved_u32(buffer, 28)?;
+                Ok(Self::GetCapsetInfo {
+                    index: read_u32(buffer, 24)?,
+                })
+            }
+            TYPE_GET_CAPSET => {
+                require_decode(buffer, CONTEXT_RESOURCE_LEN)?;
+                let capset_id = read_u32(buffer, 24)?;
+                if capset_id == 0 {
+                    return Err(DecodeError::InvalidValue {
+                        offset: 24,
+                        actual: 0,
+                    });
+                }
+                Ok(Self::GetCapset(GetCapset {
+                    capset_id,
+                    version: read_u32(buffer, 28)?,
+                }))
+            }
+            TYPE_CTX_CREATE => {
+                require_decode(buffer, CONTEXT_CREATE_LEN)?;
+                let context_id = require_context(context_id)?;
+                let name_len = read_u32(buffer, 24)? as usize;
+                if name_len > CONTEXT_DEBUG_NAME_LEN {
+                    return Err(DecodeError::InvalidValue {
+                        offset: 24,
+                        actual: name_len as u64,
+                    });
+                }
+                if buffer[32 + name_len..CONTEXT_CREATE_LEN]
+                    .iter()
+                    .any(|byte| *byte != 0)
+                {
+                    return Err(DecodeError::NonZeroReserved {
+                        offset: 32 + name_len,
+                        actual: 1,
+                    });
+                }
+                Ok(Self::ContextCreate(ContextCreateView {
+                    context_id,
+                    context_init: read_u32(buffer, 28)?,
+                    debug_name: &buffer[32..32 + name_len],
+                }))
+            }
+            TYPE_CTX_DESTROY => {
+                require_decode(buffer, COMMAND_HEADER_LEN)?;
+                Ok(Self::ContextDestroy {
+                    context_id: require_context(context_id)?,
+                })
+            }
+            TYPE_CTX_ATTACH_RESOURCE => {
+                decode_context_resource(buffer, context_id, Self::ContextAttachResource)
+            }
+            TYPE_CTX_DETACH_RESOURCE => {
+                decode_context_resource(buffer, context_id, Self::ContextDetachResource)
+            }
+            TYPE_RESOURCE_CREATE_3D => {
+                require_decode(buffer, RESOURCE_CREATE_3D_LEN)?;
+                decode_reserved_u32(buffer, 68)?;
+                let command = ResourceCreate3d {
+                    resource_id: decode_resource_id(buffer, 24)?,
+                    target: read_u32(buffer, 28)?,
+                    format: read_u32(buffer, 32)?,
+                    bind: read_u32(buffer, 36)?,
+                    width: read_u32(buffer, 40)?,
+                    height: read_u32(buffer, 44)?,
+                    depth: read_u32(buffer, 48)?,
+                    array_size: read_u32(buffer, 52)?,
+                    last_level: read_u32(buffer, 56)?,
+                    samples: read_u32(buffer, 60)?,
+                    flags: read_u32(buffer, 64)?,
+                };
+                if command.width == 0
+                    || command.height == 0
+                    || command.depth == 0
+                    || command.array_size == 0
+                {
+                    return Err(DecodeError::InvalidValue {
+                        offset: 40,
+                        actual: u64::from(command.width) << 32 | u64::from(command.height),
+                    });
+                }
+                Ok(Self::ResourceCreate3d(command))
+            }
+            TYPE_TRANSFER_TO_HOST_3D => {
+                decode_transfer_host_3d(buffer, context_id, Self::TransferToHost3d)
+            }
+            TYPE_TRANSFER_FROM_HOST_3D => {
+                decode_transfer_host_3d(buffer, context_id, Self::TransferFromHost3d)
+            }
+            TYPE_SUBMIT_3D => {
+                if buffer.len() < SUBMIT_3D_PREFIX_LEN {
+                    return Err(DecodeError::InvalidLength {
+                        expected: SUBMIT_3D_PREFIX_LEN,
+                        actual: buffer.len(),
+                    });
+                }
+                let context_id = require_context(context_id)?;
+                let size = read_u32(buffer, 24)? as usize;
+                decode_reserved_u32(buffer, 28)?;
+                if size == 0 || size > MAX_SUBMIT_3D_SIZE || size % 4 != 0 {
+                    return Err(DecodeError::InvalidValue {
+                        offset: 24,
+                        actual: size as u64,
+                    });
+                }
+                let expected = size
+                    .checked_add(SUBMIT_3D_PREFIX_LEN)
+                    .ok_or(DecodeError::LengthOverflow)?;
+                require_decode(buffer, expected)?;
+                Ok(Self::Submit3d(Submit3dView {
+                    context_id,
+                    commands: &buffer[SUBMIT_3D_PREFIX_LEN..],
+                }))
+            }
             _ => Err(DecodeError::UnknownCommand {
                 actual: command_type,
             }),
@@ -399,6 +791,36 @@ fn decode_resource_operation<'a>(
     decode_reserved_u32(buffer, 28)?;
     Ok(wrap(ResourceOperation {
         resource_id: decode_resource_id(buffer, 24)?,
+    }))
+}
+
+fn decode_context_resource<'a>(
+    buffer: &'a [u8],
+    context_id: u32,
+    wrap: impl FnOnce(ContextResource) -> DecodedCommand<'a>,
+) -> Result<DecodedCommand<'a>, DecodeError> {
+    require_decode(buffer, CONTEXT_RESOURCE_LEN)?;
+    decode_reserved_u32(buffer, 28)?;
+    Ok(wrap(ContextResource {
+        context_id: require_context(context_id)?,
+        resource_id: decode_resource_id(buffer, 24)?,
+    }))
+}
+
+fn decode_transfer_host_3d<'a>(
+    buffer: &'a [u8],
+    context_id: u32,
+    wrap: impl FnOnce(TransferHost3d) -> DecodedCommand<'a>,
+) -> Result<DecodedCommand<'a>, DecodeError> {
+    require_decode(buffer, TRANSFER_HOST_3D_LEN)?;
+    Ok(wrap(TransferHost3d {
+        context_id: require_context(context_id)?,
+        box_3d: Box3d::decode_nonempty_at(buffer, 24)?,
+        offset: read_u64(buffer, 48)?,
+        resource_id: decode_resource_id(buffer, 56)?,
+        level: read_u32(buffer, 60)?,
+        stride: read_u32(buffer, 64)?,
+        layer_stride: read_u32(buffer, 68)?,
     }))
 }
 

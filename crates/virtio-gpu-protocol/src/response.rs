@@ -5,12 +5,20 @@ use crate::{
     DecodeError, EncodeError, Rect, TYPE_RESP_ERR_INVALID_CONTEXT_ID,
     TYPE_RESP_ERR_INVALID_PARAMETER, TYPE_RESP_ERR_INVALID_RESOURCE_ID,
     TYPE_RESP_ERR_INVALID_SCANOUT_ID, TYPE_RESP_ERR_OUT_OF_MEMORY, TYPE_RESP_ERR_UNSPEC,
-    TYPE_RESP_OK_DISPLAY_INFO, TYPE_RESP_OK_NODATA,
+    TYPE_RESP_OK_CAPSET, TYPE_RESP_OK_CAPSET_INFO, TYPE_RESP_OK_DISPLAY_INFO, TYPE_RESP_OK_NODATA,
 };
 
 pub const DISPLAY_MODE_COUNT: usize = 16;
 pub const DISPLAY_INFO_LEN: usize = 24 + DISPLAY_MODE_COUNT * DisplayInfo::ENCODED_LEN;
 const RESPONSE_HEADER_LEN: usize = 24;
+pub const CAPSET_INFO_LEN: usize = 40;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapsetInfo {
+    pub id: u32,
+    pub maximum_version: u32,
+    pub maximum_size: u32,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DisplayInfo {
@@ -109,6 +117,8 @@ impl ResponseError {
 pub enum ResponseMessage<'a> {
     NoData,
     DisplayInfo(&'a [DisplayInfo; DISPLAY_MODE_COUNT]),
+    CapsetInfo(CapsetInfo),
+    Capset(&'a [u8]),
     Error(ResponseError),
 }
 
@@ -116,6 +126,8 @@ pub enum ResponseMessage<'a> {
 pub enum Response<'a> {
     NoData,
     DisplayInfo(DisplayInfoView<'a>),
+    CapsetInfo(CapsetInfo),
+    Capset(&'a [u8]),
     Error(ResponseError),
 }
 
@@ -156,6 +168,8 @@ impl ResponseMessage<'_> {
     pub const fn encoded_len(self) -> usize {
         match self {
             Self::DisplayInfo(_) => DISPLAY_INFO_LEN,
+            Self::CapsetInfo(_) => CAPSET_INFO_LEN,
+            Self::Capset(data) => RESPONSE_HEADER_LEN.saturating_add(data.len()),
             Self::NoData | Self::Error(_) => RESPONSE_HEADER_LEN,
         }
     }
@@ -176,6 +190,23 @@ impl ResponseMessage<'_> {
                         RESPONSE_HEADER_LEN + index * DisplayInfo::ENCODED_LEN,
                     )?;
                 }
+            }
+            Self::CapsetInfo(info) => {
+                if info.id == 0 || info.maximum_size == 0 {
+                    return Err(EncodeError::InvalidValue);
+                }
+                encode_header(buffer, TYPE_RESP_OK_CAPSET_INFO);
+                write_u32(buffer, 24, info.id);
+                write_u32(buffer, 28, info.maximum_version);
+                write_u32(buffer, 32, info.maximum_size);
+                write_u32(buffer, 36, 0);
+            }
+            Self::Capset(data) => {
+                if data.is_empty() {
+                    return Err(EncodeError::InvalidValue);
+                }
+                encode_header(buffer, TYPE_RESP_OK_CAPSET);
+                buffer[RESPONSE_HEADER_LEN..].copy_from_slice(data);
             }
         }
         Ok(length)
@@ -204,6 +235,39 @@ impl<'a> Response<'a> {
                     let _ = view.mode(index)?;
                 }
                 Ok(Self::DisplayInfo(view))
+            }
+            TYPE_RESP_OK_CAPSET_INFO => {
+                require_decode(buffer, CAPSET_INFO_LEN)?;
+                let id = read_u32(buffer, 24)?;
+                let maximum_version = read_u32(buffer, 28)?;
+                let maximum_size = read_u32(buffer, 32)?;
+                let reserved = read_u32(buffer, 36)?;
+                if reserved != 0 {
+                    return Err(DecodeError::NonZeroReserved {
+                        offset: 36,
+                        actual: u64::from(reserved),
+                    });
+                }
+                if id == 0 || maximum_size == 0 {
+                    return Err(DecodeError::InvalidValue {
+                        offset: 24,
+                        actual: u64::from(id) << 32 | u64::from(maximum_size),
+                    });
+                }
+                Ok(Self::CapsetInfo(CapsetInfo {
+                    id,
+                    maximum_version,
+                    maximum_size,
+                }))
+            }
+            TYPE_RESP_OK_CAPSET => {
+                if buffer.len() == RESPONSE_HEADER_LEN {
+                    return Err(DecodeError::InvalidLength {
+                        expected: RESPONSE_HEADER_LEN + 1,
+                        actual: buffer.len(),
+                    });
+                }
+                Ok(Self::Capset(&buffer[RESPONSE_HEADER_LEN..]))
             }
             TYPE_RESP_ERR_UNSPEC
             | TYPE_RESP_ERR_OUT_OF_MEMORY
@@ -235,10 +299,12 @@ impl<'a> Response<'a> {
                 expected: TYPE_RESP_OK_NODATA,
                 actual: read_u32(buffer, 0)?,
             }),
-            Self::DisplayInfo(_) => Err(DecodeError::UnexpectedResponse {
-                expected: TYPE_RESP_OK_NODATA,
-                actual: TYPE_RESP_OK_DISPLAY_INFO,
-            }),
+            Self::DisplayInfo(_) | Self::CapsetInfo(_) | Self::Capset(_) => {
+                Err(DecodeError::UnexpectedResponse {
+                    expected: TYPE_RESP_OK_NODATA,
+                    actual: TYPE_RESP_OK_DISPLAY_INFO,
+                })
+            }
         }
     }
 }

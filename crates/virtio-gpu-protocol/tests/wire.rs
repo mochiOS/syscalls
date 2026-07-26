@@ -28,8 +28,201 @@ fn command_types_and_lengths_match_specification() {
     assert_eq!(TYPE_TRANSFER_TO_HOST_2D, 0x0105);
     assert_eq!(TYPE_RESOURCE_ATTACH_BACKING, 0x0106);
     assert_eq!(TYPE_RESOURCE_DETACH_BACKING, 0x0107);
+    assert_eq!(TYPE_GET_CAPSET_INFO, 0x0108);
+    assert_eq!(TYPE_GET_CAPSET, 0x0109);
+    assert_eq!(TYPE_CTX_CREATE, 0x0200);
+    assert_eq!(TYPE_CTX_DESTROY, 0x0201);
+    assert_eq!(TYPE_CTX_ATTACH_RESOURCE, 0x0202);
+    assert_eq!(TYPE_CTX_DETACH_RESOURCE, 0x0203);
+    assert_eq!(TYPE_RESOURCE_CREATE_3D, 0x0204);
+    assert_eq!(TYPE_TRANSFER_TO_HOST_3D, 0x0205);
+    assert_eq!(TYPE_TRANSFER_FROM_HOST_3D, 0x0206);
+    assert_eq!(TYPE_SUBMIT_3D, 0x0207);
+    assert_eq!(VIRTIO_GPU_F_VIRGL, 1);
     assert_eq!(COMMAND_HEADER_LEN, 24);
     assert_eq!(DISPLAY_INFO_LEN, 408);
+}
+
+#[test]
+fn three_d_commands_have_golden_encodings() {
+    let create_context = encode::<96>(Command::ContextCreate(ContextCreate {
+        context_id: 9,
+        context_init: CAPSET_VIRGL,
+        debug_name: b"mochi",
+    }));
+    assert_eq!(&create_context[0..4], &[0, 2, 0, 0]);
+    assert_eq!(&create_context[16..20], &[9, 0, 0, 0]);
+    assert_eq!(
+        &create_context[24..37],
+        &[5, 0, 0, 0, 1, 0, 0, 0, b'm', b'o', b'c', b'h', b'i']
+    );
+    assert!(create_context[37..].iter().all(|byte| *byte == 0));
+
+    let attach = encode::<32>(Command::ContextAttachResource(ContextResource {
+        context_id: 9,
+        resource_id: 7,
+    }));
+    assert_eq!(&attach[0..4], &[2, 2, 0, 0]);
+    assert_eq!(&attach[16..20], &[9, 0, 0, 0]);
+    assert_eq!(&attach[24..32], &[7, 0, 0, 0, 0, 0, 0, 0]);
+
+    let create_resource = encode::<72>(Command::ResourceCreate3d(ResourceCreate3d {
+        resource_id: 7,
+        target: 2,
+        format: 1,
+        bind: 3,
+        width: 640,
+        height: 480,
+        depth: 1,
+        array_size: 1,
+        last_level: 0,
+        samples: 0,
+        flags: 1,
+    }));
+    assert_eq!(&create_resource[0..4], &[4, 2, 0, 0]);
+    assert_eq!(
+        &create_resource[24..40],
+        &[7, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0]
+    );
+    assert_eq!(
+        &create_resource[40..56],
+        &[128, 2, 0, 0, 224, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]
+    );
+
+    let transfer = encode::<72>(Command::TransferToHost3d(TransferHost3d {
+        context_id: 9,
+        box_3d: Box3d {
+            x: 1,
+            y: 2,
+            z: 3,
+            width: 4,
+            height: 5,
+            depth: 6,
+        },
+        offset: 0x0807_0605_0403_0201,
+        resource_id: 7,
+        level: 8,
+        stride: 9,
+        layer_stride: 10,
+    }));
+    assert_eq!(&transfer[0..4], &[5, 2, 0, 0]);
+    assert_eq!(&transfer[16..20], &[9, 0, 0, 0]);
+    assert_eq!(&transfer[48..56], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(
+        &transfer[56..72],
+        &[7, 0, 0, 0, 8, 0, 0, 0, 9, 0, 0, 0, 10, 0, 0, 0]
+    );
+
+    let submit = encode::<40>(Command::Submit3d(Submit3d {
+        context_id: 9,
+        commands: &[1, 2, 3, 4, 5, 6, 7, 8],
+    }));
+    assert_eq!(&submit[0..4], &[7, 2, 0, 0]);
+    assert_eq!(&submit[16..20], &[9, 0, 0, 0]);
+    assert_eq!(
+        &submit[24..40],
+        &[8, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8]
+    );
+}
+
+#[test]
+fn three_d_commands_decode_round_trip() {
+    let commands = [
+        encode::<32>(Command::GetCapsetInfo { index: 1 }).to_vec(),
+        encode::<32>(Command::GetCapset(GetCapset {
+            capset_id: CAPSET_VIRGL2,
+            version: 2,
+        }))
+        .to_vec(),
+        encode::<24>(Command::ContextDestroy { context_id: 9 }).to_vec(),
+        encode::<32>(Command::ContextDetachResource(ContextResource {
+            context_id: 9,
+            resource_id: 7,
+        }))
+        .to_vec(),
+        encode::<72>(Command::TransferFromHost3d(TransferHost3d {
+            context_id: 9,
+            box_3d: Box3d {
+                x: 0,
+                y: 0,
+                z: 0,
+                width: 4,
+                height: 4,
+                depth: 1,
+            },
+            offset: 0,
+            resource_id: 7,
+            level: 0,
+            stride: 16,
+            layer_stride: 64,
+        }))
+        .to_vec(),
+    ];
+    for command in commands {
+        assert!(DecodedCommand::decode(&command).is_ok());
+    }
+
+    let context = encode::<96>(Command::ContextCreate(ContextCreate {
+        context_id: 9,
+        context_init: 0,
+        debug_name: b"renderer",
+    }));
+    assert!(matches!(
+        DecodedCommand::decode(&context),
+        Ok(DecodedCommand::ContextCreate(ContextCreateView {
+            context_id: 9,
+            context_init: 0,
+            debug_name: b"renderer",
+        }))
+    ));
+
+    let submit = encode::<36>(Command::Submit3d(Submit3d {
+        context_id: 9,
+        commands: &[1, 2, 3, 4],
+    }));
+    assert!(matches!(
+        DecodedCommand::decode(&submit),
+        Ok(DecodedCommand::Submit3d(Submit3dView {
+            context_id: 9,
+            commands: &[1, 2, 3, 4],
+        }))
+    ));
+}
+
+#[test]
+fn three_d_commands_reject_invalid_context_stream_and_reserved_data() {
+    let mut buffer = [0u8; 96];
+    assert_eq!(
+        Command::ContextCreate(ContextCreate {
+            context_id: 0,
+            context_init: 0,
+            debug_name: b"renderer",
+        })
+        .encode(&mut buffer),
+        Err(EncodeError::InvalidValue)
+    );
+    let mut submit = [0u8; 36];
+    assert_eq!(
+        Command::Submit3d(Submit3d {
+            context_id: 9,
+            commands: &[1, 2, 3],
+        })
+        .encode(&mut submit),
+        Err(EncodeError::InvalidValue)
+    );
+    let mut context = encode::<96>(Command::ContextCreate(ContextCreate {
+        context_id: 9,
+        context_init: 0,
+        debug_name: b"renderer",
+    }));
+    context[95] = 1;
+    assert_eq!(
+        DecodedCommand::decode(&context),
+        Err(DecodeError::NonZeroReserved {
+            offset: 40,
+            actual: 1,
+        })
+    );
 }
 
 #[test]
@@ -384,6 +577,49 @@ fn rejects_response_length_mismatch() {
         Err(DecodeError::InvalidLength {
             expected: 24,
             actual: 25,
+        })
+    );
+}
+
+#[test]
+fn capset_responses_round_trip_and_validate_reserved_data() {
+    let info = CapsetInfo {
+        id: CAPSET_VIRGL2,
+        maximum_version: 2,
+        maximum_size: 512,
+    };
+    let mut encoded_info = [0u8; CAPSET_INFO_LEN];
+    assert_eq!(
+        ResponseMessage::CapsetInfo(info).encode(&mut encoded_info),
+        Ok(CAPSET_INFO_LEN)
+    );
+    assert_eq!(&encoded_info[0..4], &[2, 17, 0, 0]);
+    assert_eq!(
+        &encoded_info[24..40],
+        &[2, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0]
+    );
+    assert!(matches!(
+        Response::decode(&encoded_info),
+        Ok(Response::CapsetInfo(decoded)) if decoded == info
+    ));
+
+    let mut capset = [0u8; 28];
+    assert_eq!(
+        ResponseMessage::Capset(&[1, 2, 3, 4]).encode(&mut capset),
+        Ok(28)
+    );
+    assert_eq!(&capset[0..4], &[3, 17, 0, 0]);
+    assert!(matches!(
+        Response::decode(&capset),
+        Ok(Response::Capset([1, 2, 3, 4]))
+    ));
+
+    encoded_info[36] = 1;
+    assert_eq!(
+        Response::decode(&encoded_info),
+        Err(DecodeError::NonZeroReserved {
+            offset: 36,
+            actual: 1,
         })
     );
 }

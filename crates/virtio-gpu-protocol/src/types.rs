@@ -84,6 +84,66 @@ pub struct Rect {
     pub height: u32,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Box3d {
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+}
+
+impl Box3d {
+    pub const ENCODED_LEN: usize = 24;
+
+    pub const fn is_nonempty(self) -> bool {
+        self.width != 0 && self.height != 0 && self.depth != 0
+    }
+
+    pub fn validate_nonempty(self) -> Result<(), EncodeError> {
+        if !self.is_nonempty()
+            || self.x.checked_add(self.width).is_none()
+            || self.y.checked_add(self.height).is_none()
+            || self.z.checked_add(self.depth).is_none()
+        {
+            return Err(EncodeError::InvalidValue);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn encode_at(self, buffer: &mut [u8], offset: usize) {
+        write_u32(buffer, offset, self.x);
+        write_u32(buffer, offset + 4, self.y);
+        write_u32(buffer, offset + 8, self.z);
+        write_u32(buffer, offset + 12, self.width);
+        write_u32(buffer, offset + 16, self.height);
+        write_u32(buffer, offset + 20, self.depth);
+    }
+
+    pub(crate) fn decode_nonempty_at(buffer: &[u8], offset: usize) -> Result<Self, DecodeError> {
+        let value = Self {
+            x: read_u32(buffer, offset)?,
+            y: read_u32(buffer, offset + 4)?,
+            z: read_u32(buffer, offset + 8)?,
+            width: read_u32(buffer, offset + 12)?,
+            height: read_u32(buffer, offset + 16)?,
+            depth: read_u32(buffer, offset + 20)?,
+        };
+        if !value.is_nonempty()
+            || value.x.checked_add(value.width).is_none()
+            || value.y.checked_add(value.height).is_none()
+            || value.z.checked_add(value.depth).is_none()
+        {
+            return Err(DecodeError::InvalidValue {
+                offset,
+                actual: u64::from(value.width) << 32 | u64::from(value.height),
+            });
+        }
+        Ok(value)
+    }
+}
+
 impl Rect {
     pub const ENCODED_LEN: usize = 16;
 
