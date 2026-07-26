@@ -4,6 +4,8 @@ members = [
     "crates/capability-protocol",
     "crates/certificate",
     "crates/driver-control-protocol",
+    "crates/net-device-protocol",
+    "crates/network-stack",
     "crates/virtio-gpu-protocol",
     "crates/viewkit-gpu-protocol",
     "crates/syscall",

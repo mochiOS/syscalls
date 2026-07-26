@@ -198,6 +198,14 @@ name = "mochios-driver-control-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "mochios-net-device-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "mochios-network-stack"
+version = "0.1.0"
+
+[[package]]
 name = "mochios-signature-protocol"
 version = "0.1.0"
 
