@@ -2,11 +2,13 @@
 resolver = "2"
 members = [
     "crates/capability-protocol",
+    "crates/certificate",
     "crates/driver-control-protocol",
     "crates/virtio-gpu-protocol",
     "crates/viewkit-gpu-protocol",
     "crates/syscall",
     "crates/runtime",
+    "crates/signature-protocol",
     "crates/platform",
     "crates/newlib-runtime",
 ]

@@ -182,7 +182,7 @@ ROOTFS_STAGE="${RUN_DIR}/rootfs-root"
 OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 OVMF_VARS_TEMPLATE="${OVMF_VARS_TEMPLATE:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
 OVMF_VARS="${RUN_DIR}/OVMF_VARS_4M.fd"
-SIGNATURE_DB_STAGE="${TARGET_DIR}/signature.db"
+SIGNATURE_DB_STAGE="${TARGET_DIR}/execution.allowlist"
 
 need_file "${OVMF_CODE}"
 need_file "${OVMF_VARS_TEMPLATE}"

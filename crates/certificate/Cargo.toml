@@ -1,0 +1,14 @@
+[package]
+name = "mochios-certificate"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["std"]
+std = ["alloc"]
+alloc = []
+
+[dependencies]
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.10", default-features = false }
+
