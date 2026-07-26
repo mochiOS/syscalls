@@ -1,0 +1,10 @@
+[package]
+name = "mochios-network-stack"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["alloc"]
+alloc = []
+
+[dependencies]
