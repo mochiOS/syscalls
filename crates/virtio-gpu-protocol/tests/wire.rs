@@ -219,6 +219,26 @@ fn rejects_invalid_backing_and_encode_buffer() {
         .encode(&mut buffer),
         Err(EncodeError::InvalidValue)
     );
+    let zero_length = [MemoryEntry {
+        address: 0x1000,
+        length: 0,
+    }];
+    assert_eq!(
+        Command::ResourceAttachBacking(AttachBacking {
+            resource_id: 1,
+            entries: &zero_length,
+        })
+        .encode(&mut buffer),
+        Err(EncodeError::InvalidValue)
+    );
+    assert_eq!(
+        Command::ResourceAttachBacking(AttachBacking {
+            resource_id: 1,
+            entries: &[],
+        })
+        .encode(&mut buffer),
+        Err(EncodeError::InvalidValue)
+    );
     let mut short = [0u8; 23];
     assert_eq!(
         Command::GetDisplayInfo.encode(&mut short),
@@ -227,6 +247,33 @@ fn rejects_invalid_backing_and_encode_buffer() {
             actual: 23,
         })
     );
+}
+
+#[test]
+fn preserves_multiple_non_contiguous_backing_entries() {
+    let entries = [
+        MemoryEntry {
+            address: 0x1000,
+            length: 4096,
+        },
+        MemoryEntry {
+            address: 0x9000,
+            length: 8192,
+        },
+    ];
+    let attach = encode::<64>(Command::ResourceAttachBacking(AttachBacking {
+        resource_id: 3,
+        entries: &entries,
+    }));
+    match DecodedCommand::decode(&attach) {
+        Ok(DecodedCommand::ResourceAttachBacking(view)) => {
+            assert_eq!(view.entry_count(), entries.len());
+            assert_eq!(view.entry(0), Ok(Some(entries[0])));
+            assert_eq!(view.entry(1), Ok(Some(entries[1])));
+            assert_eq!(view.entry(2), Ok(None));
+        }
+        result => panic!("unexpected attach decode: {result:?}"),
+    }
 }
 
 #[test]
