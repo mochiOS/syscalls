@@ -24,6 +24,9 @@ impl Ipv4Header {
         if frag & 0x3fff != 0 {
             return Err(PacketError::Unsupported);
         }
+        if packet[8] == 0 {
+            return Err(PacketError::InvalidHeader);
+        }
         if !checksum_valid(&packet[..IPV4_HEADER_LEN]) {
             return Err(PacketError::InvalidChecksum);
         }
@@ -100,11 +103,23 @@ mod tests {
         b[0] = 0x44;
         assert_eq!(Ipv4Header::decode(&b), Err(PacketError::InvalidHeader));
         h.encode(&[], &mut b).unwrap();
+        b[2..4].copy_from_slice(&19u16.to_be_bytes());
+        assert_eq!(Ipv4Header::decode(&b), Err(PacketError::InvalidLength));
+        h.encode(&[], &mut b).unwrap();
+        b[2..4].copy_from_slice(&21u16.to_be_bytes());
+        assert_eq!(Ipv4Header::decode(&b), Err(PacketError::InvalidLength));
+        h.encode(&[], &mut b).unwrap();
         b[6] = 0x20;
         b[10] = 0;
         b[11] = 0;
         let c = checksum(&b);
         b[10..12].copy_from_slice(&c.to_be_bytes());
-        assert_eq!(Ipv4Header::decode(&b), Err(PacketError::Unsupported))
+        assert_eq!(Ipv4Header::decode(&b), Err(PacketError::Unsupported));
+        h.encode(&[], &mut b).unwrap();
+        b[8] = 0;
+        b[10..12].fill(0);
+        let c = checksum(&b);
+        b[10..12].copy_from_slice(&c.to_be_bytes());
+        assert_eq!(Ipv4Header::decode(&b), Err(PacketError::InvalidHeader))
     }
 }

@@ -55,6 +55,9 @@ mod tests {
         let mut b = [0; 12];
         p.encode(&mut b).unwrap();
         assert_eq!(EchoPacket::decode(&b), Ok(p));
+        let reply = EchoPacket { reply: true, ..p };
+        reply.encode(&mut b).unwrap();
+        assert_eq!(EchoPacket::decode(&b), Ok(reply));
         b[3] ^= 1;
         assert_eq!(EchoPacket::decode(&b), Err(PacketError::InvalidChecksum))
     }

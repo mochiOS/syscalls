@@ -1,4 +1,4 @@
-use crate::PacketError;
+use crate::{PacketError, valid_unicast_mac};
 use alloc::collections::VecDeque;
 
 pub const ARP_LEN: usize = 28;
@@ -29,9 +29,13 @@ impl ArpPacket {
         if op != ARP_REQUEST && op != ARP_REPLY {
             return Err(PacketError::Unsupported);
         }
+        let sender_mac = b[8..14].try_into().map_err(|_| PacketError::Truncated)?;
+        if !valid_unicast_mac(sender_mac) {
+            return Err(PacketError::InvalidHeader);
+        }
         Ok(Self {
             operation: op,
-            sender_mac: b[8..14].try_into().map_err(|_| PacketError::Truncated)?,
+            sender_mac,
             sender_ip: b[14..18].try_into().map_err(|_| PacketError::Truncated)?,
             target_mac: b[18..24].try_into().map_err(|_| PacketError::Truncated)?,
             target_ip: b[24..28].try_into().map_err(|_| PacketError::Truncated)?,
@@ -40,6 +44,10 @@ impl ArpPacket {
     pub fn encode(self, out: &mut [u8]) -> Result<usize, PacketError> {
         if out.len() < ARP_LEN {
             return Err(PacketError::Truncated);
+        }
+        if !matches!(self.operation, ARP_REQUEST | ARP_REPLY) || !valid_unicast_mac(self.sender_mac)
+        {
+            return Err(PacketError::InvalidHeader);
         }
         out[..ARP_LEN].fill(0);
         out[0..2].copy_from_slice(&1u16.to_be_bytes());
@@ -96,7 +104,7 @@ mod tests {
     fn packets_and_validation() {
         let p = ArpPacket {
             operation: ARP_REQUEST,
-            sender_mac: [1; 6],
+            sender_mac: [2; 6],
             sender_ip: [10, 0, 2, 15],
             target_mac: [0; 6],
             target_ip: [10, 0, 2, 2],
@@ -104,7 +112,19 @@ mod tests {
         let mut b = [0; ARP_LEN];
         p.encode(&mut b).unwrap();
         assert_eq!(ArpPacket::decode(&b), Ok(p));
+        let reply = ArpPacket {
+            operation: ARP_REPLY,
+            sender_mac: [4; 6],
+            sender_ip: p.target_ip,
+            target_mac: p.sender_mac,
+            target_ip: p.sender_ip,
+        };
+        reply.encode(&mut b).unwrap();
+        assert_eq!(ArpPacket::decode(&b), Ok(reply));
         b[4] = 5;
+        assert_eq!(ArpPacket::decode(&b), Err(PacketError::InvalidHeader));
+        p.encode(&mut b).unwrap();
+        b[8..14].copy_from_slice(&[0; 6]);
         assert_eq!(ArpPacket::decode(&b), Err(PacketError::InvalidHeader))
     }
     #[test]

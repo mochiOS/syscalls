@@ -17,16 +17,17 @@ impl EthernetHeader {
         if frame.len() < ETHERNET_HEADER_LEN {
             return Err(PacketError::Truncated);
         }
-        Ok((
-            Self {
-                destination: frame[0..6].try_into().map_err(|_| PacketError::Truncated)?,
-                source: frame[6..12]
-                    .try_into()
-                    .map_err(|_| PacketError::Truncated)?,
-                ethertype: u16::from_be_bytes([frame[12], frame[13]]),
-            },
-            &frame[14..],
-        ))
+        let header = Self {
+            destination: frame[0..6].try_into().map_err(|_| PacketError::Truncated)?,
+            source: frame[6..12]
+                .try_into()
+                .map_err(|_| PacketError::Truncated)?,
+            ethertype: u16::from_be_bytes([frame[12], frame[13]]),
+        };
+        if !valid_unicast_mac(header.source) {
+            return Err(PacketError::InvalidHeader);
+        }
+        Ok((header, &frame[14..]))
     }
     pub fn encode(self, payload: &[u8], out: &mut [u8]) -> Result<usize, PacketError> {
         let len = ETHERNET_HEADER_LEN
@@ -46,6 +47,10 @@ impl EthernetHeader {
     }
 }
 
+pub fn valid_unicast_mac(mac: [u8; 6]) -> bool {
+    mac != [0; 6] && mac != BROADCAST_MAC && mac[0] & 1 == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,7 +58,7 @@ mod tests {
     fn golden_roundtrip() {
         let h = EthernetHeader {
             destination: [1, 2, 3, 4, 5, 6],
-            source: [7, 8, 9, 10, 11, 12],
+            source: [8, 8, 9, 10, 11, 12],
             ethertype: ETHERTYPE_IPV4,
         };
         let mut b = [0; 16];
@@ -65,6 +70,13 @@ mod tests {
         assert_eq!(
             EthernetHeader::decode(&[0; 13]),
             Err(PacketError::Truncated)
+        );
+        let mut frame = [0; ETHERNET_HEADER_LEN];
+        frame[..6].copy_from_slice(&BROADCAST_MAC);
+        frame[6..12].copy_from_slice(&BROADCAST_MAC);
+        assert_eq!(
+            EthernetHeader::decode(&frame),
+            Err(PacketError::InvalidHeader)
         );
     }
 }

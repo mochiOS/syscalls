@@ -2,6 +2,9 @@ use crate::PacketError;
 pub const DHCP_CLIENT_PORT: u16 = 68;
 pub const DHCP_SERVER_PORT: u16 = 67;
 pub const DHCP_FIXED_LEN: usize = 240;
+const RETRY_BASE_MS: u64 = 1_000;
+const FAILURE_RETRY_MS: u64 = 30_000;
+const MAX_RETRIES: u8 = 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DhcpState {
     Init,
@@ -138,7 +141,7 @@ pub fn decode_reply(b: &[u8], xid: u32, mac: [u8; 6]) -> Result<DhcpMessage, Pac
         i = end
     }
     let message_type = ty.ok_or(PacketError::InvalidHeader)?;
-    if server == [0; 4] || address == [0; 4] {
+    if server == [0; 4] || (message_type != DhcpMessageType::Nak && address == [0; 4]) {
         return Err(PacketError::InvalidHeader);
     }
     Ok(DhcpMessage {
@@ -160,6 +163,8 @@ pub struct DhcpClient {
     pub offer: Option<DhcpOffer>,
     pub retries: u8,
     pub next_retry: u64,
+    pub renew_at: u64,
+    pub rebind_at: u64,
     pub lease_deadline: u64,
 }
 impl DhcpClient {
@@ -171,45 +176,69 @@ impl DhcpClient {
             offer: None,
             retries: 0,
             next_retry: 0,
+            renew_at: 0,
+            rebind_at: 0,
             lease_deadline: 0,
         }
     }
     pub fn begin(&mut self, now: u64) {
         self.state = DhcpState::Selecting;
         self.retries = 0;
-        self.next_retry = now.saturating_add(1000)
+        self.next_retry = now.saturating_add(RETRY_BASE_MS)
     }
     pub fn accept(&mut self, msg: DhcpMessage, now: u64) -> Result<(), PacketError> {
         match (self.state, msg.message_type) {
             (DhcpState::Selecting, DhcpMessageType::Offer) => {
                 self.offer = Some(msg.offer);
                 self.state = DhcpState::Requesting;
-                self.next_retry = now.saturating_add(1000);
+                self.next_retry = now.saturating_add(RETRY_BASE_MS);
                 Ok(())
             }
-            (DhcpState::Requesting, DhcpMessageType::Ack)
-                if self.offer.is_some_and(|offer| {
-                    offer.address == msg.offer.address && offer.server == msg.offer.server
-                }) =>
+            (
+                DhcpState::Requesting | DhcpState::Renewing | DhcpState::Rebinding,
+                DhcpMessageType::Ack,
+            ) if self.offer.is_some_and(|offer| {
+                offer.address == msg.offer.address && offer.server == msg.offer.server
+            }) =>
             {
+                self.offer = Some(msg.offer);
                 self.state = DhcpState::Bound;
-                self.lease_deadline =
-                    now.saturating_add(u64::from(msg.offer.lease_seconds).saturating_mul(1000));
+                self.retries = 0;
+                let lease_ms = u64::from(msg.offer.lease_seconds).saturating_mul(1_000);
+                self.renew_at = now.saturating_add(lease_ms / 2);
+                self.rebind_at = now.saturating_add(lease_ms.saturating_mul(7) / 8);
+                self.lease_deadline = now.saturating_add(lease_ms);
                 Ok(())
             }
             (_, DhcpMessageType::Nak) => {
                 self.state = DhcpState::Failed;
+                self.offer = None;
+                self.next_retry = now.saturating_add(FAILURE_RETRY_MS);
                 Ok(())
             }
             _ => Err(PacketError::Mismatch),
         }
     }
     pub fn tick(&mut self, now: u64) {
-        if self.state == DhcpState::Bound
-            && self.lease_deadline.saturating_sub(now) <= self.lease_deadline / 2
-        {
+        if self.state == DhcpState::Bound && now >= self.renew_at {
             self.state = DhcpState::Renewing;
-            self.next_retry = now
+            self.retries = 0;
+            self.next_retry = now;
+        }
+        if self.state == DhcpState::Renewing && now >= self.rebind_at {
+            self.state = DhcpState::Rebinding;
+            self.retries = 0;
+            self.next_retry = now;
+        }
+        if matches!(self.state, DhcpState::Renewing | DhcpState::Rebinding)
+            && now >= self.lease_deadline
+        {
+            self.state = DhcpState::Failed;
+            self.offer = None;
+            self.next_retry = now.saturating_add(FAILURE_RETRY_MS);
+        }
+        if self.state == DhcpState::Failed && now >= self.next_retry {
+            self.begin(now);
         }
         if matches!(
             self.state,
@@ -220,9 +249,11 @@ impl DhcpClient {
         ) && now >= self.next_retry
         {
             self.retries = self.retries.saturating_add(1);
-            self.next_retry = now.saturating_add(1000u64 << self.retries.min(5));
-            if self.retries >= 8 {
-                self.state = DhcpState::Failed
+            self.next_retry = now.saturating_add(RETRY_BASE_MS << self.retries.min(5));
+            if self.retries >= MAX_RETRIES {
+                self.state = DhcpState::Failed;
+                self.offer = None;
+                self.next_retry = now.saturating_add(FAILURE_RETRY_MS);
             }
         }
     }
@@ -271,5 +302,50 @@ mod tests {
             decode_reply(&b, 7, [1, 2, 3, 4, 5, 6]),
             Err(PacketError::InvalidLength)
         )
+    }
+
+    #[test]
+    fn lease_transitions_renew_rebind_and_retry() {
+        let lease = DhcpOffer {
+            address: [10, 0, 2, 15],
+            subnet_mask: [255, 255, 255, 0],
+            gateway: [10, 0, 2, 2],
+            dns: [10, 0, 2, 3],
+            lease_seconds: 8,
+            server: [10, 0, 2, 2],
+        };
+        let mut client = DhcpClient::new(7, [1, 2, 3, 4, 5, 6]);
+        client.begin(1_000);
+        client
+            .accept(
+                DhcpMessage {
+                    message_type: DhcpMessageType::Offer,
+                    offer: lease,
+                },
+                1_100,
+            )
+            .unwrap();
+        client
+            .accept(
+                DhcpMessage {
+                    message_type: DhcpMessageType::Ack,
+                    offer: lease,
+                },
+                2_000,
+            )
+            .unwrap();
+        assert_eq!(client.state, DhcpState::Bound);
+        client.tick(5_999);
+        assert_eq!(client.state, DhcpState::Bound);
+        client.tick(6_000);
+        assert_eq!(client.state, DhcpState::Renewing);
+        client.tick(9_000);
+        assert_eq!(client.state, DhcpState::Rebinding);
+        client.tick(10_000);
+        assert_eq!(client.state, DhcpState::Failed);
+        client.tick(39_999);
+        assert_eq!(client.state, DhcpState::Failed);
+        client.tick(40_000);
+        assert_eq!(client.state, DhcpState::Selecting);
     }
 }
