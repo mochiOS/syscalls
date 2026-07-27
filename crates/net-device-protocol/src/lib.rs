@@ -12,7 +12,14 @@ pub const STATISTICS_LEN: usize = 88;
 pub const STATUS_LEN: usize = 32;
 pub const PING_REQUEST_LEN: usize = 32;
 pub const PING_RESULT_LEN: usize = 40;
-pub const STACK_STATISTICS_LEN: usize = 160;
+pub const RESOLVE_RESULT_LEN: usize = 40;
+pub const TCP_CONNECT_RESULT_LEN: usize = 48;
+pub const TCP_IO_RESULT_LEN: usize = 40;
+pub const TCP_RECEIVE_REQUEST_LEN: usize = 40;
+pub const TCP_CLOSE_REQUEST_LEN: usize = 40;
+pub const STACK_STATISTICS_LEN: usize = 288;
+pub const MAX_HOSTNAME_LEN: usize = 253;
+pub const MAX_TCP_IO_LEN: usize = 4096;
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,8 +34,18 @@ pub enum Opcode {
     Statistics = 0x8004,
     Ping = 0x0101,
     GetStackStatistics = 0x0102,
+    ResolveIpv4 = 0x0103,
+    TcpConnect = 0x0110,
+    TcpSend = 0x0111,
+    TcpReceive = 0x0112,
+    TcpClose = 0x0113,
     PingResult = 0x8101,
     StackStatistics = 0x8102,
+    ResolveIpv4Result = 0x8103,
+    TcpConnectResult = 0x8110,
+    TcpSendResult = 0x8111,
+    TcpReceiveResult = 0x8112,
+    TcpCloseResult = 0x8113,
 }
 
 impl Opcode {
@@ -48,8 +65,18 @@ impl Opcode {
             0x8004 => Self::Statistics,
             0x0101 => Self::Ping,
             0x0102 => Self::GetStackStatistics,
+            0x0103 => Self::ResolveIpv4,
+            0x0110 => Self::TcpConnect,
+            0x0111 => Self::TcpSend,
+            0x0112 => Self::TcpReceive,
+            0x0113 => Self::TcpClose,
             0x8101 => Self::PingResult,
             0x8102 => Self::StackStatistics,
+            0x8103 => Self::ResolveIpv4Result,
+            0x8110 => Self::TcpConnectResult,
+            0x8111 => Self::TcpSendResult,
+            0x8112 => Self::TcpReceiveResult,
+            0x8113 => Self::TcpCloseResult,
             _ => return None,
         })
     }
@@ -65,6 +92,9 @@ pub enum WireError {
     UnexpectedOpcode { expected: Opcode, actual: Opcode },
     NonZeroReserved(u32),
     FrameTooLarge(usize),
+    HostnameTooLarge(usize),
+    DataTooLarge(usize),
+    InvalidText,
 }
 
 impl fmt::Display for WireError {
@@ -159,6 +189,22 @@ pub struct StackStatistics {
     pub dhcp_attempts: u64,
     pub dhcp_successes: u64,
     pub dhcp_failures: u64,
+    pub dns_queries: u64,
+    pub dns_cache_hits: u64,
+    pub dns_cache_misses: u64,
+    pub dns_timeouts: u64,
+    pub dns_failures: u64,
+    pub tcp_connections_attempted: u64,
+    pub tcp_connections_established: u64,
+    pub tcp_connections_failed: u64,
+    pub tcp_segments_sent: u64,
+    pub tcp_segments_received: u64,
+    pub tcp_retransmissions: u64,
+    pub tcp_checksum_errors: u64,
+    pub tcp_resets: u64,
+    pub tcp_timeouts: u64,
+    pub tcp_receive_drops: u64,
+    pub tcp_send_drops: u64,
 }
 
 pub fn encode_empty(opcode: Opcode, request_id: u64, out: &mut [u8]) -> Result<usize, WireError> {
@@ -405,6 +451,377 @@ pub fn decode_ping_result(bytes: &[u8]) -> Result<(u64, i32, u64), WireError> {
     Ok((header.request_id, read_i32(bytes, 24), read_u64(bytes, 32)))
 }
 
+pub fn encode_resolve_ipv4(
+    request_id: u64,
+    hostname: &str,
+    timeout_ms: u32,
+    out: &mut [u8],
+) -> Result<usize, WireError> {
+    let hostname_length = hostname.len();
+    if hostname_length == 0 || hostname_length > MAX_HOSTNAME_LEN {
+        return Err(WireError::HostnameTooLarge(hostname_length));
+    }
+    let length = 32usize
+        .checked_add(hostname_length)
+        .ok_or(WireError::HostnameTooLarge(hostname_length))?;
+    write_header(Opcode::ResolveIpv4, request_id, length, out)?;
+    write_u32(out, 24, timeout_ms);
+    write_u16(out, 28, hostname_length as u16);
+    write_u16(out, 30, 0);
+    out[32..length].copy_from_slice(hostname.as_bytes());
+    Ok(length)
+}
+
+pub fn decode_resolve_ipv4(bytes: &[u8]) -> Result<(u64, u32, &str), WireError> {
+    let header = Header::decode(bytes)?;
+    expect_opcode(header.opcode, Opcode::ResolveIpv4)?;
+    if bytes.len() < 32 || read_u16(bytes, 30) != 0 {
+        return Err(WireError::InvalidLength {
+            declared: 32,
+            actual: bytes.len(),
+        });
+    }
+    let hostname_length = usize::from(read_u16(bytes, 28));
+    if hostname_length == 0 || hostname_length > MAX_HOSTNAME_LEN {
+        return Err(WireError::HostnameTooLarge(hostname_length));
+    }
+    if 32 + hostname_length != bytes.len() {
+        return Err(WireError::InvalidLength {
+            declared: 32 + hostname_length,
+            actual: bytes.len(),
+        });
+    }
+    let hostname = core::str::from_utf8(&bytes[32..]).map_err(|_| WireError::InvalidText)?;
+    Ok((header.request_id, read_u32(bytes, 24), hostname))
+}
+
+pub fn encode_resolve_ipv4_result(
+    request_id: u64,
+    status: i32,
+    address: [u8; 4],
+    from_cache: bool,
+    out: &mut [u8],
+) -> Result<usize, WireError> {
+    write_header(
+        Opcode::ResolveIpv4Result,
+        request_id,
+        RESOLVE_RESULT_LEN,
+        out,
+    )?;
+    write_i32(out, 24, status);
+    write_u32(out, 28, u32::from(from_cache));
+    out[32..36].copy_from_slice(&address);
+    out[36..40].fill(0);
+    Ok(RESOLVE_RESULT_LEN)
+}
+
+pub fn decode_resolve_ipv4_result(bytes: &[u8]) -> Result<(u64, i32, [u8; 4], bool), WireError> {
+    let header = Header::decode(bytes)?;
+    expect_opcode(header.opcode, Opcode::ResolveIpv4Result)?;
+    if bytes.len() != RESOLVE_RESULT_LEN || bytes[36..40].iter().any(|byte| *byte != 0) {
+        return Err(WireError::InvalidLength {
+            declared: RESOLVE_RESULT_LEN,
+            actual: bytes.len(),
+        });
+    }
+    let flags = read_u32(bytes, 28);
+    if flags > 1 {
+        return Err(WireError::NonZeroReserved(flags));
+    }
+    Ok((
+        header.request_id,
+        read_i32(bytes, 24),
+        [bytes[32], bytes[33], bytes[34], bytes[35]],
+        flags == 1,
+    ))
+}
+
+pub fn encode_tcp_connect(
+    request_id: u64,
+    host: &str,
+    port: u16,
+    timeout_ms: u32,
+    out: &mut [u8],
+) -> Result<usize, WireError> {
+    let host_length = host.len();
+    if host_length == 0 || host_length > MAX_HOSTNAME_LEN {
+        return Err(WireError::HostnameTooLarge(host_length));
+    }
+    let length = 32usize
+        .checked_add(host_length)
+        .ok_or(WireError::HostnameTooLarge(host_length))?;
+    write_header(Opcode::TcpConnect, request_id, length, out)?;
+    write_u32(out, 24, timeout_ms);
+    write_u16(out, 28, port);
+    write_u16(out, 30, host_length as u16);
+    out[32..length].copy_from_slice(host.as_bytes());
+    Ok(length)
+}
+
+pub fn decode_tcp_connect(bytes: &[u8]) -> Result<(u64, u32, u16, &str), WireError> {
+    let header = Header::decode(bytes)?;
+    expect_opcode(header.opcode, Opcode::TcpConnect)?;
+    if bytes.len() < 32 {
+        return Err(WireError::InvalidLength {
+            declared: 32,
+            actual: bytes.len(),
+        });
+    }
+    let host_length = usize::from(read_u16(bytes, 30));
+    if host_length == 0 || host_length > MAX_HOSTNAME_LEN {
+        return Err(WireError::HostnameTooLarge(host_length));
+    }
+    if bytes.len() != 32 + host_length {
+        return Err(WireError::InvalidLength {
+            declared: 32 + host_length,
+            actual: bytes.len(),
+        });
+    }
+    let host = core::str::from_utf8(&bytes[32..]).map_err(|_| WireError::InvalidText)?;
+    Ok((
+        header.request_id,
+        read_u32(bytes, 24),
+        read_u16(bytes, 28),
+        host,
+    ))
+}
+
+pub fn encode_tcp_connect_result(
+    request_id: u64,
+    status: i32,
+    handle: u64,
+    address: [u8; 4],
+    port: u16,
+    out: &mut [u8],
+) -> Result<usize, WireError> {
+    write_header(
+        Opcode::TcpConnectResult,
+        request_id,
+        TCP_CONNECT_RESULT_LEN,
+        out,
+    )?;
+    write_i32(out, 24, status);
+    write_u32(out, 28, 0);
+    write_u64(out, 32, handle);
+    out[40..44].copy_from_slice(&address);
+    write_u16(out, 44, port);
+    write_u16(out, 46, 0);
+    Ok(TCP_CONNECT_RESULT_LEN)
+}
+
+pub fn decode_tcp_connect_result(bytes: &[u8]) -> Result<(u64, i32, u64, [u8; 4], u16), WireError> {
+    let header = Header::decode(bytes)?;
+    expect_opcode(header.opcode, Opcode::TcpConnectResult)?;
+    if bytes.len() != TCP_CONNECT_RESULT_LEN || read_u32(bytes, 28) != 0 || read_u16(bytes, 46) != 0
+    {
+        return Err(WireError::InvalidLength {
+            declared: TCP_CONNECT_RESULT_LEN,
+            actual: bytes.len(),
+        });
+    }
+    Ok((
+        header.request_id,
+        read_i32(bytes, 24),
+        read_u64(bytes, 32),
+        [bytes[40], bytes[41], bytes[42], bytes[43]],
+        read_u16(bytes, 44),
+    ))
+}
+
+pub fn encode_tcp_send(
+    request_id: u64,
+    handle: u64,
+    timeout_ms: u32,
+    data: &[u8],
+    out: &mut [u8],
+) -> Result<usize, WireError> {
+    if data.len() > MAX_TCP_IO_LEN {
+        return Err(WireError::DataTooLarge(data.len()));
+    }
+    let length = 40usize
+        .checked_add(data.len())
+        .ok_or(WireError::DataTooLarge(data.len()))?;
+    write_header(Opcode::TcpSend, request_id, length, out)?;
+    write_u64(out, 24, handle);
+    write_u32(out, 32, timeout_ms);
+    write_u32(out, 36, data.len() as u32);
+    out[40..length].copy_from_slice(data);
+    Ok(length)
+}
+
+pub fn decode_tcp_send(bytes: &[u8]) -> Result<(u64, u64, u32, &[u8]), WireError> {
+    let header = Header::decode(bytes)?;
+    expect_opcode(header.opcode, Opcode::TcpSend)?;
+    if bytes.len() < 40 {
+        return Err(WireError::InvalidLength {
+            declared: 40,
+            actual: bytes.len(),
+        });
+    }
+    let data_length = read_u32(bytes, 36) as usize;
+    if data_length > MAX_TCP_IO_LEN {
+        return Err(WireError::DataTooLarge(data_length));
+    }
+    if bytes.len() != 40 + data_length {
+        return Err(WireError::InvalidLength {
+            declared: 40 + data_length,
+            actual: bytes.len(),
+        });
+    }
+    Ok((
+        header.request_id,
+        read_u64(bytes, 24),
+        read_u32(bytes, 32),
+        &bytes[40..],
+    ))
+}
+
+pub fn encode_tcp_io_result(
+    opcode: Opcode,
+    request_id: u64,
+    status: i32,
+    transferred: u32,
+    out: &mut [u8],
+) -> Result<usize, WireError> {
+    if !matches!(opcode, Opcode::TcpSendResult | Opcode::TcpCloseResult) {
+        return Err(WireError::UnexpectedOpcode {
+            expected: Opcode::TcpSendResult,
+            actual: opcode,
+        });
+    }
+    write_header(opcode, request_id, TCP_IO_RESULT_LEN, out)?;
+    write_i32(out, 24, status);
+    write_u32(out, 28, 0);
+    write_u32(out, 32, transferred);
+    write_u32(out, 36, 0);
+    Ok(TCP_IO_RESULT_LEN)
+}
+
+pub fn decode_tcp_io_result(expected: Opcode, bytes: &[u8]) -> Result<(u64, i32, u32), WireError> {
+    let header = Header::decode(bytes)?;
+    expect_opcode(header.opcode, expected)?;
+    if bytes.len() != TCP_IO_RESULT_LEN || read_u32(bytes, 28) != 0 || read_u32(bytes, 36) != 0 {
+        return Err(WireError::InvalidLength {
+            declared: TCP_IO_RESULT_LEN,
+            actual: bytes.len(),
+        });
+    }
+    Ok((header.request_id, read_i32(bytes, 24), read_u32(bytes, 32)))
+}
+
+pub fn encode_tcp_receive(
+    request_id: u64,
+    handle: u64,
+    timeout_ms: u32,
+    maximum_length: u32,
+    out: &mut [u8],
+) -> Result<usize, WireError> {
+    if maximum_length as usize > MAX_TCP_IO_LEN {
+        return Err(WireError::DataTooLarge(maximum_length as usize));
+    }
+    write_header(Opcode::TcpReceive, request_id, TCP_RECEIVE_REQUEST_LEN, out)?;
+    write_u64(out, 24, handle);
+    write_u32(out, 32, timeout_ms);
+    write_u32(out, 36, maximum_length);
+    Ok(TCP_RECEIVE_REQUEST_LEN)
+}
+
+pub fn decode_tcp_receive(bytes: &[u8]) -> Result<(u64, u64, u32, u32), WireError> {
+    let header = Header::decode(bytes)?;
+    expect_opcode(header.opcode, Opcode::TcpReceive)?;
+    if bytes.len() != TCP_RECEIVE_REQUEST_LEN {
+        return Err(WireError::InvalidLength {
+            declared: TCP_RECEIVE_REQUEST_LEN,
+            actual: bytes.len(),
+        });
+    }
+    let maximum = read_u32(bytes, 36);
+    if maximum as usize > MAX_TCP_IO_LEN {
+        return Err(WireError::DataTooLarge(maximum as usize));
+    }
+    Ok((
+        header.request_id,
+        read_u64(bytes, 24),
+        read_u32(bytes, 32),
+        maximum,
+    ))
+}
+
+pub fn encode_tcp_receive_result(
+    request_id: u64,
+    status: i32,
+    closed: bool,
+    data: &[u8],
+    out: &mut [u8],
+) -> Result<usize, WireError> {
+    if data.len() > MAX_TCP_IO_LEN {
+        return Err(WireError::DataTooLarge(data.len()));
+    }
+    let length = 40usize
+        .checked_add(data.len())
+        .ok_or(WireError::DataTooLarge(data.len()))?;
+    write_header(Opcode::TcpReceiveResult, request_id, length, out)?;
+    write_i32(out, 24, status);
+    write_u32(out, 28, u32::from(closed));
+    write_u32(out, 32, data.len() as u32);
+    write_u32(out, 36, 0);
+    out[40..length].copy_from_slice(data);
+    Ok(length)
+}
+
+pub fn decode_tcp_receive_result(bytes: &[u8]) -> Result<(u64, i32, bool, &[u8]), WireError> {
+    let header = Header::decode(bytes)?;
+    expect_opcode(header.opcode, Opcode::TcpReceiveResult)?;
+    if bytes.len() < 40 || read_u32(bytes, 36) != 0 {
+        return Err(WireError::InvalidLength {
+            declared: 40,
+            actual: bytes.len(),
+        });
+    }
+    let flags = read_u32(bytes, 28);
+    if flags > 1 {
+        return Err(WireError::NonZeroReserved(flags));
+    }
+    let data_length = read_u32(bytes, 32) as usize;
+    if data_length > MAX_TCP_IO_LEN || bytes.len() != 40 + data_length {
+        return Err(WireError::InvalidLength {
+            declared: 40 + data_length,
+            actual: bytes.len(),
+        });
+    }
+    Ok((
+        header.request_id,
+        read_i32(bytes, 24),
+        flags == 1,
+        &bytes[40..],
+    ))
+}
+
+pub fn encode_tcp_close(
+    request_id: u64,
+    handle: u64,
+    timeout_ms: u32,
+    out: &mut [u8],
+) -> Result<usize, WireError> {
+    write_header(Opcode::TcpClose, request_id, TCP_CLOSE_REQUEST_LEN, out)?;
+    write_u64(out, 24, handle);
+    write_u32(out, 32, timeout_ms);
+    write_u32(out, 36, 0);
+    Ok(TCP_CLOSE_REQUEST_LEN)
+}
+
+pub fn decode_tcp_close(bytes: &[u8]) -> Result<(u64, u64, u32), WireError> {
+    let header = Header::decode(bytes)?;
+    expect_opcode(header.opcode, Opcode::TcpClose)?;
+    if bytes.len() != TCP_CLOSE_REQUEST_LEN || read_u32(bytes, 36) != 0 {
+        return Err(WireError::InvalidLength {
+            declared: TCP_CLOSE_REQUEST_LEN,
+            actual: bytes.len(),
+        });
+    }
+    Ok((header.request_id, read_u64(bytes, 24), read_u32(bytes, 32)))
+}
+
 pub fn encode_stack_statistics(
     request_id: u64,
     stats: StackStatistics,
@@ -434,6 +851,22 @@ pub fn encode_stack_statistics(
         stats.dhcp_attempts,
         stats.dhcp_successes,
         stats.dhcp_failures,
+        stats.dns_queries,
+        stats.dns_cache_hits,
+        stats.dns_cache_misses,
+        stats.dns_timeouts,
+        stats.dns_failures,
+        stats.tcp_connections_attempted,
+        stats.tcp_connections_established,
+        stats.tcp_connections_failed,
+        stats.tcp_segments_sent,
+        stats.tcp_segments_received,
+        stats.tcp_retransmissions,
+        stats.tcp_checksum_errors,
+        stats.tcp_resets,
+        stats.tcp_timeouts,
+        stats.tcp_receive_drops,
+        stats.tcp_send_drops,
     ]
     .into_iter()
     .enumerate()
@@ -472,6 +905,22 @@ pub fn decode_stack_statistics(bytes: &[u8]) -> Result<(u64, StackStatistics), W
             dhcp_attempts: read_u64(bytes, 136),
             dhcp_successes: read_u64(bytes, 144),
             dhcp_failures: read_u64(bytes, 152),
+            dns_queries: read_u64(bytes, 160),
+            dns_cache_hits: read_u64(bytes, 168),
+            dns_cache_misses: read_u64(bytes, 176),
+            dns_timeouts: read_u64(bytes, 184),
+            dns_failures: read_u64(bytes, 192),
+            tcp_connections_attempted: read_u64(bytes, 200),
+            tcp_connections_established: read_u64(bytes, 208),
+            tcp_connections_failed: read_u64(bytes, 216),
+            tcp_segments_sent: read_u64(bytes, 224),
+            tcp_segments_received: read_u64(bytes, 232),
+            tcp_retransmissions: read_u64(bytes, 240),
+            tcp_checksum_errors: read_u64(bytes, 248),
+            tcp_resets: read_u64(bytes, 256),
+            tcp_timeouts: read_u64(bytes, 264),
+            tcp_receive_drops: read_u64(bytes, 272),
+            tcp_send_drops: read_u64(bytes, 280),
         },
     ))
 }
@@ -664,6 +1113,22 @@ mod tests {
             dhcp_attempts: 15,
             dhcp_successes: 16,
             dhcp_failures: 17,
+            dns_queries: 18,
+            dns_cache_hits: 19,
+            dns_cache_misses: 20,
+            dns_timeouts: 21,
+            dns_failures: 22,
+            tcp_connections_attempted: 23,
+            tcp_connections_established: 24,
+            tcp_connections_failed: 25,
+            tcp_segments_sent: 26,
+            tcp_segments_received: 27,
+            tcp_retransmissions: 28,
+            tcp_checksum_errors: 29,
+            tcp_resets: 30,
+            tcp_timeouts: 31,
+            tcp_receive_drops: 32,
+            tcp_send_drops: 33,
         };
         let mut bytes = [0; STACK_STATISTICS_LEN];
         let length = encode_stack_statistics(u64::MAX, stats, &mut bytes).unwrap();
@@ -671,5 +1136,74 @@ mod tests {
         assert_eq!(decode_stack_statistics(&bytes), Ok((u64::MAX, stats)));
         assert_eq!(&bytes[144..152], &16u64.to_le_bytes());
         assert_eq!(&bytes[152..160], &17u64.to_le_bytes());
+        assert_eq!(&bytes[280..288], &33u64.to_le_bytes());
+    }
+
+    #[test]
+    fn dns_and_tcp_requests_round_trip() {
+        let mut bytes = [0u8; 512];
+        let length = encode_resolve_ipv4(1, "example.com", 3_000, &mut bytes).unwrap();
+        assert_eq!(
+            decode_resolve_ipv4(&bytes[..length]),
+            Ok((1, 3_000, "example.com"))
+        );
+        let length = encode_tcp_connect(2, "example.com", 80, 5_000, &mut bytes).unwrap();
+        assert_eq!(
+            decode_tcp_connect(&bytes[..length]),
+            Ok((2, 5_000, 80, "example.com"))
+        );
+        let length = encode_tcp_send(3, u64::MAX, 5_000, b"test", &mut bytes).unwrap();
+        assert_eq!(
+            decode_tcp_send(&bytes[..length]),
+            Ok((3, u64::MAX, 5_000, b"test".as_slice()))
+        );
+        encode_tcp_receive(4, 9, 5_000, 128, &mut bytes).unwrap();
+        assert_eq!(
+            decode_tcp_receive(&bytes[..TCP_RECEIVE_REQUEST_LEN]),
+            Ok((4, 9, 5_000, 128))
+        );
+        encode_tcp_close(5, 9, 5_000, &mut bytes).unwrap();
+        assert_eq!(
+            decode_tcp_close(&bytes[..TCP_CLOSE_REQUEST_LEN]),
+            Ok((5, 9, 5_000))
+        );
+    }
+
+    #[test]
+    fn dns_and_tcp_results_round_trip() {
+        let mut bytes = [0u8; 512];
+        encode_resolve_ipv4_result(1, 0, [1, 2, 3, 4], true, &mut bytes).unwrap();
+        assert_eq!(
+            decode_resolve_ipv4_result(&bytes[..RESOLVE_RESULT_LEN]),
+            Ok((1, 0, [1, 2, 3, 4], true))
+        );
+        encode_tcp_connect_result(2, 0, 99, [1, 2, 3, 4], 80, &mut bytes).unwrap();
+        assert_eq!(
+            decode_tcp_connect_result(&bytes[..TCP_CONNECT_RESULT_LEN]),
+            Ok((2, 0, 99, [1, 2, 3, 4], 80))
+        );
+        encode_tcp_io_result(Opcode::TcpSendResult, 3, 0, 4, &mut bytes).unwrap();
+        assert_eq!(
+            decode_tcp_io_result(Opcode::TcpSendResult, &bytes[..TCP_IO_RESULT_LEN]),
+            Ok((3, 0, 4))
+        );
+        let length = encode_tcp_receive_result(4, 0, false, b"pong", &mut bytes).unwrap();
+        assert_eq!(
+            decode_tcp_receive_result(&bytes[..length]),
+            Ok((4, 0, false, b"pong".as_slice()))
+        );
+    }
+
+    #[test]
+    fn dns_and_tcp_lengths_are_bounded() {
+        let mut bytes = [0u8; 64];
+        assert!(matches!(
+            encode_resolve_ipv4(1, &"a".repeat(MAX_HOSTNAME_LEN + 1), 1, &mut bytes),
+            Err(WireError::HostnameTooLarge(_))
+        ));
+        assert!(matches!(
+            encode_tcp_send(1, 1, 1, &[0; MAX_TCP_IO_LEN + 1], &mut bytes),
+            Err(WireError::DataTooLarge(_))
+        ));
     }
 }
