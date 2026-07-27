@@ -4,8 +4,10 @@ members = [
     "crates/capability-protocol",
     "crates/certificate",
     "crates/driver-control-protocol",
+    "crates/http-client",
     "crates/net-device-protocol",
     "crates/network-stack",
+    "crates/tls-client",
     "crates/virtio-gpu-protocol",
     "crates/viewkit-gpu-protocol",
     "crates/syscall",
@@ -21,6 +23,7 @@ version = "0.1.0"
 
 [patch.crates-io]
 libc = { path = "../libraries/libc" }
+mnu-abi = { path = "../core/crates/abi" }
 
 [profile.dev]
 panic = "abort"
