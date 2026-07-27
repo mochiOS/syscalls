@@ -7,11 +7,12 @@ pub const VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 24;
 pub const MAX_FRAME_LEN: usize = 1514;
 pub const INTERFACE_INFO_LEN: usize = 64;
+pub const DRIVER_NAME_LEN: usize = 12;
 pub const STATISTICS_LEN: usize = 88;
 pub const STATUS_LEN: usize = 32;
 pub const PING_REQUEST_LEN: usize = 32;
 pub const PING_RESULT_LEN: usize = 40;
-pub const STACK_STATISTICS_LEN: usize = 144;
+pub const STACK_STATISTICS_LEN: usize = 160;
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,6 +125,7 @@ pub struct InterfaceInfo {
     pub mtu: u16,
     pub driver_id: u32,
     pub device_id: u32,
+    pub driver_name: [u8; DRIVER_NAME_LEN],
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -155,6 +157,8 @@ pub struct StackStatistics {
     pub icmp_echo_requests: u64,
     pub icmp_echo_replies: u64,
     pub dhcp_attempts: u64,
+    pub dhcp_successes: u64,
+    pub dhcp_failures: u64,
 }
 
 pub fn encode_empty(opcode: Opcode, request_id: u64, out: &mut [u8]) -> Result<usize, WireError> {
@@ -258,7 +262,7 @@ pub fn encode_interface_info(
     write_u16(out, 42, 0);
     write_u32(out, 44, info.driver_id);
     write_u32(out, 48, info.device_id);
-    out[52..64].fill(0);
+    out[52..64].copy_from_slice(&info.driver_name);
     Ok(INTERFACE_INFO_LEN)
 }
 
@@ -271,7 +275,7 @@ pub fn decode_interface_info(bytes: &[u8]) -> Result<(u64, InterfaceInfo), WireE
             actual: bytes.len(),
         });
     }
-    if bytes[39] != 0 || read_u16(bytes, 42) != 0 || bytes[52..64].iter().any(|b| *b != 0) {
+    if bytes[39] != 0 || read_u16(bytes, 42) != 0 {
         return Err(WireError::NonZeroReserved(1));
     }
     Ok((
@@ -285,6 +289,12 @@ pub fn decode_interface_info(bytes: &[u8]) -> Result<(u64, InterfaceInfo), WireE
             mtu: read_u16(bytes, 40),
             driver_id: read_u32(bytes, 44),
             device_id: read_u32(bytes, 48),
+            driver_name: bytes[52..64]
+                .try_into()
+                .map_err(|_| WireError::InvalidLength {
+                    declared: INTERFACE_INFO_LEN,
+                    actual: bytes.len(),
+                })?,
         },
     ))
 }
@@ -422,6 +432,8 @@ pub fn encode_stack_statistics(
         stats.icmp_echo_requests,
         stats.icmp_echo_replies,
         stats.dhcp_attempts,
+        stats.dhcp_successes,
+        stats.dhcp_failures,
     ]
     .into_iter()
     .enumerate()
@@ -458,6 +470,8 @@ pub fn decode_stack_statistics(bytes: &[u8]) -> Result<(u64, StackStatistics), W
             icmp_echo_requests: read_u64(bytes, 120),
             icmp_echo_replies: read_u64(bytes, 128),
             dhcp_attempts: read_u64(bytes, 136),
+            dhcp_successes: read_u64(bytes, 144),
+            dhcp_failures: read_u64(bytes, 152),
         },
     ))
 }
@@ -599,6 +613,7 @@ mod tests {
             mtu: 1500,
             driver_id: 7,
             device_id: 8,
+            driver_name: *b"virtio-net\0\0",
         };
         encode_interface_info(3, info, &mut b).unwrap();
         assert_eq!(decode_interface_info(&b), Ok((3, info)));
@@ -627,5 +642,34 @@ mod tests {
         let mut b = [0; STATISTICS_LEN];
         encode_statistics(Opcode::Statistics, 4, s, &mut b).unwrap();
         assert_eq!(decode_statistics(Opcode::Statistics, &b), Ok((4, s)));
+    }
+
+    #[test]
+    fn stack_statistics_round_trip_includes_dhcp_outcomes() {
+        let stats = StackStatistics {
+            rx_packets: 1,
+            rx_bytes: 2,
+            rx_dropped: 3,
+            rx_errors: 4,
+            tx_packets: 5,
+            tx_bytes: 6,
+            tx_dropped: 7,
+            tx_errors: 8,
+            arp_requests: 9,
+            arp_cache_hits: 10,
+            arp_cache_misses: 11,
+            ipv4_checksum_errors: 12,
+            icmp_echo_requests: 13,
+            icmp_echo_replies: 14,
+            dhcp_attempts: 15,
+            dhcp_successes: 16,
+            dhcp_failures: 17,
+        };
+        let mut bytes = [0; STACK_STATISTICS_LEN];
+        let length = encode_stack_statistics(u64::MAX, stats, &mut bytes).unwrap();
+        assert_eq!(length, STACK_STATISTICS_LEN);
+        assert_eq!(decode_stack_statistics(&bytes), Ok((u64::MAX, stats)));
+        assert_eq!(&bytes[144..152], &16u64.to_le_bytes());
+        assert_eq!(&bytes[152..160], &17u64.to_le_bytes());
     }
 }
