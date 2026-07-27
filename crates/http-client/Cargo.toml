@@ -1,0 +1,8 @@
+[package]
+name = "mochios-http-client"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["alloc"]
+alloc = []
