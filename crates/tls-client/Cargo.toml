@@ -1,0 +1,27 @@
+[package]
+name = "mochios-tls-client"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["alloc"]
+alloc = ["rustls-rustcrypto/alloc"]
+test-web-pki = []
+
+[dependencies]
+getrandom = { version = "0.2.17", features = ["custom"] }
+rustls = { version = "0.23.40", default-features = false, features = ["custom-provider"] }
+rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc", "zeroize"] }
+webpki-roots = "1"
+x509-cert = { version = "0.2", default-features = false }
+
+[target.'cfg(any(target_os = "mochios", target_os = "none"))'.dependencies]
+mochi-user-platform = { path = "../platform" }
+
+[dev-dependencies]
+rcgen = "0.14"
+rustls = { version = "0.23.40", default-features = false, features = ["custom-provider", "std", "tls12"] }
+rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc", "tls12", "zeroize"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mochios", "none"))'] }
