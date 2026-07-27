@@ -2,6 +2,12 @@
 
 use core::fmt;
 
+mod http;
+mod tls;
+
+pub use http::*;
+pub use tls::*;
+
 pub const MAGIC: u32 = 0x5445_4e4d;
 pub const VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 24;
@@ -18,6 +24,7 @@ pub const TCP_IO_RESULT_LEN: usize = 40;
 pub const TCP_RECEIVE_REQUEST_LEN: usize = 40;
 pub const TCP_CLOSE_REQUEST_LEN: usize = 40;
 pub const STACK_STATISTICS_LEN: usize = 288;
+pub const SECURITY_STATISTICS_LEN: usize = 152;
 pub const MAX_HOSTNAME_LEN: usize = 253;
 pub const MAX_TCP_IO_LEN: usize = 4096;
 
@@ -35,17 +42,33 @@ pub enum Opcode {
     Ping = 0x0101,
     GetStackStatistics = 0x0102,
     ResolveIpv4 = 0x0103,
+    GetSecurityStatistics = 0x0104,
     TcpConnect = 0x0110,
     TcpSend = 0x0111,
     TcpReceive = 0x0112,
     TcpClose = 0x0113,
+    TlsConnect = 0x0120,
+    TlsSend = 0x0121,
+    TlsReceive = 0x0122,
+    TlsClose = 0x0123,
+    HttpRequest = 0x0130,
+    HttpRead = 0x0131,
+    HttpClose = 0x0132,
     PingResult = 0x8101,
     StackStatistics = 0x8102,
     ResolveIpv4Result = 0x8103,
+    SecurityStatistics = 0x8104,
     TcpConnectResult = 0x8110,
     TcpSendResult = 0x8111,
     TcpReceiveResult = 0x8112,
     TcpCloseResult = 0x8113,
+    TlsConnectResult = 0x8120,
+    TlsSendResult = 0x8121,
+    TlsReceiveResult = 0x8122,
+    TlsCloseResult = 0x8123,
+    HttpRequestResult = 0x8130,
+    HttpReadResult = 0x8131,
+    HttpCloseResult = 0x8132,
 }
 
 impl Opcode {
@@ -66,17 +89,33 @@ impl Opcode {
             0x0101 => Self::Ping,
             0x0102 => Self::GetStackStatistics,
             0x0103 => Self::ResolveIpv4,
+            0x0104 => Self::GetSecurityStatistics,
             0x0110 => Self::TcpConnect,
             0x0111 => Self::TcpSend,
             0x0112 => Self::TcpReceive,
             0x0113 => Self::TcpClose,
+            0x0120 => Self::TlsConnect,
+            0x0121 => Self::TlsSend,
+            0x0122 => Self::TlsReceive,
+            0x0123 => Self::TlsClose,
+            0x0130 => Self::HttpRequest,
+            0x0131 => Self::HttpRead,
+            0x0132 => Self::HttpClose,
             0x8101 => Self::PingResult,
             0x8102 => Self::StackStatistics,
             0x8103 => Self::ResolveIpv4Result,
+            0x8104 => Self::SecurityStatistics,
             0x8110 => Self::TcpConnectResult,
             0x8111 => Self::TcpSendResult,
             0x8112 => Self::TcpReceiveResult,
             0x8113 => Self::TcpCloseResult,
+            0x8120 => Self::TlsConnectResult,
+            0x8121 => Self::TlsSendResult,
+            0x8122 => Self::TlsReceiveResult,
+            0x8123 => Self::TlsCloseResult,
+            0x8130 => Self::HttpRequestResult,
+            0x8131 => Self::HttpReadResult,
+            0x8132 => Self::HttpCloseResult,
             _ => return None,
         })
     }
@@ -89,6 +128,10 @@ pub enum WireError {
     InvalidMagic(u32),
     UnsupportedVersion(u16),
     UnknownOpcode(u16),
+    UnknownTlsFailure(u16),
+    UnknownHttpFailure(u16),
+    UnknownHttpMethod(u16),
+    UnknownHttpStream(u16),
     UnexpectedOpcode { expected: Opcode, actual: Opcode },
     NonZeroReserved(u32),
     FrameTooLarge(usize),
@@ -205,6 +248,26 @@ pub struct StackStatistics {
     pub tcp_timeouts: u64,
     pub tcp_receive_drops: u64,
     pub tcp_send_drops: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SecurityStatistics {
+    pub tls_connections_attempted: u64,
+    pub tls_connections_established: u64,
+    pub tls_connections_failed: u64,
+    pub tls_handshake_failures: u64,
+    pub tls_certificate_failures: u64,
+    pub tls_hostname_failures: u64,
+    pub tls_records_sent: u64,
+    pub tls_records_received: u64,
+    pub tls_decrypt_failures: u64,
+    pub http_requests: u64,
+    pub http_responses: u64,
+    pub http_failures: u64,
+    pub http_redirects: u64,
+    pub http_header_errors: u64,
+    pub http_body_limit_errors: u64,
+    pub http_chunk_errors: u64,
 }
 
 pub fn encode_empty(opcode: Opcode, request_id: u64, out: &mut [u8]) -> Result<usize, WireError> {
@@ -925,6 +988,75 @@ pub fn decode_stack_statistics(bytes: &[u8]) -> Result<(u64, StackStatistics), W
     ))
 }
 
+pub fn encode_security_statistics(
+    request_id: u64,
+    stats: SecurityStatistics,
+    out: &mut [u8],
+) -> Result<usize, WireError> {
+    write_header(
+        Opcode::SecurityStatistics,
+        request_id,
+        SECURITY_STATISTICS_LEN,
+        out,
+    )?;
+    for (index, value) in [
+        stats.tls_connections_attempted,
+        stats.tls_connections_established,
+        stats.tls_connections_failed,
+        stats.tls_handshake_failures,
+        stats.tls_certificate_failures,
+        stats.tls_hostname_failures,
+        stats.tls_records_sent,
+        stats.tls_records_received,
+        stats.tls_decrypt_failures,
+        stats.http_requests,
+        stats.http_responses,
+        stats.http_failures,
+        stats.http_redirects,
+        stats.http_header_errors,
+        stats.http_body_limit_errors,
+        stats.http_chunk_errors,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        write_u64(out, 24 + index * 8, value);
+    }
+    Ok(SECURITY_STATISTICS_LEN)
+}
+
+pub fn decode_security_statistics(bytes: &[u8]) -> Result<(u64, SecurityStatistics), WireError> {
+    let header = Header::decode(bytes)?;
+    expect_opcode(header.opcode, Opcode::SecurityStatistics)?;
+    if bytes.len() != SECURITY_STATISTICS_LEN {
+        return Err(WireError::InvalidLength {
+            declared: SECURITY_STATISTICS_LEN,
+            actual: bytes.len(),
+        });
+    }
+    Ok((
+        header.request_id,
+        SecurityStatistics {
+            tls_connections_attempted: read_u64(bytes, 24),
+            tls_connections_established: read_u64(bytes, 32),
+            tls_connections_failed: read_u64(bytes, 40),
+            tls_handshake_failures: read_u64(bytes, 48),
+            tls_certificate_failures: read_u64(bytes, 56),
+            tls_hostname_failures: read_u64(bytes, 64),
+            tls_records_sent: read_u64(bytes, 72),
+            tls_records_received: read_u64(bytes, 80),
+            tls_decrypt_failures: read_u64(bytes, 88),
+            http_requests: read_u64(bytes, 96),
+            http_responses: read_u64(bytes, 104),
+            http_failures: read_u64(bytes, 112),
+            http_redirects: read_u64(bytes, 120),
+            http_header_errors: read_u64(bytes, 128),
+            http_body_limit_errors: read_u64(bytes, 136),
+            http_chunk_errors: read_u64(bytes, 144),
+        },
+    ))
+}
+
 fn expect_opcode(actual: Opcode, expected: Opcode) -> Result<(), WireError> {
     if actual == expected {
         Ok(())
@@ -1137,6 +1269,44 @@ mod tests {
         assert_eq!(&bytes[144..152], &16u64.to_le_bytes());
         assert_eq!(&bytes[152..160], &17u64.to_le_bytes());
         assert_eq!(&bytes[280..288], &33u64.to_le_bytes());
+    }
+
+    #[test]
+    fn security_statistics_have_fixed_wire_layout() {
+        let stats = SecurityStatistics {
+            tls_connections_attempted: 1,
+            tls_connections_established: 2,
+            tls_connections_failed: 3,
+            tls_handshake_failures: 4,
+            tls_certificate_failures: 5,
+            tls_hostname_failures: 6,
+            tls_records_sent: 7,
+            tls_records_received: 8,
+            tls_decrypt_failures: 9,
+            http_requests: 10,
+            http_responses: 11,
+            http_failures: 12,
+            http_redirects: 13,
+            http_header_errors: 14,
+            http_body_limit_errors: 15,
+            http_chunk_errors: 16,
+        };
+        let mut bytes = [0; SECURITY_STATISTICS_LEN];
+        let length = encode_security_statistics(u64::MAX, stats, &mut bytes).unwrap();
+        assert_eq!(length, SECURITY_STATISTICS_LEN);
+        assert_eq!(Opcode::GetSecurityStatistics.wire_value(), 0x0104);
+        assert_eq!(Opcode::SecurityStatistics.wire_value(), 0x8104);
+        assert_eq!(&bytes[24..32], &1u64.to_le_bytes());
+        assert_eq!(&bytes[144..152], &16u64.to_le_bytes());
+        assert_eq!(decode_security_statistics(&bytes), Ok((u64::MAX, stats)));
+        assert!(matches!(
+            decode_security_statistics(&bytes[..SECURITY_STATISTICS_LEN - 1]),
+            Err(WireError::InvalidLength { .. })
+        ));
+        assert!(matches!(
+            encode_security_statistics(1, stats, &mut [0; SECURITY_STATISTICS_LEN - 1]),
+            Err(WireError::BufferTooSmall { .. })
+        ));
     }
 
     #[test]
