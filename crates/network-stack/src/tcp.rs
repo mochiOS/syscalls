@@ -346,7 +346,7 @@ impl TcpConnection {
     }
 
     pub fn queue_send(&mut self, bytes: &[u8]) -> Result<(), TcpConnectionError> {
-        if self.state != TcpState::Established {
+        if !matches!(self.state, TcpState::Established | TcpState::CloseWait) {
             return Err(TcpConnectionError::InvalidState);
         }
         let in_flight = self.outstanding.iter().fold(0usize, |total, segment| {
@@ -412,7 +412,9 @@ impl TcpConnection {
             return Ok(Some(transmit_from(segment, local_window, false)));
         }
 
-        if self.state == TcpState::Established && !self.send_buffer.is_empty() {
+        if matches!(self.state, TcpState::Established | TcpState::CloseWait)
+            && !self.send_buffer.is_empty()
+        {
             if self.peer_window == 0 {
                 return Ok(None);
             }
@@ -1037,6 +1039,43 @@ mod tests {
             .on_segment(&segment(TCP_FLAG_ACK, 502, passive.send_next, &[]), 4)
             .unwrap();
         assert_eq!(passive.state, TcpState::Closed);
+    }
+
+    #[test]
+    fn passive_close_allows_data_before_local_fin() {
+        let mut connection = connection(32, 8);
+        establish(&mut connection);
+        connection
+            .on_segment(&segment(TCP_FLAG_FIN | TCP_FLAG_ACK, 501, 101, &[]), 2)
+            .unwrap();
+        assert_eq!(connection.state, TcpState::CloseWait);
+
+        connection.queue_send(b"close-notify").unwrap();
+        connection.request_close().unwrap();
+        let mut now = 3;
+        let mut sent = Vec::new();
+        while connection.queued_send_len() != 0 {
+            let data = connection.poll_transmit(now).unwrap().unwrap();
+            assert_eq!(data.flags, TCP_FLAG_ACK | TCP_FLAG_PSH);
+            assert_eq!(connection.state, TcpState::CloseWait);
+            sent.extend_from_slice(&data.payload);
+            connection
+                .on_segment(
+                    &segment(
+                        TCP_FLAG_ACK,
+                        502,
+                        data.sequence.wrapping_add(data.payload.len() as u32),
+                        &[],
+                    ),
+                    now + 1,
+                )
+                .unwrap();
+            now += 2;
+        }
+        assert_eq!(sent, b"close-notify");
+        let fin = connection.poll_transmit(now).unwrap().unwrap();
+        assert_eq!(fin.flags, TCP_FLAG_FIN | TCP_FLAG_ACK);
+        assert_eq!(connection.state, TcpState::LastAck);
     }
 
     #[test]
