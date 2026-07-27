@@ -718,6 +718,8 @@ fn capability_class_from_string(name: &str) -> CapabilityClass {
         | "fs.write.removable"
         | "net.connect"
         | "net.listen"
+        | "net.tls.connect"
+        | "net.http.request"
         | "window.create"
         | "window.overlay"
         | "display.read"
@@ -767,6 +769,7 @@ fn capability_class_from_string(name: &str) -> CapabilityClass {
         | "account.other.read"
         | "account.other.modify"
         | "settings.write" => CapabilityClass::Privileged,
+        "system.random.read" => CapabilityClass::SystemOnly,
         _ => CapabilityClass::SystemOnly,
     }
 }

@@ -464,6 +464,32 @@ pub mod time {
     pub fn ticks() -> SysResult<u64> {
         syscall::call0(syscall::SyscallNumber::TimeNow)
     }
+
+    pub fn utc_seconds() -> SysResult<u64> {
+        let mut timespec = [0i64; 2];
+        syscall::call2(
+            syscall::SyscallNumber::ClockGettime,
+            0,
+            timespec.as_mut_ptr() as u64,
+        )?;
+        u64::try_from(timespec[0]).map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))
+    }
+}
+
+pub mod random {
+    use super::syscall::{self, SysResult};
+
+    pub fn fill(destination: &mut [u8]) -> SysResult<()> {
+        let written = syscall::call2(
+            syscall::SyscallNumber::RandomFill,
+            destination.as_mut_ptr() as u64,
+            destination.len() as u64,
+        )?;
+        if written != destination.len() as u64 {
+            return Err(syscall::SysError::from_raw(syscall::EIO as i64));
+        }
+        Ok(())
+    }
 }
 
 pub mod port {
@@ -734,16 +760,16 @@ pub mod event {
 pub mod capability {
     use super::syscall::{self, SysResult};
     pub use mochios_capability_protocol::{
-        decode_decision_request, decode_request, decode_resolve_capabilities_reply,
-        decode_resolve_capabilities_request, encode_decision_request, encode_request,
-        encode_resolve_capabilities_reply, encode_resolve_capabilities_request, CapabilityClass,
-        CapabilityDecision, CapabilityDecisionRequest, CapabilityRequest, ExecutableIdentity,
-        ProtocolError, ResolveCapabilitiesReply, ResourceDescriptor, CAPABILITY_DECISION_OPCODE,
-        CAPABILITY_PERSISTENT_QUERY_OPCODE, CAPABILITY_PROMPT_OPCODE, CAPABILITY_RESPONSE_OPCODE,
-        MAX_CAPABILITY_NAME_LEN, MAX_DECISION_PAYLOAD_SIZE, MAX_EXECUTABLE_PATH_LEN,
-        MAX_PAYLOAD_SIZE, MAX_REASON_LEN, MAX_RESOURCE_PATH_LEN, PROTOCOL_VERSION,
-        RESOLVE_CAPABILITIES_OPCODE, RESOLVE_CAPABILITIES_REPLY_STATUS_LEN,
-        RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN,
+        CAPABILITY_DECISION_OPCODE, CAPABILITY_PERSISTENT_QUERY_OPCODE, CAPABILITY_PROMPT_OPCODE,
+        CAPABILITY_RESPONSE_OPCODE, CapabilityClass, CapabilityDecision, CapabilityDecisionRequest,
+        CapabilityRequest, ExecutableIdentity, MAX_CAPABILITY_NAME_LEN, MAX_DECISION_PAYLOAD_SIZE,
+        MAX_EXECUTABLE_PATH_LEN, MAX_PAYLOAD_SIZE, MAX_REASON_LEN, MAX_RESOURCE_PATH_LEN,
+        PROTOCOL_VERSION, ProtocolError, RESOLVE_CAPABILITIES_OPCODE,
+        RESOLVE_CAPABILITIES_REPLY_STATUS_LEN, RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN,
+        ResolveCapabilitiesReply, ResourceDescriptor, decode_decision_request, decode_request,
+        decode_resolve_capabilities_reply, decode_resolve_capabilities_request,
+        encode_decision_request, encode_request, encode_resolve_capabilities_reply,
+        encode_resolve_capabilities_request,
     };
 
     pub fn capability_from_string(name: &str) -> CapabilityClass {
@@ -768,6 +794,8 @@ pub mod capability {
             | "fs.write.removable"
             | "net.connect"
             | "net.listen"
+            | "net.tls.connect"
+            | "net.http.request"
             | "window.create"
             | "window.overlay"
             | "display.read"
@@ -818,6 +846,7 @@ pub mod capability {
             | "account.other.read"
             | "account.other.modify"
             | "settings.write" => CapabilityClass::Privileged,
+            "system.random.read" => CapabilityClass::SystemOnly,
             _ => CapabilityClass::SystemOnly,
         }
     }
