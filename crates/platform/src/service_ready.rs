@@ -133,18 +133,12 @@ pub fn decode_notification(message: &[u8]) -> Result<(u64, i32), DecodeError> {
         message[14],
         message[15],
     ]);
-    let status = i32::from_le_bytes([
-        message[16],
-        message[17],
-        message[18],
-        message[19],
-    ]);
+    let status = i32::from_le_bytes([message[16], message[17], message[18], message[19]]);
     Ok((token, status))
 }
 
 pub fn validate_notification(message: &[u8], expected_token: u64) -> Result<(), ResultError> {
-    let (token, status) =
-        decode_notification(message).map_err(ResultError::InvalidMessage)?;
+    let (token, status) = decode_notification(message).map_err(ResultError::InvalidMessage)?;
     if token != expected_token {
         return Err(ResultError::TokenMismatch);
     }
@@ -185,8 +179,7 @@ mod tests {
         assert_eq!(
             notification(0x0807_0605_0403_0201, -5),
             [
-                0x53, 0x44, 0x52, 0x59, 1, 0, 1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0xfb, 0xff,
-                0xff, 0xff,
+                0x53, 0x44, 0x52, 0x59, 1, 0, 1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0xfb, 0xff, 0xff, 0xff,
             ]
         );
     }
