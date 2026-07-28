@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-mochi-user-syscall = { path = "../syscall" }
+mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
 
 [features]
 default = []

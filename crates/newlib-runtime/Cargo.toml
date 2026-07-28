@@ -7,5 +7,5 @@ edition = "2024"
 crate-type = ["staticlib"]
 
 [dependencies]
-mochi-user-syscall = { path = "../syscall" }
-mochios-capability-protocol = { path = "../capability-protocol", default-features = false }
+mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
+mochios-capability-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-capability-protocol", default-features = false }

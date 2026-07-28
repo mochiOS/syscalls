@@ -22,8 +22,8 @@ edition = "2024"
 version = "0.1.0"
 
 [patch.crates-io]
-libc = { path = "../libraries/libc" }
-mnu-abi = { path = "../core/crates/abi" }
+libc = { git = "https://github.com/mochiOS/libc", package = "libc" }
+mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 
 [profile.dev]
 panic = "abort"
