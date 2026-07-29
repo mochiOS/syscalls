@@ -19,7 +19,7 @@ pub const SIGNATURE_LEN: usize = 64;
 pub const DOMAIN_SEPARATOR: &[u8] = b"mochios-certificate-v1\0";
 pub const KEY_USAGE_PACKAGE_SIGNING: u32 = 1;
 pub const MAX_CERTIFICATE_LEN: usize = 1024 * 1024;
-pub const MAX_DEVELOPER_ID_LEN: usize = 255;
+pub const MAX_DEVELOPER_ID_LEN: usize = 32;
 pub const MAX_PACKAGE_SCOPES: usize = 256;
 pub const MAX_ALLOWED_CAPABILITIES: usize = 512;
 pub const MAX_ITEM_LEN: usize = 255;
@@ -513,27 +513,38 @@ pub fn key_id(public_key: &[u8; 32]) -> [u8; 32] {
     result
 }
 
-#[cfg(feature = "alloc")]
-fn is_valid_developer_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_DEVELOPER_ID_LEN
+pub fn is_valid_developer_id(value: &str) -> bool {
+    value.len() == MAX_DEVELOPER_ID_LEN
         && value
             .bytes()
-            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-'))
-        && !value.starts_with('.')
-        && !value.ends_with('.')
-        && !value.contains("..")
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        && value.as_bytes()[12] == b'7'
+        && matches!(value.as_bytes()[16], b'8' | b'9' | b'a' | b'b')
 }
 
 pub fn is_valid_package_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_ITEM_LEN
-        && value
+    if value.is_empty() || value.len() > MAX_ITEM_LEN {
+        return false;
+    }
+    let mut segments = value.split('.');
+    let Some(first) = segments.next() else {
+        return false;
+    };
+    valid_package_segment(first)
+        && segments
+            .try_fold(0usize, |count, segment| {
+                valid_package_segment(segment).then_some(count + 1)
+            })
+            .is_some_and(|separator_count| separator_count >= 1)
+}
+
+fn valid_package_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && !segment.starts_with('-')
+        && !segment.ends_with('-')
+        && segment
             .bytes()
-            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-'))
-        && !value.starts_with('.')
-        && !value.ends_with('.')
-        && !value.contains("..")
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'-'))
 }
 
 pub fn is_valid_capability(value: &str) -> bool {

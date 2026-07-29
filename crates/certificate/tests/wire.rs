@@ -2,8 +2,10 @@ use ed25519_dalek::{Signer, SigningKey};
 use mochios_certificate::{
     DOMAIN_SEPARATOR, DeveloperCertificate, EncodeError, FORMAT_VERSION, HEADER_LEN,
     KEY_USAGE_PACKAGE_SIGNING, MAGIC, PackageIdScope, SIGNATURE_LEN, ValidationError, VerifyError,
-    key_id,
+    is_valid_developer_id, is_valid_package_id, key_id,
 };
+
+const DEVELOPER_ID: &str = "019f9e5ac6687902b0e72fe53abfbef1";
 
 fn signed_certificate() -> (DeveloperCertificate, [u8; 32]) {
     let root = SigningKey::from_bytes(&[7u8; 32]);
@@ -13,7 +15,7 @@ fn signed_certificate() -> (DeveloperCertificate, [u8; 32]) {
     let mut certificate = DeveloperCertificate {
         serial_number: 42,
         issuer_key_id: key_id(&root_public),
-        developer_id: "org.mochios.developer.example".into(),
+        developer_id: DEVELOPER_ID.into(),
         subject_key_id: key_id(&subject_public_key),
         subject_public_key,
         not_before: 1_700_000_000,
@@ -219,4 +221,47 @@ fn rejects_noncanonical_strings_and_unknown_usage() {
         certificate.validate(),
         Err(ValidationError::UnknownKeyUsage { actual: 3 })
     );
+}
+
+#[test]
+fn developer_ids_are_uuid_v7_lowercase_hex() {
+    assert!(is_valid_developer_id(DEVELOPER_ID));
+    for invalid in [
+        "",
+        "019f9e5a-c668-7902-b0e7-2fe53abfbef1",
+        "org.mochios.developer.019f9e5ac6687902b0e72fe53abfbef1",
+        "019F9E5AC6687902B0E72FE53ABFBEF1",
+        "019f9e5ac6686902b0e72fe53abfbef1",
+        "019f9e5ac6687902c0e72fe53abfbef1",
+        "019f9e5ac6687902b0e72fe53abfbefg",
+    ] {
+        assert!(!is_valid_developer_id(invalid), "accepted {invalid}");
+    }
+}
+
+#[test]
+fn package_ids_follow_the_shared_reverse_domain_contract() {
+    for valid in [
+        "com.example.app",
+        "io.github.user.app",
+        "dev.tas0.tool",
+        "org.mochios.app",
+        "1.example-app",
+    ] {
+        assert!(is_valid_package_id(valid), "rejected {valid}");
+    }
+    for invalid in [
+        "app",
+        "Com.example.app",
+        ".com.example",
+        "com.example.",
+        "com..example",
+        "com.example_app",
+        "-com.example",
+        "com-.example",
+        "com.-example",
+        "com.example-",
+    ] {
+        assert!(!is_valid_package_id(invalid), "accepted {invalid}");
+    }
 }
