@@ -6,7 +6,7 @@ description = "mochiOS user-space syscall interface"
 license = "Apache-2.0"
 
 [dependencies]
-mnu-abi = "0.1.0"
+mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 
 [features]
 default = []

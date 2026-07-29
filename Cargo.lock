@@ -306,13 +306,13 @@ dependencies = [
 
 [[package]]
 name = "displaydoc"
-version = "0.2.6"
+version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ac70aa55017e108007fbaf5aa0f54b021c98f92ff8af59d42eda9da96e3dd4f"
+checksum = "c6232dd377dcc64799954cbd3a9bb882e9cdc1308ccd87b1c098f1fb2eaf82a8"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -484,6 +484,7 @@ dependencies = [
 [[package]]
 name = "libc"
 version = "0.2.185"
+source = "git+https://github.com/mochiOS/libc#d2072c233a70c5044bc9adc1d6c60cafc3e663e1"
 
 [[package]]
 name = "libm"
@@ -506,13 +507,14 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 [[package]]
 name = "mnu-abi"
 version = "0.1.0"
+source = "git+https://github.com/mochiOS/mnu#7460aa5cf1a12f4c69735644601775c38dcf21be"
 
 [[package]]
 name = "mochi-user-newlib-runtime"
 version = "0.1.0"
 dependencies = [
- "mochi-user-syscall",
- "mochios-capability-protocol",
+ "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochios-capability-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
 ]
 
 [[package]]
@@ -520,16 +522,35 @@ name = "mochi-user-platform"
 version = "0.1.0"
 dependencies = [
  "mnu-abi",
- "mochi-user-runtime",
- "mochi-user-syscall",
- "mochios-capability-protocol",
+ "mochi-user-runtime 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochios-capability-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+]
+
+[[package]]
+name = "mochi-user-platform"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+dependencies = [
+ "mnu-abi",
+ "mochi-user-runtime 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochios-capability-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
 ]
 
 [[package]]
 name = "mochi-user-runtime"
 version = "0.1.0"
 dependencies = [
- "mochi-user-syscall",
+ "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+]
+
+[[package]]
+name = "mochi-user-runtime"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+dependencies = [
+ "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
 ]
 
 [[package]]
@@ -540,8 +561,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mochi-user-syscall"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+dependencies = [
+ "mnu-abi",
+]
+
+[[package]]
 name = "mochios-capability-protocol"
 version = "0.1.0"
+
+[[package]]
+name = "mochios-capability-protocol"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
 
 [[package]]
 name = "mochios-certificate"
@@ -576,7 +610,7 @@ name = "mochios-tls-client"
 version = "0.1.0"
 dependencies = [
  "getrandom",
- "mochi-user-platform",
+ "mochi-user-platform 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "rcgen",
  "rustls",
  "rustls-rustcrypto",
