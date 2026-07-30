@@ -636,6 +636,10 @@ pub mod file {
         syscall::call3(syscall::SyscallNumber::FileWrite, fd, buf_ptr, len)
     }
 
+    pub fn sync(fd: u64) -> SysResult<u64> {
+        syscall::call1(syscall::SyscallNumber::FileSync, fd)
+    }
+
     pub fn seek(fd: u64, offset: i64, whence: u64) -> SysResult<u64> {
         syscall::call3(syscall::SyscallNumber::FileSeek, fd, offset as u64, whence)
     }
