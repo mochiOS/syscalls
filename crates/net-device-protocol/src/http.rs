@@ -12,6 +12,7 @@ pub const HTTP_CLOSE_RESULT_LEN: usize = 48;
 pub type HttpReadResult<'a> = (u64, i32, HttpFailure, u64, bool, &'a [u8]);
 pub const MAX_HTTP_URL_LEN: usize = 2_048;
 pub const MAX_HTTP_CONTENT_TYPE_LEN: usize = 256;
+pub const MAX_HTTP_ETAG_LEN: usize = 128;
 pub const MAX_HTTP_IPC_DATA_LEN: usize = 4_096;
 
 #[repr(u16)]
@@ -106,6 +107,7 @@ pub struct HttpRequest<'a> {
     pub timeout_ms: u32,
     pub url: &'a str,
     pub content_type: &'a str,
+    pub if_none_match: &'a str,
     pub body: &'a [u8],
 }
 
@@ -127,17 +129,20 @@ pub fn encode_http_request(
     timeout_ms: u32,
     url: &str,
     content_type: &str,
+    if_none_match: &str,
     body: &[u8],
     out: &mut [u8],
 ) -> Result<usize, WireError> {
     validate_text(url, MAX_HTTP_URL_LEN)?;
     validate_text(content_type, MAX_HTTP_CONTENT_TYPE_LEN)?;
+    validate_etag(if_none_match)?;
     if body.len() > MAX_HTTP_IPC_DATA_LEN {
         return Err(WireError::DataTooLarge(body.len()));
     }
     let payload = url
         .len()
         .checked_add(content_type.len())
+        .and_then(|value| value.checked_add(if_none_match.len()))
         .and_then(|value| value.checked_add(body.len()))
         .ok_or(WireError::DataTooLarge(usize::MAX))?;
     let length = HTTP_REQUEST_BASE_LEN
@@ -150,13 +155,16 @@ pub fn encode_http_request(
     write_u16(out, 32, url.len() as u16);
     write_u16(out, 34, content_type.len() as u16);
     write_u32(out, 36, body.len() as u32);
-    write_u32(out, 40, 0);
+    write_u16(out, 40, if_none_match.len() as u16);
+    write_u16(out, 42, 0);
     write_u32(out, 44, 0);
     let url_end = HTTP_REQUEST_BASE_LEN + url.len();
     let content_type_end = url_end + content_type.len();
+    let etag_end = content_type_end + if_none_match.len();
     out[HTTP_REQUEST_BASE_LEN..url_end].copy_from_slice(url.as_bytes());
     out[url_end..content_type_end].copy_from_slice(content_type.as_bytes());
-    out[content_type_end..length].copy_from_slice(body);
+    out[content_type_end..etag_end].copy_from_slice(if_none_match.as_bytes());
+    out[etag_end..length].copy_from_slice(body);
     Ok(length)
 }
 
@@ -165,7 +173,7 @@ pub fn decode_http_request(bytes: &[u8]) -> Result<HttpRequest<'_>, WireError> {
     expect_opcode(header.opcode, Opcode::HttpRequest)?;
     if bytes.len() < HTTP_REQUEST_BASE_LEN
         || read_u16(bytes, 26) != 0
-        || read_u32(bytes, 40) != 0
+        || read_u16(bytes, 42) != 0
         || read_u32(bytes, 44) != 0
     {
         return invalid_length(HTTP_REQUEST_BASE_LEN, bytes.len());
@@ -176,8 +184,10 @@ pub fn decode_http_request(bytes: &[u8]) -> Result<HttpRequest<'_>, WireError> {
     let url_length = usize::from(read_u16(bytes, 32));
     let content_type_length = usize::from(read_u16(bytes, 34));
     let body_length = read_u32(bytes, 36) as usize;
+    let etag_length = usize::from(read_u16(bytes, 40));
     if url_length > MAX_HTTP_URL_LEN
         || content_type_length > MAX_HTTP_CONTENT_TYPE_LEN
+        || etag_length > MAX_HTTP_ETAG_LEN
         || body_length > MAX_HTTP_IPC_DATA_LEN
     {
         return Err(WireError::DataTooLarge(body_length));
@@ -185,6 +195,7 @@ pub fn decode_http_request(bytes: &[u8]) -> Result<HttpRequest<'_>, WireError> {
     let expected = HTTP_REQUEST_BASE_LEN
         .checked_add(url_length)
         .and_then(|value| value.checked_add(content_type_length))
+        .and_then(|value| value.checked_add(etag_length))
         .and_then(|value| value.checked_add(body_length))
         .ok_or(WireError::DataTooLarge(usize::MAX))?;
     if bytes.len() != expected {
@@ -192,19 +203,24 @@ pub fn decode_http_request(bytes: &[u8]) -> Result<HttpRequest<'_>, WireError> {
     }
     let url_end = HTTP_REQUEST_BASE_LEN + url_length;
     let content_type_end = url_end + content_type_length;
+    let etag_end = content_type_end + etag_length;
     let url = core::str::from_utf8(&bytes[HTTP_REQUEST_BASE_LEN..url_end])
         .map_err(|_| WireError::InvalidText)?;
     let content_type = core::str::from_utf8(&bytes[url_end..content_type_end])
         .map_err(|_| WireError::InvalidText)?;
+    let if_none_match = core::str::from_utf8(&bytes[content_type_end..etag_end])
+        .map_err(|_| WireError::InvalidText)?;
     validate_text(url, MAX_HTTP_URL_LEN)?;
     validate_text(content_type, MAX_HTTP_CONTENT_TYPE_LEN)?;
+    validate_etag(if_none_match)?;
     Ok(HttpRequest {
         request_id: header.request_id,
         method,
         timeout_ms: read_u32(bytes, 28),
         url,
         content_type,
-        body: &bytes[content_type_end..],
+        if_none_match,
+        body: &bytes[etag_end..],
     })
 }
 
@@ -389,6 +405,31 @@ fn validate_text(text: &str, maximum: usize) -> Result<(), WireError> {
     Ok(())
 }
 
+fn validate_etag(etag: &str) -> Result<(), WireError> {
+    if etag.len() > MAX_HTTP_ETAG_LEN {
+        return Err(WireError::DataTooLarge(etag.len()));
+    }
+    if etag.is_empty() {
+        return Ok(());
+    }
+    let bytes = etag.as_bytes();
+    let opaque = if bytes.starts_with(b"W/\"") && bytes.ends_with(b"\"") {
+        &bytes[3..bytes.len().saturating_sub(1)]
+    } else if bytes.starts_with(b"\"") && bytes.ends_with(b"\"") {
+        &bytes[1..bytes.len().saturating_sub(1)]
+    } else {
+        return Err(WireError::InvalidText);
+    };
+    if opaque
+        .iter()
+        .all(|byte| *byte == 0x21 || (0x23..=0x7e).contains(byte))
+    {
+        Ok(())
+    } else {
+        Err(WireError::InvalidText)
+    }
+}
+
 fn invalid_length<T>(declared: usize, actual: usize) -> Result<T, WireError> {
     Err(WireError::InvalidLength { declared, actual })
 }
@@ -406,6 +447,7 @@ mod tests {
             5000,
             "https://example.com/a",
             "application/json",
+            "W/\"snapshot-7\"",
             b"{}",
             &mut bytes,
         )
@@ -418,6 +460,7 @@ mod tests {
                 timeout_ms: 5000,
                 url: "https://example.com/a",
                 content_type: "application/json",
+                if_none_match: "W/\"snapshot-7\"",
                 body: b"{}"
             })
         );
@@ -428,10 +471,24 @@ mod tests {
                 1,
                 "https://a.test/",
                 "",
+                "",
                 &[0; MAX_HTTP_IPC_DATA_LEN + 1],
                 &mut bytes
             ),
             Err(WireError::DataTooLarge(_))
+        ));
+        assert!(matches!(
+            encode_http_request(
+                1,
+                HttpMethod::Get,
+                1,
+                "https://a.test/",
+                "",
+                "two, etags",
+                &[],
+                &mut bytes
+            ),
+            Err(WireError::InvalidText)
         ));
     }
 

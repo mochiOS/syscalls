@@ -22,7 +22,7 @@ pub const MAX_HEADER_LINE_LEN: usize = 4_096;
 pub const MAX_HEADER_COUNT: usize = 64;
 pub const MAX_HEADER_BYTES: usize = 16 * 1024;
 pub const MAX_TRAILER_BYTES: usize = 8 * 1024;
-pub const MAX_BODY_BYTES: usize = 1024 * 1024;
+pub const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_CHUNK_BYTES: usize = 256 * 1024;
 pub const MAX_REDIRECTS: usize = 3;
 
