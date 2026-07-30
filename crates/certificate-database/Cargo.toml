@@ -1,0 +1,13 @@
+[package]
+name = "mochios-certificate-database"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false }
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/capability-protocol",
     "crates/certificate",
+    "crates/certificate-database",
     "crates/driver-control-protocol",
     "crates/http-client",
     "crates/net-device-protocol",

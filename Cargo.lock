@@ -586,6 +586,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mochios-certificate-database"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "mochios-driver-control-protocol"
 version = "0.1.0"
 
