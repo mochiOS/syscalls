@@ -213,8 +213,14 @@ macro_rules! println {
 }
 
 pub mod thread {
+    use super::syscall::{self, SysResult};
+
     pub fn yield_now() {
         super::runtime_support::yield_now();
+    }
+
+    pub fn sleep_milliseconds(milliseconds: u64) -> SysResult<()> {
+        syscall::call1(syscall::SyscallNumber::Sleep, milliseconds).map(|_| ())
     }
 }
 
