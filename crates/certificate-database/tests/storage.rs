@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 
+#[cfg(feature = "std")]
+use mochios_certificate_database::std_file::FileBackend;
 use mochios_certificate_database::storage::{
     REVOCATIONS_A_PATH, REVOCATIONS_B_PATH, STATE_PATH, SnapshotKind, SnapshotValidator,
     StorageBackend, StorageError, TRUST_A_PATH, TRUST_B_PATH, ValidatedSnapshot, load_database,
     load_database_read_only, mark_checked, persist_snapshot,
 };
-#[cfg(feature = "std")]
-use mochios_certificate_database::std_file::FileBackend;
 use mochios_certificate_database::{DatabaseState, Etag, STATE_LEN, Slot};
 
 #[derive(Default)]
