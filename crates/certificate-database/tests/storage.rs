@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use mochios_certificate_database::storage::{
     REVOCATIONS_A_PATH, REVOCATIONS_B_PATH, STATE_PATH, SnapshotKind, SnapshotValidator,
     StorageBackend, StorageError, TRUST_A_PATH, TRUST_B_PATH, ValidatedSnapshot, load_database,
-    persist_snapshot,
+    mark_checked, persist_snapshot,
 };
 use mochios_certificate_database::{DatabaseState, Etag, STATE_LEN, Slot};
 
@@ -67,12 +67,120 @@ impl SnapshotValidator for Validator {
     }
 }
 
+#[derive(Default)]
+struct OrderedValidator {
+    trust_active: bool,
+    revocations_active: bool,
+}
+
+impl SnapshotValidator for OrderedValidator {
+    fn validate(
+        &mut self,
+        kind: SnapshotKind,
+        bytes: &[u8],
+    ) -> Result<ValidatedSnapshot, StorageError> {
+        if kind == SnapshotKind::Revocations && !self.trust_active {
+            return Err(StorageError::InvalidSnapshot);
+        }
+        let mut validator = Validator;
+        validator.validate(kind, bytes)
+    }
+
+    fn activate(&mut self, kind: SnapshotKind, _bytes: &[u8]) -> Result<(), StorageError> {
+        match kind {
+            SnapshotKind::Trust => self.trust_active = true,
+            SnapshotKind::Revocations => {
+                if !self.trust_active {
+                    return Err(StorageError::InvalidSnapshot);
+                }
+                self.revocations_active = true;
+            }
+        }
+        Ok(())
+    }
+}
+
 fn snapshot(version: u64) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(24);
     bytes.extend_from_slice(&version.to_le_bytes());
     bytes.extend_from_slice(&(version * 10).to_le_bytes());
     bytes.extend_from_slice(&(version * 10 + 100).to_le_bytes());
     bytes
+}
+
+#[test]
+fn mark_checked_updates_only_state_metadata() {
+    let mut backend = MemoryBackend::default();
+    let mut validator = Validator;
+    let mut state = DatabaseState::default();
+    persist_snapshot(
+        &mut backend,
+        &mut validator,
+        &mut state,
+        SnapshotKind::Trust,
+        &snapshot(1),
+        etag(1),
+        10,
+    )
+    .unwrap();
+    let trust_a = backend.files.get(TRUST_A_PATH).cloned();
+    let trust_b = backend.files.get(TRUST_B_PATH).cloned();
+    let writes_before = backend.writes.len();
+
+    mark_checked(&mut backend, &mut state, SnapshotKind::Trust, 20).unwrap();
+
+    assert_eq!(state.generation, 2);
+    assert_eq!(state.trust.last_checked_at, 20);
+    assert_eq!(state.trust.snapshot_version, 1);
+    assert_eq!(state.trust.etag, etag(1));
+    assert_eq!(backend.files.get(TRUST_A_PATH).cloned(), trust_a);
+    assert_eq!(backend.files.get(TRUST_B_PATH).cloned(), trust_b);
+    assert_eq!(&backend.writes[writes_before..], [STATE_PATH]);
+    assert_eq!(backend.state(), state);
+}
+
+#[test]
+fn mark_checked_rejects_missing_snapshot_and_preserves_state_on_write_failure() {
+    let mut backend = MemoryBackend::default();
+    let mut state = DatabaseState::default();
+    assert_eq!(
+        mark_checked(&mut backend, &mut state, SnapshotKind::Trust, 10),
+        Err(StorageError::InvalidSnapshot)
+    );
+
+    let mut validator = Validator;
+    persist_snapshot(
+        &mut backend,
+        &mut validator,
+        &mut state,
+        SnapshotKind::Trust,
+        &snapshot(1),
+        etag(1),
+        10,
+    )
+    .unwrap();
+    let committed = state.clone();
+    backend.fail_path = Some(STATE_PATH.to_string());
+    assert_eq!(
+        mark_checked(&mut backend, &mut state, SnapshotKind::Trust, 20),
+        Err(StorageError::Backend)
+    );
+    assert_eq!(state, committed);
+}
+
+#[test]
+fn recovery_activates_selected_trust_before_validating_revocations() {
+    let mut backend = MemoryBackend::default();
+    backend.insert(TRUST_A_PATH, snapshot(1));
+    backend.insert(REVOCATIONS_A_PATH, snapshot(1));
+    let mut validator = OrderedValidator::default();
+
+    let loaded = load_database(&mut backend, &mut validator).unwrap();
+
+    assert_eq!(loaded.trust, Some(snapshot(1)));
+    assert_eq!(loaded.revocations, Some(snapshot(1)));
+    assert!(validator.trust_active);
+    assert!(validator.revocations_active);
 }
 
 fn etag(version: u64) -> Etag {

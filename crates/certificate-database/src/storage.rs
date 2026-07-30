@@ -42,6 +42,10 @@ pub trait SnapshotValidator {
         kind: SnapshotKind,
         bytes: &[u8],
     ) -> Result<ValidatedSnapshot, StorageError>;
+
+    fn activate(&mut self, _kind: SnapshotKind, _bytes: &[u8]) -> Result<(), StorageError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,12 +71,18 @@ pub fn load_database<B: StorageBackend, V: SnapshotValidator>(
         SnapshotKind::Trust,
         stored_state.as_ref(),
     )?;
+    if let Some(candidate) = trust.as_ref() {
+        validator.activate(SnapshotKind::Trust, &candidate.bytes)?;
+    }
     let revocations = load_kind(
         backend,
         validator,
         SnapshotKind::Revocations,
         stored_state.as_ref(),
     )?;
+    if let Some(candidate) = revocations.as_ref() {
+        validator.activate(SnapshotKind::Revocations, &candidate.bytes)?;
+    }
 
     let mut recovered = stored_state.is_none();
     recovered |= apply_loaded(&mut state, SnapshotKind::Trust, trust.as_ref());
@@ -137,6 +147,26 @@ pub fn persist_snapshot<B: StorageBackend, V: SnapshotValidator>(
     write_state(backend, &next)?;
     *state = next;
     Ok(target)
+}
+
+pub fn mark_checked<B: StorageBackend>(
+    backend: &mut B,
+    state: &mut DatabaseState,
+    kind: SnapshotKind,
+    last_checked_at: u64,
+) -> Result<(), StorageError> {
+    if metadata(state, kind).snapshot_version == 0 {
+        return Err(StorageError::InvalidSnapshot);
+    }
+    let mut next = state.clone();
+    next.generation = next
+        .generation
+        .checked_add(1)
+        .ok_or(StorageError::GenerationOverflow)?;
+    metadata_mut(&mut next, kind).last_checked_at = last_checked_at;
+    write_state(backend, &next)?;
+    *state = next;
+    Ok(())
 }
 
 struct Candidate {
