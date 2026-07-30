@@ -19,6 +19,10 @@ impl FileBackend {
         Self::for_root(Path::new("/"))
     }
 
+    pub fn system_read_only() -> Self {
+        Self::for_root_read_only(Path::new("/"))
+    }
+
     pub fn for_root(root: &Path) -> Result<Self, StorageError> {
         let backend = Self {
             root: root.to_path_buf(),
@@ -29,6 +33,12 @@ impl FileBackend {
             Err(_) => return Err(StorageError::Backend),
         }
         Ok(backend)
+    }
+
+    pub fn for_root_read_only(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+        }
     }
 
     fn resolve(&self, path: &str) -> Result<PathBuf, StorageError> {

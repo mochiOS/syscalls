@@ -5,6 +5,8 @@ use mochios_certificate_database::storage::{
     StorageBackend, StorageError, TRUST_A_PATH, TRUST_B_PATH, ValidatedSnapshot, load_database,
     load_database_read_only, mark_checked, persist_snapshot,
 };
+#[cfg(feature = "std")]
+use mochios_certificate_database::std_file::FileBackend;
 use mochios_certificate_database::{DatabaseState, Etag, STATE_LEN, Slot};
 
 #[derive(Default)]
@@ -342,6 +344,20 @@ fn both_corrupt_slots_fall_back_to_empty_database() {
     assert!(loaded.revocations.is_none());
     assert_eq!(loaded.state.trust.snapshot_version, 0);
     assert_eq!(loaded.state.revocations.snapshot_version, 0);
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn read_only_file_backend_does_not_create_the_database_directory() {
+    let root = std::env::temp_dir().join(format!(
+        "mochios-certificate-read-only-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let mut backend = FileBackend::for_root_read_only(&root);
+
+    assert_eq!(backend.read(TRUST_A_PATH), Ok(None));
+    assert!(!root.join("libraries/certificate").exists());
 }
 
 #[test]
