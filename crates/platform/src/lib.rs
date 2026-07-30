@@ -1,14 +1,59 @@
 #![no_std]
 
 extern crate alloc;
-#[cfg(test)]
+#[cfg(any(feature = "std", test))]
 extern crate std;
+
+#[cfg(all(feature = "runtime", feature = "std"))]
+compile_error!("features `runtime` and `std` are mutually exclusive");
+#[cfg(not(any(feature = "runtime", feature = "std")))]
+compile_error!("either feature `runtime` or `std` must be enabled");
 
 use core::fmt::{self, Write};
 
 pub use mnu_abi::DmaAllocation;
+#[cfg(feature = "runtime")]
 pub use mochi_user_runtime as runtime;
 pub use mochi_user_syscall as syscall;
+
+#[cfg(feature = "runtime")]
+use runtime as runtime_support;
+
+#[cfg(feature = "std")]
+mod runtime_support {
+    use super::syscall;
+
+    pub fn write_all(fd: u64, mut bytes: &[u8]) -> syscall::SysResult<()> {
+        while !bytes.is_empty() {
+            let wrote = syscall::call3(
+                syscall::SyscallNumber::Write,
+                fd,
+                bytes.as_ptr() as u64,
+                bytes.len() as u64,
+            )?;
+            if wrote == 0 {
+                return Err(syscall::SysError::from_raw(syscall::EPIPE as i64));
+            }
+            let consumed = wrote as usize;
+            if consumed > bytes.len() {
+                return Err(syscall::SysError::from_raw(syscall::EIO as i64));
+            }
+            bytes = &bytes[consumed..];
+        }
+        Ok(())
+    }
+
+    pub fn yield_now() {
+        let _ = syscall::call0(syscall::SyscallNumber::ThreadYield);
+    }
+
+    pub fn process_exit(code: u64) -> ! {
+        let _ = syscall::raw_syscall1(syscall::SyscallNumber::ProcessExit, code);
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+}
 
 pub mod path {
     use super::syscall::{self, SysError, SysResult};
@@ -43,7 +88,7 @@ pub mod io {
     pub const STDERR: u64 = 2;
 
     pub fn write(fd: u64, bytes: &[u8]) -> SysResult<()> {
-        super::runtime::write_all(fd, bytes)
+        super::runtime_support::write_all(fd, bytes)
     }
 
     pub fn stdout(bytes: &[u8]) -> SysResult<()> {
@@ -56,12 +101,15 @@ pub mod io {
 }
 
 pub mod logger {
-    use super::{Write, alloc, ipc, runtime, syscall};
+    #[cfg(feature = "runtime")]
+    use super::runtime;
+    use super::{Write, alloc, ipc, syscall};
     use core::fmt;
     use core::sync::atomic::{AtomicU64, Ordering};
 
     static LOGGER_ENDPOINT: AtomicU64 = AtomicU64::new(0);
 
+    #[cfg(feature = "runtime")]
     fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
         if bytes.is_empty() {
             return None;
@@ -77,6 +125,7 @@ pub mod logger {
         Some(out)
     }
 
+    #[cfg(feature = "runtime")]
     unsafe fn c_string_len(ptr: *const u8) -> usize {
         let mut len = 0usize;
         loop {
@@ -97,6 +146,7 @@ pub mod logger {
         if endpoint == 0 { None } else { Some(endpoint) }
     }
 
+    #[cfg(feature = "runtime")]
     pub unsafe fn init_from_initial_stack(sp: *const usize) -> Option<u64> {
         let stack = unsafe { runtime::InitialStack::parse(sp) };
         let mut last_numeric = None;
@@ -164,7 +214,7 @@ macro_rules! println {
 
 pub mod thread {
     pub fn yield_now() {
-        super::runtime::yield_now();
+        super::runtime_support::yield_now();
     }
 }
 
@@ -181,7 +231,7 @@ pub mod process {
     }
 
     pub fn exit(code: u64) -> ! {
-        super::runtime::process_exit(code)
+        super::runtime_support::process_exit(code)
     }
 
     pub fn wait(pid: i64, status_ptr: u64, options: u64) -> SysResult<u64> {

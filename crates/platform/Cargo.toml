@@ -6,8 +6,10 @@ edition = "2024"
 [dependencies]
 mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 mochi-user-syscall = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-syscall" }
-mochi-user-runtime = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-runtime" }
+mochi-user-runtime = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-runtime", optional = true }
 mochios-capability-protocol = { git = "https://github.com/mochiOS/syscalls", package = "mochios-capability-protocol", default-features = false, features = ["alloc"] }
 
 [features]
-default = []
+default = ["runtime"]
+runtime = ["dep:mochi-user-runtime"]
+std = []
