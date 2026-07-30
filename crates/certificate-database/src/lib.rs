@@ -3,11 +3,15 @@
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
+#[cfg(feature = "std")]
+extern crate std;
 
 use core::fmt;
 
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "std")]
+pub mod std_file;
 #[cfg(feature = "alloc")]
 pub mod storage;
 
