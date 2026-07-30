@@ -37,6 +37,12 @@ impl OneShotStatus {
     }
 }
 
+impl Default for OneShotStatus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecodeError {
     InvalidLength,

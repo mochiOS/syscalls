@@ -207,17 +207,13 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
             let collected = pending_value.clone();
             let parsed = parse_array_values(&collected)?;
             match pending_section {
-                Section::Binary => {
+                Section::Binary if pending_key == "requires" => {
                     let binary = current_binary.as_mut()?;
-                    match pending_key.as_str() {
-                        "requires" => binary.requires = parsed,
-                        _ => {}
-                    }
+                    binary.requires = parsed;
                 }
-                Section::LegacyCapabilities => match pending_key.as_str() {
-                    "requires" => legacy_requires = parsed,
-                    _ => {}
-                },
+                Section::LegacyCapabilities if pending_key == "requires" => {
+                    legacy_requires = parsed;
+                }
                 _ => {}
             }
             pending_array = None;
@@ -365,14 +361,14 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
         return None;
     }
 
-    if package.binaries.is_empty() {
-        if let Some(entry) = legacy_entry {
-            package.binaries.push(PackageBinary {
-                path: entry,
-                requires: legacy_requires,
-                ..PackageBinary::default()
-            });
-        }
+    if package.binaries.is_empty()
+        && let Some(entry) = legacy_entry
+    {
+        package.binaries.push(PackageBinary {
+            path: entry,
+            requires: legacy_requires,
+            ..PackageBinary::default()
+        });
     }
 
     for binary in &package.binaries {
@@ -461,6 +457,9 @@ mod tests {
     fn parses_multiline_legacy_capabilities_requires() {
         let manifest = r#"
             [service]
+            id = "org.mochios.logger"
+            name = "Logger Service"
+            version = "1"
             entry = "/system/services/logger.service"
 
             [capabilities]
