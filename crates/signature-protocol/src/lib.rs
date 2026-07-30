@@ -8,6 +8,7 @@ pub const HEADER_LEN: usize = 24;
 pub const BEGIN_LEN: usize = HEADER_LEN + 40;
 pub const FINISH_LEN: usize = HEADER_LEN;
 pub const ERROR_LEN: usize = HEADER_LEN + 8;
+pub const UPDATE_NOTIFICATION_LEN: usize = HEADER_LEN + 16;
 pub const VERIFIED_FIXED_LEN: usize = HEADER_LEN + 112;
 
 #[repr(u16)]
@@ -16,6 +17,8 @@ pub enum Opcode {
     VerifyBegin = 0x0001,
     VerifyChunk = 0x0002,
     VerifyFinish = 0x0003,
+    TrustUpdated = 0x0100,
+    RevocationsUpdated = 0x0101,
     Status = 0x8000,
     Verified = 0x8003,
     Error = 0xffff,
@@ -30,6 +33,7 @@ impl Opcode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EncodeError {
     BufferTooSmall { required: usize, actual: usize },
+    InvalidOpcode,
     ValueTooLong,
     TooManyCapabilities,
 }
@@ -41,6 +45,7 @@ pub enum DecodeError {
     UnsupportedVersion(u16),
     UnknownOpcode(u16),
     UnexpectedOpcode { expected: Opcode, actual: Opcode },
+    UnexpectedUpdateOpcode(Opcode),
     NonZeroFlags(u32),
     NonZeroReserved,
     InvalidUtf8,
@@ -147,6 +152,79 @@ impl VerifyChunk<'_> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VerifyFinish {
     pub request_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UpdateNotification {
+    pub opcode: Opcode,
+    pub request_id: u64,
+    pub snapshot_version: u64,
+    pub generation: u64,
+}
+
+impl UpdateNotification {
+    pub const fn trust(request_id: u64, snapshot_version: u64, generation: u64) -> Self {
+        Self {
+            opcode: Opcode::TrustUpdated,
+            request_id,
+            snapshot_version,
+            generation,
+        }
+    }
+
+    pub const fn revocations(request_id: u64, snapshot_version: u64, generation: u64) -> Self {
+        Self {
+            opcode: Opcode::RevocationsUpdated,
+            request_id,
+            snapshot_version,
+            generation,
+        }
+    }
+
+    pub const fn opcode(&self) -> Opcode {
+        self.opcode
+    }
+
+    pub const fn request_id(&self) -> u64 {
+        self.request_id
+    }
+
+    pub const fn encoded_len(&self) -> usize {
+        UPDATE_NOTIFICATION_LEN
+    }
+
+    pub fn encode(&self, output: &mut [u8]) -> Result<usize, EncodeError> {
+        if !matches!(
+            self.opcode,
+            Opcode::TrustUpdated | Opcode::RevocationsUpdated
+        ) {
+            return Err(EncodeError::InvalidOpcode);
+        }
+        require(output, UPDATE_NOTIFICATION_LEN)?;
+        write_header(output, self.opcode, self.request_id, 16);
+        output[24..32].copy_from_slice(&self.snapshot_version.to_le_bytes());
+        output[32..40].copy_from_slice(&self.generation.to_le_bytes());
+        Ok(UPDATE_NOTIFICATION_LEN)
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        let header = decode_header(input)?;
+        if !matches!(
+            header.opcode,
+            Opcode::TrustUpdated | Opcode::RevocationsUpdated
+        ) {
+            return Err(DecodeError::UnexpectedUpdateOpcode(header.opcode));
+        }
+        if header.payload_len != 16 || input.len() != UPDATE_NOTIFICATION_LEN {
+            return Err(DecodeError::InvalidLength);
+        }
+        Ok(Self {
+            opcode: header.opcode,
+            request_id: header.request_id,
+            snapshot_version: read_u64(input, 24),
+            generation: read_u64(input, 32),
+        })
+    }
 }
 
 impl VerifyFinish {
@@ -428,6 +506,8 @@ fn decode_header(input: &[u8]) -> Result<Header, DecodeError> {
         1 => Opcode::VerifyBegin,
         2 => Opcode::VerifyChunk,
         3 => Opcode::VerifyFinish,
+        0x0100 => Opcode::TrustUpdated,
+        0x0101 => Opcode::RevocationsUpdated,
         0x8000 => Opcode::Status,
         0x8003 => Opcode::Verified,
         0xffff => Opcode::Error,

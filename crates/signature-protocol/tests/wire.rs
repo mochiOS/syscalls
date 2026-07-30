@@ -65,6 +65,65 @@ fn verified_round_trip() {
 }
 
 #[test]
+fn update_notifications_have_fixed_golden_encoding() {
+    let trust = UpdateNotification::trust(
+        0x0807_0605_0403_0201,
+        0x1817_1615_1413_1211,
+        0x2827_2625_2423_2221,
+    );
+    let mut bytes = [0xff; UPDATE_NOTIFICATION_LEN];
+    assert_eq!(trust.encode(&mut bytes), Ok(UPDATE_NOTIFICATION_LEN));
+    assert_eq!(
+        bytes,
+        [
+            b'M', b'S', b'I', b'G', 1, 0, 0, 1, 1, 2, 3, 4, 5, 6, 7, 8, 16, 0, 0, 0, 0, 0, 0, 0,
+            17, 18, 19, 20, 21, 22, 23, 24, 33, 34, 35, 36, 37, 38, 39, 40,
+        ]
+    );
+    assert_eq!(UpdateNotification::decode(&bytes), Ok(trust));
+
+    let revocations = UpdateNotification::revocations(u64::MAX, u64::MAX, u64::MAX);
+    assert_eq!(revocations.encode(&mut bytes), Ok(UPDATE_NOTIFICATION_LEN));
+    assert_eq!(UpdateNotification::decode(&bytes), Ok(revocations));
+}
+
+#[test]
+fn update_notifications_reject_wrong_opcode_length_and_output() {
+    let invalid = UpdateNotification {
+        opcode: Opcode::VerifyBegin,
+        request_id: 1,
+        snapshot_version: 2,
+        generation: 3,
+    };
+    let mut bytes = [0; UPDATE_NOTIFICATION_LEN];
+    assert_eq!(invalid.encode(&mut bytes), Err(EncodeError::InvalidOpcode));
+
+    VerifyFinish { request_id: 1 }.encode(&mut bytes).unwrap();
+    assert_eq!(
+        UpdateNotification::decode(&bytes[..FINISH_LEN]),
+        Err(DecodeError::UnexpectedUpdateOpcode(Opcode::VerifyFinish))
+    );
+
+    let notification = UpdateNotification::trust(1, 2, 3);
+    notification.encode(&mut bytes).unwrap();
+    assert_eq!(
+        UpdateNotification::decode(&bytes[..UPDATE_NOTIFICATION_LEN - 1]),
+        Err(DecodeError::InvalidLength)
+    );
+    let mut excess = [0; UPDATE_NOTIFICATION_LEN + 1];
+    excess[..UPDATE_NOTIFICATION_LEN].copy_from_slice(&bytes);
+    assert_eq!(
+        UpdateNotification::decode(&excess),
+        Err(DecodeError::InvalidLength)
+    );
+    let mut short = [0; UPDATE_NOTIFICATION_LEN - 1];
+    assert!(matches!(
+        notification.encode(&mut short),
+        Err(EncodeError::BufferTooSmall { .. })
+    ));
+}
+
+#[test]
 fn malformed_headers_and_lengths_are_rejected() {
     let mut bytes = [0; FINISH_LEN];
     VerifyFinish { request_id: 1 }.encode(&mut bytes).unwrap();
