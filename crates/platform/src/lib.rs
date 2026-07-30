@@ -109,7 +109,7 @@ pub mod logger {
 
     static LOGGER_ENDPOINT: AtomicU64 = AtomicU64::new(0);
 
-    #[cfg(feature = "runtime")]
+    #[cfg(any(feature = "runtime", feature = "std"))]
     fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
         if bytes.is_empty() {
             return None;
@@ -158,6 +158,22 @@ pub mod logger {
             let arg = unsafe { core::slice::from_raw_parts(arg_ptr, len) };
             crate::service_ready::capture_bootstrap_arg(arg);
             if let Some(value) = parse_decimal_u64(arg) {
+                last_numeric = Some(value);
+            }
+        }
+        if let Some(endpoint) = last_numeric {
+            init(endpoint);
+        }
+        last_numeric
+    }
+
+    #[cfg(feature = "std")]
+    pub fn init_from_env() -> Option<u64> {
+        let mut last_numeric = None;
+        for argument in std::env::args() {
+            let bytes = argument.as_bytes();
+            crate::service_ready::capture_bootstrap_arg(bytes);
+            if let Some(value) = parse_decimal_u64(bytes) {
                 last_numeric = Some(value);
             }
         }

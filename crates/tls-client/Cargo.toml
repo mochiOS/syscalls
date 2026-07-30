@@ -16,7 +16,7 @@ webpki-roots = "1"
 x509-cert = { version = "0.2", default-features = false }
 
 [target.'cfg(any(target_os = "mochios", target_os = "none"))'.dependencies]
-mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform" }
+mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false }
 
 [dev-dependencies]
 rcgen = "0.14"
