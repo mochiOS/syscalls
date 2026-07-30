@@ -1,9 +1,15 @@
 #![no_std]
 #![deny(unsafe_code)]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
 use core::fmt;
 
 use sha2::{Digest, Sha256};
+
+#[cfg(feature = "alloc")]
+pub mod storage;
 
 pub const MAGIC: u32 = 0x494b_5043;
 pub const FORMAT_VERSION: u16 = 1;
