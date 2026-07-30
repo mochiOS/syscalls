@@ -432,7 +432,7 @@ impl<'a> VerifiedView<'a> {
             bytes: capability_bytes,
             remaining: capability_count,
         };
-        while let Some(capability) = iterator.next() {
+        for capability in iterator.by_ref() {
             validate_text(capability?)?;
         }
         if !iterator.bytes.is_empty() {
