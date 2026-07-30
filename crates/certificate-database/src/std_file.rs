@@ -23,7 +23,11 @@ impl FileBackend {
         let backend = Self {
             root: root.to_path_buf(),
         };
-        std::fs::create_dir_all(backend.resolve_directory()).map_err(|_| StorageError::Backend)?;
+        match std::fs::create_dir_all(backend.resolve_directory()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(StorageError::Backend),
+        }
         Ok(backend)
     }
 
