@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use mochios_certificate_database::storage::{
     REVOCATIONS_A_PATH, REVOCATIONS_B_PATH, STATE_PATH, SnapshotKind, SnapshotValidator,
     StorageBackend, StorageError, TRUST_A_PATH, TRUST_B_PATH, ValidatedSnapshot, load_database,
-    mark_checked, persist_snapshot,
+    load_database_read_only, mark_checked, persist_snapshot,
 };
 use mochios_certificate_database::{DatabaseState, Etag, STATE_LEN, Slot};
 
@@ -342,6 +342,44 @@ fn both_corrupt_slots_fall_back_to_empty_database() {
     assert!(loaded.revocations.is_none());
     assert_eq!(loaded.state.trust.snapshot_version, 0);
     assert_eq!(loaded.state.revocations.snapshot_version, 0);
+}
+
+#[test]
+fn read_only_recovery_selects_fallback_without_rewriting_state() {
+    let mut backend = MemoryBackend::default();
+    let mut validator = Validator;
+    let mut state = DatabaseState::default();
+    persist_snapshot(
+        &mut backend,
+        &mut validator,
+        &mut state,
+        SnapshotKind::Trust,
+        &snapshot(1),
+        etag(1),
+        10,
+    )
+    .unwrap();
+    persist_snapshot(
+        &mut backend,
+        &mut validator,
+        &mut state,
+        SnapshotKind::Trust,
+        &snapshot(2),
+        etag(2),
+        20,
+    )
+    .unwrap();
+    backend.insert(TRUST_A_PATH, vec![0]);
+    let committed_state = backend.files.get(STATE_PATH).cloned();
+    let writes_before = backend.writes.len();
+
+    let loaded = load_database_read_only(&mut backend, &mut validator).unwrap();
+
+    assert!(loaded.recovered);
+    assert_eq!(loaded.state.active_trust_slot, Slot::B);
+    assert_eq!(loaded.state.trust.snapshot_version, 1);
+    assert_eq!(backend.writes.len(), writes_before);
+    assert_eq!(backend.files.get(STATE_PATH), committed_state.as_ref());
 }
 
 #[test]

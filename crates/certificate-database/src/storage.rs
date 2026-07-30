@@ -60,6 +60,21 @@ pub fn load_database<B: StorageBackend, V: SnapshotValidator>(
     backend: &mut B,
     validator: &mut V,
 ) -> Result<LoadedDatabase, StorageError> {
+    load_database_inner(backend, validator, true)
+}
+
+pub fn load_database_read_only<B: StorageBackend, V: SnapshotValidator>(
+    backend: &mut B,
+    validator: &mut V,
+) -> Result<LoadedDatabase, StorageError> {
+    load_database_inner(backend, validator, false)
+}
+
+fn load_database_inner<B: StorageBackend, V: SnapshotValidator>(
+    backend: &mut B,
+    validator: &mut V,
+    repair_state: bool,
+) -> Result<LoadedDatabase, StorageError> {
     let stored_state = backend
         .read(STATE_PATH)?
         .and_then(|bytes| DatabaseState::decode(&bytes).ok());
@@ -87,7 +102,7 @@ pub fn load_database<B: StorageBackend, V: SnapshotValidator>(
     let mut recovered = stored_state.is_none();
     recovered |= apply_loaded(&mut state, SnapshotKind::Trust, trust.as_ref());
     recovered |= apply_loaded(&mut state, SnapshotKind::Revocations, revocations.as_ref());
-    if recovered {
+    if recovered && repair_state {
         state.generation = state
             .generation
             .checked_add(1)
