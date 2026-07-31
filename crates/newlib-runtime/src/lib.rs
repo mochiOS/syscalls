@@ -2511,24 +2511,29 @@ pub extern "C" fn times(buf: *mut Tms) -> i64 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn clock_gettime(_clock_id: c_int, tp: *mut Timespec) -> c_int {
+pub extern "C" fn clock_gettime(clock_id: c_int, tp: *mut Timespec) -> c_int {
     if tp.is_null() {
         set_errno(EFAULT);
         return -1;
     }
 
-    let result =
-        syscall_errno(syscall::raw_syscall0(syscall::SyscallNumber::TimeNow)).map(|ticks| {
-            let seconds = ticks / 1_000_000_000;
-            let nanos = ticks % 1_000_000_000;
-            unsafe {
-                *tp = Timespec {
-                    tv_sec: seconds as CLong,
-                    tv_nsec: nanos as CLong,
-                };
-            }
-            0
-        });
+    let kernel_clock_id = match clock_id {
+        0 | 1 | 8 => 0,
+        2 => 2,
+        3 => 3,
+        4 | 5 | 6 | 7 | 9 => 1,
+        _ => {
+            set_errno(EINVAL);
+            return -1;
+        }
+    };
+
+    let result = syscall_errno(syscall::raw_syscall2(
+        syscall::SyscallNumber::ClockGettime,
+        kernel_clock_id,
+        tp as u64,
+    ))
+    .map(|_| 0);
     result_with_errno(result, -1)
 }
 
