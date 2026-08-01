@@ -17,6 +17,7 @@ const PROT_READ_WRITE: u64 = 0x3;
 const MAP_PRIVATE_ANON: u64 = 0x22;
 const MAP_FAILED: *mut c_void = (-1isize) as *mut c_void;
 const AT_FDCWD: i64 = -100;
+const AT_SYMLINK_NOFOLLOW: u64 = 2;
 const SC_OPEN_MAX: c_int = 4;
 const SC_PAGESIZE: c_int = 8;
 const SC_NPROCESSORS_CONF: c_int = 9;
@@ -2275,8 +2276,7 @@ pub extern "C" fn fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
     _fstat(fd, stat_buf)
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn _stat(path: *const c_char, stat_buf: *mut c_void) -> c_int {
+fn stat_with_flags(path: *const c_char, stat_buf: *mut c_void, flags: u64) -> c_int {
     if path.is_null() || stat_buf.is_null() {
         set_errno(EFAULT);
         return -1;
@@ -2304,7 +2304,7 @@ pub extern "C" fn _stat(path: *const c_char, stat_buf: *mut c_void) -> c_int {
             AT_FDCWD as u64,
             path as u64,
             (&mut kernel_stat as *mut KernelStat).cast::<c_void>() as u64,
-            0,
+            flags,
         ))?;
         let translated = translate_stat(&kernel_stat);
         unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), translated) };
@@ -2314,8 +2314,23 @@ pub extern "C" fn _stat(path: *const c_char, stat_buf: *mut c_void) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn _stat(path: *const c_char, stat_buf: *mut c_void) -> c_int {
+    stat_with_flags(path, stat_buf, 0)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn stat(path: *const c_char, stat_buf: *mut c_void) -> c_int {
     _stat(path, stat_buf)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _lstat(path: *const c_char, stat_buf: *mut c_void) -> c_int {
+    stat_with_flags(path, stat_buf, AT_SYMLINK_NOFOLLOW)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lstat(path: *const c_char, stat_buf: *mut c_void) -> c_int {
+    _lstat(path, stat_buf)
 }
 
 #[unsafe(no_mangle)]
