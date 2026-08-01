@@ -212,18 +212,18 @@ need_file "${KERNEL_BIN}"
 need_file "${BOOT_BIN}"
 
 rm -rf "${ESP_DIR}" "${INITFS_STAGE}" "${ROOTFS_STAGE}"
-mkdir -p "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}"
+mkdir -p "${ESP_DIR}/EFI/BOOT" "${INITFS_STAGE}/tmp"
 
 install -m 0644 "${KERNEL_BIN}" "${ESP_DIR}/kernel"
 install -m 0644 "${BOOT_BIN}" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
 install -m 0755 "${HELLO_ELF}" "${INITFS_STAGE}/core.service"
-install -m 0755 "${HELLO_ELF}" "${INITFS_STAGE}/hello.bin"
+install -m 0755 "${HELLO_ELF}" "${INITFS_STAGE}/tmp/hello.bin"
 
 echo "[build] signature db"
 perl "${CORE_ROOT}/scripts/signature_db.pl" \
     --output "${SIGNATURE_DB_STAGE}" \
     --entry "core.service=${HELLO_ELF}" \
-    --entry "/hello.bin=${HELLO_ELF}"
+    --entry "/tmp/hello.bin=${HELLO_ELF}"
 
 echo "[build] rootfs"
 ROOTFS_SOURCE_DIR="${CORE_ROOT}/examples/fs/rootfs" \
