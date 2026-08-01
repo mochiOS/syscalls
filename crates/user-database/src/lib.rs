@@ -64,6 +64,21 @@ impl UserRecord {
         }
         Ok(())
     }
+
+    pub fn parse(bytes: &[u8]) -> Result<Self, DatabaseError> {
+        let line = core::str::from_utf8(bytes).map_err(|_| DatabaseError::InvalidUtf8)?;
+        if line.is_empty() || line.contains('\n') || line.contains('\r') {
+            return Err(DatabaseError::InvalidRecord);
+        }
+        parse_record(line)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, DatabaseError> {
+        self.validate()?;
+        let mut output = String::new();
+        encode_record(self, &mut output);
+        Ok(output.into_bytes())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,22 +138,7 @@ impl UserDatabase {
         let mut output = String::from(HEADER);
         output.push('\n');
         for user in &self.users {
-            let flags = if user.locked { LOCKED_FLAG } else { 0 };
-            output.push_str(&user.uid.to_string());
-            output.push('\t');
-            output.push_str(&user.gid.to_string());
-            output.push('\t');
-            output.push_str(&flags.to_string());
-            for value in [
-                &user.name,
-                &user.display_name,
-                &user.home,
-                &user.shell,
-                &user.password_hash,
-            ] {
-                output.push('\t');
-                encode_hex(value.as_bytes(), &mut output);
-            }
+            encode_record(user, &mut output);
             output.push('\n');
         }
         if output.len() > MAX_DATABASE_BYTES {
@@ -226,6 +226,25 @@ impl UserDatabase {
             return Err(DatabaseError::InvalidRoot);
         }
         Ok(())
+    }
+}
+
+fn encode_record(user: &UserRecord, output: &mut String) {
+    let flags = if user.locked { LOCKED_FLAG } else { 0 };
+    output.push_str(&user.uid.to_string());
+    output.push('\t');
+    output.push_str(&user.gid.to_string());
+    output.push('\t');
+    output.push_str(&flags.to_string());
+    for value in [
+        &user.name,
+        &user.display_name,
+        &user.home,
+        &user.shell,
+        &user.password_hash,
+    ] {
+        output.push('\t');
+        encode_hex(value.as_bytes(), output);
     }
 }
 
@@ -396,6 +415,13 @@ mod tests {
         database.add(user).unwrap();
         let decoded = UserDatabase::parse(&database.encode().unwrap()).unwrap();
         assert_eq!(decoded.find_name("alice").unwrap().uid, 1000);
+    }
+
+    #[test]
+    fn individual_record_round_trips() {
+        let mut user = UserRecord::regular("alice", 1000, 1000);
+        user.display_name = "Alice Example".to_string();
+        assert_eq!(UserRecord::parse(&user.encode().unwrap()).unwrap(), user);
     }
 
     #[test]
