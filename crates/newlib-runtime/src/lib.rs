@@ -2596,6 +2596,27 @@ pub extern "C" fn mkdir(path: *const c_char, mode: c_int) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn _rmdir(path: *const c_char) -> c_int {
+    if path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    let result = (|| {
+        let _ = syscall_errno(syscall::raw_syscall1(
+            syscall::SyscallNumber::Rmdir,
+            path as u64,
+        ))?;
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rmdir(path: *const c_char) -> c_int {
+    _rmdir(path)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn _rename(old_path: *const c_char, new_path: *const c_char) -> c_int {
     if old_path.is_null() || new_path.is_null() {
         set_errno(EFAULT);
