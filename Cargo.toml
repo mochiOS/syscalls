@@ -9,6 +9,7 @@ members = [
     "crates/net-device-protocol",
     "crates/network-stack",
     "crates/tls-client",
+    "crates/user-database",
     "crates/virtio-gpu-protocol",
     "crates/viewkit-gpu-protocol",
     "crates/syscall",
