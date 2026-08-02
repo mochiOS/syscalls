@@ -523,6 +523,37 @@ pub mod service {
         )
     }
 
+    pub fn spawn_manifest_with_credentials(
+        path: &str,
+        role: u64,
+        uid: u32,
+        gid: u32,
+        args_nul: Option<&[u8]>,
+        caps_nul: Option<&[u8]>,
+    ) -> SysResult<u64> {
+        let path = super::path::CPath::<256>::new(path)?;
+        let args_ptr = match args_nul {
+            Some(bytes) if !bytes.is_empty() => bytes.as_ptr() as u64,
+            _ => 0,
+        };
+        let (caps_ptr, caps_len) = match caps_nul {
+            Some(bytes) if !bytes.is_empty() => (bytes.as_ptr() as u64, bytes.len() as u64),
+            _ => (0, 0),
+        };
+        let mut request = [0u8; 24];
+        request[0..8].copy_from_slice(&role.to_le_bytes());
+        request[8..12].copy_from_slice(&uid.to_le_bytes());
+        request[12..16].copy_from_slice(&gid.to_le_bytes());
+        syscall::call5(
+            syscall::SyscallNumber::ExecManifestWithCredentials,
+            path.as_ptr(),
+            args_ptr,
+            caps_ptr,
+            caps_len,
+            request.as_ptr() as u64,
+        )
+    }
+
     pub fn register_delegate(kind: u64, pid: u64) -> SysResult<u64> {
         syscall::call2(syscall::SyscallNumber::ServiceDelegateRegister, kind, pid)
     }

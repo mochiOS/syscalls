@@ -2026,13 +2026,70 @@ pub extern "C" fn getegid() -> u32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn setgid(_gid: c_int) -> c_int {
-    0
+pub extern "C" fn setgid(gid: c_int) -> c_int {
+    if gid < 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    result_with_errno(
+        syscall_errno(syscall::raw_syscall1(
+            syscall::SyscallNumber::Setgid,
+            gid as u64,
+        ))
+        .map(|_| 0),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn setuid(_uid: c_int) -> c_int {
-    0
+pub extern "C" fn setuid(uid: c_int) -> c_int {
+    if uid < 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    result_with_errno(
+        syscall_errno(syscall::raw_syscall1(
+            syscall::SyscallNumber::Setuid,
+            uid as u64,
+        ))
+        .map(|_| 0),
+        -1,
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn chmod(path: *const c_char, mode: u32) -> c_int {
+    if path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    result_with_errno(
+        syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::Chmod,
+            path as u64,
+            mode as u64,
+        ))
+        .map(|_| 0),
+        -1,
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn chown(path: *const c_char, uid: u32, gid: u32) -> c_int {
+    if path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    result_with_errno(
+        syscall_errno(syscall::raw_syscall3(
+            syscall::SyscallNumber::Chown,
+            path as u64,
+            uid as u64,
+            gid as u64,
+        ))
+        .map(|_| 0),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]
