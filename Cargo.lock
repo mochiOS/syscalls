@@ -507,7 +507,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 [[package]]
 name = "mnu-abi"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#7460aa5cf1a12f4c69735644601775c38dcf21be"
+source = "git+https://github.com/mochiOS/mnu#3226f104cafb461788d6c03f28c878ced1a9d78f"
 
 [[package]]
 name = "mochi-user-newlib-runtime"
@@ -563,7 +563,7 @@ dependencies = [
 [[package]]
 name = "mochi-user-syscall"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
+source = "git+https://github.com/mochiOS/syscalls#2911fd97b9f9e384835093036b1a7ae2da0908cc"
 dependencies = [
  "mnu-abi",
 ]

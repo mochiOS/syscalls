@@ -768,9 +768,10 @@ fn capability_class_from_string(name: &str) -> CapabilityClass {
         | "device.storage"
         | "device.net"
         | "account.other.read"
+        | "account.authenticate"
         | "account.other.modify"
         | "settings.write" => CapabilityClass::Privileged,
-        "system.random.read" => CapabilityClass::SystemOnly,
+        "window.secure-overlay" | "system.random.read" => CapabilityClass::SystemOnly,
         _ => CapabilityClass::SystemOnly,
     }
 }

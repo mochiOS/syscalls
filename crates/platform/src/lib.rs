@@ -972,9 +972,10 @@ pub mod capability {
             | "device.storage"
             | "device.net"
             | "account.other.read"
+            | "account.authenticate"
             | "account.other.modify"
             | "settings.write" => CapabilityClass::Privileged,
-            "system.random.read" => CapabilityClass::SystemOnly,
+            "window.secure-overlay" | "system.random.read" => CapabilityClass::SystemOnly,
             _ => CapabilityClass::SystemOnly,
         }
     }
