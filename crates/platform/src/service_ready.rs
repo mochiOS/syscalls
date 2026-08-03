@@ -1,10 +1,13 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 pub const MESSAGE_LEN: usize = 20;
+pub const SESSION_MESSAGE_LEN: usize = 28;
+pub const MAX_MESSAGE_LEN: usize = SESSION_MESSAGE_LEN;
 
 const MAGIC: u32 = 0x5952_4453;
 const VERSION: u16 = 1;
 const KIND_NOTIFICATION: u16 = 1;
+const KIND_SESSION: u16 = 2;
 const BOOTSTRAP_ARG_PREFIX: &[u8] = b"--service-ready=";
 
 static BOOTSTRAP_ENDPOINT: AtomicU64 = AtomicU64::new(0);
@@ -14,6 +17,12 @@ static BOOTSTRAP_TOKEN: AtomicU64 = AtomicU64::new(0);
 pub struct Target {
     pub endpoint: u64,
     pub token: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SessionIdentity {
+    pub uid: u32,
+    pub gid: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +122,22 @@ pub fn notification(token: u64, status: i32) -> [u8; MESSAGE_LEN] {
     message
 }
 
+pub fn session_notification(
+    token: u64,
+    status: i32,
+    identity: SessionIdentity,
+) -> [u8; SESSION_MESSAGE_LEN] {
+    let mut message = [0u8; SESSION_MESSAGE_LEN];
+    message[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+    message[4..6].copy_from_slice(&VERSION.to_le_bytes());
+    message[6..8].copy_from_slice(&KIND_SESSION.to_le_bytes());
+    message[8..16].copy_from_slice(&token.to_le_bytes());
+    message[16..20].copy_from_slice(&status.to_le_bytes());
+    message[20..24].copy_from_slice(&identity.uid.to_le_bytes());
+    message[24..28].copy_from_slice(&identity.gid.to_le_bytes());
+    message
+}
+
 pub fn decode_notification(message: &[u8]) -> Result<(u64, i32), DecodeError> {
     if message.len() != MESSAGE_LEN {
         return Err(DecodeError::InvalidLength);
@@ -141,6 +166,40 @@ pub fn decode_notification(message: &[u8]) -> Result<(u64, i32), DecodeError> {
     ]);
     let status = i32::from_le_bytes([message[16], message[17], message[18], message[19]]);
     Ok((token, status))
+}
+
+pub fn decode_session_notification(
+    message: &[u8],
+) -> Result<(u64, i32, SessionIdentity), DecodeError> {
+    if message.len() != SESSION_MESSAGE_LEN {
+        return Err(DecodeError::InvalidLength);
+    }
+    let magic = u32::from_le_bytes([message[0], message[1], message[2], message[3]]);
+    if magic != MAGIC {
+        return Err(DecodeError::InvalidMagic);
+    }
+    let version = u16::from_le_bytes([message[4], message[5]]);
+    if version != VERSION {
+        return Err(DecodeError::UnsupportedVersion);
+    }
+    let kind = u16::from_le_bytes([message[6], message[7]]);
+    if kind != KIND_SESSION {
+        return Err(DecodeError::InvalidKind);
+    }
+    let token = u64::from_le_bytes([
+        message[8],
+        message[9],
+        message[10],
+        message[11],
+        message[12],
+        message[13],
+        message[14],
+        message[15],
+    ]);
+    let status = i32::from_le_bytes([message[16], message[17], message[18], message[19]]);
+    let uid = u32::from_le_bytes([message[20], message[21], message[22], message[23]]);
+    let gid = u32::from_le_bytes([message[24], message[25], message[26], message[27]]);
+    Ok((token, status, SessionIdentity { uid, gid }))
 }
 
 pub fn validate_notification(message: &[u8], expected_token: u64) -> Result<(), ResultError> {
@@ -176,6 +235,18 @@ pub fn notify(target: Target, status: i32) -> super::syscall::SysResult<u64> {
     super::ipc::send(target.endpoint, &notification(target.token, status))
 }
 
+#[cfg(not(test))]
+pub fn notify_session(
+    target: Target,
+    status: i32,
+    identity: SessionIdentity,
+) -> super::syscall::SysResult<u64> {
+    super::ipc::send(
+        target.endpoint,
+        &session_notification(target.token, status, identity),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +258,26 @@ mod tests {
             [
                 0x53, 0x44, 0x52, 0x59, 1, 0, 1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0xfb, 0xff, 0xff, 0xff,
             ]
+        );
+    }
+
+    #[test]
+    fn session_notification_has_stable_encoding() {
+        let identity = SessionIdentity {
+            uid: 0x0c0b_0a09,
+            gid: 0x100f_0e0d,
+        };
+        let message = session_notification(0x0807_0605_0403_0201, 0, identity);
+        assert_eq!(
+            message,
+            [
+                0x53, 0x44, 0x52, 0x59, 1, 0, 2, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 9, 10, 11,
+                12, 13, 14, 15, 16,
+            ]
+        );
+        assert_eq!(
+            decode_session_notification(&message),
+            Ok((0x0807_0605_0403_0201, 0, identity))
         );
     }
 
@@ -213,6 +304,18 @@ mod tests {
         let mut storage = [0u8; MESSAGE_LEN + 1];
         storage[1..].copy_from_slice(&notification(7, 0));
         assert_eq!(decode_notification(&storage[1..]), Ok((7, 0)));
+
+        let identity = SessionIdentity { uid: 1000, gid: 20 };
+        let mut session_storage = [0u8; SESSION_MESSAGE_LEN + 1];
+        session_storage[1..].copy_from_slice(&session_notification(9, 0, identity));
+        assert_eq!(
+            decode_session_notification(&session_storage[1..]),
+            Ok((9, 0, identity))
+        );
+        assert_eq!(
+            decode_session_notification(&session_storage[1..SESSION_MESSAGE_LEN]),
+            Err(DecodeError::InvalidLength)
+        );
     }
 
     #[test]
