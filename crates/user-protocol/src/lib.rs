@@ -444,11 +444,7 @@ fn encode_credentials(
     name: &str,
     password: &[u8],
 ) -> Result<usize, EncodeError> {
-    if name.is_empty()
-        || name.len() > MAX_USER_NAME_LEN
-        || password.is_empty()
-        || password.len() > MAX_PASSWORD_LEN
-    {
+    if name.is_empty() || name.len() > MAX_USER_NAME_LEN || password.len() > MAX_PASSWORD_LEN {
         return Err(EncodeError::InvalidLength);
     }
     let length = HEADER_LEN
@@ -484,7 +480,6 @@ fn decode_credentials<'a>(input: &'a [u8], opcode: Opcode) -> Result<Credentials
     let password_len = read_u16(input, 26) as usize;
     if name_len == 0
         || name_len > MAX_USER_NAME_LEN
-        || password_len == 0
         || password_len > MAX_PASSWORD_LEN
         || name_len
             .checked_add(password_len)
@@ -761,6 +756,25 @@ mod tests {
         };
         let length = set_password.encode(&mut bytes).unwrap();
         assert_eq!(SetPassword::decode(&bytes[..length]), Ok(set_password));
+
+        let empty_password = SetPassword {
+            request_id: 8,
+            name: "alice",
+            password: b"",
+        };
+        let length = empty_password.encode(&mut bytes).unwrap();
+        assert_eq!(SetPassword::decode(&bytes[..length]), Ok(empty_password));
+
+        let empty_authentication = Authenticate {
+            request_id: 9,
+            name: "alice",
+            password: b"",
+        };
+        let length = empty_authentication.encode(&mut bytes).unwrap();
+        assert_eq!(
+            Authenticate::decode(&bytes[..length]),
+            Ok(empty_authentication)
+        );
 
         let result = AuthenticationResult {
             request_id: u64::MAX,
