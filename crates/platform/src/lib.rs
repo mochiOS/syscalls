@@ -1,6 +1,8 @@
 #![no_std]
 
 extern crate alloc;
+
+pub mod session_control;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
@@ -242,6 +244,17 @@ pub mod thread {
 
 pub mod process {
     use super::syscall::{self, SysResult};
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    pub const RECORD_SIZE: usize = 88;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Record {
+        pub pid: u64,
+        pub state: u64,
+        pub parent_pid: u64,
+    }
 
     pub fn find_by_name(name: &str) -> SysResult<u64> {
         let bytes = name.as_bytes();
@@ -265,6 +278,40 @@ pub mod process {
         )
     }
 
+    pub fn kill(pid: u64, signal: u64) -> SysResult<u64> {
+        syscall::call2(syscall::SyscallNumber::Kill, pid, signal)
+    }
+
+    pub fn list(max_records: usize) -> SysResult<Vec<Record>> {
+        let mut bytes = vec![0u8; RECORD_SIZE.saturating_mul(max_records)];
+        let count = syscall::call2(
+            syscall::SyscallNumber::ListProcesses,
+            bytes.as_mut_ptr() as u64,
+            bytes.len() as u64,
+        )? as usize;
+        let mut records = Vec::with_capacity(count.min(max_records));
+        for record in bytes.chunks_exact(RECORD_SIZE).take(count.min(max_records)) {
+            records.push(Record {
+                pid: read_u64(record, 0),
+                state: read_u64(record, 16),
+                parent_pid: read_u64(record, 24),
+            });
+        }
+        Ok(records)
+    }
+
+    fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+        u64::from_ne_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+            bytes[offset + 4],
+            bytes[offset + 5],
+            bytes[offset + 6],
+            bytes[offset + 7],
+        ])
+    }
 }
 
 pub mod ipc {
@@ -303,6 +350,10 @@ pub mod ipc {
 
     pub fn endpoint_alive(endpoint: u64) -> bool {
         syscall::call1(syscall::SyscallNumber::IpcEndpointAlive, endpoint).is_ok()
+    }
+
+    pub fn endpoint_owner_process(endpoint: u64) -> SysResult<u64> {
+        syscall::call1(syscall::SyscallNumber::IpcEndpointOwner, endpoint)
     }
 
     pub fn call(dest_thread_id: u64, request: &[u8], reply: &mut [u8]) -> SysResult<u64> {
