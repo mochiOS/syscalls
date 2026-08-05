@@ -1453,4 +1453,4 @@ dependencies = [
 [[patch.unused]]
 name = "mnu-abi"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#26fda999d6a2162b39bd51100ec00145ace585b4"
+source = "git+https://github.com/mochiOS/mnu#a6483c140b4bfe1f7bd5a1ecac7ba1d22e0107ad"
