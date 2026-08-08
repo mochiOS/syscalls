@@ -2652,6 +2652,21 @@ pub extern "C" fn unlink(path: *const c_char) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn _link(old_path: *const c_char, new_path: *const c_char) -> c_int {
+    if old_path.is_null() || new_path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    set_errno(ENOSYS);
+    -1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn link(old_path: *const c_char, new_path: *const c_char) -> c_int {
+    _link(old_path, new_path)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn _mkdir(path: *const c_char, mode: c_int) -> c_int {
     if path.is_null() {
         set_errno(EFAULT);
