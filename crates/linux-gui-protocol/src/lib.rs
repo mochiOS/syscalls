@@ -7,12 +7,16 @@ pub const VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 16;
 pub const LAUNCH_REQUEST_LEN: usize = 24;
 pub const LAUNCH_RESPONSE_LEN: usize = 32;
+pub const STATUS_REQUEST_LEN: usize = 24;
+pub const STATUS_RESPONSE_LEN: usize = 32;
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Opcode {
     Launch = 0x0001,
+    Status = 0x0002,
     LaunchResponse = 0x8001,
+    StatusResponse = 0x8002,
 }
 
 impl Opcode {
@@ -25,6 +29,8 @@ impl Opcode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LinuxApplication {
     XTerm = 1,
+    XCalc = 2,
+    XClock = 3,
 }
 
 impl LinuxApplication {
@@ -35,6 +41,8 @@ impl LinuxApplication {
     pub const fn host_name(self) -> &'static str {
         match self {
             Self::XTerm => "xterm",
+            Self::XCalc => "xcalc",
+            Self::XClock => "xclock",
         }
     }
 }
@@ -53,6 +61,7 @@ pub enum DecodeError {
     UnexpectedOpcode { expected: Opcode, actual: Opcode },
     UnknownApplication(u32),
     NonZeroReserved(u32),
+    InvalidBoolean(u32),
 }
 
 impl fmt::Display for DecodeError {
@@ -80,6 +89,9 @@ impl fmt::Display for DecodeError {
             }
             Self::NonZeroReserved(actual) => {
                 write!(formatter, "reserved field must be zero: {actual:#010x}")
+            }
+            Self::InvalidBoolean(actual) => {
+                write!(formatter, "boolean field must be zero or one: {actual}")
             }
         }
     }
@@ -118,6 +130,8 @@ impl LaunchRequest {
         require_zero(buffer, 20)?;
         let application = match read_u32(buffer, 16) {
             1 => LinuxApplication::XTerm,
+            2 => LinuxApplication::XCalc,
+            3 => LinuxApplication::XClock,
             actual => return Err(DecodeError::UnknownApplication(actual)),
         };
         Ok(Self {
@@ -168,6 +182,113 @@ impl LaunchResponse {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StatusRequest {
+    pub request_id: u64,
+    pub instance: u64,
+}
+
+impl StatusRequest {
+    pub const fn opcode(&self) -> Opcode {
+        Opcode::Status
+    }
+
+    pub const fn request_id(&self) -> u64 {
+        self.request_id
+    }
+
+    pub const fn encoded_len(&self) -> usize {
+        STATUS_REQUEST_LEN
+    }
+
+    pub fn encode(&self, buffer: &mut [u8]) -> Result<usize, EncodeError> {
+        require_encode_len(buffer, STATUS_REQUEST_LEN)?;
+        write_header(buffer, self.opcode(), self.request_id);
+        write_u64(buffer, 16, self.instance);
+        Ok(STATUS_REQUEST_LEN)
+    }
+
+    pub fn decode(buffer: &[u8]) -> Result<Self, DecodeError> {
+        require_decode_len(buffer, STATUS_REQUEST_LEN)?;
+        let request_id = decode_header(buffer, Opcode::Status)?;
+        Ok(Self {
+            request_id,
+            instance: read_u64(buffer, 16),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StatusResponse {
+    pub request_id: u64,
+    pub status: i32,
+    pub running: bool,
+    pub instance: u64,
+}
+
+impl StatusResponse {
+    pub const fn opcode(&self) -> Opcode {
+        Opcode::StatusResponse
+    }
+
+    pub const fn request_id(&self) -> u64 {
+        self.request_id
+    }
+
+    pub const fn encoded_len(&self) -> usize {
+        STATUS_RESPONSE_LEN
+    }
+
+    pub fn encode(&self, buffer: &mut [u8]) -> Result<usize, EncodeError> {
+        require_encode_len(buffer, STATUS_RESPONSE_LEN)?;
+        write_header(buffer, self.opcode(), self.request_id);
+        buffer[16..20].copy_from_slice(&self.status.to_le_bytes());
+        write_u32(buffer, 20, u32::from(self.running));
+        write_u64(buffer, 24, self.instance);
+        Ok(STATUS_RESPONSE_LEN)
+    }
+
+    pub fn decode(buffer: &[u8]) -> Result<Self, DecodeError> {
+        require_decode_len(buffer, STATUS_RESPONSE_LEN)?;
+        let request_id = decode_header(buffer, Opcode::StatusResponse)?;
+        let running = match read_u32(buffer, 20) {
+            0 => false,
+            1 => true,
+            actual => return Err(DecodeError::InvalidBoolean(actual)),
+        };
+        Ok(Self {
+            request_id,
+            status: i32::from_le_bytes(buffer[16..20].try_into().unwrap_or([0; 4])),
+            running,
+            instance: read_u64(buffer, 24),
+        })
+    }
+}
+
+pub fn decode_opcode(buffer: &[u8]) -> Result<Opcode, DecodeError> {
+    if buffer.len() < HEADER_LEN {
+        return Err(DecodeError::InvalidLength {
+            expected: HEADER_LEN,
+            actual: buffer.len(),
+        });
+    }
+    let magic = read_u32(buffer, 0);
+    if magic != MAGIC {
+        return Err(DecodeError::InvalidMagic(magic));
+    }
+    let version = u16::from_le_bytes([buffer[4], buffer[5]]);
+    if version != VERSION {
+        return Err(DecodeError::UnsupportedVersion(version));
+    }
+    match u16::from_le_bytes([buffer[6], buffer[7]]) {
+        0x0001 => Ok(Opcode::Launch),
+        0x0002 => Ok(Opcode::Status),
+        0x8001 => Ok(Opcode::LaunchResponse),
+        0x8002 => Ok(Opcode::StatusResponse),
+        actual => Err(DecodeError::UnknownOpcode(actual)),
+    }
+}
+
 fn require_encode_len(buffer: &[u8], required: usize) -> Result<(), EncodeError> {
     if buffer.len() < required {
         Err(EncodeError::BufferTooSmall {
@@ -198,20 +319,7 @@ fn write_header(buffer: &mut [u8], opcode: Opcode, request_id: u64) {
 }
 
 fn decode_header(buffer: &[u8], expected: Opcode) -> Result<u64, DecodeError> {
-    let magic = read_u32(buffer, 0);
-    if magic != MAGIC {
-        return Err(DecodeError::InvalidMagic(magic));
-    }
-    let version = u16::from_le_bytes([buffer[4], buffer[5]]);
-    if version != VERSION {
-        return Err(DecodeError::UnsupportedVersion(version));
-    }
-    let raw_opcode = u16::from_le_bytes([buffer[6], buffer[7]]);
-    let opcode = match raw_opcode {
-        0x0001 => Opcode::Launch,
-        0x8001 => Opcode::LaunchResponse,
-        actual => return Err(DecodeError::UnknownOpcode(actual)),
-    };
+    let opcode = decode_opcode(buffer)?;
     if opcode != expected {
         return Err(DecodeError::UnexpectedOpcode {
             expected,
@@ -283,6 +391,30 @@ mod tests {
     }
 
     #[test]
+    fn every_supported_application_has_a_stable_wire_value_and_host_name() {
+        assert_eq!(LinuxApplication::XTerm.wire_value(), 1);
+        assert_eq!(LinuxApplication::XTerm.host_name(), "xterm");
+        assert_eq!(LinuxApplication::XCalc.wire_value(), 2);
+        assert_eq!(LinuxApplication::XCalc.host_name(), "xcalc");
+        assert_eq!(LinuxApplication::XClock.wire_value(), 3);
+        assert_eq!(LinuxApplication::XClock.host_name(), "xclock");
+
+        for application in [
+            LinuxApplication::XTerm,
+            LinuxApplication::XCalc,
+            LinuxApplication::XClock,
+        ] {
+            let request = LaunchRequest {
+                request_id: 7,
+                application,
+            };
+            let mut encoded = [0u8; LAUNCH_REQUEST_LEN];
+            assert_eq!(request.encode(&mut encoded), Ok(LAUNCH_REQUEST_LEN));
+            assert_eq!(LaunchRequest::decode(&encoded), Ok(request));
+        }
+    }
+
+    #[test]
     fn launch_response_round_trip_and_status_values() {
         for status in [i32::MIN, -16, 0, i32::MAX] {
             let message = LaunchResponse {
@@ -294,6 +426,62 @@ mod tests {
             assert_eq!(message.encode(&mut encoded), Ok(LAUNCH_RESPONSE_LEN));
             assert_eq!(LaunchResponse::decode(&encoded), Ok(message));
         }
+    }
+
+    #[test]
+    fn status_messages_round_trip_and_have_stable_bytes() {
+        let request = StatusRequest {
+            request_id: 0x0102_0304_0506_0708,
+            instance: u64::MAX,
+        };
+        let mut encoded_request = [0u8; STATUS_REQUEST_LEN];
+        assert_eq!(request.encode(&mut encoded_request), Ok(STATUS_REQUEST_LEN));
+        assert_eq!(
+            encoded_request,
+            [
+                b'L', b'G', b'U', b'I', 1, 0, 2, 0, 8, 7, 6, 5, 4, 3, 2, 1, 0xff, 0xff, 0xff, 0xff,
+                0xff, 0xff, 0xff, 0xff,
+            ]
+        );
+        assert_eq!(StatusRequest::decode(&encoded_request), Ok(request));
+        assert_eq!(decode_opcode(&encoded_request), Ok(Opcode::Status));
+
+        for (status, running) in [(0, false), (0, true), (-5, false)] {
+            let response = StatusResponse {
+                request_id: request.request_id,
+                status,
+                running,
+                instance: request.instance,
+            };
+            let mut encoded_response = [0u8; STATUS_RESPONSE_LEN];
+            assert_eq!(
+                response.encode(&mut encoded_response),
+                Ok(STATUS_RESPONSE_LEN)
+            );
+            assert_eq!(StatusResponse::decode(&encoded_response), Ok(response));
+            assert_eq!(decode_opcode(&encoded_response), Ok(Opcode::StatusResponse));
+        }
+    }
+
+    #[test]
+    fn status_response_rejects_non_boolean_running_value() {
+        let response = StatusResponse {
+            request_id: 1,
+            status: 0,
+            running: false,
+            instance: 9,
+        };
+        let mut encoded = [0u8; STATUS_RESPONSE_LEN];
+        assert_eq!(response.encode(&mut encoded), Ok(STATUS_RESPONSE_LEN));
+        encoded[20..24].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(
+            StatusResponse::decode(&encoded),
+            Err(DecodeError::InvalidBoolean(2))
+        );
+        assert!(matches!(
+            response.encode(&mut encoded[..STATUS_RESPONSE_LEN - 1]),
+            Err(EncodeError::BufferTooSmall { .. })
+        ));
     }
 
     #[test]
@@ -347,10 +535,10 @@ mod tests {
             Err(DecodeError::NonZeroReserved(1))
         );
         encoded[20] = 0;
-        encoded[16..20].copy_from_slice(&2_u32.to_le_bytes());
+        encoded[16..20].copy_from_slice(&4_u32.to_le_bytes());
         assert_eq!(
             LaunchRequest::decode(&encoded),
-            Err(DecodeError::UnknownApplication(2))
+            Err(DecodeError::UnknownApplication(4))
         );
         assert!(matches!(
             message.encode(&mut encoded[..23]),
