@@ -1055,7 +1055,8 @@ pub mod capability {
             | "account.other.read"
             | "account.authenticate"
             | "account.other.modify"
-            | "settings.write" => CapabilityClass::Privileged,
+            | "settings.write"
+            | "developer.compile" => CapabilityClass::Privileged,
             "window.secure-overlay" | "system.random.read" => CapabilityClass::SystemOnly,
             _ => CapabilityClass::SystemOnly,
         }
