@@ -770,8 +770,7 @@ fn capability_class_from_string(name: &str) -> CapabilityClass {
         | "account.other.read"
         | "account.authenticate"
         | "account.other.modify"
-        | "settings.write"
-        | "developer.compile" => CapabilityClass::Privileged,
+        | "settings.write" => CapabilityClass::Privileged,
         "window.secure-overlay" | "system.random.read" => CapabilityClass::SystemOnly,
         _ => CapabilityClass::SystemOnly,
     }
