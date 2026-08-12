@@ -9,14 +9,19 @@ pub const LAUNCH_REQUEST_LEN: usize = 24;
 pub const LAUNCH_RESPONSE_LEN: usize = 32;
 pub const STATUS_REQUEST_LEN: usize = 24;
 pub const STATUS_RESPONSE_LEN: usize = 32;
+pub const MAX_BUNDLE_ID_LEN: usize = 128;
+pub const MAX_USER_NAME_LEN: usize = 64;
+pub const BUNDLE_LAUNCH_PREFIX_LEN: usize = 24;
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Opcode {
     Launch = 0x0001,
     Status = 0x0002,
+    LaunchBundle = 0x0003,
     LaunchResponse = 0x8001,
     StatusResponse = 0x8002,
+    LaunchBundleResponse = 0x8003,
 }
 
 impl Opcode {
@@ -50,6 +55,7 @@ impl LinuxApplication {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EncodeError {
     BufferTooSmall { required: usize, actual: usize },
+    InvalidValue,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,6 +68,9 @@ pub enum DecodeError {
     UnknownApplication(u32),
     NonZeroReserved(u32),
     InvalidBoolean(u32),
+    InvalidUtf8,
+    InvalidBundleId,
+    InvalidUserName,
 }
 
 impl fmt::Display for DecodeError {
@@ -93,7 +102,127 @@ impl fmt::Display for DecodeError {
             Self::InvalidBoolean(actual) => {
                 write!(formatter, "boolean field must be zero or one: {actual}")
             }
+            Self::InvalidUtf8 => write!(formatter, "string field is not valid UTF-8"),
+            Self::InvalidBundleId => write!(formatter, "invalid Linux application bundle ID"),
+            Self::InvalidUserName => write!(formatter, "invalid Linux application user name"),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BundleLaunchRequest<'a> {
+    pub request_id: u64,
+    pub bundle_id: &'a str,
+    pub user: &'a str,
+}
+
+impl BundleLaunchRequest<'_> {
+    pub const fn opcode(&self) -> Opcode {
+        Opcode::LaunchBundle
+    }
+
+    pub const fn request_id(&self) -> u64 {
+        self.request_id
+    }
+
+    pub fn encoded_len(&self) -> usize {
+        BUNDLE_LAUNCH_PREFIX_LEN + self.bundle_id.len() + self.user.len()
+    }
+
+    pub fn encode(&self, buffer: &mut [u8]) -> Result<usize, EncodeError> {
+        let length = self.encoded_len();
+        require_encode_len(buffer, length)?;
+        if !valid_bundle_id(self.bundle_id) || !valid_user_name(self.user) {
+            return Err(EncodeError::InvalidValue);
+        }
+        write_header(buffer, self.opcode(), self.request_id);
+        buffer[16..18].copy_from_slice(&(self.bundle_id.len() as u16).to_le_bytes());
+        buffer[18..20].copy_from_slice(&(self.user.len() as u16).to_le_bytes());
+        buffer[20..24].copy_from_slice(&0u32.to_le_bytes());
+        let bundle_end = BUNDLE_LAUNCH_PREFIX_LEN + self.bundle_id.len();
+        buffer[BUNDLE_LAUNCH_PREFIX_LEN..bundle_end].copy_from_slice(self.bundle_id.as_bytes());
+        buffer[bundle_end..length].copy_from_slice(self.user.as_bytes());
+        Ok(length)
+    }
+
+    pub fn decode(buffer: &'_ [u8]) -> Result<BundleLaunchRequest<'_>, DecodeError> {
+        if buffer.len() < BUNDLE_LAUNCH_PREFIX_LEN {
+            return Err(DecodeError::InvalidLength {
+                expected: BUNDLE_LAUNCH_PREFIX_LEN,
+                actual: buffer.len(),
+            });
+        }
+        let request_id = decode_header(buffer, Opcode::LaunchBundle)?;
+        let bundle_len = usize::from(u16::from_le_bytes([buffer[16], buffer[17]]));
+        let user_len = usize::from(u16::from_le_bytes([buffer[18], buffer[19]]));
+        let reserved = u32::from_le_bytes([buffer[20], buffer[21], buffer[22], buffer[23]]);
+        if reserved != 0 {
+            return Err(DecodeError::NonZeroReserved(reserved));
+        }
+        let expected = BUNDLE_LAUNCH_PREFIX_LEN + bundle_len + user_len;
+        if buffer.len() != expected {
+            return Err(DecodeError::InvalidLength {
+                expected,
+                actual: buffer.len(),
+            });
+        }
+        let bundle_end = BUNDLE_LAUNCH_PREFIX_LEN + bundle_len;
+        let bundle_id = core::str::from_utf8(&buffer[BUNDLE_LAUNCH_PREFIX_LEN..bundle_end])
+            .map_err(|_| DecodeError::InvalidUtf8)?;
+        let user =
+            core::str::from_utf8(&buffer[bundle_end..]).map_err(|_| DecodeError::InvalidUtf8)?;
+        if !valid_bundle_id(bundle_id) {
+            return Err(DecodeError::InvalidBundleId);
+        }
+        if !valid_user_name(user) {
+            return Err(DecodeError::InvalidUserName);
+        }
+        Ok(BundleLaunchRequest {
+            request_id,
+            bundle_id,
+            user,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BundleLaunchResponse {
+    pub request_id: u64,
+    pub status: i32,
+    pub instance: u64,
+}
+
+impl BundleLaunchResponse {
+    pub const fn opcode(&self) -> Opcode {
+        Opcode::LaunchBundleResponse
+    }
+
+    pub const fn request_id(&self) -> u64 {
+        self.request_id
+    }
+
+    pub const fn encoded_len(&self) -> usize {
+        LAUNCH_RESPONSE_LEN
+    }
+
+    pub fn encode(&self, buffer: &mut [u8]) -> Result<usize, EncodeError> {
+        require_encode_len(buffer, LAUNCH_RESPONSE_LEN)?;
+        write_header(buffer, self.opcode(), self.request_id);
+        buffer[16..20].copy_from_slice(&self.status.to_le_bytes());
+        write_u32(buffer, 20, 0);
+        write_u64(buffer, 24, self.instance);
+        Ok(LAUNCH_RESPONSE_LEN)
+    }
+
+    pub fn decode(buffer: &[u8]) -> Result<Self, DecodeError> {
+        require_decode_len(buffer, LAUNCH_RESPONSE_LEN)?;
+        let request_id = decode_header(buffer, Opcode::LaunchBundleResponse)?;
+        require_zero(buffer, 20)?;
+        Ok(Self {
+            request_id,
+            status: i32::from_le_bytes(buffer[16..20].try_into().unwrap_or([0; 4])),
+            instance: read_u64(buffer, 24),
+        })
     }
 }
 
@@ -283,8 +412,10 @@ pub fn decode_opcode(buffer: &[u8]) -> Result<Opcode, DecodeError> {
     match u16::from_le_bytes([buffer[6], buffer[7]]) {
         0x0001 => Ok(Opcode::Launch),
         0x0002 => Ok(Opcode::Status),
+        0x0003 => Ok(Opcode::LaunchBundle),
         0x8001 => Ok(Opcode::LaunchResponse),
         0x8002 => Ok(Opcode::StatusResponse),
+        0x8003 => Ok(Opcode::LaunchBundleResponse),
         actual => Err(DecodeError::UnknownOpcode(actual)),
     }
 }
@@ -336,6 +467,25 @@ fn require_zero(buffer: &[u8], offset: usize) -> Result<(), DecodeError> {
     } else {
         Err(DecodeError::NonZeroReserved(actual))
     }
+}
+
+fn valid_bundle_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_BUNDLE_ID_LEN
+        && !value.starts_with('.')
+        && !value.ends_with('.')
+        && !value.contains("..")
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-'))
+}
+
+fn valid_user_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_USER_NAME_LEN
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
 }
 
 fn read_u32(buffer: &[u8], offset: usize) -> u32 {
@@ -426,6 +576,88 @@ mod tests {
             assert_eq!(message.encode(&mut encoded), Ok(LAUNCH_RESPONSE_LEN));
             assert_eq!(LaunchResponse::decode(&encoded), Ok(message));
         }
+    }
+
+    #[test]
+    fn bundle_launch_round_trip_and_golden_bytes() {
+        let request = BundleLaunchRequest {
+            request_id: 0x0102_0304_0506_0708,
+            bundle_id: "org.example.editor",
+            user: "alice",
+        };
+        let mut encoded = [0u8; 64];
+        let length = request.encode(&mut encoded).unwrap();
+        assert_eq!(length, BUNDLE_LAUNCH_PREFIX_LEN + 18 + 5);
+        assert_eq!(&encoded[..4], b"LGUI");
+        assert_eq!(&encoded[4..8], &[1, 0, 3, 0]);
+        assert_eq!(&encoded[8..16], &[8, 7, 6, 5, 4, 3, 2, 1]);
+        assert_eq!(&encoded[16..24], &[18, 0, 5, 0, 0, 0, 0, 0]);
+        assert_eq!(&encoded[24..42], b"org.example.editor");
+        assert_eq!(&encoded[42..length], b"alice");
+        assert_eq!(BundleLaunchRequest::decode(&encoded[..length]), Ok(request));
+
+        let response = BundleLaunchResponse {
+            request_id: request.request_id,
+            status: -13,
+            instance: u64::MAX,
+        };
+        let mut response_bytes = [0u8; LAUNCH_RESPONSE_LEN];
+        assert_eq!(
+            response.encode(&mut response_bytes),
+            Ok(LAUNCH_RESPONSE_LEN)
+        );
+        assert_eq!(BundleLaunchResponse::decode(&response_bytes), Ok(response));
+    }
+
+    #[test]
+    fn bundle_launch_rejects_invalid_ids_lengths_and_reserved() {
+        for bundle_id in [
+            "",
+            ".org.example",
+            "org.example.",
+            "org..example",
+            "Org.example",
+            "org/example",
+        ] {
+            let request = BundleLaunchRequest {
+                request_id: 1,
+                bundle_id,
+                user: "alice",
+            };
+            let mut encoded = [0u8; 256];
+            assert_eq!(request.encode(&mut encoded), Err(EncodeError::InvalidValue));
+        }
+        for user in ["", "Alice", "../root", "alice/user"] {
+            let request = BundleLaunchRequest {
+                request_id: 1,
+                bundle_id: "org.example.editor",
+                user,
+            };
+            let mut encoded = [0u8; 256];
+            assert_eq!(request.encode(&mut encoded), Err(EncodeError::InvalidValue));
+        }
+
+        let request = BundleLaunchRequest {
+            request_id: 1,
+            bundle_id: "org.example.editor",
+            user: "alice",
+        };
+        let mut encoded = [0u8; 64];
+        let length = request.encode(&mut encoded).unwrap();
+        assert!(matches!(
+            request.encode(&mut encoded[..length - 1]),
+            Err(EncodeError::BufferTooSmall { .. })
+        ));
+        encoded[20] = 1;
+        assert_eq!(
+            BundleLaunchRequest::decode(&encoded[..length]),
+            Err(DecodeError::NonZeroReserved(1))
+        );
+        encoded[20] = 0;
+        assert!(matches!(
+            BundleLaunchRequest::decode(&encoded[..length - 1]),
+            Err(DecodeError::InvalidLength { .. })
+        ));
     }
 
     #[test]

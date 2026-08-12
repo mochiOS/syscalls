@@ -26,6 +26,13 @@ pub struct PackageFile {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct LinuxApplication {
+    pub entrypoint: String,
+    pub rootfs_file: String,
+    pub writable_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct PackageManifest {
     pub package_id: String,
     pub package_name: String,
@@ -36,6 +43,7 @@ pub struct PackageManifest {
     pub package_abi: Option<String>,
     pub files: Vec<PackageFile>,
     pub binaries: Vec<PackageBinary>,
+    pub linux: Option<LinuxApplication>,
 }
 
 impl PackageManifest {
@@ -166,6 +174,7 @@ enum Section {
     File,
     LegacyPackage,
     LegacyCapabilities,
+    Linux,
 }
 
 pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
@@ -214,6 +223,9 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
                 Section::LegacyCapabilities if pending_key == "requires" => {
                     legacy_requires = parsed;
                 }
+                Section::Linux if pending_key == "writable_paths" => {
+                    package.linux.as_mut()?.writable_paths = parsed;
+                }
                 _ => {}
             }
             pending_array = None;
@@ -241,6 +253,10 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
                 "package" => Section::Package,
                 "service" | "driver" => Section::LegacyPackage,
                 "capabilities" => Section::LegacyCapabilities,
+                "linux" => {
+                    package.linux = Some(LinuxApplication::default());
+                    Section::Linux
+                }
                 _ => Section::None,
             };
             continue;
@@ -336,6 +352,25 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
                 }
             }
             Section::None => {}
+            Section::Linux => {
+                let linux = package.linux.as_mut()?;
+                match key {
+                    "entrypoint" => {
+                        linux.entrypoint = unquote(value).unwrap_or_else(|| value.to_string())
+                    }
+                    "rootfs_file" => {
+                        linux.rootfs_file = unquote(value).unwrap_or_else(|| value.to_string())
+                    }
+                    "writable_paths" => {
+                        if value.trim_start().starts_with('[') && !value.contains(']') {
+                            pending_array = Some((section, key.to_string(), value.to_string()));
+                            continue;
+                        }
+                        linux.writable_paths = parse_array_values(value)?;
+                    }
+                    _ => {}
+                }
+            }
             Section::LegacyCapabilities => {
                 if key == "requires" {
                     if value.trim_start().starts_with('[') && !value.contains(']') {
@@ -398,7 +433,74 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
         }
     }
 
+    if let Some(linux) = &package.linux {
+        if package.package_kind.as_deref() != Some("application")
+            || package.package_abi.as_deref() != Some("mboot-linux-1")
+            || !is_valid_absolute_path(&linux.entrypoint)
+            || linux.rootfs_file.is_empty()
+            || !package
+                .files
+                .iter()
+                .any(|file| file.id == linux.rootfs_file)
+            || linux
+                .writable_paths
+                .iter()
+                .any(|path| !is_valid_writable_linux_path(path))
+            || linux
+                .writable_paths
+                .iter()
+                .enumerate()
+                .any(|(index, path)| {
+                    linux.writable_paths[index + 1..]
+                        .iter()
+                        .any(|other| linux_paths_overlap(path, other))
+                })
+        {
+            return None;
+        }
+    }
+
     Some(package)
+}
+
+fn linux_paths_overlap(left: &str, right: &str) -> bool {
+    left == right
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn is_valid_absolute_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path.len() > 1
+        && !path.ends_with('/')
+        && !path.contains("//")
+        && !path.contains('\\')
+        && !path.as_bytes().contains(&0)
+        && path[1..]
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+fn is_valid_writable_linux_path(path: &str) -> bool {
+    is_valid_absolute_path(path)
+        && !["/dev", "/proc", "/sys", "/run", "/tmp", "/home", "/mochios"]
+            .iter()
+            .any(|root| path == *root || path.starts_with(&alloc::format!("{root}/")))
+        && !matches!(
+            path,
+            "/bin" | "/sbin" | "/lib" | "/lib64" | "/usr" | "/usr/bin" | "/usr/lib"
+        )
+        && !path.starts_with("/bin/")
+        && !path.starts_with("/sbin/")
+        && !path.starts_with("/lib/")
+        && !path.starts_with("/lib64/")
+        && !path.starts_with("/usr/bin/")
+        && !path.starts_with("/usr/lib/")
+        && !path.starts_with("/mochios")
 }
 
 pub fn binary_requires<'a>(manifest: &'a PackageManifest, path: &str) -> Option<&'a [String]> {
@@ -451,6 +553,99 @@ mod tests {
                 .requires[0],
             "fs.write.all"
         );
+    }
+
+    #[test]
+    fn parses_linux_application_manifest() {
+        let manifest = parse_manifest(
+            r#"
+            [package]
+            id = "org.example.editor"
+            name = "Editor"
+            version = "1"
+            kind = "application"
+            architecture = "x86_64"
+            abi = "mboot-linux-1"
+
+            [linux]
+            entrypoint = "/usr/bin/editor"
+            rootfs_file = "linux-rootfs"
+            writable_paths = [
+                "/usr/share/editor",
+                "/var/lib/editor",
+            ]
+
+            [[file]]
+            id = "linux-rootfs"
+            path = "$/rootfs.squashfs"
+            digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            size = 4096
+            mode = "0644"
+            "#,
+        )
+        .unwrap();
+        let linux = manifest.linux.unwrap();
+        assert_eq!(linux.entrypoint, "/usr/bin/editor");
+        assert_eq!(linux.rootfs_file, "linux-rootfs");
+        assert_eq!(
+            linux.writable_paths,
+            ["/usr/share/editor", "/var/lib/editor"]
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_linux_writable_paths_and_missing_rootfs() {
+        for (rootfs_file, writable) in [
+            ("missing", "/var/lib/editor"),
+            ("linux-rootfs", "/usr/bin/editor"),
+            ("linux-rootfs", "/mochios/system"),
+            ("linux-rootfs", "/home/user"),
+            ("linux-rootfs", "/proc/self"),
+            ("linux-rootfs", "/var/../system"),
+        ] {
+            let text = alloc::format!(
+                r#"
+                [package]
+                id = "org.example.editor"
+                name = "Editor"
+                version = "1"
+                kind = "application"
+                abi = "mboot-linux-1"
+
+                [linux]
+                entrypoint = "/usr/bin/editor"
+                rootfs_file = "{rootfs_file}"
+                writable_paths = ["{writable}"]
+
+                [[file]]
+                id = "linux-rootfs"
+                path = "$/rootfs.squashfs"
+                digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                size = 4096
+                mode = "0644"
+                "#
+            );
+            assert!(parse_manifest(&text).is_none());
+        }
+        let overlapping = r#"
+            [package]
+            id = "org.example.editor"
+            name = "Editor"
+            version = "1"
+            kind = "application"
+            abi = "mboot-linux-1"
+            [linux]
+            entrypoint = "/usr/bin/editor"
+            rootfs_file = "linux-rootfs"
+            writable_paths = ["/var/lib/editor", "/var/lib/editor/cache"]
+            [[file]]
+            id = "linux-rootfs"
+            path = "$/rootfs.squashfs"
+            digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            size = 4096
+            mode = "0644"
+        "#;
+        assert!(parse_manifest(overlapping).is_none());
     }
 
     #[test]
