@@ -7,6 +7,7 @@ members = [
     "crates/driver-control-protocol",
     "crates/http-client",
     "crates/linux-gui-protocol",
+    "crates/linux-portal-protocol",
     "crates/net-device-protocol",
     "crates/network-stack",
     "crates/tls-client",

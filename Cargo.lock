@@ -605,6 +605,10 @@ name = "mochios-linux-gui-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "mochios-linux-portal-protocol"
+version = "0.1.0"
+
+[[package]]
 name = "mochios-net-device-protocol"
 version = "0.1.0"
 
