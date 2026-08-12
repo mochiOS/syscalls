@@ -30,6 +30,8 @@ pub struct LinuxApplication {
     pub entrypoint: String,
     pub rootfs_file: String,
     pub writable_paths: Vec<String>,
+    pub portal_read_paths: Vec<String>,
+    pub portal_write_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -226,6 +228,12 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
                 Section::Linux if pending_key == "writable_paths" => {
                     package.linux.as_mut()?.writable_paths = parsed;
                 }
+                Section::Linux if pending_key == "portal_read_paths" => {
+                    package.linux.as_mut()?.portal_read_paths = parsed;
+                }
+                Section::Linux if pending_key == "portal_write_paths" => {
+                    package.linux.as_mut()?.portal_write_paths = parsed;
+                }
                 _ => {}
             }
             pending_array = None;
@@ -368,6 +376,20 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
                         }
                         linux.writable_paths = parse_array_values(value)?;
                     }
+                    "portal_read_paths" => {
+                        if value.trim_start().starts_with('[') && !value.contains(']') {
+                            pending_array = Some((section, key.to_string(), value.to_string()));
+                            continue;
+                        }
+                        linux.portal_read_paths = parse_array_values(value)?;
+                    }
+                    "portal_write_paths" => {
+                        if value.trim_start().starts_with('[') && !value.contains(']') {
+                            pending_array = Some((section, key.to_string(), value.to_string()));
+                            continue;
+                        }
+                        linux.portal_write_paths = parse_array_values(value)?;
+                    }
                     _ => {}
                 }
             }
@@ -455,12 +477,39 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
                         .iter()
                         .any(|other| linux_paths_overlap(path, other))
                 })
+            || linux
+                .portal_read_paths
+                .iter()
+                .any(|path| !is_valid_linux_portal_path(path, false))
+            || linux
+                .portal_write_paths
+                .iter()
+                .any(|path| !is_valid_linux_portal_path(path, true))
         {
             return None;
         }
     }
 
     Some(package)
+}
+
+fn is_valid_linux_portal_path(path: &str, writable: bool) -> bool {
+    let user_home = path == "/home/$USER"
+        || path
+            .strip_prefix("/home/$USER/")
+            .is_some_and(|suffix| {
+                !suffix.is_empty()
+                    && !suffix.contains('\\')
+                    && suffix
+                        .split('/')
+                        .all(|part| !part.is_empty() && part != "." && part != "..")
+            });
+    user_home
+        || (!writable
+            && (path == "/applications"
+                || path.starts_with("/applications/")
+                || path == "/libraries"
+                || path.starts_with("/libraries/")))
 }
 
 fn linux_paths_overlap(left: &str, right: &str) -> bool {
@@ -574,6 +623,8 @@ mod tests {
                 "/usr/share/editor",
                 "/var/lib/editor",
             ]
+            portal_read_paths = ["/applications", "/home/$USER/Develop"]
+            portal_write_paths = ["/home/$USER/Develop"]
 
             [[file]]
             id = "linux-rootfs"
@@ -591,6 +642,38 @@ mod tests {
             linux.writable_paths,
             ["/usr/share/editor", "/var/lib/editor"]
         );
+        assert_eq!(linux.portal_read_paths, ["/applications", "/home/$USER/Develop"]);
+        assert_eq!(linux.portal_write_paths, ["/home/$USER/Develop"]);
+    }
+
+    #[test]
+    fn rejects_unsafe_linux_portal_paths() {
+        for (key, path) in [
+            ("portal_read_paths", "/system"),
+            ("portal_read_paths", "/home/alice"),
+            ("portal_write_paths", "/applications"),
+            ("portal_write_paths", "/home/$USER/../root"),
+        ] {
+            let manifest = alloc::format!(r#"
+                [package]
+                id = "org.example.editor"
+                name = "Editor"
+                version = "1"
+                kind = "application"
+                abi = "mboot-linux-1"
+                [linux]
+                entrypoint = "/usr/bin/editor"
+                rootfs_file = "linux-rootfs"
+                {key} = ["{path}"]
+                [[file]]
+                id = "linux-rootfs"
+                path = "$/rootfs.squashfs"
+                digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                size = 4096
+                mode = "0644"
+            "#);
+            assert!(parse_manifest(&manifest).is_none(), "accepted {key}={path}");
+        }
     }
 
     #[test]
