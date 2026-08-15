@@ -873,8 +873,23 @@ pub mod file {
 
     pub fn read_to_end_path(path: &str) -> SysResult<Vec<u8>> {
         let fd = open_path(path, 0)?;
+        let expected_len = match seek(fd, 0, 2).and_then(|length| {
+            seek(fd, 0, 0)?;
+            usize::try_from(length)
+                .map_err(|_| syscall::SysError::from_raw(syscall::ERANGE as i64))
+        }) {
+            Ok(length) => length,
+            Err(error) => {
+                let _ = close(fd);
+                return Err(error);
+            }
+        };
         let mut out = Vec::new();
-        let mut buf = [0u8; 512];
+        if out.try_reserve_exact(expected_len).is_err() {
+            let _ = close(fd);
+            return Err(syscall::SysError::from_raw(syscall::ENOMEM as i64));
+        }
+        let mut buf = [0u8; 64 * 1024];
         loop {
             let read = match read(fd, buf.as_mut_ptr() as u64, buf.len() as u64) {
                 Ok(read) => read,
