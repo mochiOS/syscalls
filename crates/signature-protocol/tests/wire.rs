@@ -36,6 +36,62 @@ fn chunk_and_finish_round_trip() {
 }
 
 #[test]
+fn verify_file_golden_and_round_trip() {
+    let message = VerifyFile {
+        request_id: 0x0807_0605_0403_0201,
+        package_len: 0x1817_1615_1413_1211,
+        package_digest: [0xaa; 32],
+        path: "/system/samples/Chromium-x86_64.mpkg",
+    };
+    let mut bytes = [0; 256];
+    let length = message.encode(&mut bytes).unwrap();
+    assert_eq!(length, VERIFY_FILE_FIXED_LEN + message.path.len());
+    assert_eq!(&bytes[..8], &[b'M', b'S', b'I', b'G', 1, 0, 4, 0]);
+    assert_eq!(&bytes[8..16], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(&bytes[24..32], &[17, 18, 19, 20, 21, 22, 23, 24]);
+    assert_eq!(&bytes[32..64], &[0xaa; 32]);
+    assert_eq!(
+        &bytes[64..72],
+        &[message.path.len() as u8, 0, 0, 0, 0, 0, 0, 0]
+    );
+    assert_eq!(VerifyFile::decode(&bytes[..length]), Ok(message));
+}
+
+#[test]
+fn verify_file_rejects_invalid_path_length_reserved_and_output() {
+    let message = VerifyFile {
+        request_id: 1,
+        package_len: 2,
+        package_digest: [3; 32],
+        path: "/package.mpkg",
+    };
+    let mut bytes = [0; 128];
+    let length = message.encode(&mut bytes).unwrap();
+
+    bytes[66] = 1;
+    assert_eq!(
+        VerifyFile::decode(&bytes[..length]),
+        Err(DecodeError::NonZeroReserved)
+    );
+    bytes[66] = 0;
+    bytes[64..66].copy_from_slice(&1u16.to_le_bytes());
+    assert_eq!(
+        VerifyFile::decode(&bytes[..length]),
+        Err(DecodeError::InvalidLength)
+    );
+    assert!(matches!(
+        message.encode(&mut bytes[..length - 1]),
+        Err(EncodeError::BufferTooSmall { .. })
+    ));
+
+    let invalid = VerifyFile {
+        path: "relative",
+        ..message
+    };
+    assert_eq!(invalid.encode(&mut bytes), Err(EncodeError::InvalidPath));
+}
+
+#[test]
 fn verified_round_trip() {
     let capabilities = ["fs.read.all", "process.spawn"];
     let message = VerifiedResponse {

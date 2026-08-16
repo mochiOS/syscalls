@@ -872,11 +872,12 @@ pub mod file {
     }
 
     pub fn read_to_end_path(path: &str) -> SysResult<Vec<u8>> {
+        const READ_CHUNK_LEN: usize = 256 * 1024;
+
         let fd = open_path(path, 0)?;
         let expected_len = match seek(fd, 0, 2).and_then(|length| {
             seek(fd, 0, 0)?;
-            usize::try_from(length)
-                .map_err(|_| syscall::SysError::from_raw(syscall::ERANGE as i64))
+            usize::try_from(length).map_err(|_| syscall::SysError::from_raw(syscall::ERANGE as i64))
         }) {
             Ok(length) => length,
             Err(error) => {
@@ -889,9 +890,11 @@ pub mod file {
             let _ = close(fd);
             return Err(syscall::SysError::from_raw(syscall::ENOMEM as i64));
         }
-        let mut buf = [0u8; 64 * 1024];
-        loop {
-            let read = match read(fd, buf.as_mut_ptr() as u64, buf.len() as u64) {
+        out.resize(expected_len, 0);
+        let mut offset = 0usize;
+        while offset < expected_len {
+            let chunk_len = core::cmp::min(READ_CHUNK_LEN, expected_len - offset);
+            let read = match read(fd, out[offset..].as_mut_ptr() as u64, chunk_len as u64) {
                 Ok(read) => read,
                 Err(err) => {
                     let _ = close(fd);
@@ -901,12 +904,13 @@ pub mod file {
             if read == 0 {
                 break;
             }
-            out.extend_from_slice(&buf[..read as usize]);
-            if (read as usize) < buf.len() {
+            offset += read as usize;
+            if (read as usize) < chunk_len {
                 break;
             }
         }
         let _ = close(fd);
+        out.truncate(offset);
         Ok(out)
     }
 

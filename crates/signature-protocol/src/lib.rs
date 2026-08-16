@@ -6,6 +6,7 @@ pub const MAGIC: u32 = 0x4749_534d;
 pub const VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 24;
 pub const BEGIN_LEN: usize = HEADER_LEN + 40;
+pub const VERIFY_FILE_FIXED_LEN: usize = HEADER_LEN + 48;
 pub const FINISH_LEN: usize = HEADER_LEN;
 pub const ERROR_LEN: usize = HEADER_LEN + 8;
 pub const UPDATE_NOTIFICATION_LEN: usize = HEADER_LEN + 16;
@@ -17,6 +18,7 @@ pub enum Opcode {
     VerifyBegin = 0x0001,
     VerifyChunk = 0x0002,
     VerifyFinish = 0x0003,
+    VerifyFile = 0x0004,
     TrustUpdated = 0x0100,
     RevocationsUpdated = 0x0101,
     Status = 0x8000,
@@ -36,6 +38,7 @@ pub enum EncodeError {
     InvalidOpcode,
     ValueTooLong,
     TooManyCapabilities,
+    InvalidPath,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +54,7 @@ pub enum DecodeError {
     InvalidUtf8,
     InvalidText,
     InvalidCapabilityList,
+    InvalidPath,
 }
 
 impl fmt::Display for DecodeError {
@@ -71,6 +75,68 @@ pub struct VerifyBegin {
     pub request_id: u64,
     pub package_len: u64,
     pub package_digest: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VerifyFile<'a> {
+    pub request_id: u64,
+    pub package_len: u64,
+    pub package_digest: [u8; 32],
+    pub path: &'a str,
+}
+
+impl<'a> VerifyFile<'a> {
+    pub const fn opcode(&self) -> Opcode {
+        Opcode::VerifyFile
+    }
+
+    pub const fn request_id(&self) -> u64 {
+        self.request_id
+    }
+
+    pub const fn encoded_len(&self) -> usize {
+        VERIFY_FILE_FIXED_LEN + self.path.len()
+    }
+
+    pub fn encode(&self, output: &mut [u8]) -> Result<usize, EncodeError> {
+        validate_path(self.path).map_err(|_| EncodeError::InvalidPath)?;
+        let path_len = u16::try_from(self.path.len()).map_err(|_| EncodeError::ValueTooLong)?;
+        let length = self.encoded_len();
+        require(output, length)?;
+        let payload_len =
+            u32::try_from(length - HEADER_LEN).map_err(|_| EncodeError::ValueTooLong)?;
+        write_header(output, self.opcode(), self.request_id, payload_len);
+        output[24..32].copy_from_slice(&self.package_len.to_le_bytes());
+        output[32..64].copy_from_slice(&self.package_digest);
+        output[64..66].copy_from_slice(&path_len.to_le_bytes());
+        output[66..72].fill(0);
+        output[72..length].copy_from_slice(self.path.as_bytes());
+        Ok(length)
+    }
+
+    pub fn decode(input: &'a [u8]) -> Result<Self, DecodeError> {
+        let header = expected_header(input, Opcode::VerifyFile)?;
+        if input.len() < VERIFY_FILE_FIXED_LEN
+            || header.payload_len < VERIFY_FILE_FIXED_LEN - HEADER_LEN
+            || input[66..72].iter().any(|byte| *byte != 0)
+        {
+            return Err(DecodeError::NonZeroReserved);
+        }
+        let path_len = usize::from(read_u16(input, 64));
+        if input.len() != VERIFY_FILE_FIXED_LEN + path_len {
+            return Err(DecodeError::InvalidLength);
+        }
+        let path = core::str::from_utf8(&input[72..]).map_err(|_| DecodeError::InvalidUtf8)?;
+        validate_path(path)?;
+        let mut package_digest = [0; 32];
+        package_digest.copy_from_slice(&input[32..64]);
+        Ok(Self {
+            request_id: header.request_id,
+            package_len: read_u64(input, 24),
+            package_digest,
+            path,
+        })
+    }
 }
 
 impl VerifyBegin {
@@ -506,6 +572,7 @@ fn decode_header(input: &[u8]) -> Result<Header, DecodeError> {
         1 => Opcode::VerifyBegin,
         2 => Opcode::VerifyChunk,
         3 => Opcode::VerifyFinish,
+        4 => Opcode::VerifyFile,
         0x0100 => Opcode::TrustUpdated,
         0x0101 => Opcode::RevocationsUpdated,
         0x8000 => Opcode::Status,
@@ -582,6 +649,18 @@ fn validate_text(value: &str) -> Result<(), DecodeError> {
         })
     {
         Err(DecodeError::InvalidText)
+    } else {
+        Ok(())
+    }
+}
+fn validate_path(value: &str) -> Result<(), DecodeError> {
+    if !value.starts_with('/')
+        || value.len() < 2
+        || value
+            .bytes()
+            .any(|byte| byte == 0 || byte.is_ascii_control())
+    {
+        Err(DecodeError::InvalidPath)
     } else {
         Ok(())
     }
