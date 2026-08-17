@@ -11,6 +11,7 @@ use crate::{
 pub const DISPLAY_MODE_COUNT: usize = 16;
 pub const DISPLAY_INFO_LEN: usize = 24 + DISPLAY_MODE_COUNT * DisplayInfo::ENCODED_LEN;
 const RESPONSE_HEADER_LEN: usize = 24;
+const FLAG_FENCE: u32 = 1;
 pub const CAPSET_INFO_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,25 +141,41 @@ fn encode_header(buffer: &mut [u8], response_type: u32) {
     buffer[21..24].fill(0);
 }
 
-fn decode_header(buffer: &[u8]) -> Result<u32, DecodeError> {
+fn decode_header(buffer: &[u8], expected_fence: Option<(u64, u32)>) -> Result<u32, DecodeError> {
     let response_type = read_u32(buffer, 0)?;
-    for (offset, value) in [
-        (4, u64::from(read_u32(buffer, 4)?)),
-        (8, read_u64(buffer, 8)?),
-        (16, u64::from(read_u32(buffer, 16)?)),
-        (20, u64::from(read_u8(buffer, 20)?)),
-        (
-            21,
-            u64::from(read_u8(buffer, 21)?)
-                | (u64::from(read_u8(buffer, 22)?) << 8)
-                | (u64::from(read_u8(buffer, 23)?) << 16),
-        ),
-    ] {
-        if value != 0 {
-            return Err(DecodeError::NonZeroReserved {
-                offset,
-                actual: value,
-            });
+    let flags = read_u32(buffer, 4)?;
+    let fence_id = read_u64(buffer, 8)?;
+    let context_id = read_u32(buffer, 16)?;
+    let ring_index = read_u8(buffer, 20)?;
+    let padding = u64::from(read_u8(buffer, 21)?)
+        | (u64::from(read_u8(buffer, 22)?) << 8)
+        | (u64::from(read_u8(buffer, 23)?) << 16);
+    if let Some((expected_id, expected_context)) = expected_fence {
+        for (offset, actual, expected) in [
+            (4, u64::from(flags), u64::from(FLAG_FENCE)),
+            (8, fence_id, expected_id),
+            (16, u64::from(context_id), u64::from(expected_context)),
+            (20, u64::from(ring_index), 0),
+            (21, padding, 0),
+        ] {
+            if actual != expected {
+                return Err(DecodeError::InvalidValue { offset, actual });
+            }
+        }
+    } else {
+        for (offset, value) in [
+            (4, u64::from(flags)),
+            (8, fence_id),
+            (16, u64::from(context_id)),
+            (20, u64::from(ring_index)),
+            (21, padding),
+        ] {
+            if value != 0 {
+                return Err(DecodeError::NonZeroReserved {
+                    offset,
+                    actual: value,
+                });
+            }
         }
     }
     Ok(response_type)
@@ -215,13 +232,34 @@ impl ResponseMessage<'_> {
 
 impl<'a> Response<'a> {
     pub fn decode(buffer: &'a [u8]) -> Result<Self, DecodeError> {
+        Self::decode_inner(buffer, None)
+    }
+
+    pub fn decode_fenced(
+        buffer: &'a [u8],
+        fence_id: u64,
+        context_id: u32,
+    ) -> Result<Self, DecodeError> {
+        if fence_id == 0 {
+            return Err(DecodeError::InvalidValue {
+                offset: 8,
+                actual: 0,
+            });
+        }
+        Self::decode_inner(buffer, Some((fence_id, context_id)))
+    }
+
+    fn decode_inner(
+        buffer: &'a [u8],
+        expected_fence: Option<(u64, u32)>,
+    ) -> Result<Self, DecodeError> {
         if buffer.len() < RESPONSE_HEADER_LEN {
             return Err(DecodeError::InvalidLength {
                 expected: RESPONSE_HEADER_LEN,
                 actual: buffer.len(),
             });
         }
-        let response_type = decode_header(buffer)?;
+        let response_type = decode_header(buffer, expected_fence)?;
         match response_type {
             TYPE_RESP_OK_NODATA => {
                 require_decode(buffer, RESPONSE_HEADER_LEN)?;

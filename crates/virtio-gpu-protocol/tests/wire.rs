@@ -46,6 +46,42 @@ fn command_types_and_lengths_match_specification() {
 }
 
 #[test]
+fn fenced_commands_and_responses_preserve_fence_context() {
+    let command = Command::ContextDetachResource(ContextResource {
+        context_id: 9,
+        resource_id: 7,
+    });
+    assert_eq!(command.context_id(), 9);
+    let mut encoded = [0u8; 32];
+    assert_eq!(command.encode_fenced(&mut encoded, u64::MAX), Ok(32));
+    assert_eq!(&encoded[4..8], &1u32.to_le_bytes());
+    assert_eq!(&encoded[8..16], &u64::MAX.to_le_bytes());
+    assert_eq!(&encoded[16..20], &9u32.to_le_bytes());
+    assert_eq!(
+        command.encode_fenced(&mut encoded, 0),
+        Err(EncodeError::InvalidValue)
+    );
+
+    let mut response = [0u8; 24];
+    assert_eq!(ResponseMessage::NoData.encode(&mut response), Ok(24));
+    response[4..8].copy_from_slice(&1u32.to_le_bytes());
+    response[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+    response[16..20].copy_from_slice(&9u32.to_le_bytes());
+    assert!(matches!(
+        Response::decode_fenced(&response, u64::MAX, 9),
+        Ok(Response::NoData)
+    ));
+    assert!(matches!(
+        Response::decode_fenced(&response, 1, 9),
+        Err(DecodeError::InvalidValue { offset: 8, .. })
+    ));
+    assert!(matches!(
+        Response::decode(&response),
+        Err(DecodeError::NonZeroReserved { offset: 4, .. })
+    ));
+}
+
+#[test]
 fn cursor_commands_round_trip_and_match_golden_bytes() {
     let position = CursorPosition {
         scanout_id: 3,

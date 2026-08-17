@@ -12,6 +12,7 @@ use crate::{
 };
 
 pub const COMMAND_HEADER_LEN: usize = 24;
+const FLAG_FENCE: u32 = 1;
 const RESOURCE_OPERATION_LEN: usize = 32;
 const RESOURCE_CREATE_2D_LEN: usize = 40;
 const SET_SCANOUT_LEN: usize = 48;
@@ -293,6 +294,21 @@ pub enum DecodedCommand<'a> {
 }
 
 impl Command<'_> {
+    pub const fn context_id(self) -> u32 {
+        match self {
+            Self::ContextCreate(command) => command.context_id,
+            Self::ContextDestroy { context_id } => context_id,
+            Self::ContextAttachResource(command) | Self::ContextDetachResource(command) => {
+                command.context_id
+            }
+            Self::TransferToHost3d(command) | Self::TransferFromHost3d(command) => {
+                command.context_id
+            }
+            Self::Submit3d(command) => command.context_id,
+            _ => 0,
+        }
+    }
+
     pub fn encoded_len(self) -> Result<usize, EncodeError> {
         match self {
             Self::GetDisplayInfo => Ok(COMMAND_HEADER_LEN),
@@ -507,6 +523,16 @@ impl Command<'_> {
                 encode_cursor_position(buffer, TYPE_MOVE_CURSOR, position)?;
             }
         }
+        Ok(length)
+    }
+
+    pub fn encode_fenced(self, buffer: &mut [u8], fence_id: u64) -> Result<usize, EncodeError> {
+        if fence_id == 0 {
+            return Err(EncodeError::InvalidValue);
+        }
+        let length = self.encode(buffer)?;
+        write_u32(buffer, 4, FLAG_FENCE);
+        write_u64(buffer, 8, fence_id);
         Ok(length)
     }
 }
