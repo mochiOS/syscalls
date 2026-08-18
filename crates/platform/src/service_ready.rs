@@ -232,7 +232,7 @@ pub fn generate_token() -> super::syscall::SysResult<u64> {
 
 #[cfg(not(test))]
 pub fn notify(target: Target, status: i32) -> super::syscall::SysResult<u64> {
-    super::ipc::send(target.endpoint, &notification(target.token, status))
+    send_when_ready(target.endpoint, &notification(target.token, status))
 }
 
 #[cfg(not(test))]
@@ -241,10 +241,22 @@ pub fn notify_session(
     status: i32,
     identity: SessionIdentity,
 ) -> super::syscall::SysResult<u64> {
-    super::ipc::send(
+    send_when_ready(
         target.endpoint,
         &session_notification(target.token, status, identity),
     )
+}
+
+#[cfg(not(test))]
+fn send_when_ready(endpoint: u64, message: &[u8]) -> super::syscall::SysResult<u64> {
+    loop {
+        match super::ipc::send(endpoint, message) {
+            Err(error) if error.raw() == super::syscall::EAGAIN as i64 => {
+                super::thread::yield_now()
+            }
+            result => return result,
+        }
+    }
 }
 
 #[cfg(test)]
