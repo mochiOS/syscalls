@@ -2561,8 +2561,11 @@ pub extern "C" fn sysconf(name: c_int) -> CLong {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _getpid() -> c_int {
-    set_errno(ENOSYS);
-    -1
+    result_with_errno(
+        syscall_errno(syscall::raw_syscall0(syscall::SyscallNumber::GetPid))
+            .and_then(|pid| c_int::try_from(pid).map_err(|_| EIO)),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -2571,9 +2574,16 @@ pub extern "C" fn getpid() -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _kill(_pid: c_int, _sig: c_int) -> c_int {
-    set_errno(ENOSYS);
-    -1
+pub extern "C" fn _kill(pid: c_int, sig: c_int) -> c_int {
+    result_with_errno(
+        syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::Kill,
+            pid as i64 as u64,
+            sig as i64 as u64,
+        ))
+        .map(|_| 0),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]
