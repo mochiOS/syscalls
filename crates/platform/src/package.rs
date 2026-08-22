@@ -32,6 +32,7 @@ pub struct LinuxApplication {
     pub writable_paths: Vec<String>,
     pub portal_read_paths: Vec<String>,
     pub portal_write_paths: Vec<String>,
+    pub network: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -369,6 +370,7 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
                     "rootfs_file" => {
                         linux.rootfs_file = unquote(value).unwrap_or_else(|| value.to_string())
                     }
+                    "network" => linux.network = unquote(value),
                     "writable_paths" => {
                         if value.trim_start().starts_with('[') && !value.contains(']') {
                             pending_array = Some((section, key.to_string(), value.to_string()));
@@ -485,6 +487,10 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
                 .portal_write_paths
                 .iter()
                 .any(|path| !is_valid_linux_portal_path(path, true))
+            || linux
+                .network
+                .as_deref()
+                .is_some_and(|mode| mode != "client")
         {
             return None;
         }
@@ -495,15 +501,13 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
 
 fn is_valid_linux_portal_path(path: &str, writable: bool) -> bool {
     let user_home = path == "/home/$USER"
-        || path
-            .strip_prefix("/home/$USER/")
-            .is_some_and(|suffix| {
-                !suffix.is_empty()
-                    && !suffix.contains('\\')
-                    && suffix
-                        .split('/')
-                        .all(|part| !part.is_empty() && part != "." && part != "..")
-            });
+        || path.strip_prefix("/home/$USER/").is_some_and(|suffix| {
+            !suffix.is_empty()
+                && !suffix.contains('\\')
+                && suffix
+                    .split('/')
+                    .all(|part| !part.is_empty() && part != "." && part != "..")
+        });
     user_home
         || (!writable
             && (path == "/applications"
@@ -625,6 +629,7 @@ mod tests {
             ]
             portal_read_paths = ["/applications", "/home/$USER/Develop"]
             portal_write_paths = ["/home/$USER/Develop"]
+            network = "client"
 
             [[file]]
             id = "linux-rootfs"
@@ -642,8 +647,12 @@ mod tests {
             linux.writable_paths,
             ["/usr/share/editor", "/var/lib/editor"]
         );
-        assert_eq!(linux.portal_read_paths, ["/applications", "/home/$USER/Develop"]);
+        assert_eq!(
+            linux.portal_read_paths,
+            ["/applications", "/home/$USER/Develop"]
+        );
         assert_eq!(linux.portal_write_paths, ["/home/$USER/Develop"]);
+        assert_eq!(linux.network.as_deref(), Some("client"));
     }
 
     #[test]
@@ -654,7 +663,8 @@ mod tests {
             ("portal_write_paths", "/applications"),
             ("portal_write_paths", "/home/$USER/../root"),
         ] {
-            let manifest = alloc::format!(r#"
+            let manifest = alloc::format!(
+                r#"
                 [package]
                 id = "org.example.editor"
                 name = "Editor"
@@ -671,7 +681,8 @@ mod tests {
                 digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 size = 4096
                 mode = "0644"
-            "#);
+            "#
+            );
             assert!(parse_manifest(&manifest).is_none(), "accepted {key}={path}");
         }
     }

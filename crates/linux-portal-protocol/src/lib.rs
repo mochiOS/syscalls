@@ -7,6 +7,8 @@ pub const VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 16;
 pub const GRANT_REQUEST_PREFIX_LEN: usize = 40;
 pub const GRANT_RESPONSE_LEN: usize = 32;
+pub const NETWORK_REQUEST_PREFIX_LEN: usize = 32;
+pub const NETWORK_RESPONSE_LEN: usize = 24;
 pub const MAX_BUNDLE_ID_LEN: usize = 128;
 pub const MAX_USER_NAME_LEN: usize = 64;
 pub const MAX_PATH_LEN: usize = 512;
@@ -16,6 +18,8 @@ pub const MAX_PATH_LEN: usize = 512;
 pub enum Opcode {
     GrantDirectory = 0x0001,
     GrantDirectoryResponse = 0x8001,
+    RequestNetwork = 0x0002,
+    RequestNetworkResponse = 0x8002,
 }
 
 impl Opcode {
@@ -180,6 +184,91 @@ pub struct GrantDirectoryResponse {
     pub grant_id: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RequestNetworkRequest<'a> {
+    pub request_id: u64,
+    pub session_id: u64,
+    pub bundle_id: &'a str,
+    pub user: &'a str,
+}
+
+impl<'a> RequestNetworkRequest<'a> {
+    pub fn encoded_len(&self) -> usize {
+        NETWORK_REQUEST_PREFIX_LEN + self.bundle_id.len() + self.user.len()
+    }
+
+    pub fn encode(&self, output: &mut [u8]) -> Result<usize, EncodeError> {
+        if self.session_id == 0 || !valid_bundle_id(self.bundle_id) || !valid_user_name(self.user) {
+            return Err(EncodeError::InvalidValue);
+        }
+        let length = self.encoded_len();
+        require_output(output, length)?;
+        write_header(output, Opcode::RequestNetwork, self.request_id);
+        output[16..24].copy_from_slice(&self.session_id.to_le_bytes());
+        output[24..26].copy_from_slice(&(self.bundle_id.len() as u16).to_le_bytes());
+        output[26..28].copy_from_slice(&(self.user.len() as u16).to_le_bytes());
+        output[28..32].fill(0);
+        let bundle_end = NETWORK_REQUEST_PREFIX_LEN + self.bundle_id.len();
+        output[NETWORK_REQUEST_PREFIX_LEN..bundle_end].copy_from_slice(self.bundle_id.as_bytes());
+        output[bundle_end..length].copy_from_slice(self.user.as_bytes());
+        Ok(length)
+    }
+
+    pub fn decode(input: &'a [u8]) -> Result<Self, DecodeError> {
+        if input.len() < NETWORK_REQUEST_PREFIX_LEN {
+            return Err(DecodeError::InvalidLength { expected: NETWORK_REQUEST_PREFIX_LEN, actual: input.len() });
+        }
+        let request_id = decode_header(input, Opcode::RequestNetwork)?;
+        let session_id = read_u64(input, 16);
+        let bundle_len = usize::from(read_u16(input, 24));
+        let user_len = usize::from(read_u16(input, 26));
+        let reserved = read_u32(input, 28);
+        let expected = NETWORK_REQUEST_PREFIX_LEN + bundle_len + user_len;
+        if reserved != 0 {
+            return Err(DecodeError::NonZeroReserved(reserved));
+        }
+        if input.len() != expected {
+            return Err(DecodeError::InvalidLength { expected, actual: input.len() });
+        }
+        let bundle_end = NETWORK_REQUEST_PREFIX_LEN + bundle_len;
+        let bundle_id = text(&input[NETWORK_REQUEST_PREFIX_LEN..bundle_end])?;
+        let user = text(&input[bundle_end..])?;
+        if session_id == 0 || !valid_bundle_id(bundle_id) {
+            return Err(DecodeError::InvalidBundleId);
+        }
+        if !valid_user_name(user) {
+            return Err(DecodeError::InvalidUserName);
+        }
+        Ok(Self { request_id, session_id, bundle_id, user })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RequestNetworkResponse {
+    pub request_id: u64,
+    pub status: i32,
+}
+
+impl RequestNetworkResponse {
+    pub fn encode(&self, output: &mut [u8]) -> Result<usize, EncodeError> {
+        require_output(output, NETWORK_RESPONSE_LEN)?;
+        write_header(output, Opcode::RequestNetworkResponse, self.request_id);
+        output[16..20].copy_from_slice(&self.status.to_le_bytes());
+        output[20..24].fill(0);
+        Ok(NETWORK_RESPONSE_LEN)
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        require_exact(input, NETWORK_RESPONSE_LEN)?;
+        let request_id = decode_header(input, Opcode::RequestNetworkResponse)?;
+        let reserved = read_u32(input, 20);
+        if reserved != 0 {
+            return Err(DecodeError::NonZeroReserved(reserved));
+        }
+        Ok(Self { request_id, status: i32::from_le_bytes(input[16..20].try_into().unwrap()) })
+    }
+}
+
 impl GrantDirectoryResponse {
     pub const fn opcode(&self) -> Opcode {
         Opcode::GrantDirectoryResponse
@@ -243,6 +332,8 @@ pub fn decode_opcode(input: &[u8]) -> Result<Opcode, DecodeError> {
     match read_u16(input, 6) {
         0x0001 => Ok(Opcode::GrantDirectory),
         0x8001 => Ok(Opcode::GrantDirectoryResponse),
+        0x0002 => Ok(Opcode::RequestNetwork),
+        0x8002 => Ok(Opcode::RequestNetworkResponse),
         value => Err(DecodeError::UnknownOpcode(value)),
     }
 }
@@ -409,7 +500,7 @@ mod tests {
         assert!(matches!(GrantDirectoryRequest::decode(&bad[..length]), Err(DecodeError::UnsupportedVersion(2))));
         bad = bytes;
         bad[6] = 2;
-        assert!(matches!(GrantDirectoryRequest::decode(&bad[..length]), Err(DecodeError::UnknownOpcode(2))));
+        assert!(matches!(GrantDirectoryRequest::decode(&bad[..length]), Err(DecodeError::UnexpectedOpcode { actual: Opcode::RequestNetwork, .. })));
         bad = bytes;
         bad[34] = 1;
         assert!(matches!(GrantDirectoryRequest::decode(&bad[..length]), Err(DecodeError::NonZeroReserved(_))));

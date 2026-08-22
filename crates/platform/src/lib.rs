@@ -198,6 +198,18 @@ pub mod logger {
             super::write_fmt(super::io::STDOUT, args)
         }
     }
+
+    /// Writes only to logger.service. Unlike `write_fmt`, this never falls back
+    /// to the process stdout, so service diagnostics cannot corrupt an
+    /// interactive terminal when logger initialization is missing or delayed.
+    pub fn write_log_fmt(args: fmt::Arguments<'_>) -> syscall::SysResult<()> {
+        let endpoint =
+            endpoint().ok_or_else(|| syscall::SysError::from_raw(syscall::ENOENT as i64))?;
+        let mut buf = alloc::string::String::new();
+        buf.write_fmt(args)
+            .map_err(|_| syscall::SysError::from_raw(syscall::EINVAL as i64))?;
+        ipc::send(endpoint, buf.as_bytes()).map(|_| ())
+    }
 }
 
 struct FmtWriter(u64);
@@ -229,6 +241,23 @@ macro_rules! println {
     }};
     ($($arg:tt)*) => {{
         let _ = $crate::logger::write_fmt(format_args!("{}\n", format_args!($($arg)*)));
+    }};
+}
+
+#[macro_export]
+macro_rules! log {
+    ($($arg:tt)*) => {{
+        let _ = $crate::logger::write_log_fmt(format_args!($($arg)*));
+    }};
+}
+
+#[macro_export]
+macro_rules! logln {
+    () => {{
+        let _ = $crate::logger::write_log_fmt(format_args!("\n"));
+    }};
+    ($($arg:tt)*) => {{
+        let _ = $crate::logger::write_log_fmt(format_args!("{}\n", format_args!($($arg)*)));
     }};
 }
 
