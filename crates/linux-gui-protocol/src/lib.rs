@@ -12,6 +12,8 @@ pub const STATUS_RESPONSE_LEN: usize = 32;
 pub const MAX_BUNDLE_ID_LEN: usize = 128;
 pub const MAX_USER_NAME_LEN: usize = 64;
 pub const BUNDLE_LAUNCH_PREFIX_LEN: usize = 24;
+pub const PREPARE_BUNDLE_PREFIX_LEN: usize = 40;
+pub const PREPARE_BUNDLE_RESPONSE_LEN: usize = 24;
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -19,9 +21,147 @@ pub enum Opcode {
     Launch = 0x0001,
     Status = 0x0002,
     LaunchBundle = 0x0003,
+    PrepareBundle = 0x0004,
     LaunchResponse = 0x8001,
     StatusResponse = 0x8002,
     LaunchBundleResponse = 0x8003,
+    PrepareBundleResponse = 0x8004,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PrepareBundleRequest<'a> {
+    pub request_id: u64,
+    pub bundle_id: &'a str,
+    pub source_path: &'a str,
+    pub rootfs_offset: u64,
+    pub rootfs_size: u64,
+    pub rootfs_digest: &'a str,
+}
+
+impl<'a> PrepareBundleRequest<'a> {
+    pub fn encoded_len(&self) -> usize {
+        PREPARE_BUNDLE_PREFIX_LEN
+            + self.bundle_id.len()
+            + self.source_path.len()
+            + self.rootfs_digest.len()
+    }
+
+    pub fn encode(&self, buffer: &mut [u8]) -> Result<usize, EncodeError> {
+        let length = self.encoded_len();
+        require_encode_len(buffer, length)?;
+        if !valid_bundle_id(self.bundle_id)
+            || !valid_absolute_path(self.source_path)
+            || self.rootfs_size == 0
+            || !valid_sha256(self.rootfs_digest)
+        {
+            return Err(EncodeError::InvalidValue);
+        }
+        write_header(buffer, Opcode::PrepareBundle, self.request_id);
+        buffer[16..18].copy_from_slice(&(self.bundle_id.len() as u16).to_le_bytes());
+        buffer[18..20].copy_from_slice(&(self.source_path.len() as u16).to_le_bytes());
+        buffer[20..28].copy_from_slice(&self.rootfs_offset.to_le_bytes());
+        buffer[28..36].copy_from_slice(&self.rootfs_size.to_le_bytes());
+        buffer[36..38].copy_from_slice(&(self.rootfs_digest.len() as u16).to_le_bytes());
+        buffer[38..40].fill(0);
+        let bundle_end = PREPARE_BUNDLE_PREFIX_LEN + self.bundle_id.len();
+        let source_end = bundle_end + self.source_path.len();
+        buffer[PREPARE_BUNDLE_PREFIX_LEN..bundle_end].copy_from_slice(self.bundle_id.as_bytes());
+        buffer[bundle_end..source_end].copy_from_slice(self.source_path.as_bytes());
+        buffer[source_end..length].copy_from_slice(self.rootfs_digest.as_bytes());
+        Ok(length)
+    }
+
+    pub fn decode(buffer: &'a [u8]) -> Result<Self, DecodeError> {
+        if buffer.len() < PREPARE_BUNDLE_PREFIX_LEN {
+            return Err(DecodeError::InvalidLength {
+                expected: PREPARE_BUNDLE_PREFIX_LEN,
+                actual: buffer.len(),
+            });
+        }
+        let request_id = decode_header(buffer, Opcode::PrepareBundle)?;
+        let bundle_len = usize::from(u16::from_le_bytes([buffer[16], buffer[17]]));
+        let source_len = usize::from(u16::from_le_bytes([buffer[18], buffer[19]]));
+        let digest_len = usize::from(u16::from_le_bytes([buffer[36], buffer[37]]));
+        let expected = PREPARE_BUNDLE_PREFIX_LEN + bundle_len + source_len + digest_len;
+        if buffer[38..40] != [0, 0] || buffer.len() != expected {
+            return Err(DecodeError::InvalidLength {
+                expected,
+                actual: buffer.len(),
+            });
+        }
+        let bundle_end = PREPARE_BUNDLE_PREFIX_LEN + bundle_len;
+        let source_end = bundle_end + source_len;
+        let bundle_id = core::str::from_utf8(&buffer[PREPARE_BUNDLE_PREFIX_LEN..bundle_end])
+            .map_err(|_| DecodeError::InvalidUtf8)?;
+        let source_path = core::str::from_utf8(&buffer[bundle_end..source_end])
+            .map_err(|_| DecodeError::InvalidUtf8)?;
+        let rootfs_digest =
+            core::str::from_utf8(&buffer[source_end..]).map_err(|_| DecodeError::InvalidUtf8)?;
+        if !valid_bundle_id(bundle_id) {
+            return Err(DecodeError::InvalidBundleId);
+        }
+        if !valid_absolute_path(source_path) || !valid_sha256(rootfs_digest) {
+            return Err(DecodeError::InvalidText);
+        }
+        let rootfs_size = read_u64(buffer, 28);
+        if rootfs_size == 0 {
+            return Err(DecodeError::InvalidLength {
+                expected: 1,
+                actual: 0,
+            });
+        }
+        Ok(Self {
+            request_id,
+            bundle_id,
+            source_path,
+            rootfs_offset: read_u64(buffer, 20),
+            rootfs_size,
+            rootfs_digest,
+        })
+    }
+}
+
+fn valid_absolute_path(value: &str) -> bool {
+    value.starts_with('/')
+        && !value.contains('\0')
+        && !value.contains("//")
+        && value
+            .split('/')
+            .skip(1)
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PrepareBundleResponse {
+    pub request_id: u64,
+    pub status: i32,
+}
+
+impl PrepareBundleResponse {
+    pub fn encode(&self, buffer: &mut [u8]) -> Result<usize, EncodeError> {
+        require_encode_len(buffer, PREPARE_BUNDLE_RESPONSE_LEN)?;
+        write_header(buffer, Opcode::PrepareBundleResponse, self.request_id);
+        buffer[16..20].copy_from_slice(&self.status.to_le_bytes());
+        buffer[20..24].fill(0);
+        Ok(PREPARE_BUNDLE_RESPONSE_LEN)
+    }
+
+    pub fn decode(buffer: &[u8]) -> Result<Self, DecodeError> {
+        require_decode_len(buffer, PREPARE_BUNDLE_RESPONSE_LEN)?;
+        let request_id = decode_header(buffer, Opcode::PrepareBundleResponse)?;
+        require_zero(buffer, 20)?;
+        Ok(Self {
+            request_id,
+            status: i32::from_le_bytes(buffer[16..20].try_into().unwrap_or([0; 4])),
+        })
+    }
 }
 
 impl Opcode {
@@ -69,6 +209,7 @@ pub enum DecodeError {
     NonZeroReserved(u32),
     InvalidBoolean(u32),
     InvalidUtf8,
+    InvalidText,
     InvalidBundleId,
     InvalidUserName,
 }
@@ -103,6 +244,7 @@ impl fmt::Display for DecodeError {
                 write!(formatter, "boolean field must be zero or one: {actual}")
             }
             Self::InvalidUtf8 => write!(formatter, "string field is not valid UTF-8"),
+            Self::InvalidText => write!(formatter, "string field has an invalid value"),
             Self::InvalidBundleId => write!(formatter, "invalid Linux application bundle ID"),
             Self::InvalidUserName => write!(formatter, "invalid Linux application user name"),
         }
@@ -413,9 +555,11 @@ pub fn decode_opcode(buffer: &[u8]) -> Result<Opcode, DecodeError> {
         0x0001 => Ok(Opcode::Launch),
         0x0002 => Ok(Opcode::Status),
         0x0003 => Ok(Opcode::LaunchBundle),
+        0x0004 => Ok(Opcode::PrepareBundle),
         0x8001 => Ok(Opcode::LaunchResponse),
         0x8002 => Ok(Opcode::StatusResponse),
         0x8003 => Ok(Opcode::LaunchBundleResponse),
+        0x8004 => Ok(Opcode::PrepareBundleResponse),
         actual => Err(DecodeError::UnknownOpcode(actual)),
     }
 }
@@ -607,6 +751,40 @@ mod tests {
             Ok(LAUNCH_RESPONSE_LEN)
         );
         assert_eq!(BundleLaunchResponse::decode(&response_bytes), Ok(response));
+    }
+
+    #[test]
+    fn prepare_bundle_round_trip_and_golden_bytes() {
+        let request = PrepareBundleRequest {
+            request_id: 0x0102_0304_0506_0708,
+            bundle_id: "org.mochios.chromium",
+            source_path: "/system/samples/Chromium-x86_64.mpkg",
+            rootfs_offset: 4096,
+            rootfs_size: 242_634_752,
+            rootfs_digest: "b18cad88465a5303a4c3dfcf321d2a6541d7e8759f62286fbc3f8fa17a552450",
+        };
+        let mut encoded = [0u8; 256];
+        let length = request.encode(&mut encoded).unwrap();
+        assert_eq!(length, request.encoded_len());
+        assert_eq!(&encoded[..4], b"LGUI");
+        assert_eq!(&encoded[4..8], &[1, 0, 4, 0]);
+        assert_eq!(&encoded[16..20], &[20, 0, 36, 0]);
+        assert_eq!(&encoded[20..28], &4096u64.to_le_bytes());
+        assert_eq!(
+            PrepareBundleRequest::decode(&encoded[..length]),
+            Ok(request)
+        );
+
+        let response = PrepareBundleResponse {
+            request_id: request.request_id,
+            status: -5,
+        };
+        let mut response_bytes = [0u8; PREPARE_BUNDLE_RESPONSE_LEN];
+        assert_eq!(
+            response.encode(&mut response_bytes),
+            Ok(PREPARE_BUNDLE_RESPONSE_LEN)
+        );
+        assert_eq!(PrepareBundleResponse::decode(&response_bytes), Ok(response));
     }
 
     #[test]

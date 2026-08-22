@@ -143,7 +143,9 @@ impl GrantDirectoryRequest<'_> {
         let reserved = u32::from_le_bytes([input[34], input[35], input[36], input[37]]);
         let reserved_tail = u16::from_le_bytes([input[38], input[39]]);
         if reserved != 0 || reserved_tail != 0 {
-            return Err(DecodeError::NonZeroReserved(reserved | u32::from(reserved_tail)));
+            return Err(DecodeError::NonZeroReserved(
+                reserved | u32::from(reserved_tail),
+            ));
         }
         let expected = GRANT_REQUEST_PREFIX_LEN + bundle_len + user_len + path_len;
         if input.len() != expected {
@@ -216,7 +218,10 @@ impl<'a> RequestNetworkRequest<'a> {
 
     pub fn decode(input: &'a [u8]) -> Result<Self, DecodeError> {
         if input.len() < NETWORK_REQUEST_PREFIX_LEN {
-            return Err(DecodeError::InvalidLength { expected: NETWORK_REQUEST_PREFIX_LEN, actual: input.len() });
+            return Err(DecodeError::InvalidLength {
+                expected: NETWORK_REQUEST_PREFIX_LEN,
+                actual: input.len(),
+            });
         }
         let request_id = decode_header(input, Opcode::RequestNetwork)?;
         let session_id = read_u64(input, 16);
@@ -228,7 +233,10 @@ impl<'a> RequestNetworkRequest<'a> {
             return Err(DecodeError::NonZeroReserved(reserved));
         }
         if input.len() != expected {
-            return Err(DecodeError::InvalidLength { expected, actual: input.len() });
+            return Err(DecodeError::InvalidLength {
+                expected,
+                actual: input.len(),
+            });
         }
         let bundle_end = NETWORK_REQUEST_PREFIX_LEN + bundle_len;
         let bundle_id = text(&input[NETWORK_REQUEST_PREFIX_LEN..bundle_end])?;
@@ -239,7 +247,12 @@ impl<'a> RequestNetworkRequest<'a> {
         if !valid_user_name(user) {
             return Err(DecodeError::InvalidUserName);
         }
-        Ok(Self { request_id, session_id, bundle_id, user })
+        Ok(Self {
+            request_id,
+            session_id,
+            bundle_id,
+            user,
+        })
     }
 }
 
@@ -265,7 +278,10 @@ impl RequestNetworkResponse {
         if reserved != 0 {
             return Err(DecodeError::NonZeroReserved(reserved));
         }
-        Ok(Self { request_id, status: i32::from_le_bytes(input[16..20].try_into().unwrap()) })
+        Ok(Self {
+            request_id,
+            status: i32::from_le_bytes(input[16..20].try_into().unwrap()),
+        })
     }
 }
 
@@ -365,9 +381,9 @@ fn valid_bundle_id(value: &str) -> bool {
 fn valid_user_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_USER_NAME_LEN
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
-        })
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 fn write_header(output: &mut [u8], opcode: Opcode, request_id: u64) {
@@ -461,9 +477,8 @@ mod tests {
         assert_eq!(
             &bytes[..40],
             &[
-                0x4d, 0x44, 0x52, 0x50, 1, 0, 1, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-                0xff, 0xff, 9, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 18, 0, 5, 0, 19, 0, 0,
-                0, 0, 0, 0, 0,
+                0x4d, 0x44, 0x52, 0x50, 1, 0, 1, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                9, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 18, 0, 5, 0, 19, 0, 0, 0, 0, 0, 0, 0,
             ]
         );
         assert_eq!(GrantDirectoryRequest::decode(&bytes[..length]), Ok(request));
@@ -481,8 +496,8 @@ mod tests {
         assert_eq!(
             bytes,
             [
-                0x4d, 0x44, 0x52, 0x50, 1, 0, 1, 0x80, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                0x4d, 0x44, 0x52, 0x50, 1, 0, 1, 0x80, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
             ]
         );
         assert_eq!(GrantDirectoryResponse::decode(&bytes), Ok(response));
@@ -494,18 +509,39 @@ mod tests {
         let length = request().encode(&mut bytes).unwrap();
         let mut bad = bytes;
         bad[0] = 0;
-        assert!(matches!(GrantDirectoryRequest::decode(&bad[..length]), Err(DecodeError::InvalidMagic(_))));
+        assert!(matches!(
+            GrantDirectoryRequest::decode(&bad[..length]),
+            Err(DecodeError::InvalidMagic(_))
+        ));
         bad = bytes;
         bad[4] = 2;
-        assert!(matches!(GrantDirectoryRequest::decode(&bad[..length]), Err(DecodeError::UnsupportedVersion(2))));
+        assert!(matches!(
+            GrantDirectoryRequest::decode(&bad[..length]),
+            Err(DecodeError::UnsupportedVersion(2))
+        ));
         bad = bytes;
         bad[6] = 2;
-        assert!(matches!(GrantDirectoryRequest::decode(&bad[..length]), Err(DecodeError::UnexpectedOpcode { actual: Opcode::RequestNetwork, .. })));
+        assert!(matches!(
+            GrantDirectoryRequest::decode(&bad[..length]),
+            Err(DecodeError::UnexpectedOpcode {
+                actual: Opcode::RequestNetwork,
+                ..
+            })
+        ));
         bad = bytes;
         bad[34] = 1;
-        assert!(matches!(GrantDirectoryRequest::decode(&bad[..length]), Err(DecodeError::NonZeroReserved(_))));
-        assert!(matches!(GrantDirectoryRequest::decode(&bytes[..length - 1]), Err(DecodeError::InvalidLength { .. })));
-        assert!(matches!(GrantDirectoryRequest::decode(&bytes[..GRANT_REQUEST_PREFIX_LEN - 1]), Err(DecodeError::InvalidLength { .. })));
+        assert!(matches!(
+            GrantDirectoryRequest::decode(&bad[..length]),
+            Err(DecodeError::NonZeroReserved(_))
+        ));
+        assert!(matches!(
+            GrantDirectoryRequest::decode(&bytes[..length - 1]),
+            Err(DecodeError::InvalidLength { .. })
+        ));
+        assert!(matches!(
+            GrantDirectoryRequest::decode(&bytes[..GRANT_REQUEST_PREFIX_LEN - 1]),
+            Err(DecodeError::InvalidLength { .. })
+        ));
     }
 
     #[test]
@@ -514,8 +550,14 @@ mod tests {
         assert!(!valid_portal_path("/"));
         assert!(!valid_portal_path("/home/../root"));
         let mut short = [0u8; 8];
-        assert!(matches!(request().encode(&mut short), Err(EncodeError::BufferTooSmall { .. })));
-        let invalid = GrantDirectoryRequest { path: "/tmp/../root", ..request() };
+        assert!(matches!(
+            request().encode(&mut short),
+            Err(EncodeError::BufferTooSmall { .. })
+        ));
+        let invalid = GrantDirectoryRequest {
+            path: "/tmp/../root",
+            ..request()
+        };
         let mut output = [0u8; 128];
         assert_eq!(invalid.encode(&mut output), Err(EncodeError::InvalidValue));
     }
@@ -523,9 +565,31 @@ mod tests {
     #[test]
     fn response_requires_consistent_status_and_grant() {
         let mut bytes = [0u8; GRANT_RESPONSE_LEN];
-        assert_eq!(GrantDirectoryResponse { request_id: 1, status: 0, grant_id: 0 }.encode(&mut bytes), Err(EncodeError::InvalidValue));
-        assert_eq!(GrantDirectoryResponse { request_id: 1, status: -13, grant_id: 1 }.encode(&mut bytes), Err(EncodeError::InvalidValue));
-        GrantDirectoryResponse { request_id: 1, status: -13, grant_id: 0 }.encode(&mut bytes).unwrap();
+        assert_eq!(
+            GrantDirectoryResponse {
+                request_id: 1,
+                status: 0,
+                grant_id: 0
+            }
+            .encode(&mut bytes),
+            Err(EncodeError::InvalidValue)
+        );
+        assert_eq!(
+            GrantDirectoryResponse {
+                request_id: 1,
+                status: -13,
+                grant_id: 1
+            }
+            .encode(&mut bytes),
+            Err(EncodeError::InvalidValue)
+        );
+        GrantDirectoryResponse {
+            request_id: 1,
+            status: -13,
+            grant_id: 0,
+        }
+        .encode(&mut bytes)
+        .unwrap();
         assert_eq!(GrantDirectoryResponse::decode(&bytes).unwrap().status, -13);
     }
 }

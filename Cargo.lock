@@ -512,12 +512,13 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 [[package]]
 name = "mnu-abi"
 version = "0.1.0"
+source = "git+https://github.com/mochiOS/mnu#ad95b82193732d72a29d8d6d6c1f7ccfd09fcd46"
 
 [[package]]
 name = "mochi-user-newlib-runtime"
 version = "0.1.0"
 dependencies = [
- "mochi-user-syscall",
+ "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "mochios-capability-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
 ]
 
@@ -528,7 +529,7 @@ dependencies = [
  "mboot-protocol",
  "mnu-abi",
  "mochi-user-runtime 0.1.0 (git+https://github.com/mochiOS/syscalls)",
- "mochi-user-syscall",
+ "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "mochios-capability-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
 ]
 
@@ -539,7 +540,7 @@ source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db
 dependencies = [
  "mnu-abi",
  "mochi-user-runtime 0.1.0 (git+https://github.com/mochiOS/syscalls)",
- "mochi-user-syscall",
+ "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "mochios-capability-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
 ]
 
@@ -547,7 +548,7 @@ dependencies = [
 name = "mochi-user-runtime"
 version = "0.1.0"
 dependencies = [
- "mochi-user-syscall",
+ "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
 ]
 
 [[package]]
@@ -555,12 +556,20 @@ name = "mochi-user-runtime"
 version = "0.1.0"
 source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
 dependencies = [
- "mochi-user-syscall",
+ "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
 ]
 
 [[package]]
 name = "mochi-user-syscall"
 version = "0.1.0"
+dependencies = [
+ "mnu-abi",
+]
+
+[[package]]
+name = "mochi-user-syscall"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls#e80d60b62f4911f858da4a44ca8f0365847027db"
 dependencies = [
  "mnu-abi",
 ]
@@ -1463,8 +1472,3 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
-
-[[patch.unused]]
-name = "mnu-abi"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#6482d7ddc13e272f9b56fe99e0f98a2080130c72"
