@@ -9,6 +9,8 @@ pub const GRANT_REQUEST_PREFIX_LEN: usize = 40;
 pub const GRANT_RESPONSE_LEN: usize = 32;
 pub const NETWORK_REQUEST_PREFIX_LEN: usize = 32;
 pub const NETWORK_RESPONSE_LEN: usize = 24;
+pub const STORAGE_REQUEST_PREFIX_LEN: usize = 32;
+pub const STORAGE_RESPONSE_LEN: usize = 24;
 pub const MAX_BUNDLE_ID_LEN: usize = 128;
 pub const MAX_USER_NAME_LEN: usize = 64;
 pub const MAX_PATH_LEN: usize = 512;
@@ -20,6 +22,31 @@ pub enum Opcode {
     GrantDirectoryResponse = 0x8001,
     RequestNetwork = 0x0002,
     RequestNetworkResponse = 0x8002,
+    AuthorizeStorage = 0x0003,
+    AuthorizeStorageResponse = 0x8003,
+}
+
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StorageAction {
+    Use = 1,
+    Create = 2,
+    Delete = 3,
+}
+
+impl StorageAction {
+    pub const fn wire_value(self) -> u16 {
+        self as u16
+    }
+
+    fn from_wire(value: u16) -> Result<Self, DecodeError> {
+        match value {
+            1 => Ok(Self::Use),
+            2 => Ok(Self::Create),
+            3 => Ok(Self::Delete),
+            _ => Err(DecodeError::InvalidStorageAction(value)),
+        }
+    }
 }
 
 impl Opcode {
@@ -71,6 +98,7 @@ pub enum DecodeError {
     InvalidBundleId,
     InvalidUserName,
     InvalidPath,
+    InvalidStorageAction(u16),
 }
 
 impl fmt::Display for DecodeError {
@@ -262,6 +290,111 @@ pub struct RequestNetworkResponse {
     pub status: i32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthorizeStorageRequest<'a> {
+    pub request_id: u64,
+    pub session_id: u64,
+    pub action: StorageAction,
+    pub bundle_id: &'a str,
+    pub target: &'a str,
+}
+
+impl<'a> AuthorizeStorageRequest<'a> {
+    pub fn encoded_len(&self) -> usize {
+        STORAGE_REQUEST_PREFIX_LEN + self.bundle_id.len() + self.target.len()
+    }
+
+    pub fn encode(&self, output: &mut [u8]) -> Result<usize, EncodeError> {
+        if self.session_id == 0
+            || !valid_bundle_id(self.bundle_id)
+            || !valid_storage_target(self.target)
+        {
+            return Err(EncodeError::InvalidValue);
+        }
+        let length = self.encoded_len();
+        require_output(output, length)?;
+        write_header(output, Opcode::AuthorizeStorage, self.request_id);
+        output[16..24].copy_from_slice(&self.session_id.to_le_bytes());
+        output[24..26].copy_from_slice(&self.action.wire_value().to_le_bytes());
+        output[26..28].copy_from_slice(&(self.bundle_id.len() as u16).to_le_bytes());
+        output[28..30].copy_from_slice(&(self.target.len() as u16).to_le_bytes());
+        output[30..32].fill(0);
+        let bundle_end = STORAGE_REQUEST_PREFIX_LEN + self.bundle_id.len();
+        output[STORAGE_REQUEST_PREFIX_LEN..bundle_end].copy_from_slice(self.bundle_id.as_bytes());
+        output[bundle_end..length].copy_from_slice(self.target.as_bytes());
+        Ok(length)
+    }
+
+    pub fn decode(input: &'a [u8]) -> Result<Self, DecodeError> {
+        if input.len() < STORAGE_REQUEST_PREFIX_LEN {
+            return Err(DecodeError::InvalidLength {
+                expected: STORAGE_REQUEST_PREFIX_LEN,
+                actual: input.len(),
+            });
+        }
+        let request_id = decode_header(input, Opcode::AuthorizeStorage)?;
+        let session_id = read_u64(input, 16);
+        let action = StorageAction::from_wire(read_u16(input, 24))?;
+        let bundle_len = usize::from(read_u16(input, 26));
+        let target_len = usize::from(read_u16(input, 28));
+        if read_u16(input, 30) != 0 {
+            return Err(DecodeError::NonZeroReserved(u32::from(read_u16(input, 30))));
+        }
+        let expected = STORAGE_REQUEST_PREFIX_LEN + bundle_len + target_len;
+        if input.len() != expected {
+            return Err(DecodeError::InvalidLength {
+                expected,
+                actual: input.len(),
+            });
+        }
+        let bundle_end = STORAGE_REQUEST_PREFIX_LEN + bundle_len;
+        let bundle_id = text(&input[STORAGE_REQUEST_PREFIX_LEN..bundle_end])?;
+        let target = text(&input[bundle_end..])?;
+        if session_id == 0 || !valid_bundle_id(bundle_id) {
+            return Err(DecodeError::InvalidBundleId);
+        }
+        if !valid_storage_target(target) {
+            return Err(DecodeError::InvalidPath);
+        }
+        Ok(Self {
+            request_id,
+            session_id,
+            action,
+            bundle_id,
+            target,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthorizeStorageResponse {
+    pub request_id: u64,
+    pub status: i32,
+}
+
+impl AuthorizeStorageResponse {
+    pub fn encode(&self, output: &mut [u8]) -> Result<usize, EncodeError> {
+        require_output(output, STORAGE_RESPONSE_LEN)?;
+        write_header(output, Opcode::AuthorizeStorageResponse, self.request_id);
+        output[16..20].copy_from_slice(&self.status.to_le_bytes());
+        output[20..24].fill(0);
+        Ok(STORAGE_RESPONSE_LEN)
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, DecodeError> {
+        require_exact(input, STORAGE_RESPONSE_LEN)?;
+        let request_id = decode_header(input, Opcode::AuthorizeStorageResponse)?;
+        let reserved = read_u32(input, 20);
+        if reserved != 0 {
+            return Err(DecodeError::NonZeroReserved(reserved));
+        }
+        Ok(Self {
+            request_id,
+            status: i32::from_le_bytes(input[16..20].try_into().unwrap()),
+        })
+    }
+}
+
 impl RequestNetworkResponse {
     pub fn encode(&self, output: &mut [u8]) -> Result<usize, EncodeError> {
         require_output(output, NETWORK_RESPONSE_LEN)?;
@@ -350,8 +483,17 @@ pub fn decode_opcode(input: &[u8]) -> Result<Opcode, DecodeError> {
         0x8001 => Ok(Opcode::GrantDirectoryResponse),
         0x0002 => Ok(Opcode::RequestNetwork),
         0x8002 => Ok(Opcode::RequestNetworkResponse),
+        0x0003 => Ok(Opcode::AuthorizeStorage),
+        0x8003 => Ok(Opcode::AuthorizeStorageResponse),
         value => Err(DecodeError::UnknownOpcode(value)),
     }
+}
+
+fn valid_storage_target(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_PATH_LEN
+        && !value.as_bytes().contains(&0)
+        && !value.chars().any(char::is_control)
 }
 
 pub fn valid_portal_path(path: &str) -> bool {
@@ -591,5 +733,53 @@ mod tests {
         .encode(&mut bytes)
         .unwrap();
         assert_eq!(GrantDirectoryResponse::decode(&bytes).unwrap().status, -13);
+    }
+
+    #[test]
+    fn storage_authorization_round_trip() {
+        let request = AuthorizeStorageRequest {
+            request_id: 81,
+            session_id: 9,
+            action: StorageAction::Delete,
+            bundle_id: "org.mochios.installer",
+            target: "Samsung SSD / Windows / 476 GB",
+        };
+        let mut bytes = [0u8; 160];
+        let length = request.encode(&mut bytes).unwrap();
+        assert_eq!(
+            AuthorizeStorageRequest::decode(&bytes[..length]),
+            Ok(request)
+        );
+
+        let response = AuthorizeStorageResponse {
+            request_id: request.request_id,
+            status: 0,
+        };
+        let mut reply = [0u8; STORAGE_RESPONSE_LEN];
+        assert_eq!(response.encode(&mut reply).unwrap(), STORAGE_RESPONSE_LEN);
+        assert_eq!(AuthorizeStorageResponse::decode(&reply), Ok(response));
+    }
+
+    #[test]
+    fn storage_authorization_rejects_invalid_action_and_target() {
+        let request = AuthorizeStorageRequest {
+            request_id: 1,
+            session_id: 2,
+            action: StorageAction::Use,
+            bundle_id: "org.mochios.installer",
+            target: "Disk / Partition",
+        };
+        let mut bytes = [0u8; 96];
+        let length = request.encode(&mut bytes).unwrap();
+        bytes[24..26].copy_from_slice(&9u16.to_le_bytes());
+        assert_eq!(
+            AuthorizeStorageRequest::decode(&bytes[..length]),
+            Err(DecodeError::InvalidStorageAction(9))
+        );
+        let invalid = AuthorizeStorageRequest {
+            target: "Disk\nPartition",
+            ..request
+        };
+        assert_eq!(invalid.encode(&mut bytes), Err(EncodeError::InvalidValue));
     }
 }
