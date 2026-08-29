@@ -4,8 +4,8 @@ use core::fmt;
 
 #[cfg(target_os = "mochios")]
 use mboot_protocol::{
-    Argument, Body, Destination, KnownCommand, MAX_MESSAGE_LEN, Message, MessageType, decode_line,
-    encode_to_string,
+    Argument, Body, Destination, KnownCommand, MAX_IPC_MESSAGE_LEN, Message, MessageType,
+    decode_line, encode_to_string,
 };
 
 #[cfg(target_os = "mochios")]
@@ -137,7 +137,7 @@ fn call(command: KnownCommand, arguments: Vec<Argument>) -> Result<Message, Wifi
         arguments,
     );
     let encoded = encode_to_string(&request).map_err(|_| WifiError::InvalidReply)?;
-    let mut reply = [0u8; MAX_MESSAGE_LEN];
+    let mut reply = [0u8; MAX_IPC_MESSAGE_LEN];
     let raw = crate::ipc::call(agent, encoded.as_bytes(), &mut reply)
         .map_err(|_| WifiError::Unavailable)?;
     let length = (raw & 0xffff_ffff) as usize;
