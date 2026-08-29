@@ -849,6 +849,29 @@ pub mod memory {
     }
 }
 
+pub mod storage {
+    use super::syscall::{self, SysResult};
+
+    pub use mnu_abi::STORAGE_CONTROL_LIST_DEVICE;
+    pub use mnu_abi::mdriver_control::{
+        MDRIVER_CONTROL_CREATE_PARTITION, MDRIVER_CONTROL_DELETE_PARTITION,
+        MDRIVER_CONTROL_INSPECT_STORAGE, MDRIVER_CONTROL_INSTALL_PARTITION,
+        MDRIVER_CONTROL_STATUS_END, MDRIVER_CONTROL_STATUS_OK, MDRIVER_STORAGE_QUERY_DISK,
+        MDRIVER_STORAGE_QUERY_PARTITION_GUIDS, MDRIVER_STORAGE_QUERY_PARTITION_RANGE,
+    };
+    pub use mnu_abi::{StorageControlRequest, StorageControlResponse};
+
+    pub fn control(request: StorageControlRequest) -> SysResult<StorageControlResponse> {
+        let mut response = StorageControlResponse::default();
+        syscall::call2(
+            syscall::SyscallNumber::StorageControl,
+            (&request as *const StorageControlRequest) as u64,
+            (&mut response as *mut StorageControlResponse) as u64,
+        )?;
+        Ok(response)
+    }
+}
+
 pub mod file {
     use super::syscall::{self, SysResult};
     use alloc::string::{String, ToString};
