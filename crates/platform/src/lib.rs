@@ -792,6 +792,24 @@ pub mod memory {
         syscall::call2(syscall::SyscallNumber::MapFramebuffer, virt, len)
     }
 
+    pub fn present_framebuffer(
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> SysResult<u64> {
+        let position = u64::from(x) | (u64::from(y) << 32);
+        let size = u64::from(width) | (u64::from(height) << 32);
+        syscall::call4(
+            syscall::SyscallNumber::PresentFramebuffer,
+            position,
+            size,
+            pixels.as_ptr() as u64,
+            pixels.len() as u64,
+        )
+    }
+
     pub fn get_physical_addr(virt: u64) -> SysResult<u64> {
         syscall::call1(syscall::SyscallNumber::GetPhysicalAddr, virt)
     }
