@@ -2621,10 +2621,10 @@ pub extern "C" fn clock_gettime(clock_id: c_int, tp: *mut Timespec) -> c_int {
     }
 
     let kernel_clock_id = match clock_id {
-        0 | 1 | 8 => 0,
+        0 | 5 | 8 => 0,
+        1 | 4 | 6 | 7 | 9 => 1,
         2 => 2,
         3 => 3,
-        4 | 5 | 6 | 7 | 9 => 1,
         _ => {
             set_errno(EINVAL);
             return -1;
