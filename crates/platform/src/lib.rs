@@ -871,6 +871,24 @@ pub mod storage {
     }
 }
 
+pub mod performance {
+    use super::syscall::{self, SysResult};
+
+    pub use mnu_abi::performance::{
+        KernelPerformanceSnapshot, LatencyMetric, VfsActivitySnapshot,
+    };
+
+    pub fn snapshot() -> SysResult<KernelPerformanceSnapshot> {
+        let mut snapshot = KernelPerformanceSnapshot::default();
+        syscall::call2(
+            syscall::SyscallNumber::PerformanceSnapshot,
+            (&mut snapshot as *mut KernelPerformanceSnapshot) as u64,
+            core::mem::size_of::<KernelPerformanceSnapshot>() as u64,
+        )?;
+        Ok(snapshot)
+    }
+}
+
 pub mod file {
     use super::syscall::{self, SysResult};
     use alloc::string::{String, ToString};
