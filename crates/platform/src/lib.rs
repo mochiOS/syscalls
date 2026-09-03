@@ -794,6 +794,12 @@ pub mod memory {
         usize::try_from(limit).map_err(|_| syscall::SysError::from_raw(syscall::ERANGE as i64))
     }
 
+    pub fn commit_framebuffer(x: u32, y: u32, width: u32, height: u32) -> SysResult<u64> {
+        let position = u64::from(x) | (u64::from(y) << 32);
+        let size = u64::from(width) | (u64::from(height) << 32);
+        syscall::call2(syscall::SyscallNumber::CommitFramebuffer, position, size)
+    }
+
     pub fn get_physical_addr(virt: u64) -> SysResult<u64> {
         syscall::call1(syscall::SyscallNumber::GetPhysicalAddr, virt)
     }
