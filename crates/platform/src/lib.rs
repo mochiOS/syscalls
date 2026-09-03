@@ -789,6 +789,11 @@ pub mod memory {
         )
     }
 
+    pub fn framebuffer_transfer_limit() -> SysResult<usize> {
+        let limit = syscall::call0(syscall::SyscallNumber::FramebufferTransferLimit)?;
+        usize::try_from(limit).map_err(|_| syscall::SysError::from_raw(syscall::ERANGE as i64))
+    }
+
     pub fn get_physical_addr(virt: u64) -> SysResult<u64> {
         syscall::call1(syscall::SyscallNumber::GetPhysicalAddr, virt)
     }
