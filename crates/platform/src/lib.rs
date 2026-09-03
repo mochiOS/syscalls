@@ -562,28 +562,11 @@ pub mod input {
 
 pub mod service {
     use super::syscall::{self, SysResult};
-    pub const DELEGATE_SERVICE_SPAWN: u64 = 1;
-    pub const DELEGATE_DRIVER_SPAWN: u64 = 2;
-    pub const ROLE_CORE_SERVICE: u64 = 1;
-    pub const ROLE_SERVICE: u64 = 2;
-    pub const ROLE_APPLICATION: u64 = 3;
-    pub const ROLE_DRIVER: u64 = 4;
-    pub const ROLE_TOOL: u64 = 5;
-    pub const ROLE_UNKNOWN: u64 = 6;
-
-    pub fn spawn(path: &str) -> SysResult<u64> {
-        let path = super::path::CPath::<256>::new(path)?;
-        syscall::call1(syscall::SyscallNumber::ServiceSpawn, path.as_ptr())
-    }
-
-    pub fn spawn_driver(path: &str) -> SysResult<u64> {
-        let path = super::path::CPath::<256>::new(path)?;
-        syscall::call1(syscall::SyscallNumber::DriverSpawn, path.as_ptr())
-    }
+    pub use mnu_abi::exec::ExecutionClass;
 
     pub fn spawn_manifest(
         path: &str,
-        role: u64,
+        execution_class: ExecutionClass,
         args_nul: Option<&[u8]>,
         caps_nul: Option<&[u8]>,
     ) -> SysResult<u64> {
@@ -602,13 +585,13 @@ pub mod service {
             args_ptr,
             caps_ptr,
             caps_len,
-            role,
+            execution_class.as_raw(),
         )
     }
 
     pub fn spawn_manifest_with_credentials(
         path: &str,
-        role: u64,
+        execution_class: ExecutionClass,
         uid: u32,
         gid: u32,
         args_nul: Option<&[u8]>,
@@ -624,7 +607,7 @@ pub mod service {
             _ => (0, 0),
         };
         let mut request = [0u8; 24];
-        request[0..8].copy_from_slice(&role.to_le_bytes());
+        request[0..8].copy_from_slice(&execution_class.as_raw().to_le_bytes());
         request[8..12].copy_from_slice(&uid.to_le_bytes());
         request[12..16].copy_from_slice(&gid.to_le_bytes());
         syscall::call5(
@@ -639,7 +622,7 @@ pub mod service {
 
     pub fn spawn_manifest_for_requester(
         path: &str,
-        role: u64,
+        execution_class: ExecutionClass,
         requester_tid: u64,
         args_nul: Option<&[u8]>,
         caps_nul: Option<&[u8]>,
@@ -654,7 +637,7 @@ pub mod service {
             _ => (0, 0),
         };
         let mut request = [0u8; 24];
-        request[0..8].copy_from_slice(&role.to_le_bytes());
+        request[0..8].copy_from_slice(&execution_class.as_raw().to_le_bytes());
         request[8..16].copy_from_slice(&requester_tid.to_le_bytes());
         syscall::call5(
             syscall::SyscallNumber::ExecManifestForRequester,
@@ -664,10 +647,6 @@ pub mod service {
             caps_len,
             request.as_ptr() as u64,
         )
-    }
-
-    pub fn register_delegate(kind: u64, pid: u64) -> SysResult<u64> {
-        syscall::call2(syscall::SyscallNumber::ServiceDelegateRegister, kind, pid)
     }
 }
 
