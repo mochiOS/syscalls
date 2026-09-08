@@ -189,6 +189,9 @@ pub mod logger {
 
     pub fn write_fmt(args: fmt::Arguments<'_>) -> syscall::SysResult<()> {
         if let Some(endpoint) = endpoint() {
+            if !cfg!(debug_assertions) {
+                return Ok(());
+            }
             let mut buf = alloc::string::String::new();
             buf.write_fmt(args)
                 .map_err(|_| syscall::SysError::from_raw(syscall::EINVAL as i64))?;
@@ -203,6 +206,15 @@ pub mod logger {
     /// to the process stdout, so service diagnostics cannot corrupt an
     /// interactive terminal when logger initialization is missing or delayed.
     pub fn write_log_fmt(args: fmt::Arguments<'_>) -> syscall::SysResult<()> {
+        if !cfg!(debug_assertions) {
+            return Ok(());
+        }
+        write_status_fmt(args)
+    }
+
+    /// Records explicit lifecycle/failure status in Release as well as Debug.
+    /// Never writes to stdout or the framebuffer; delivery errors reach the caller.
+    pub fn write_status_fmt(args: fmt::Arguments<'_>) -> syscall::SysResult<()> {
         let endpoint =
             endpoint().ok_or_else(|| syscall::SysError::from_raw(syscall::ENOENT as i64))?;
         let mut buf = alloc::string::String::new();
@@ -259,6 +271,23 @@ macro_rules! logln {
     ($($arg:tt)*) => {{
         let _ = $crate::logger::write_log_fmt(format_args!("{}\n", format_args!($($arg)*)));
     }};
+}
+
+pub mod device {
+    use super::syscall::{self, SysResult};
+    pub use mnu_abi::{DeviceControlRequest, DeviceControlResponse};
+
+    pub fn control(authority: &str, request: DeviceControlRequest) -> SysResult<DeviceControlResponse> {
+        let mut response = DeviceControlResponse::default();
+        syscall::call4(
+            syscall::SyscallNumber::DeviceControl,
+            &request as *const _ as u64,
+            &mut response as *mut _ as u64,
+            authority.as_ptr() as u64,
+            authority.len() as u64,
+        )?;
+        Ok(response)
+    }
 }
 
 pub mod thread {
