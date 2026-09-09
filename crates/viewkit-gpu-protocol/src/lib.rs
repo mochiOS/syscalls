@@ -260,8 +260,47 @@ pub mod compositor {
 
     pub const MAGIC: u32 = u32::from_le_bytes(*b"VKGC");
     pub const VERSION: u16 = 1;
+    pub const TIMED_VERSION: u16 = 2;
     pub const HEADER_LEN: usize = 64;
+
+    /// Milliseconds measured in the producer's clock domain. IPC and control
+    /// describe the previous frame; control is included in IPC, not additive.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct FrameTiming {
+        pub compose_ms: u32,
+        pub ipc_ms: u32,
+        pub control_ms: u32,
+    }
+
+    pub fn frame_timing(bytes: &[u8]) -> Option<FrameTiming> {
+        if bytes.len() < HEADER_LEN || read_u32(bytes, 0).ok()? != MAGIC
+            || read_u16(bytes, 4).ok()? != TIMED_VERSION
+            || read_u16(bytes, 6).ok()? as usize != HEADER_LEN {
+            return None;
+        }
+        Some(FrameTiming {
+            compose_ms: read_u32(bytes, 52).ok()?,
+            ipc_ms: read_u32(bytes, 56).ok()?,
+            control_ms: read_u32(bytes, 60).ok()?,
+        })
+    }
+
+    pub fn set_frame_timing(bytes: &mut [u8], timing: FrameTiming) -> Result<(), DecodeError> {
+        if bytes.len() < HEADER_LEN { return Err(DecodeError::TooShort); }
+        if read_u32(bytes, 0)? != MAGIC { return Err(DecodeError::BadMagic); }
+        if !matches!(read_u16(bytes, 4)?, VERSION | TIMED_VERSION) {
+            return Err(DecodeError::BadVersion);
+        }
+        if read_u16(bytes, 6)? as usize != HEADER_LEN {
+            return Err(DecodeError::BadHeaderLength);
+        }
+        put_u16(bytes, 4, TIMED_VERSION)?;
+        put_u32(bytes, 52, timing.compose_ms)?;
+        put_u32(bytes, 56, timing.ipc_ms)?;
+        put_u32(bytes, 60, timing.control_ms)
+    }
     pub const TEXTURE_DESC_LEN: usize = 40;
+
     pub const BATCH_DESC_LEN: usize = 16;
     pub const MAX_TEXTURES: u32 = 64;
     pub const MAX_BATCHES: u32 = 128;
@@ -451,7 +490,8 @@ pub mod compositor {
         if read_u32(bytes, 0)? != MAGIC {
             return Err(DecodeError::BadMagic);
         }
-        if read_u16(bytes, 4)? != VERSION {
+        let version = read_u16(bytes, 4)?;
+        if !matches!(version, VERSION | TIMED_VERSION) {
             return Err(DecodeError::BadVersion);
         }
         if read_u16(bytes, 6)? as usize != HEADER_LEN {
@@ -481,7 +521,7 @@ pub mod compositor {
             || vertex_offset != expected_vertex
             || data_offset != expected_data
             || data_offset > bytes.len()
-            || bytes[52..HEADER_LEN].iter().any(|byte| *byte != 0)
+            || (version == VERSION && bytes[52..HEADER_LEN].iter().any(|byte| *byte != 0))
         {
             return Err(DecodeError::BadOffsets);
         }
@@ -689,5 +729,25 @@ mod tests {
         assert_eq!(scene.texture(0).unwrap().generation, 7);
         assert_eq!(scene.texture(0).unwrap().data, &[1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(scene.batch(0).unwrap().texture_key, 42);
+        assert_eq!(compositor::frame_timing(&bytes), None);
+        let payload = bytes[COMPOSITOR_HEADER_LEN..].to_vec();
+        let timing = compositor::FrameTiming {
+            compose_ms: 8,
+            ipc_ms: 1000,
+            control_ms: 800,
+        };
+        compositor::set_frame_timing(&mut bytes, timing).unwrap();
+        assert_eq!(compositor::frame_timing(&bytes), Some(timing));
+        assert_eq!(&bytes[COMPOSITOR_HEADER_LEN..], &payload);
+        let scene = compositor::decode(&bytes).unwrap();
+        assert_eq!(scene.texture(0).unwrap().data, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(scene.batch(0).unwrap().texture_key, 42);
+        bytes[4..6].copy_from_slice(&compositor::VERSION.to_le_bytes());
+        assert!(compositor::decode(&bytes).is_err());
+        bytes[4..6].copy_from_slice(&3u16.to_le_bytes());
+        assert!(compositor::decode(&bytes).is_err());
+        assert!(compositor::set_frame_timing(&mut bytes, timing).is_err());
+        assert_eq!(compositor::frame_timing(&bytes[..32]), None);
+        assert!(compositor::set_frame_timing(&mut bytes[..32], timing).is_err());
     }
 }
