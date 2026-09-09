@@ -31,6 +31,23 @@ def compiler_info(toolchain):
     return dict(line.split(": ", 1) for line in rustc(toolchain, "-vV").splitlines() if ": " in line)
 
 
+def license_files(paths):
+    files = {}
+    for index, path in enumerate(paths):
+        if path.is_dir():
+            notices = sorted(p for p in path.rglob('*') if p.is_file() and
+                             p.name.upper().startswith(('LICENSE', 'COPYING', 'COPYRIGHT', 'NOTICE')))
+            if not notices:
+                raise ValueError(f"no license notices found: {path}")
+            for notice in notices:
+                files[f"licenses/{index}-{path.name}/{notice.relative_to(path).as_posix()}"] = notice
+        else:
+            files[f"licenses/{index}-{path.name}"] = path
+    if not files:
+        raise ValueError("license notices are required")
+    return files
+
+
 def pack(args):
     """Select exact dependencies from metadata, never mix cached std variants."""
     libraries = {}
@@ -61,11 +78,12 @@ def pack(args):
     for name in ("libc.a", "libm.a"):
         files[f"lib/{name}"] = args.c_sdk / "sysroot/lib" / name
     files["rust-sdk.py"] = Path(__file__)
-    for index, license_path in enumerate(args.license):
-        files[f"licenses/{index}-{license_path.name}"] = license_path
+    files.update(license_files(args.license))
     for path in files.values():
         if not path.is_file():
             raise ValueError(f"missing input: {path}")
+        if path.suffix in ('.a', '.rlib', '.o') and os.fsencode(str(Path.home()) + '/') in path.read_bytes():
+            raise ValueError(f"host home path embedded in {path}; rebuild with path remapping")
     # Exclusive creation avoids replacing an already published artifact.
     with zipfile.ZipFile(args.output, "x", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("sdk.json", json.dumps(manifest, indent=2) + "\n")

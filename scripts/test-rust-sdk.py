@@ -34,6 +34,17 @@ class InstallTests(unittest.TestCase):
                     sha256=sdk.checksum(self.archive), destination=self.destination))
         self.assertEqual((self.destination / "lib/example.a").read_text(), "test")
 
+    def test_license_directory_preserves_component_notices(self):
+        component = self.root / 'dependency'
+        component.mkdir()
+        (component / 'LICENSE.txt').write_text('license')
+        (component / 'NOTICE').write_text('notice')
+        (component / 'secret.key').write_text('not a license')
+        self.assertEqual(set(sdk.license_files([component])), {
+            'licenses/0-dependency/LICENSE.txt', 'licenses/0-dependency/NOTICE'})
+        with self.assertRaisesRegex(ValueError, 'required'):
+            sdk.license_files([])
+
     def test_checksum_mismatch_leaves_no_install(self):
         self.archive_with()
         with self.assertRaisesRegex(ValueError, "checksum mismatch"):

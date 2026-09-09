@@ -48,7 +48,8 @@ if [[ -n "$ABI_SOURCE" ]]; then
     [[ -f "$ABI_SOURCE/Cargo.toml" ]] || { echo "invalid ABI source" >&2; exit 2; }
     patch_args+=(--config "patch.\"https://github.com/mochiOS/mnu\".mnu-abi.path='$ABI_SOURCE'")
 fi
-BUILD_DIR="$OUT_ROOT/build-newlib"
+# Separate objects from older builds that embedded host paths.
+BUILD_DIR="$OUT_ROOT/build-newlib-remapped"
 INSTALL_ROOT="$OUT_ROOT/toolchain"
 SYSROOT="${NEWLIB_SYSROOT:-$INSTALL_ROOT/x86_64-elf}"
 TARGET_DIR="$OUT_ROOT/cargo-target"
@@ -68,12 +69,14 @@ if [[ -n "$NEWLIB_SOURCE" ]]; then
         echo "newlib source changed; select a separate --output to preserve the existing build" >&2
         exit 2
     fi
-    make -C "$BUILD_DIR" -j"$JOBS" all-target-newlib
-    make -C "$BUILD_DIR" install-target-newlib
+    target_cflags="-O2 -g0 -ffile-prefix-map=$NEWLIB_SOURCE=/src/newlib -ffile-prefix-map=$OUT_ROOT=/build/newlib"
+    make -C "$BUILD_DIR" -j"$JOBS" CFLAGS_FOR_TARGET="$target_cflags" all-target-newlib
+    make -C "$BUILD_DIR" CFLAGS_FOR_TARGET="$target_cflags" install-target-newlib
 else
     echo "[cache] use supplied newlib sysroot"
 fi
 cd "$USER_ROOT"
+RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build --remap-path-prefix=$USER_ROOT=/src/user" \
 cargo "${cargo_args[@]}" build -Z json-target-spec -Z build-std=core,compiler_builtins \
     --manifest-path "$USER_ROOT/Cargo.toml" --package mochi-user-newlib-runtime \
     --release --target "$USER_ROOT/targets/x86_64-unknown-mochios.json" \
