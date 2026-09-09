@@ -517,8 +517,8 @@ version = "0.1.0"
 name = "mochi-user-newlib-runtime"
 version = "0.1.0"
 dependencies = [
- "mochi-user-syscall",
- "mochios-capability-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochi-user-syscall 0.1.0",
+ "mochios-capability-protocol 0.1.0",
 ]
 
 [[package]]
@@ -528,7 +528,7 @@ dependencies = [
  "mboot-protocol",
  "mnu-abi",
  "mochi-user-runtime 0.1.0 (git+https://github.com/mochiOS/syscalls)",
- "mochi-user-syscall",
+ "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "mochios-capability-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
 ]
 
@@ -539,7 +539,7 @@ source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db
 dependencies = [
  "mnu-abi",
  "mochi-user-runtime 0.1.0 (git+https://github.com/mochiOS/syscalls)",
- "mochi-user-syscall",
+ "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
  "mochios-capability-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
 ]
 
@@ -547,7 +547,7 @@ dependencies = [
 name = "mochi-user-runtime"
 version = "0.1.0"
 dependencies = [
- "mochi-user-syscall",
+ "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
 ]
 
 [[package]]
@@ -555,12 +555,20 @@ name = "mochi-user-runtime"
 version = "0.1.0"
 source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
 dependencies = [
- "mochi-user-syscall",
+ "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
 ]
 
 [[package]]
 name = "mochi-user-syscall"
 version = "0.1.0"
+dependencies = [
+ "mnu-abi",
+]
+
+[[package]]
+name = "mochi-user-syscall"
+version = "0.1.0"
+source = "git+https://github.com/mochiOS/syscalls#8d6ef9b52e0e2272a09f0ed1b8595ac8cd0aa0c6"
 dependencies = [
  "mnu-abi",
 ]

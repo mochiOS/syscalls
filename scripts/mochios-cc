@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SDK="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CC="${MOCHIOS_CC:-x86_64-elf-gcc}"
+link=1
+for arg in "$@"; do
+    case "$arg" in -c|-S|-E|-M|-MM|-fsyntax-only|--version|-dumpmachine|-print-*) link=0 ;; esac
+done
+flags=(--sysroot="$SDK/sysroot" -isystem "$SDK/sysroot/include" -ffreestanding)
+if ((link)); then
+    exec "$CC" "${flags[@]}" -static -nostdlib -nostartfiles \
+        "-Wl,-T,$SDK/lib/linker.ld" -Wl,-no-pie -Wl,-z,noexecstack \
+        "-L$SDK/lib" "-L$SDK/sysroot/lib" -Wl,--start-group "$SDK/lib/crt0.o" \
+        "$@" -lmochi_user_newlib_runtime -lc -lm -lgcc -Wl,--end-group
+fi
+exec "$CC" "${flags[@]}" "$@"
