@@ -16,7 +16,7 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "viewkit"
-version = "1.0.1"
+version = "2.0.0"
 
 [[patch.unused]]
 name = "libc"
@@ -36,7 +36,7 @@ version = "1.99.0"
 
 [[patch.unused]]
 name = "viewkit"
-version = "1.0.1"
+version = "2.0.0"
 
 [[patch.unused]]
 name = "mochios-viewkit-gpu-protocol"

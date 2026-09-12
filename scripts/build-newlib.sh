@@ -75,6 +75,7 @@ if [[ -n "$NEWLIB_SOURCE" ]]; then
 else
     echo "[cache] use supplied newlib sysroot"
 fi
+
 cd "$USER_ROOT"
 RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build --remap-path-prefix=$USER_ROOT=/src/user" \
 cargo "${cargo_args[@]}" build -Z json-target-spec -Z build-std=core,compiler_builtins \
@@ -87,8 +88,20 @@ install -C -m 0644 "$TARGET_DIR/x86_64-unknown-mochios/release/libmochi_user_new
 install -C -m 0644 "$USER_ROOT/runtime/linker.ld" "$SDK/lib/linker.ld"
 install -C -m 0644 "$USER_ROOT/targets/x86_64-unknown-mochios.json" "$SDK/share/x86_64-unknown-mochios.json"
 install -C -m 0755 "$USER_ROOT/scripts/mochios-cc" "$SDK/bin/mochios-cc"
-mkdir -p "$SDK/sysroot"
-cp -a "$SYSROOT/include" "$SYSROOT/lib" "$SDK/sysroot/"
+
+SYSROOT_STAMP="$SDK/sysroot/.newlib-installed"
+
+if [[ ! -f "$SYSROOT_STAMP" ||
+      "$SYSROOT/lib/libc.a" -nt "$SYSROOT_STAMP" ||
+      "$SYSROOT/lib/libm.a" -nt "$SYSROOT_STAMP" ]]; then
+	rm -rf "$SDK/sysroot"
+	mkdir -p "$SDK/sysroot"
+	cp -a "$SYSROOT/include" "$SYSROOT/lib" "$SDK/sysroot/"
+	touch "$SYSROOT_STAMP"
+else
+	echo "[cache] reuse newlib SDK sysroot"
+fi
+
 "$SDK/bin/mochios-cc" -O2 "$USER_ROOT/libc-port/tests/hello.c" -o "$OUT_ROOT/hello/hello.elf"
 [[ -z "$(nm -u "$OUT_ROOT/hello/hello.elf")" ]] || { echo "unresolved symbols in hello.elf" >&2; exit 1; }
 readelf -h "$OUT_ROOT/hello/hello.elf"
