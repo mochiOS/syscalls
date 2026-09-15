@@ -2238,18 +2238,19 @@ pub extern "C" fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _fsync(fd: c_int) -> c_int {
-    let result = (|| {
+    result_with_errno(sync_file_descriptor(fd, syscall::SyscallNumber::Fsync), -1)
+}
+
+fn sync_file_descriptor(
+    fd: c_int,
+    number: syscall::SyscallNumber,
+) -> Result<c_int, c_int> {
         let entry = with_fd_entry(fd)?;
         if !matches!(entry.kind, FdKind::File) {
             return Err(EBADF);
         }
-        syscall_errno(syscall::raw_syscall1(
-            syscall::SyscallNumber::Fsync,
-            entry.lower_handle,
-        ))?;
+        syscall_errno(syscall::raw_syscall1(number, entry.lower_handle))?;
         Ok(0)
-    })();
-    result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
@@ -2259,7 +2260,10 @@ pub extern "C" fn fsync(fd: c_int) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fdatasync(fd: c_int) -> c_int {
-    _fsync(fd)
+    result_with_errno(
+        sync_file_descriptor(fd, syscall::SyscallNumber::Fdatasync),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]

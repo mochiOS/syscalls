@@ -69,7 +69,7 @@ if [[ -n "$NEWLIB_SOURCE" ]]; then
         echo "newlib source changed; select a separate --output to preserve the existing build" >&2
         exit 2
     fi
-    target_cflags="-O2 -g0 -ffile-prefix-map=$NEWLIB_SOURCE=/src/newlib -ffile-prefix-map=$OUT_ROOT=/build/newlib"
+    target_cflags="-O2 -g0 -DHAVE_RENAME -ffile-prefix-map=$NEWLIB_SOURCE=/src/newlib -ffile-prefix-map=$OUT_ROOT=/build/newlib"
     make -C "$BUILD_DIR" -j"$JOBS" CFLAGS_FOR_TARGET="$target_cflags" all-target-newlib
     make -C "$BUILD_DIR" CFLAGS_FOR_TARGET="$target_cflags" install-target-newlib
 else
