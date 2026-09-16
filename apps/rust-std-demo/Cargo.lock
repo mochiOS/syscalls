@@ -27,6 +27,10 @@ name = "libc"
 version = "0.2.185"
 
 [[patch.unused]]
+name = "mochios-mdriver-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "rustc-std-workspace-alloc"
 version = "1.99.0"
 
@@ -37,6 +41,38 @@ version = "1.99.0"
 [[patch.unused]]
 name = "viewkit"
 version = "2.0.0"
+
+[[patch.unused]]
+name = "mochi-user-platform"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochi-user-syscall"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-linux-gui-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-linux-portal-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-signature-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-tls-client"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-user-database"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-user-protocol"
+version = "0.1.0"
 
 [[patch.unused]]
 name = "mochios-viewkit-gpu-protocol"
