@@ -96,6 +96,7 @@ fn verified_round_trip() {
     let capabilities = ["fs.read.all", "process.spawn"];
     let message = VerifiedResponse {
         request_id: u64::MAX,
+        provenance: InstallProvenance::Development,
         certificate_serial: 42,
         subject_key_id: [1; 32],
         manifest_digest: [2; 32],
@@ -108,6 +109,7 @@ fn verified_round_trip() {
     let len = message.encode(&mut bytes).unwrap();
     let decoded = VerifiedView::decode(&bytes[..len]).unwrap();
     assert_eq!(decoded.request_id, u64::MAX);
+    assert_eq!(decoded.provenance, InstallProvenance::Development);
     assert_eq!(decoded.certificate_serial, 42);
     assert_eq!(decoded.developer_id, message.developer_id);
     assert_eq!(decoded.verified_package_id, message.verified_package_id);

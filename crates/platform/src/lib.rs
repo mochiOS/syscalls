@@ -325,6 +325,19 @@ pub mod process {
         )
     }
 
+    pub fn thread_security_context(
+        thread_id: u64,
+    ) -> SysResult<syscall::ThreadSecurityContext> {
+        let mut context = syscall::ThreadSecurityContext::default();
+        syscall::call3(
+            syscall::SyscallNumber::GetThreadSecurityContext,
+            thread_id,
+            (&mut context as *mut syscall::ThreadSecurityContext) as u64,
+            core::mem::size_of::<syscall::ThreadSecurityContext>() as u64,
+        )?;
+        Ok(context)
+    }
+
     pub fn exit(code: u64) -> ! {
         super::runtime_support::process_exit(code)
     }
@@ -675,6 +688,23 @@ pub mod service {
             caps_ptr,
             caps_len,
             request.as_ptr() as u64,
+        )
+    }
+
+    pub fn authorize_exec_for_requester(
+        requester_tid: u64,
+        path: &str,
+        identity_nul: &[u8],
+        caps_nul: &[u8],
+    ) -> SysResult<u64> {
+        let path = super::path::CPath::<256>::new(path)?;
+        syscall::call5(
+            syscall::SyscallNumber::AuthorizeExec,
+            requester_tid,
+            path.as_ptr(),
+            identity_nul.as_ptr() as u64,
+            caps_nul.as_ptr() as u64,
+            caps_nul.len() as u64,
         )
     }
 }
@@ -1096,94 +1126,32 @@ pub mod event {
 pub mod capability {
     use super::syscall::{self, SysResult};
     pub use mochios_capability_protocol::{
-        CAPABILITY_DECISION_OPCODE, CAPABILITY_PERSISTENT_QUERY_OPCODE, CAPABILITY_PROMPT_OPCODE,
-        CAPABILITY_RESPONSE_OPCODE, CapabilityClass, CapabilityDecision, CapabilityDecisionRequest,
+        AUTHORIZE_EXEC_OPCODE, CAPABILITY_DECISION_OPCODE, CAPABILITY_PERSISTENT_QUERY_OPCODE,
+        CAPABILITY_PROMPT_OPCODE, CAPABILITY_RESPONSE_OPCODE, CapabilityClass, CapabilityDecision,
+        CapabilityDecisionRequest,
         CapabilityRequest, ExecutableIdentity, MAX_CAPABILITY_NAME_LEN, MAX_DECISION_PAYLOAD_SIZE,
         MAX_EXECUTABLE_PATH_LEN, MAX_PAYLOAD_SIZE, MAX_REASON_LEN, MAX_RESOURCE_PATH_LEN,
-        PROTOCOL_VERSION, ProtocolError, RESOLVE_CAPABILITIES_OPCODE,
+        PACKAGE_INDEX_CHANGED_OPCODE, PROTOCOL_VERSION, ProtocolError, RESOLVE_CAPABILITIES_OPCODE,
+        RESOLVE_EXECUTION_SECURITY_OPCODE,
         RESOLVE_CAPABILITIES_REPLY_STATUS_LEN, RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN,
-        ResolveCapabilitiesReply, ResourceDescriptor, decode_decision_request, decode_request,
-        decode_resolve_capabilities_reply, decode_resolve_capabilities_request,
+        ResolveCapabilitiesReply, ResolveExecutionSecurityReply, ResourceDescriptor,
+        decode_authorize_exec_request,
+        decode_decision_request, decode_request, decode_resolve_capabilities_reply,
+        decode_resolve_capabilities_request, decode_resolve_execution_security_reply,
+        decode_resolve_execution_security_request, encode_authorize_exec_request,
         encode_decision_request, encode_request, encode_resolve_capabilities_reply,
-        encode_resolve_capabilities_request,
+        encode_resolve_capabilities_request, encode_resolve_execution_security_reply,
+        encode_resolve_execution_security_request,
     };
 
     pub fn capability_from_string(name: &str) -> CapabilityClass {
-        match name {
-            "fs.read.user.documents"
-            | "fs.write.user.documents"
-            | "fs.read.user.downloads"
-            | "fs.write.user.downloads"
-            | "fs.read.user.desktop"
-            | "fs.write.user.desktop"
-            | "fs.read.user.pictures"
-            | "fs.write.user.pictures"
-            | "fs.read.user.music"
-            | "fs.write.user.music"
-            | "fs.read.user.videos"
-            | "fs.write.user.videos"
-            | "fs.read.user"
-            | "fs.write.user"
-            | "fs.read.tmp"
-            | "fs.write.tmp"
-            | "fs.read.removable"
-            | "fs.write.removable"
-            | "net.connect"
-            | "net.listen"
-            | "net.tls.connect"
-            | "net.http.request"
-            | "window.create"
-            | "window.overlay"
-            | "display.read"
-            | "input.keyboard"
-            | "input.pointer"
-            | "audio.playback"
-            | "audio.record"
-            | "clipboard.read"
-            | "clipboard.write"
-            | "notification.send"
-            | "system.time.read"
-            | "system.info.read"
-            | "system.logs.read"
-            | "account.self.read"
-            | "account.self.modify"
-            | "settings.read" => CapabilityClass::UserGrantable,
-            "fs.read.all"
-            | "fs.write.all"
-            | "net.raw"
-            | "window.decorate"
-            | "window.capture"
-            | "display.capture"
-            | "input.keyboard.global"
-            | "input.pointer.global"
-            | "input.gamepad"
-            | "camera.access"
-            | "microphone.access"
-            | "location.access"
-            | "bluetooth.access"
-            | "usb.access"
-            | "serial.access"
-            | "power.shutdown"
-            | "power.reboot"
-            | "power.suspend"
-            | "system.time.set"
-            | "package.install"
-            | "package.remove"
-            | "package.update"
-            | "service.register"
-            | "service.control"
-            | "vm.create"
-            | "vm.control"
-            | "device.gpu"
-            | "device.audio"
-            | "device.input"
-            | "device.storage"
-            | "device.net"
-            | "account.other.read"
-            | "account.authenticate"
-            | "account.other.modify"
-            | "settings.write" => CapabilityClass::Privileged,
-            "window.secure-overlay" | "system.random.read" => CapabilityClass::SystemOnly,
+        match mnu_abi::capability::metadata(name).map(|metadata| metadata.classification) {
+            Some(mnu_abi::capability::CapabilityClassification::UserGrantable) => {
+                CapabilityClass::UserGrantable
+            }
+            Some(mnu_abi::capability::CapabilityClassification::Privileged) => {
+                CapabilityClass::Privileged
+            }
             _ => CapabilityClass::SystemOnly,
         }
     }

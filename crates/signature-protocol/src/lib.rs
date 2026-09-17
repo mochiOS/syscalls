@@ -11,6 +11,28 @@ pub const FINISH_LEN: usize = HEADER_LEN;
 pub const ERROR_LEN: usize = HEADER_LEN + 8;
 pub const UPDATE_NOTIFICATION_LEN: usize = HEADER_LEN + 16;
 pub const VERIFIED_FIXED_LEN: usize = HEADER_LEN + 112;
+pub const INSTALL_RECORD_MAGIC: u32 = 0x5249_564d;
+pub const INSTALL_RECORD_VERSION: u16 = 1;
+pub const INSTALL_RECORD_HEADER_LEN: usize = 8;
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstallProvenance {
+    BuiltIn = 1,
+    VerifiedPackage = 2,
+    Development = 3,
+}
+
+impl InstallProvenance {
+    pub const fn from_wire(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::BuiltIn),
+            2 => Some(Self::VerifiedPackage),
+            3 => Some(Self::Development),
+            _ => None,
+        }
+    }
+}
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -392,6 +414,7 @@ impl ErrorResponse {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VerifiedResponse<'a> {
     pub request_id: u64,
+    pub provenance: InstallProvenance,
     pub certificate_serial: u64,
     pub subject_key_id: [u8; 32],
     pub manifest_digest: [u8; 32],
@@ -440,7 +463,8 @@ impl VerifiedResponse<'_> {
         output[128..130].copy_from_slice(&developer_len.to_le_bytes());
         output[130..132].copy_from_slice(&package_len.to_le_bytes());
         output[132..134].copy_from_slice(&cap_count.to_le_bytes());
-        output[134..136].fill(0);
+        output[134] = self.provenance as u8;
+        output[135] = 0;
         let mut cursor = VERIFIED_FIXED_LEN;
         put_text(output, &mut cursor, self.developer_id);
         put_text(output, &mut cursor, self.verified_package_id);
@@ -457,6 +481,7 @@ impl VerifiedResponse<'_> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VerifiedView<'a> {
     pub request_id: u64,
+    pub provenance: InstallProvenance,
     pub certificate_serial: u64,
     pub subject_key_id: [u8; 32],
     pub manifest_digest: [u8; 32],
@@ -465,6 +490,84 @@ pub struct VerifiedView<'a> {
     pub verified_package_id: &'a str,
     capability_bytes: &'a [u8],
     capability_count: u16,
+}
+
+/// Versioned record persisted by the package installer after verification.
+///
+/// This wrapper keeps the signature-service response wire format unchanged
+/// while making the trust provenance of an installed package explicit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InstallRecord<'a> {
+    pub provenance: InstallProvenance,
+    pub verification: VerifiedResponse<'a>,
+}
+
+impl InstallRecord<'_> {
+    pub fn encoded_len(&self) -> usize {
+        INSTALL_RECORD_HEADER_LEN + self.verification.encoded_len()
+    }
+
+    pub fn encode(&self, output: &mut [u8]) -> Result<usize, EncodeError> {
+        let length = self.encoded_len();
+        require(output, length)?;
+        output[..4].copy_from_slice(&INSTALL_RECORD_MAGIC.to_le_bytes());
+        output[4..6].copy_from_slice(&INSTALL_RECORD_VERSION.to_le_bytes());
+        output[6] = self.provenance as u8;
+        output[7] = 0;
+        let verification_len = self
+            .verification
+            .encode(&mut output[INSTALL_RECORD_HEADER_LEN..])?;
+        Ok(INSTALL_RECORD_HEADER_LEN + verification_len)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InstallRecordView<'a> {
+    pub provenance: InstallProvenance,
+    pub verification: VerifiedView<'a>,
+}
+
+impl<'a> InstallRecordView<'a> {
+    pub fn decode(input: &'a [u8]) -> Result<Self, DecodeError> {
+        if input.len() < INSTALL_RECORD_HEADER_LEN {
+            return Err(DecodeError::InvalidLength);
+        }
+        let magic = u32::from_le_bytes(input[..4].try_into().unwrap());
+        if magic != INSTALL_RECORD_MAGIC {
+            return Err(DecodeError::InvalidMagic(magic));
+        }
+        let version = u16::from_le_bytes(input[4..6].try_into().unwrap());
+        if version != INSTALL_RECORD_VERSION {
+            return Err(DecodeError::UnsupportedVersion(version));
+        }
+        let provenance = InstallProvenance::from_wire(input[6])
+            .ok_or(DecodeError::InvalidText)?;
+        if input[7] != 0 {
+            return Err(DecodeError::NonZeroReserved);
+        }
+        let verification = VerifiedView::decode(&input[INSTALL_RECORD_HEADER_LEN..])?;
+        Ok(Self {
+            provenance,
+            verification,
+        })
+    }
+
+    pub const fn application_identity(&self) -> ApplicationIdentityView<'a> {
+        ApplicationIdentityView {
+            package_id: self.verification.verified_package_id,
+            developer_id: self.verification.developer_id,
+            subject_key_id: self.verification.subject_key_id,
+            provenance: self.provenance,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApplicationIdentityView<'a> {
+    pub package_id: &'a str,
+    pub developer_id: &'a str,
+    pub subject_key_id: [u8; 32],
+    pub provenance: InstallProvenance,
 }
 
 impl<'a> VerifiedView<'a> {
@@ -482,9 +585,17 @@ impl<'a> VerifiedView<'a> {
     }
     pub fn decode(input: &'a [u8]) -> Result<Self, DecodeError> {
         let header = expected_header(input, Opcode::Verified)?;
-        if input.len() < VERIFIED_FIXED_LEN || input[134..136].iter().any(|byte| *byte != 0) {
+        if input.len() < VERIFIED_FIXED_LEN || input[135] != 0 {
             return Err(DecodeError::NonZeroReserved);
         }
+        // Zero was reserved in protocol v1 before provenance was carried in
+        // the verification response. Preserve compatibility with those
+        // responses as ordinary verified packages, never as BuiltIn.
+        let provenance = if input[134] == 0 {
+            InstallProvenance::VerifiedPackage
+        } else {
+            InstallProvenance::from_wire(input[134]).ok_or(DecodeError::InvalidText)?
+        };
         let developer_len = usize::from(read_u16(input, 128));
         let package_len = usize::from(read_u16(input, 130));
         let capability_count = read_u16(input, 132);
@@ -512,6 +623,7 @@ impl<'a> VerifiedView<'a> {
         package_digest.copy_from_slice(&input[96..128]);
         Ok(Self {
             request_id: header.request_id,
+            provenance,
             certificate_serial: read_u64(input, 24),
             subject_key_id,
             manifest_digest,

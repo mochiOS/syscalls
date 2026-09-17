@@ -14,10 +14,14 @@ pub const CAPABILITY_RESPONSE_OPCODE: u32 = 0x4350_5252;
 pub const CAPABILITY_DECISION_OPCODE: u32 = 0x4350_5244;
 pub const CAPABILITY_PERSISTENT_QUERY_OPCODE: u32 = 0x4350_5150;
 pub const RESOLVE_CAPABILITIES_OPCODE: u32 = 0x4341_5053;
+pub const RESOLVE_EXECUTION_SECURITY_OPCODE: u32 = 0x4341_4553;
+pub const PACKAGE_INDEX_CHANGED_OPCODE: u32 = 0x4341_5049;
+pub const AUTHORIZE_EXEC_OPCODE: u32 = 0x4341_4558;
 pub const PROTOCOL_VERSION: u32 = 1;
 
 pub const RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN: usize = size_of::<u32>();
 pub const RESOLVE_CAPABILITIES_REPLY_STATUS_LEN: usize = size_of::<u64>();
+pub const RESOLVE_EXECUTION_SECURITY_REPLY_HEADER_LEN: usize = size_of::<u64>() + size_of::<u32>();
 
 pub const MAX_CAPABILITY_NAME_LEN: usize = 64;
 pub const MAX_EXECUTABLE_PATH_LEN: usize = 256;
@@ -61,6 +65,13 @@ pub struct ResolveCapabilitiesReply<'a> {
     pub capabilities: &'a [u8],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolveExecutionSecurityReply<'a> {
+    pub status: u64,
+    pub identity: &'a [u8],
+    pub capabilities: &'a [u8],
+}
+
 fn resolve_capabilities_path(bytes: &[u8]) -> Result<&str, ProtocolError> {
     if bytes.is_empty() {
         return Err(ProtocolError::InvalidLength);
@@ -96,6 +107,53 @@ pub fn decode_resolve_capabilities_request(bytes: &[u8]) -> Result<&str, Protoco
 }
 
 #[cfg(feature = "alloc")]
+pub fn encode_resolve_execution_security_request(
+    execution_class: u64,
+    path: &str,
+) -> Result<Vec<u8>, ProtocolError> {
+    resolve_capabilities_path(path.as_bytes())?;
+    let mut request = Vec::with_capacity(size_of::<u32>() + size_of::<u64>() + path.len());
+    request.extend_from_slice(&RESOLVE_EXECUTION_SECURITY_OPCODE.to_le_bytes());
+    request.extend_from_slice(&execution_class.to_le_bytes());
+    request.extend_from_slice(path.as_bytes());
+    Ok(request)
+}
+
+pub fn decode_resolve_execution_security_request(
+    bytes: &[u8],
+) -> Result<(u64, &str), ProtocolError> {
+    if bytes.len() < size_of::<u32>() + size_of::<u64>() {
+        return Err(ProtocolError::TooShort);
+    }
+    if u32::from_le_bytes(bytes[..4].try_into().unwrap())
+        != RESOLVE_EXECUTION_SECURITY_OPCODE
+    {
+        return Err(ProtocolError::UnknownOpcode);
+    }
+    let execution_class = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
+    Ok((execution_class, resolve_capabilities_path(&bytes[12..])?))
+}
+
+#[cfg(feature = "alloc")]
+pub fn encode_authorize_exec_request(path: &str) -> Result<Vec<u8>, ProtocolError> {
+    resolve_capabilities_path(path.as_bytes())?;
+    let mut request = Vec::with_capacity(size_of::<u32>() + path.len());
+    request.extend_from_slice(&AUTHORIZE_EXEC_OPCODE.to_le_bytes());
+    request.extend_from_slice(path.as_bytes());
+    Ok(request)
+}
+
+pub fn decode_authorize_exec_request(bytes: &[u8]) -> Result<&str, ProtocolError> {
+    if bytes.len() <= size_of::<u32>() {
+        return Err(ProtocolError::TooShort);
+    }
+    if u32::from_le_bytes(bytes[..4].try_into().unwrap()) != AUTHORIZE_EXEC_OPCODE {
+        return Err(ProtocolError::UnknownOpcode);
+    }
+    resolve_capabilities_path(&bytes[4..])
+}
+
+#[cfg(feature = "alloc")]
 pub fn encode_resolve_capabilities_reply(status: u64, capabilities: &[u8]) -> Vec<u8> {
     let mut reply = Vec::with_capacity(RESOLVE_CAPABILITIES_REPLY_STATUS_LEN + capabilities.len());
     reply.extend_from_slice(&status.to_le_bytes());
@@ -114,6 +172,45 @@ pub fn decode_resolve_capabilities_reply(
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]),
         capabilities: &bytes[RESOLVE_CAPABILITIES_REPLY_STATUS_LEN..],
+    })
+}
+
+#[cfg(feature = "alloc")]
+pub fn encode_resolve_execution_security_reply(
+    status: u64,
+    identity: &[u8],
+    capabilities: &[u8],
+) -> Result<Vec<u8>, ProtocolError> {
+    let identity_len = u32::try_from(identity.len()).map_err(|_| ProtocolError::InvalidLength)?;
+    let mut reply = Vec::with_capacity(
+        RESOLVE_EXECUTION_SECURITY_REPLY_HEADER_LEN + identity.len() + capabilities.len(),
+    );
+    reply.extend_from_slice(&status.to_le_bytes());
+    reply.extend_from_slice(&identity_len.to_le_bytes());
+    reply.extend_from_slice(identity);
+    reply.extend_from_slice(capabilities);
+    Ok(reply)
+}
+
+pub fn decode_resolve_execution_security_reply(
+    bytes: &[u8],
+) -> Result<ResolveExecutionSecurityReply<'_>, ProtocolError> {
+    if bytes.len() < RESOLVE_EXECUTION_SECURITY_REPLY_HEADER_LEN {
+        return Err(ProtocolError::TooShort);
+    }
+    let status = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+    let identity_len =
+        u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let identity_end = RESOLVE_EXECUTION_SECURITY_REPLY_HEADER_LEN
+        .checked_add(identity_len)
+        .ok_or(ProtocolError::InvalidLength)?;
+    if identity_end > bytes.len() {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(ResolveExecutionSecurityReply {
+        status,
+        identity: &bytes[RESOLVE_EXECUTION_SECURITY_REPLY_HEADER_LEN..identity_end],
+        capabilities: &bytes[identity_end..],
     })
 }
 

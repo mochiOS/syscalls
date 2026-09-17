@@ -517,6 +517,7 @@ version = "0.1.0"
 name = "mochi-user-newlib-runtime"
 version = "0.1.0"
 dependencies = [
+ "mnu-abi",
  "mochi-user-syscall 0.1.0",
  "mochios-capability-protocol 0.1.0",
 ]
@@ -1475,4 +1476,4 @@ dependencies = [
 [[patch.unused]]
 name = "mnu-abi"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#9f098f219b927786f81c7b60a31f82854d7f54ec"
+source = "git+https://github.com/mochiOS/mnu#a5dc118db84c4a303ac74457c0feb78f4cd6dcba"

@@ -290,6 +290,7 @@ pub struct PackageManifest {
     pub package_id: String,
     pub package_name: String,
     pub package_version: String,
+    pub install_provenance: Option<String>,
     pub vendor: Option<String>,
     pub package_kind: Option<String>,
     pub package_architecture: Option<String>,
@@ -528,6 +529,10 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
         match section {
             Section::Package | Section::LegacyPackage => match key {
                 "id" => package.package_id = unquote(value).unwrap_or_else(|| value.to_string()),
+                "provenance" => {
+                    package.install_provenance =
+                        Some(unquote(value).unwrap_or_else(|| value.to_string()))
+                }
                 "name" => {
                     package.package_name = unquote(value).unwrap_or_else(|| value.to_string())
                 }

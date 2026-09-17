@@ -8,7 +8,7 @@ use core::arch::asm;
 pub use mnu_abi::{
     EACCES, EAGAIN, EBADF, ECHILD, EEXIST, EFAULT, EINVAL, EIO, EISDIR, EMFILE, ENODATA, ENOENT,
     ENOMEM, ENOSPC, ENOSYS, ENOTDIR, ENOTSUP, ENOTTY, ENXIO, EPERM, EPIPE, ERANGE, ESRCH, SUCCESS,
-    SyscallNumber,
+    SyscallNumber, ThreadSecurityContext,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

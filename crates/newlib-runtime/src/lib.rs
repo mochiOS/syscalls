@@ -6,7 +6,8 @@ use core::ptr;
 
 use mochi_user_syscall as syscall;
 use mochios_capability_protocol::{
-    CAPABILITY_PERSISTENT_QUERY_OPCODE, CAPABILITY_PROMPT_OPCODE, CapabilityClass,
+    AUTHORIZE_EXEC_OPCODE, CAPABILITY_PERSISTENT_QUERY_OPCODE, CAPABILITY_PROMPT_OPCODE,
+    CapabilityClass,
     CapabilityDecision, CapabilityExecutableIdentity, CapabilityPromptRequest,
     CapabilityResourceDescriptor, MAX_CAPABILITY_NAME_LEN, MAX_REASON_LEN,
 };
@@ -698,81 +699,16 @@ fn read_env_path(name: &[u8]) -> Option<[u8; 256]> {
 }
 
 fn capability_class_from_string(name: &str) -> CapabilityClass {
-    match name {
-        "fs.read.user.documents"
-        | "fs.write.user.documents"
-        | "fs.read.user.downloads"
-        | "fs.write.user.downloads"
-        | "fs.read.user.desktop"
-        | "fs.write.user.desktop"
-        | "fs.read.user.pictures"
-        | "fs.write.user.pictures"
-        | "fs.read.user.music"
-        | "fs.write.user.music"
-        | "fs.read.user.videos"
-        | "fs.write.user.videos"
-        | "fs.read.user"
-        | "fs.write.user"
-        | "fs.read.tmp"
-        | "fs.write.tmp"
-        | "fs.read.removable"
-        | "fs.write.removable"
-        | "net.connect"
-        | "net.listen"
-        | "net.tls.connect"
-        | "net.http.request"
-        | "window.create"
-        | "window.overlay"
-        | "display.read"
-        | "input.keyboard"
-        | "input.pointer"
-        | "audio.playback"
-        | "audio.record"
-        | "clipboard.read"
-        | "clipboard.write"
-        | "notification.send"
-        | "system.time.read"
-        | "system.info.read"
-        | "system.logs.read"
-        | "account.self.read"
-        | "account.self.modify"
-        | "settings.read" => CapabilityClass::UserGrantable,
-        "fs.read.all"
-        | "fs.write.all"
-        | "net.raw"
-        | "window.capture"
-        | "display.capture"
-        | "input.keyboard.global"
-        | "input.pointer.global"
-        | "input.gamepad"
-        | "camera.access"
-        | "microphone.access"
-        | "location.access"
-        | "bluetooth.access"
-        | "usb.access"
-        | "serial.access"
-        | "power.shutdown"
-        | "power.reboot"
-        | "power.suspend"
-        | "system.time.set"
-        | "package.install"
-        | "package.remove"
-        | "package.update"
-        | "service.register"
-        | "service.control"
-        | "vm.create"
-        | "vm.control"
-        | "device.gpu"
-        | "device.audio"
-        | "device.input"
-        | "device.storage"
-        | "device.net"
-        | "account.other.read"
-        | "account.authenticate"
-        | "account.other.modify"
-        | "settings.write" => CapabilityClass::Privileged,
-        "window.secure-overlay" | "system.random.read" => CapabilityClass::SystemOnly,
-        _ => CapabilityClass::SystemOnly,
+    match mnu_abi::capability::metadata(name).map(|metadata| metadata.classification) {
+        Some(mnu_abi::capability::CapabilityClassification::UserGrantable) => {
+            CapabilityClass::UserGrantable
+        }
+        Some(mnu_abi::capability::CapabilityClassification::Privileged) => {
+            CapabilityClass::Privileged
+        }
+        Some(mnu_abi::capability::CapabilityClassification::SystemOnly) | None => {
+            CapabilityClass::SystemOnly
+        }
     }
 }
 
@@ -1472,6 +1408,46 @@ fn execve_syscall_raw(
     Ok(())
 }
 
+fn authorize_exec_path(path: *const c_char) -> Result<(), c_int> {
+    let path_bytes = unsafe { c_bytes(path) };
+    if path_bytes.is_empty() || path_bytes[0] != b'/' {
+        return Err(ENOENT);
+    }
+    if path_bytes.len() > 255 {
+        return Err(ENAMETOOLONG);
+    }
+    let endpoint = syscall_errno(syscall::raw_syscall2(
+        syscall::SyscallNumber::FindProcessByName,
+        CAPABILITY_SERVICE_NAME.as_ptr() as u64,
+        CAPABILITY_SERVICE_NAME.len() as u64,
+    ))?;
+    if endpoint == 0 {
+        return Err(ENOENT);
+    }
+    let mut request = [0u8; 260];
+    request[..4].copy_from_slice(&AUTHORIZE_EXEC_OPCODE.to_le_bytes());
+    request[4..4 + path_bytes.len()].copy_from_slice(path_bytes);
+    let request_len = 4 + path_bytes.len();
+    let mut reply = [0u8; 8];
+    let message = syscall_errno(syscall::raw_syscall5(
+        syscall::SyscallNumber::IpcCall,
+        endpoint,
+        request.as_ptr() as u64,
+        request_len as u64,
+        reply.as_mut_ptr() as u64,
+        reply.len() as u64,
+    ))?;
+    if (message & 0xffff_ffff) as usize != reply.len() {
+        return Err(EIO);
+    }
+    let status = u64::from_le_bytes(reply);
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(c_int::try_from(status).unwrap_or(EIO))
+    }
+}
+
 fn execve_with_fd_state(
     path: *const c_char,
     argv: *const *const c_char,
@@ -1486,6 +1462,7 @@ fn execve_with_fd_state(
         fd_state[..fd_state_len].as_ptr().cast::<c_char>(),
         &mut env_ptrs,
     )?;
+    authorize_exec_path(path)?;
     execve_syscall_raw(path, argv, env_ptrs.as_ptr())
 }
 
@@ -3144,7 +3121,9 @@ pub extern "C" fn _posix_spawn(
         {
             process_exit(SPAWN_FAIL_EXIT_STATUS);
         }
-        if execve_syscall_raw(snapshot.path, snapshot.argv, env_ptrs.as_ptr()).is_err() {
+        if authorize_exec_path(snapshot.path).is_err()
+            || execve_syscall_raw(snapshot.path, snapshot.argv, env_ptrs.as_ptr()).is_err()
+        {
             process_exit(SPAWN_FAIL_EXIT_STATUS);
         }
         process_exit(SPAWN_FAIL_EXIT_STATUS);
