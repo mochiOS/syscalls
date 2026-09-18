@@ -5,6 +5,7 @@ OUT_ROOT="$USER_ROOT/target/newlib-sdk"
 NEWLIB_SOURCE=""
 NEWLIB_SYSROOT=""
 ABI_SOURCE=""
+LIBC_SOURCE=""
 TOOLCHAIN=""
 JOBS="${JOBS:-8}"
 while (($#)); do
@@ -13,10 +14,11 @@ while (($#)); do
         --newlib-sysroot) NEWLIB_SYSROOT="$2"; shift 2 ;;
         --output) OUT_ROOT="$2"; shift 2 ;;
         --abi-source) ABI_SOURCE="$2"; shift 2 ;;
+        --libc-source) LIBC_SOURCE="$2"; shift 2 ;;
         --toolchain) TOOLCHAIN="$2"; shift 2 ;;
         --jobs) JOBS="$2"; shift 2 ;;
         --help)
-            echo "Usage: $0 (--newlib-source DIR | --newlib-sysroot DIR) [--output DIR] [--abi-source DIR] [--toolchain NAME] [--jobs N]"
+            echo "Usage: $0 (--newlib-source DIR | --newlib-sysroot DIR) [--output DIR] [--abi-source DIR] [--libc-source DIR] [--toolchain NAME] [--jobs N]"
             echo "Builds a relocatable C SDK without a kernel or mochiOS workspace."
             echo "Requires Cargo with rust-src and x86_64-elf GCC. CARGO_NET_OFFLINE=true enables offline builds."
             exit 0 ;;
@@ -47,6 +49,12 @@ if [[ -n "$ABI_SOURCE" ]]; then
     ABI_SOURCE="$(cd "$ABI_SOURCE" && pwd)"
     [[ -f "$ABI_SOURCE/Cargo.toml" ]] || { echo "invalid ABI source" >&2; exit 2; }
     patch_args+=(--config "patch.\"https://github.com/mochiOS/mnu\".mnu-abi.path='$ABI_SOURCE'")
+fi
+if [[ -n "$LIBC_SOURCE" ]]; then
+    LIBC_SOURCE="$(cd "$LIBC_SOURCE" && pwd)"
+    [[ -f "$LIBC_SOURCE/Cargo.toml" ]] || { echo "invalid libc source" >&2; exit 2; }
+    patch_args+=(--config "patch.crates-io.libc.path='$LIBC_SOURCE'")
+    patch_args+=(--config "patch.\"https://github.com/mochiOS/libc\".libc.path='$LIBC_SOURCE'")
 fi
 # Separate objects from older builds that embedded host paths.
 BUILD_DIR="$OUT_ROOT/build-newlib-remapped"

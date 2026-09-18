@@ -484,7 +484,6 @@ dependencies = [
 [[package]]
 name = "libc"
 version = "0.2.185"
-source = "git+https://github.com/mochiOS/libc#d2072c233a70c5044bc9adc1d6c60cafc3e663e1"
 
 [[package]]
 name = "libm"
