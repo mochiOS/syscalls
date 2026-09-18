@@ -6,6 +6,8 @@ NEWLIB_SOURCE=""
 NEWLIB_SYSROOT=""
 ABI_SOURCE=""
 LIBC_SOURCE=""
+MBOOT_PROTOCOL_SOURCE=""
+SYSCALLS_SOURCE=""
 TOOLCHAIN=""
 JOBS="${JOBS:-8}"
 while (($#)); do
@@ -15,10 +17,12 @@ while (($#)); do
         --output) OUT_ROOT="$2"; shift 2 ;;
         --abi-source) ABI_SOURCE="$2"; shift 2 ;;
         --libc-source) LIBC_SOURCE="$2"; shift 2 ;;
+        --mboot-protocol-source) MBOOT_PROTOCOL_SOURCE="$2"; shift 2 ;;
+        --syscalls-source) SYSCALLS_SOURCE="$2"; shift 2 ;;
         --toolchain) TOOLCHAIN="$2"; shift 2 ;;
         --jobs) JOBS="$2"; shift 2 ;;
         --help)
-            echo "Usage: $0 (--newlib-source DIR | --newlib-sysroot DIR) [--output DIR] [--abi-source DIR] [--libc-source DIR] [--toolchain NAME] [--jobs N]"
+            echo "Usage: $0 (--newlib-source DIR | --newlib-sysroot DIR) [--output DIR] [--abi-source DIR] [--libc-source DIR] [--mboot-protocol-source DIR] [--syscalls-source DIR] [--toolchain NAME] [--jobs N]"
             echo "Builds a relocatable C SDK without a kernel or mochiOS workspace."
             echo "Requires Cargo with rust-src and x86_64-elf GCC. CARGO_NET_OFFLINE=true enables offline builds."
             exit 0 ;;
@@ -55,6 +59,19 @@ if [[ -n "$LIBC_SOURCE" ]]; then
     [[ -f "$LIBC_SOURCE/Cargo.toml" ]] || { echo "invalid libc source" >&2; exit 2; }
     patch_args+=(--config "patch.crates-io.libc.path='$LIBC_SOURCE'")
     patch_args+=(--config "patch.\"https://github.com/mochiOS/libc\".libc.path='$LIBC_SOURCE'")
+fi
+if [[ -n "$MBOOT_PROTOCOL_SOURCE" ]]; then
+    MBOOT_PROTOCOL_SOURCE="$(cd "$MBOOT_PROTOCOL_SOURCE" && pwd)"
+    [[ -f "$MBOOT_PROTOCOL_SOURCE/Cargo.toml" ]] || { echo "invalid mBoot protocol source" >&2; exit 2; }
+    patch_args+=(--config "patch.\"https://github.com/mochiOS/mBoot\".mboot-protocol.path='$MBOOT_PROTOCOL_SOURCE'")
+fi
+if [[ -n "$SYSCALLS_SOURCE" ]]; then
+    SYSCALLS_SOURCE="$(cd "$SYSCALLS_SOURCE" && pwd)"
+    [[ -f "$SYSCALLS_SOURCE/Cargo.toml" ]] || { echo "invalid syscalls source" >&2; exit 2; }
+    patch_args+=(--config "patch.\"https://github.com/mochiOS/syscalls\".mochi-user-platform.path='$SYSCALLS_SOURCE/crates/platform'")
+    patch_args+=(--config "patch.\"https://github.com/mochiOS/syscalls\".mochi-user-runtime.path='$SYSCALLS_SOURCE/crates/runtime'")
+    patch_args+=(--config "patch.\"https://github.com/mochiOS/syscalls\".mochi-user-syscall.path='$SYSCALLS_SOURCE/crates/syscall'")
+    patch_args+=(--config "patch.\"https://github.com/mochiOS/syscalls\".mochios-capability-protocol.path='$SYSCALLS_SOURCE/crates/capability-protocol'")
 fi
 # Separate objects from older builds that embedded host paths.
 BUILD_DIR="$OUT_ROOT/build-newlib-remapped"

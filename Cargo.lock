@@ -494,7 +494,6 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "mboot-protocol"
 version = "0.1.0"
-source = "git+https://github.com/mochiOS/mBoot#ea6c81e06fe6f9a7a49fb0ec1faf3988a053ce44"
 
 [[package]]
 name = "memchr"
@@ -517,8 +516,8 @@ name = "mochi-user-newlib-runtime"
 version = "0.1.0"
 dependencies = [
  "mnu-abi",
- "mochi-user-syscall 0.1.0",
- "mochios-capability-protocol 0.1.0",
+ "mochi-user-syscall",
+ "mochios-capability-protocol",
 ]
 
 [[package]]
@@ -527,35 +526,16 @@ version = "0.1.0"
 dependencies = [
  "mboot-protocol",
  "mnu-abi",
- "mochi-user-runtime 0.1.0 (git+https://github.com/mochiOS/syscalls)",
- "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
- "mochios-capability-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
-]
-
-[[package]]
-name = "mochi-user-platform"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
-dependencies = [
- "mnu-abi",
- "mochi-user-runtime 0.1.0 (git+https://github.com/mochiOS/syscalls)",
- "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
- "mochios-capability-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochi-user-runtime",
+ "mochi-user-syscall",
+ "mochios-capability-protocol",
 ]
 
 [[package]]
 name = "mochi-user-runtime"
 version = "0.1.0"
 dependencies = [
- "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
-]
-
-[[package]]
-name = "mochi-user-runtime"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
-dependencies = [
- "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochi-user-syscall",
 ]
 
 [[package]]
@@ -566,21 +546,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "mochi-user-syscall"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#8d6ef9b52e0e2272a09f0ed1b8595ac8cd0aa0c6"
-dependencies = [
- "mnu-abi",
-]
-
-[[package]]
 name = "mochios-capability-protocol"
 version = "0.1.0"
-
-[[package]]
-name = "mochios-capability-protocol"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#e41ac7909a7ee11e9f89172d2e18db9a5a171f6f"
 
 [[package]]
 name = "mochios-certificate"
@@ -630,7 +597,7 @@ name = "mochios-tls-client"
 version = "0.1.0"
 dependencies = [
  "getrandom",
- "mochi-user-platform 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochi-user-platform",
  "rcgen",
  "rustls",
  "rustls-rustcrypto",
