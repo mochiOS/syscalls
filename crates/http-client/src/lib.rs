@@ -11,7 +11,7 @@ mod response;
 mod url;
 
 pub use request::{Header, Method, encode_request};
-pub use response::{HttpResponse, ResponseDecoder};
+pub use response::{HttpResponse, ResponseDecoder, StreamError, StreamHead, StreamingResponseDecoder};
 pub use url::{HttpsUrl, RedirectTracker};
 
 pub const MAX_URL_LEN: usize = 2_048;
@@ -50,6 +50,9 @@ pub enum HttpError {
     ConflictingContentLength,
     ConflictingFraming,
     UnsupportedTransferEncoding,
+    UnsupportedContentEncoding,
+    UnexpectedStatus,
+    StreamPoisoned,
     InvalidChunkSize,
     ChunkTooLarge,
     InvalidChunkTerminator,
@@ -308,6 +311,62 @@ mod tests {
             .unwrap();
         assert_eq!(decoder.decode(false), Err(HttpError::Incomplete));
         assert_eq!(decoder.decode(true).unwrap().body, b"body");
+    }
+
+    #[test]
+    fn streaming_decoder_handles_large_body_without_collecting_it() {
+        let size = MAX_BODY_BYTES + 4096;
+        let head = alloc::format!("HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nContent-Type: application/octet-stream\r\n\r\n");
+        let mut decoder = StreamingResponseDecoder::new();
+        let mut received = 0usize;
+        let mut sink = |part: &[u8]| -> Result<(), ()> { received += part.len(); Ok(()) };
+        for part in head.as_bytes().chunks(7) {
+            decoder.feed(part, &mut sink).unwrap();
+        }
+        assert_eq!(decoder.head().unwrap().content_length, size as u64);
+        assert_eq!(decoder.head().unwrap().header("content-type"), Some("application/octet-stream"));
+        let chunk = [0x5au8; 4096];
+        for _ in 0..size / chunk.len() {
+            decoder.feed(&chunk, &mut sink).unwrap();
+        }
+        assert!(decoder.is_complete());
+        assert_eq!(decoder.finish(), Ok(()));
+        assert_eq!(decoder.feed(b"extra", &mut sink), Err(StreamError::Protocol(HttpError::TrailingData)));
+        assert_eq!(received, size);
+    }
+
+    #[test]
+    fn streaming_decoder_fails_closed_on_bad_framing_and_truncation() {
+        for (head, expected) in [
+            (b"HTTP/1.1 200 OK\r\n\r\n".as_slice(), HttpError::ConflictingContentLength),
+            (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".as_slice(), HttpError::UnsupportedTransferEncoding),
+            (b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\n".as_slice(), HttpError::ConflictingContentLength),
+            (b"HTTP/1.1 302 Found\r\nContent-Length: 1\r\n\r\nx".as_slice(), HttpError::RedirectUnsupported),
+            (b"HTTP/1.1 404 Missing\r\nContent-Length: 1\r\n\r\nx".as_slice(), HttpError::UnexpectedStatus),
+            (b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Encoding: gzip\r\n\r\nx".as_slice(), HttpError::UnsupportedContentEncoding),
+        ] {
+            let mut decoder = StreamingResponseDecoder::new();
+            assert_eq!(decoder.feed(head, &mut |_| Ok::<(), ()>(())), Err(StreamError::Protocol(expected)));
+        }
+        let mut decoder = StreamingResponseDecoder::new();
+        decoder.feed(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nab", &mut |_| Ok::<(), ()>(())).unwrap();
+        assert_eq!(decoder.finish(), Err(HttpError::UnexpectedEnd));
+        assert_eq!(decoder.feed(b"c", &mut |_| Ok::<(), ()>(())), Err(StreamError::Protocol(HttpError::StreamPoisoned)));
+
+        let mut decoder = StreamingResponseDecoder::new();
+        assert_eq!(decoder.feed(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nxy", &mut |_| Ok::<(), ()>(())), Err(StreamError::Protocol(HttpError::TrailingData)));
+    }
+
+    #[test]
+    fn streaming_decoder_propagates_sink_failure() {
+        let mut decoder = StreamingResponseDecoder::new();
+        assert_eq!(
+            decoder.feed(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx", &mut |_| Err::<(), _>("disk-full")),
+            Err(StreamError::Sink("disk-full")),
+        );
+        assert!(!decoder.is_complete());
+        assert_eq!(decoder.finish(), Err(HttpError::StreamPoisoned));
+        assert_eq!(decoder.feed(b"x", &mut |_| Ok::<(), &str>(())), Err(StreamError::Protocol(HttpError::StreamPoisoned)));
     }
 
     #[test]

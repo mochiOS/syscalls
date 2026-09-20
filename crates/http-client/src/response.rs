@@ -55,6 +55,146 @@ impl Default for ResponseDecoder {
     }
 }
 
+/// Parses a Content-Length response without retaining its body. This is a
+/// building block for large downloads; callers must still enforce the signed
+/// manifest's URL, size, digest, and destination policy.
+pub struct StreamingResponseDecoder {
+    header_bytes: Vec<u8>,
+    head: Option<StreamHead>,
+    remaining: u64,
+    failed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamHead {
+    pub status_code: u16,
+    pub headers: Vec<(String, String)>,
+    pub content_length: u64,
+}
+
+impl StreamHead {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum StreamError<E> {
+    Protocol(HttpError),
+    Sink(E),
+}
+
+impl StreamingResponseDecoder {
+    pub const fn new() -> Self {
+        Self { header_bytes: Vec::new(), head: None, remaining: 0, failed: false }
+    }
+
+    pub fn head(&self) -> Option<&StreamHead> { self.head.as_ref() }
+
+    pub fn is_complete(&self) -> bool { !self.failed && self.head.is_some() && self.remaining == 0 }
+
+    pub fn feed<E>(
+        &mut self,
+        bytes: &[u8],
+        sink: &mut impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<(), StreamError<E>> {
+        if self.failed { return Err(StreamError::Protocol(HttpError::StreamPoisoned)); }
+        let result = self.feed_inner(bytes, sink);
+        if result.is_err() { self.failed = true; }
+        result
+    }
+
+    fn feed_inner<E>(
+        &mut self,
+        mut bytes: &[u8],
+        sink: &mut impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<(), StreamError<E>> {
+        if self.head.is_none() {
+            while let Some((&byte, rest)) = bytes.split_first() {
+                if self.header_bytes.len() == MAX_HEADER_BYTES {
+                    return Err(StreamError::Protocol(HttpError::HeadersTooLarge));
+                }
+                self.header_bytes.push(byte);
+                bytes = rest;
+                if self.header_bytes.ends_with(b"\r\n\r\n") {
+                    let head = parse_stream_head(&self.header_bytes)
+                        .map_err(StreamError::Protocol)?;
+                    self.remaining = head.content_length;
+                    self.head = Some(head);
+                    self.header_bytes.clear();
+                    break;
+                }
+            }
+        }
+        if self.head.is_some() && !bytes.is_empty() {
+            if bytes.len() as u64 > self.remaining {
+                return Err(StreamError::Protocol(HttpError::TrailingData));
+            }
+            sink(bytes).map_err(StreamError::Sink)?;
+            self.remaining -= bytes.len() as u64;
+        }
+        Ok(())
+    }
+
+    pub fn finish(&mut self) -> Result<(), HttpError> {
+        if self.failed { Err(HttpError::StreamPoisoned) }
+        else if self.is_complete() { Ok(()) }
+        else {
+            self.failed = true;
+            Err(HttpError::UnexpectedEnd)
+        }
+    }
+}
+
+impl Default for StreamingResponseDecoder {
+    fn default() -> Self { Self::new() }
+}
+
+fn parse_stream_head(bytes: &[u8]) -> Result<StreamHead, HttpError> {
+    let head = bytes.strip_suffix(b"\r\n\r\n").ok_or(HttpError::Incomplete)?;
+    let text = core::str::from_utf8(head).map_err(|_| HttpError::InvalidResponseHeader)?;
+    let mut lines = text.split("\r\n");
+    let (status_code, _) = parse_status_line(lines.next().ok_or(HttpError::InvalidStatusLine)?)?;
+    if matches!(status_code, 301 | 302 | 303 | 307 | 308) {
+        return Err(HttpError::RedirectUnsupported);
+    }
+    if status_code != 200 { return Err(HttpError::UnexpectedStatus); }
+    let mut headers = Vec::new();
+    let mut content_length = None;
+    for line in lines {
+        if line.len() > MAX_HEADER_LINE_LEN { return Err(HttpError::HeadersTooLarge); }
+        if headers.len() >= MAX_HEADER_COUNT { return Err(HttpError::TooManyHeaders); }
+        let (name, value) = parse_header(line)?;
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            // Unknown-length and chunked responses need a separate bounded
+            // framing path; never stream them as raw payload bytes.
+            return Err(HttpError::UnsupportedTransferEncoding);
+        }
+        if name.eq_ignore_ascii_case("content-encoding") && !value.eq_ignore_ascii_case("identity") {
+            return Err(HttpError::UnsupportedContentEncoding);
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            let length = value.parse::<u64>().map_err(|_| HttpError::ConflictingContentLength)?;
+            if content_length.is_some_and(|previous| previous != length) {
+                return Err(HttpError::ConflictingContentLength);
+            }
+            content_length = Some(length);
+        }
+        headers.push((name.to_ascii_lowercase(), value.to_string()));
+    }
+    let content_length = if response_has_no_body(status_code) {
+        if content_length.is_some_and(|length| length != 0) {
+            return Err(HttpError::ConflictingContentLength);
+        }
+        0
+    } else {
+        content_length.ok_or(HttpError::ConflictingContentLength)?
+    };
+    Ok(StreamHead { status_code, headers, content_length })
+}
+
 fn decode_response(bytes: &[u8], end_of_stream: bool) -> Result<HttpResponse, HttpError> {
     let header_end = find_sequence(bytes, b"\r\n\r\n").ok_or({
         if bytes.len() > MAX_HEADER_BYTES {

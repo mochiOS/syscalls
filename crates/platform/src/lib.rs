@@ -920,6 +920,19 @@ pub mod storage {
     }
 }
 
+pub mod boot {
+    use super::syscall::{self, SysResult};
+
+    pub use mnu_abi::boot::{
+        BOOT_SYSTEM_SLOT_A, BOOT_SYSTEM_SLOT_B, BOOT_SYSTEM_SLOT_LEGACY,
+    };
+
+    /// Returns 0 for legacy images, 1 for system A, or 2 for system B.
+    pub fn system_slot() -> SysResult<u64> {
+        syscall::call0(syscall::SyscallNumber::BootSystemSlot)
+    }
+}
+
 pub mod performance {
     use super::syscall::{self, SysResult};
 
