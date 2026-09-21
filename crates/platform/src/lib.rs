@@ -918,6 +918,30 @@ pub mod storage {
         )?;
         Ok(response)
     }
+
+    pub fn block_read(disk_id: u32, lba: u64, destination: &mut [u8]) -> SysResult<u64> {
+        syscall::call4(
+            syscall::SyscallNumber::BlockRead,
+            u64::from(disk_id),
+            lba,
+            destination.as_mut_ptr() as u64,
+            destination.len() as u64,
+        )
+    }
+
+    pub fn block_write(disk_id: u32, lba: u64, source: &[u8]) -> SysResult<u64> {
+        syscall::call4(
+            syscall::SyscallNumber::BlockWrite,
+            u64::from(disk_id),
+            lba,
+            source.as_ptr() as u64,
+            source.len() as u64,
+        )
+    }
+
+    pub fn block_flush(disk_id: u32) -> SysResult<u64> {
+        syscall::call1(syscall::SyscallNumber::BlockFlush, u64::from(disk_id))
+    }
 }
 
 pub mod boot {
@@ -930,6 +954,16 @@ pub mod boot {
     /// Returns 0 for legacy images, 1 for system A, or 2 for system B.
     pub fn system_slot() -> SysResult<u64> {
         syscall::call0(syscall::SyscallNumber::BootSystemSlot)
+    }
+
+    pub fn esp_guid() -> SysResult<[u8; 16]> {
+        let mut guid = [0u8; 16];
+        syscall::call2(
+            syscall::SyscallNumber::BootEspGuid,
+            guid.as_mut_ptr() as u64,
+            guid.len() as u64,
+        )?;
+        Ok(guid)
     }
 }
 
