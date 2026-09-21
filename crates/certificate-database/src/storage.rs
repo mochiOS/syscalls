@@ -1,12 +1,12 @@
 use crate::{DatabaseState, Etag, STATE_LEN, Slot, SnapshotMetadata};
 use alloc::vec::Vec;
 
-pub const DATABASE_DIRECTORY: &str = "/libraries/certificate";
-pub const STATE_PATH: &str = "/libraries/certificate/state.bin";
-pub const TRUST_A_PATH: &str = "/libraries/certificate/trust-a.json";
-pub const TRUST_B_PATH: &str = "/libraries/certificate/trust-b.json";
-pub const REVOCATIONS_A_PATH: &str = "/libraries/certificate/revocations-a.json";
-pub const REVOCATIONS_B_PATH: &str = "/libraries/certificate/revocations-b.json";
+pub const DATABASE_DIRECTORY: &str = "/var/lib/certificate";
+pub const STATE_PATH: &str = "/var/lib/certificate/state.bin";
+pub const TRUST_A_PATH: &str = "/var/lib/certificate/trust-a.json";
+pub const TRUST_B_PATH: &str = "/var/lib/certificate/trust-b.json";
+pub const REVOCATIONS_A_PATH: &str = "/var/lib/certificate/revocations-a.json";
+pub const REVOCATIONS_B_PATH: &str = "/var/lib/certificate/revocations-b.json";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SnapshotKind {

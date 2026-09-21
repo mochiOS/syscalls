@@ -6,7 +6,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
-pub const DATABASE_PATH: &str = "/system/users/users.db";
+pub const DATABASE_PATH: &str = "/var/lib/accounts/users.db";
 pub const DATABASE_VERSION: u16 = 1;
 pub const FIRST_REGULAR_UID: u32 = 1000;
 
