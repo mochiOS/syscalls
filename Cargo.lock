@@ -526,7 +526,7 @@ version = "0.1.0"
 dependencies = [
  "mboot-protocol",
  "mnu-abi",
- "mochi-user-runtime 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochi-user-runtime",
  "mochi-user-syscall",
  "mochios-capability-protocol",
  "mochios-workspace-protocol",
@@ -535,14 +535,6 @@ dependencies = [
 [[package]]
 name = "mochi-user-runtime"
 version = "0.1.0"
-dependencies = [
- "mochi-user-syscall",
-]
-
-[[package]]
-name = "mochi-user-runtime"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#0b494cb448832b1b5e3542eaa61c66d1d0c5904d"
 dependencies = [
  "mochi-user-syscall",
 ]
@@ -1451,26 +1443,6 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
-
-[[patch.unused]]
-name = "viewkit"
-version = "2.0.0"
-
-[[patch.unused]]
-name = "mochios-mdriver-protocol"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "rustc-std-workspace-alloc"
-version = "1.99.0"
-
-[[patch.unused]]
-name = "rustc-std-workspace-std"
-version = "1.99.0"
-
-[[patch.unused]]
-name = "viewkit"
-version = "2.0.0"
 
 [[patch.unused]]
 name = "mnu-abi"
