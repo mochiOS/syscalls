@@ -5,6 +5,7 @@ extern crate alloc;
 #[cfg(feature = "mboot-wifi")]
 pub mod mboot_wifi;
 pub mod session_control;
+pub mod workspace;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 

@@ -15,6 +15,7 @@ members = [
     "crates/user-protocol",
     "crates/virtio-gpu-protocol",
     "crates/viewkit-gpu-protocol",
+    "crates/workspace-protocol",
     "crates/syscall",
     "crates/runtime",
     "crates/signature-protocol",
