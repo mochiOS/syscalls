@@ -9,6 +9,9 @@ pub const MAX_CHUNK_BYTES: usize = MAX_MESSAGE_LEN - HEADER_LEN - 16;
 pub const MAX_CONTENT_TYPE_LEN: usize = 127;
 pub const MAX_EXTENSION_LEN: usize = 63;
 pub const MAX_BUNDLE_ID_LEN: usize = 255;
+pub const MAX_PATH_LEN: usize = 4095;
+pub const MAX_HANDLER_NAME_LEN: usize = 255;
+pub const MAX_ASSOCIATION_HANDLERS: usize = 256;
 
 pub const OP_CLIPBOARD_SET_BEGIN: u16 = 0x0100;
 pub const OP_CLIPBOARD_SET_CHUNK: u16 = 0x0101;
@@ -18,11 +21,14 @@ pub const OP_CLIPBOARD_READ: u16 = 0x0104;
 pub const OP_ASSOCIATION_SET: u16 = 0x0200;
 pub const OP_ASSOCIATION_REMOVE: u16 = 0x0201;
 pub const OP_ASSOCIATION_RESOLVE: u16 = 0x0202;
+pub const OP_DOCUMENT_OPEN: u16 = 0x0203;
+pub const OP_ASSOCIATION_HANDLERS: u16 = 0x0204;
 
 pub const OP_STATUS: u16 = 0x8000;
 pub const OP_CLIPBOARD_METADATA: u16 = 0x8103;
 pub const OP_CLIPBOARD_CHUNK: u16 = 0x8104;
 pub const OP_ASSOCIATION_RESULT: u16 = 0x8202;
+pub const OP_ASSOCIATION_HANDLERS_RESULT: u16 = 0x8204;
 
 pub const ASSOCIATION_ROLE_VIEW: u16 = 1 << 0;
 pub const ASSOCIATION_ROLE_EDIT: u16 = 1 << 1;
@@ -120,22 +126,30 @@ pub fn decode_status(message: Message<'_>) -> Result<(i32, u64, u64), ProtocolEr
 }
 
 pub fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, ProtocolError> {
-    let value = bytes.get(offset..offset + 2).ok_or(ProtocolError::InvalidLength)?;
+    let value = bytes
+        .get(offset..offset + 2)
+        .ok_or(ProtocolError::InvalidLength)?;
     Ok(u16::from_le_bytes([value[0], value[1]]))
 }
 
 pub fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, ProtocolError> {
-    let value = bytes.get(offset..offset + 4).ok_or(ProtocolError::InvalidLength)?;
+    let value = bytes
+        .get(offset..offset + 4)
+        .ok_or(ProtocolError::InvalidLength)?;
     Ok(u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
 }
 
 pub fn read_i32(bytes: &[u8], offset: usize) -> Result<i32, ProtocolError> {
-    let value = bytes.get(offset..offset + 4).ok_or(ProtocolError::InvalidLength)?;
+    let value = bytes
+        .get(offset..offset + 4)
+        .ok_or(ProtocolError::InvalidLength)?;
     Ok(i32::from_le_bytes([value[0], value[1], value[2], value[3]]))
 }
 
 pub fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, ProtocolError> {
-    let value = bytes.get(offset..offset + 8).ok_or(ProtocolError::InvalidLength)?;
+    let value = bytes
+        .get(offset..offset + 8)
+        .ok_or(ProtocolError::InvalidLength)?;
     Ok(u64::from_le_bytes([
         value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
     ]))
@@ -151,7 +165,12 @@ pub fn validate_utf8_field<'a>(
         return Err(ProtocolError::InvalidField);
     }
     let field = bytes
-        .get(offset..offset.checked_add(length).ok_or(ProtocolError::InvalidLength)?)
+        .get(
+            offset
+                ..offset
+                    .checked_add(length)
+                    .ok_or(ProtocolError::InvalidLength)?,
+        )
         .ok_or(ProtocolError::InvalidLength)?;
     core::str::from_utf8(field).map_err(|_| ProtocolError::InvalidField)
 }
@@ -163,8 +182,14 @@ mod tests {
     #[test]
     fn message_round_trip_has_stable_little_endian_header() {
         let mut encoded = [0u8; 64];
-        let length = encode(OP_CLIPBOARD_SNAPSHOT, 0x0102_0304_0506_0708, 3, b"abc", &mut encoded)
-            .expect("encode");
+        let length = encode(
+            OP_CLIPBOARD_SNAPSHOT,
+            0x0102_0304_0506_0708,
+            3,
+            b"abc",
+            &mut encoded,
+        )
+        .expect("encode");
         assert_eq!(&encoded[..4], b"MWSP");
         assert_eq!(&encoded[4..8], &[1, 0, 3, 1]);
         assert_eq!(&encoded[8..16], &[8, 7, 6, 5, 4, 3, 2, 1]);
@@ -180,9 +205,15 @@ mod tests {
         let mut encoded = [0u8; 64];
         let length = encode(OP_CLIPBOARD_SNAPSHOT, 1, 0, b"abc", &mut encoded).unwrap();
         encoded[16..20].copy_from_slice(&99u32.to_le_bytes());
-        assert_eq!(decode(&encoded[..length]), Err(ProtocolError::InvalidLength));
+        assert_eq!(
+            decode(&encoded[..length]),
+            Err(ProtocolError::InvalidLength)
+        );
         encoded[16..20].copy_from_slice(&3u32.to_le_bytes());
         encoded[4..6].copy_from_slice(&2u16.to_le_bytes());
-        assert_eq!(decode(&encoded[..length]), Err(ProtocolError::UnsupportedVersion));
+        assert_eq!(
+            decode(&encoded[..length]),
+            Err(ProtocolError::UnsupportedVersion)
+        );
     }
 }

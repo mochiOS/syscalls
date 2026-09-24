@@ -11,6 +11,15 @@ const SERVICE_NAME: &str = "workspace.service";
 const TEXT_CONTENT_TYPE: &str = "text/plain;charset=utf-8";
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
+pub const ASSOCIATION_ROLE_VIEW: u16 = protocol::ASSOCIATION_ROLE_VIEW;
+pub const ASSOCIATION_ROLE_EDIT: u16 = protocol::ASSOCIATION_ROLE_EDIT;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssociationHandler {
+    pub bundle_id: String,
+    pub name: String,
+}
+
 fn invalid() -> SysError {
     SysError::from_raw(syscall::EINVAL as i64)
 }
@@ -29,16 +38,13 @@ fn service() -> SysResult<u64> {
     crate::process::find_by_name(SERVICE_NAME)
 }
 
-fn call<'a>(
-    opcode: u16,
-    payload: &[u8],
-    reply: &'a mut [u8],
-) -> SysResult<protocol::Message<'a>> {
+fn call<'a>(opcode: u16, payload: &[u8], reply: &'a mut [u8]) -> SysResult<protocol::Message<'a>> {
     let id = request_id();
     let mut request = vec![0u8; protocol::HEADER_LEN + payload.len()];
     let length = protocol::encode(opcode, id, 0, payload, &mut request).map_err(|_| invalid())?;
     let received = crate::ipc::call(service()?, &request[..length], reply)? as usize;
-    let message = protocol::decode(reply.get(..received).ok_or_else(invalid)?).map_err(|_| invalid())?;
+    let message =
+        protocol::decode(reply.get(..received).ok_or_else(invalid)?).map_err(|_| invalid())?;
     if message.request_id != id {
         return Err(invalid());
     }
@@ -100,18 +106,15 @@ pub fn set_clipboard_text(text: &str) -> SysResult<()> {
 
 pub fn clipboard() -> SysResult<Option<(String, Vec<u8>)>> {
     let mut metadata_reply = vec![0u8; protocol::MAX_MESSAGE_LEN];
-    let metadata = call(
-        protocol::OP_CLIPBOARD_SNAPSHOT,
-        &[],
-        &mut metadata_reply,
-    )?;
+    let metadata = call(protocol::OP_CLIPBOARD_SNAPSHOT, &[], &mut metadata_reply)?;
     if metadata.opcode != protocol::OP_CLIPBOARD_METADATA || metadata.payload.len() < 24 {
         return Err(invalid());
     }
     let generation = protocol::read_u64(metadata.payload, 0).map_err(|_| invalid())?;
     let total = usize::try_from(protocol::read_u64(metadata.payload, 8).map_err(|_| invalid())?)
         .map_err(|_| invalid())?;
-    let content_type_len = protocol::read_u16(metadata.payload, 16).map_err(|_| invalid())? as usize;
+    let content_type_len =
+        protocol::read_u16(metadata.payload, 16).map_err(|_| invalid())? as usize;
     if total > protocol::MAX_CLIPBOARD_BYTES || metadata.payload.len() != 24 + content_type_len {
         return Err(invalid());
     }
@@ -166,7 +169,8 @@ pub fn set_association(
     if bundle_id.is_empty() || bundle_id.len() > protocol::MAX_BUNDLE_ID_LEN {
         return Err(invalid());
     }
-    let mut payload = Vec::with_capacity(8 + extension.len() + content_type.len() + bundle_id.len());
+    let mut payload =
+        Vec::with_capacity(8 + extension.len() + content_type.len() + bundle_id.len());
     payload.extend_from_slice(&roles.to_le_bytes());
     payload.extend_from_slice(&(extension.len() as u16).to_le_bytes());
     payload.extend_from_slice(&(content_type.len() as u16).to_le_bytes());
@@ -183,11 +187,7 @@ pub fn remove_association(extension: &str, content_type: &str, roles: u16) -> Sy
     validate_association_key(extension, content_type, roles)?;
     let payload = association_key(extension, content_type, roles);
     let mut reply = [0u8; protocol::HEADER_LEN + 24];
-    status(call(
-        protocol::OP_ASSOCIATION_REMOVE,
-        &payload,
-        &mut reply,
-    )?)?;
+    status(call(protocol::OP_ASSOCIATION_REMOVE, &payload, &mut reply)?)?;
     Ok(())
 }
 
@@ -210,6 +210,94 @@ pub fn resolve_association(extension: &str, content_type: &str, roles: u16) -> S
     core::str::from_utf8(&result.payload[8..])
         .map(str::to_string)
         .map_err(|_| invalid())
+}
+
+pub fn association_handlers(
+    extension: &str,
+    content_type: &str,
+    roles: u16,
+) -> SysResult<Vec<AssociationHandler>> {
+    validate_association_key(extension, content_type, roles)?;
+    let payload = association_key(extension, content_type, roles);
+    let mut reply = vec![0u8; protocol::MAX_MESSAGE_LEN];
+    let result = call(protocol::OP_ASSOCIATION_HANDLERS, &payload, &mut reply)?;
+    if result.opcode == protocol::OP_STATUS {
+        status(result)?;
+        return Err(invalid());
+    }
+    if result.opcode != protocol::OP_ASSOCIATION_HANDLERS_RESULT || result.payload.len() < 8 {
+        return Err(invalid());
+    }
+    let count = protocol::read_u16(result.payload, 0).map_err(|_| invalid())? as usize;
+    if count > protocol::MAX_ASSOCIATION_HANDLERS {
+        return Err(invalid());
+    }
+    let mut offset = 8usize;
+    let mut handlers = Vec::with_capacity(count);
+    for _ in 0..count {
+        let bundle_len =
+            protocol::read_u16(result.payload, offset).map_err(|_| invalid())? as usize;
+        let name_len =
+            protocol::read_u16(result.payload, offset + 2).map_err(|_| invalid())? as usize;
+        offset = offset.checked_add(4).ok_or_else(invalid)?;
+        let end = offset
+            .checked_add(bundle_len)
+            .and_then(|value| value.checked_add(name_len))
+            .ok_or_else(invalid)?;
+        let bytes = result.payload.get(offset..end).ok_or_else(invalid)?;
+        let bundle_id = core::str::from_utf8(&bytes[..bundle_len])
+            .map_err(|_| invalid())?
+            .to_string();
+        let name = core::str::from_utf8(&bytes[bundle_len..])
+            .map_err(|_| invalid())?
+            .to_string();
+        if bundle_id.is_empty()
+            || bundle_id.len() > protocol::MAX_BUNDLE_ID_LEN
+            || name.is_empty()
+            || name.len() > protocol::MAX_HANDLER_NAME_LEN
+        {
+            return Err(invalid());
+        }
+        handlers.push(AssociationHandler { bundle_id, name });
+        offset = end;
+    }
+    if offset != result.payload.len() {
+        return Err(invalid());
+    }
+    Ok(handlers)
+}
+
+pub fn open_document(path: &str, content_type: &str, roles: u16) -> SysResult<u64> {
+    open_document_with(path, content_type, "", roles)
+}
+
+pub fn open_document_with(
+    path: &str,
+    content_type: &str,
+    bundle_id: &str,
+    roles: u16,
+) -> SysResult<u64> {
+    if path.is_empty()
+        || path.len() > protocol::MAX_PATH_LEN
+        || content_type.is_empty()
+        || content_type.len() > protocol::MAX_CONTENT_TYPE_LEN
+        || bundle_id.len() > protocol::MAX_BUNDLE_ID_LEN
+        || roles == 0
+        || roles & !protocol::ASSOCIATION_ROLE_ALL != 0
+    {
+        return Err(invalid());
+    }
+    let mut payload = Vec::with_capacity(8 + path.len() + content_type.len() + bundle_id.len());
+    payload.extend_from_slice(&roles.to_le_bytes());
+    payload.extend_from_slice(&(path.len() as u16).to_le_bytes());
+    payload.extend_from_slice(&(content_type.len() as u16).to_le_bytes());
+    payload.extend_from_slice(&(bundle_id.len() as u16).to_le_bytes());
+    payload.extend_from_slice(path.as_bytes());
+    payload.extend_from_slice(content_type.as_bytes());
+    payload.extend_from_slice(bundle_id.as_bytes());
+    let mut reply = [0u8; protocol::HEADER_LEN + 24];
+    let (_, process_id) = status(call(protocol::OP_DOCUMENT_OPEN, &payload, &mut reply)?)?;
+    Ok(process_id)
 }
 
 fn validate_association_key(extension: &str, content_type: &str, roles: u16) -> SysResult<()> {
