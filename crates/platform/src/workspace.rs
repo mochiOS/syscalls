@@ -20,6 +20,28 @@ pub struct AssociationHandler {
     pub name: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilePanelMode {
+    Open,
+    Save,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilePanelOptions<'a> {
+    pub mode: FilePanelMode,
+    pub title: &'a str,
+    pub initial_directory: &'a str,
+    pub suggested_name: &'a str,
+    pub allowed_content_types: &'a [&'a str],
+    pub executable: &'a str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilePanelSelection {
+    pub token: [u8; protocol::FILE_PANEL_TOKEN_LEN],
+    pub path: String,
+}
+
 fn invalid() -> SysError {
     SysError::from_raw(syscall::EINVAL as i64)
 }
@@ -57,6 +79,26 @@ fn status(message: protocol::Message<'_>) -> SysResult<(u64, u64)> {
         return Err(SysError::from_raw(status.unsigned_abs() as i64));
     }
     Ok((generation, value))
+}
+
+pub fn register_application(endpoint: u64) -> SysResult<()> {
+    let mut reply = [0u8; protocol::HEADER_LEN + 24];
+    status(call(
+        protocol::OP_APPLICATION_REGISTER,
+        &endpoint.to_le_bytes(),
+        &mut reply,
+    )?)?;
+    Ok(())
+}
+
+pub fn activate_application(process_id: u64) -> SysResult<()> {
+    let mut reply = [0u8; protocol::HEADER_LEN + 24];
+    status(call(
+        protocol::OP_APPLICATION_ACTIVATE,
+        &process_id.to_le_bytes(),
+        &mut reply,
+    )?)?;
+    Ok(())
 }
 
 pub fn set_clipboard(content_type: &str, bytes: &[u8]) -> SysResult<()> {
@@ -298,6 +340,107 @@ pub fn open_document_with(
     let mut reply = [0u8; protocol::HEADER_LEN + 24];
     let (_, process_id) = status(call(protocol::OP_DOCUMENT_OPEN, &payload, &mut reply)?)?;
     Ok(process_id)
+}
+
+/// Starts a workspace-owned file-panel transaction. The returned selection
+/// must be acknowledged with [`file_panel_finish`].
+pub fn file_panel_begin(options: FilePanelOptions<'_>) -> SysResult<Option<FilePanelSelection>> {
+    if options.allowed_content_types.iter().any(|value| {
+        value.is_empty()
+            || value.len() > protocol::MAX_CONTENT_TYPE_LEN
+            || value.as_bytes().contains(&0x1f)
+    }) {
+        return Err(invalid());
+    }
+    let content_types = options.allowed_content_types.join("\x1f");
+    let request = protocol::FilePanelRequest {
+        mode: match options.mode {
+            FilePanelMode::Open => protocol::FILE_PANEL_MODE_OPEN,
+            FilePanelMode::Save => protocol::FILE_PANEL_MODE_SAVE,
+        },
+        title: options.title,
+        initial_directory: options.initial_directory,
+        suggested_name: options.suggested_name,
+        allowed_content_types: &content_types,
+        executable: options.executable,
+    };
+    let mut payload = vec![0u8; protocol::MAX_MESSAGE_LEN - protocol::HEADER_LEN];
+    let length =
+        protocol::encode_file_panel_request(request, &mut payload).map_err(|_| invalid())?;
+    let mut reply = vec![0u8; protocol::MAX_MESSAGE_LEN];
+    let result = call(protocol::OP_FILE_PANEL, &payload[..length], &mut reply)?;
+    if result.opcode == protocol::OP_STATUS {
+        status(result)?;
+        return Err(invalid());
+    }
+    if result.opcode != protocol::OP_FILE_PANEL_RESULT {
+        return Err(invalid());
+    }
+    let result = protocol::decode_file_panel_result(result.payload).map_err(|_| invalid())?;
+    decode_file_panel_selection(result)
+}
+
+fn decode_file_panel_selection(
+    result: protocol::FilePanelResult<'_>,
+) -> SysResult<Option<FilePanelSelection>> {
+    match result.status {
+        0 => Ok(Some(FilePanelSelection {
+            token: result.token,
+            path: result.path.to_string(),
+        })),
+        1 => Ok(None),
+        status => Err(SysError::from_raw(status.unsigned_abs() as i64)),
+    }
+}
+
+/// Waits for another selection from an existing panel after the application
+/// rejected a previous selection.
+pub fn file_panel_retry(
+    token: [u8; protocol::FILE_PANEL_TOKEN_LEN],
+) -> SysResult<Option<FilePanelSelection>> {
+    let mut reply = vec![0u8; protocol::MAX_MESSAGE_LEN];
+    let result = call(protocol::OP_FILE_PANEL_RETRY, &token, &mut reply)?;
+    if result.opcode == protocol::OP_STATUS {
+        status(result)?;
+        return Err(invalid());
+    }
+    if result.opcode != protocol::OP_FILE_PANEL_RESULT {
+        return Err(invalid());
+    }
+    decode_file_panel_selection(
+        protocol::decode_file_panel_result(result.payload).map_err(|_| invalid())?,
+    )
+}
+
+/// Reports whether the application operation for a selected path succeeded.
+/// A failure keeps the picker open so the user can correct the destination.
+pub fn file_panel_finish(
+    token: [u8; protocol::FILE_PANEL_TOKEN_LEN],
+    succeeded: bool,
+) -> SysResult<()> {
+    let finish = protocol::FilePanelFinish {
+        token,
+        status: if succeeded { 0 } else { 1 },
+    };
+    let mut payload = [0u8; protocol::FILE_PANEL_FINISH_LEN];
+    let length = protocol::encode_file_panel_finish(finish, &mut payload).map_err(|_| invalid())?;
+    let mut reply = [0u8; protocol::HEADER_LEN + 24];
+    status(call(
+        protocol::OP_FILE_PANEL_FINISH,
+        &payload[..length],
+        &mut reply,
+    )?)?;
+    Ok(())
+}
+
+/// Compatibility helper for clients that only select a path and do not run an
+/// operation which can fail.
+pub fn file_panel(options: FilePanelOptions<'_>) -> SysResult<Option<String>> {
+    let Some(selection) = file_panel_begin(options)? else {
+        return Ok(None);
+    };
+    file_panel_finish(selection.token, true)?;
+    Ok(Some(selection.path))
 }
 
 fn validate_association_key(extension: &str, content_type: &str, roles: u16) -> SysResult<()> {
