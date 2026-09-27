@@ -12,6 +12,11 @@ pub const MAX_BUNDLE_ID_LEN: usize = 255;
 pub const MAX_PATH_LEN: usize = 4095;
 pub const MAX_HANDLER_NAME_LEN: usize = 255;
 pub const MAX_ASSOCIATION_HANDLERS: usize = 256;
+pub const MAX_CONTROL_CENTER_ITEM_ID_LEN: usize = 64;
+pub const MAX_CONTROL_CENTER_CARD_TITLE_LEN: usize = 96;
+pub const MAX_CONTROL_CENTER_CARD_BODY_LEN: usize = 2048;
+pub const MAX_CONTROL_CENTER_CARDS: usize = 64;
+pub const CONTROL_CENTER_CARD_PREFIX_LEN: usize = 8;
 
 pub const OP_CLIPBOARD_SET_BEGIN: u16 = 0x0100;
 pub const OP_CLIPBOARD_SET_CHUNK: u16 = 0x0101;
@@ -29,6 +34,8 @@ pub const OP_FILE_PANEL_FINISH: u16 = 0x0302;
 pub const OP_FILE_PANEL_RETRY: u16 = 0x0303;
 pub const OP_APPLICATION_REGISTER: u16 = 0x0400;
 pub const OP_APPLICATION_ACTIVATE: u16 = 0x0401;
+pub const OP_CONTROL_CENTER_CARD_REGISTER: u16 = 0x0500;
+pub const OP_CONTROL_CENTER_CARD_SNAPSHOT: u16 = 0x0501;
 
 pub const OP_STATUS: u16 = 0x8000;
 pub const OP_CLIPBOARD_METADATA: u16 = 0x8103;
@@ -37,6 +44,7 @@ pub const OP_ASSOCIATION_RESULT: u16 = 0x8202;
 pub const OP_ASSOCIATION_HANDLERS_RESULT: u16 = 0x8204;
 pub const OP_FILE_PANEL_RESULT: u16 = 0x8300;
 pub const OP_FILE_PANEL_OPERATION_ERROR: u16 = 0x8302;
+pub const OP_CONTROL_CENTER_CARD_SNAPSHOT_RESULT: u16 = 0x8501;
 
 pub const FILE_PANEL_MODE_OPEN: u16 = 1;
 pub const FILE_PANEL_MODE_SAVE: u16 = 2;
@@ -95,6 +103,105 @@ pub struct FilePanelFinish<'a> {
     /// application operation failed and the picker must remain open.
     pub status: i32,
     pub error: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ControlCenterCard<'a> {
+    pub bundle_id: &'a str,
+    pub item_id: &'a str,
+    pub title: &'a str,
+    /// Newline-separated rows. Each row is `label\x1fvalue`.
+    pub body: &'a str,
+}
+
+pub fn encode_control_center_card(
+    card: ControlCenterCard<'_>,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    let fields = [
+        card.bundle_id.as_bytes(),
+        card.item_id.as_bytes(),
+        card.title.as_bytes(),
+        card.body.as_bytes(),
+    ];
+    let limits = [
+        MAX_BUNDLE_ID_LEN,
+        MAX_CONTROL_CENTER_ITEM_ID_LEN,
+        MAX_CONTROL_CENTER_CARD_TITLE_LEN,
+        MAX_CONTROL_CENTER_CARD_BODY_LEN,
+    ];
+    if fields
+        .iter()
+        .zip(limits)
+        .any(|(field, limit)| field.is_empty() || field.len() > limit)
+    {
+        return Err(ProtocolError::InvalidField);
+    }
+    let total = fields
+        .iter()
+        .try_fold(CONTROL_CENTER_CARD_PREFIX_LEN, |total, field| {
+            total
+                .checked_add(field.len())
+                .ok_or(ProtocolError::InvalidLength)
+        })?;
+    if output.len() < total || total > MAX_MESSAGE_LEN - HEADER_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    for (index, field) in fields.iter().enumerate() {
+        output[index * 2..index * 2 + 2].copy_from_slice(
+            &u16::try_from(field.len())
+                .map_err(|_| ProtocolError::InvalidLength)?
+                .to_le_bytes(),
+        );
+    }
+    let mut offset = CONTROL_CENTER_CARD_PREFIX_LEN;
+    for field in fields {
+        output[offset..offset + field.len()].copy_from_slice(field);
+        offset += field.len();
+    }
+    decode_control_center_card(&output[..total])?;
+    Ok(total)
+}
+
+pub fn decode_control_center_card(payload: &[u8]) -> Result<ControlCenterCard<'_>, ProtocolError> {
+    if payload.len() < CONTROL_CENTER_CARD_PREFIX_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    let lengths = [
+        read_u16(payload, 0)? as usize,
+        read_u16(payload, 2)? as usize,
+        read_u16(payload, 4)? as usize,
+        read_u16(payload, 6)? as usize,
+    ];
+    let limits = [
+        MAX_BUNDLE_ID_LEN,
+        MAX_CONTROL_CENTER_ITEM_ID_LEN,
+        MAX_CONTROL_CENTER_CARD_TITLE_LEN,
+        MAX_CONTROL_CENTER_CARD_BODY_LEN,
+    ];
+    let expected = lengths
+        .iter()
+        .try_fold(CONTROL_CENTER_CARD_PREFIX_LEN, |total, length| {
+            total
+                .checked_add(*length)
+                .ok_or(ProtocolError::InvalidLength)
+        })?;
+    if expected != payload.len() {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let mut offset = CONTROL_CENTER_CARD_PREFIX_LEN;
+    let mut next = |index: usize| {
+        let length = lengths[index];
+        let value = validate_utf8_field(payload, offset, length, limits[index])?;
+        offset += length;
+        Ok(value)
+    };
+    Ok(ControlCenterCard {
+        bundle_id: next(0)?,
+        item_id: next(1)?,
+        title: next(2)?,
+        body: next(3)?,
+    })
 }
 
 pub fn decode_file_panel_finish(payload: &[u8]) -> Result<FilePanelFinish<'_>, ProtocolError> {
@@ -518,6 +625,23 @@ mod tests {
                 &mut payload,
             ),
             Err(ProtocolError::InvalidField)
+        );
+    }
+
+    #[test]
+    fn control_center_card_round_trip() {
+        let card = ControlCenterCard {
+            bundle_id: "org.mochios.example",
+            item_id: "status",
+            title: "Example Status",
+            body: "State\x1fReady\nVersion\x1f1.0",
+        };
+        let mut payload = [0u8; 256];
+        let length = encode_control_center_card(card, &mut payload).unwrap();
+        assert_eq!(decode_control_center_card(&payload[..length]), Ok(card));
+        assert_eq!(
+            decode_control_center_card(&payload[..length - 1]),
+            Err(ProtocolError::InvalidLength)
         );
     }
 }

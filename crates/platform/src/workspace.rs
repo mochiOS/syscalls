@@ -20,6 +20,20 @@ pub struct AssociationHandler {
     pub name: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlCenterCardRow {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlCenterCard {
+    pub bundle_id: String,
+    pub item_id: String,
+    pub title: String,
+    pub rows: Vec<ControlCenterCardRow>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FilePanelMode {
     Open,
@@ -103,6 +117,98 @@ pub fn activate_application(process_id: u64) -> SysResult<()> {
         &mut reply,
     )?)?;
     Ok(())
+}
+
+pub fn register_control_center_card(card: &ControlCenterCard) -> SysResult<()> {
+    let body = card
+        .rows
+        .iter()
+        .map(|row| {
+            if row
+                .label
+                .chars()
+                .any(|character| matches!(character, '\n' | '\x1f'))
+                || row
+                    .value
+                    .chars()
+                    .any(|character| matches!(character, '\n' | '\x1f'))
+            {
+                return Err(invalid());
+            }
+            Ok(alloc::format!("{}\x1f{}", row.label, row.value))
+        })
+        .collect::<SysResult<Vec<_>>>()?
+        .join("\n");
+    let mut payload = vec![0u8; protocol::MAX_MESSAGE_LEN - protocol::HEADER_LEN];
+    let length = protocol::encode_control_center_card(
+        protocol::ControlCenterCard {
+            bundle_id: &card.bundle_id,
+            item_id: &card.item_id,
+            title: &card.title,
+            body: &body,
+        },
+        &mut payload,
+    )
+    .map_err(|_| invalid())?;
+    let mut reply = [0u8; protocol::HEADER_LEN + 24];
+    status(call(
+        protocol::OP_CONTROL_CENTER_CARD_REGISTER,
+        &payload[..length],
+        &mut reply,
+    )?)?;
+    Ok(())
+}
+
+pub fn control_center_cards() -> SysResult<Vec<ControlCenterCard>> {
+    let mut reply = vec![0u8; protocol::MAX_MESSAGE_LEN];
+    let message = call(protocol::OP_CONTROL_CENTER_CARD_SNAPSHOT, &[], &mut reply)?;
+    if message.opcode != protocol::OP_CONTROL_CENTER_CARD_SNAPSHOT_RESULT
+        || message.payload.len() < 4
+    {
+        return Err(invalid());
+    }
+    let count = protocol::read_u16(message.payload, 0).map_err(|_| invalid())? as usize;
+    if count > protocol::MAX_CONTROL_CENTER_CARDS
+        || protocol::read_u16(message.payload, 2).map_err(|_| invalid())? != 0
+    {
+        return Err(invalid());
+    }
+    let mut cards = Vec::with_capacity(count);
+    let mut offset = 4;
+    for _ in 0..count {
+        let length = protocol::read_u32(message.payload, offset).map_err(|_| invalid())? as usize;
+        offset = offset.checked_add(4).ok_or_else(invalid)?;
+        let end = offset.checked_add(length).ok_or_else(invalid)?;
+        let wire = protocol::decode_control_center_card(
+            message.payload.get(offset..end).ok_or_else(invalid)?,
+        )
+        .map_err(|_| invalid())?;
+        let rows = wire
+            .body
+            .lines()
+            .map(|line| {
+                let (label, value) = line.split_once('\x1f').ok_or_else(invalid)?;
+                if label.is_empty() || value.is_empty() {
+                    return Err(invalid());
+                }
+                Ok(ControlCenterCardRow {
+                    label: label.to_string(),
+                    value: value.to_string(),
+                })
+            })
+            .collect::<SysResult<Vec<_>>>()?;
+        cards.push(ControlCenterCard {
+            bundle_id: wire.bundle_id.to_string(),
+            item_id: wire.item_id.to_string(),
+            title: wire.title.to_string(),
+            rows,
+        });
+        offset = end;
+    }
+    if offset != message.payload.len() {
+        return Err(invalid());
+    }
+    Ok(cards)
 }
 
 pub fn set_clipboard(content_type: &str, bytes: &[u8]) -> SysResult<()> {
