@@ -36,13 +36,15 @@ pub const OP_CLIPBOARD_CHUNK: u16 = 0x8104;
 pub const OP_ASSOCIATION_RESULT: u16 = 0x8202;
 pub const OP_ASSOCIATION_HANDLERS_RESULT: u16 = 0x8204;
 pub const OP_FILE_PANEL_RESULT: u16 = 0x8300;
+pub const OP_FILE_PANEL_OPERATION_ERROR: u16 = 0x8302;
 
 pub const FILE_PANEL_MODE_OPEN: u16 = 1;
 pub const FILE_PANEL_MODE_SAVE: u16 = 2;
 pub const FILE_PANEL_REQUEST_PREFIX_LEN: usize = 16;
 pub const FILE_PANEL_RESULT_PREFIX_LEN: usize = 24;
 pub const FILE_PANEL_TOKEN_LEN: usize = 16;
-pub const FILE_PANEL_FINISH_LEN: usize = 24;
+pub const FILE_PANEL_FINISH_PREFIX_LEN: usize = 24;
+pub const MAX_FILE_PANEL_ERROR_LEN: usize = 1023;
 pub const MAX_FILE_PANEL_TITLE_LEN: usize = 255;
 pub const MAX_FILE_PANEL_SUGGESTED_NAME_LEN: usize = 255;
 pub const MAX_FILE_PANEL_CONTENT_TYPES_LEN: usize = 2047;
@@ -87,32 +89,52 @@ pub struct FilePanelResult<'a> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FilePanelFinish {
+pub struct FilePanelFinish<'a> {
     pub token: [u8; FILE_PANEL_TOKEN_LEN],
     /// Zero means the selected path was used successfully. One means the
     /// application operation failed and the picker must remain open.
     pub status: i32,
+    pub error: &'a str,
 }
 
-pub fn decode_file_panel_finish(payload: &[u8]) -> Result<FilePanelFinish, ProtocolError> {
-    if payload.len() != FILE_PANEL_FINISH_LEN {
-        return Err(ProtocolError::InvalidLength);
+pub fn decode_file_panel_finish(payload: &[u8]) -> Result<FilePanelFinish<'_>, ProtocolError> {
+    if payload.len() < FILE_PANEL_FINISH_PREFIX_LEN {
+        return Err(ProtocolError::BufferTooSmall);
     }
     let mut token = [0; FILE_PANEL_TOKEN_LEN];
     token.copy_from_slice(&payload[..FILE_PANEL_TOKEN_LEN]);
     let status = read_i32(payload, 16)?;
-    if !matches!(status, 0 | 1) || read_u32(payload, 20)? != 0 {
+    let error_len = read_u16(payload, 20)? as usize;
+    if !matches!(status, 0 | 1)
+        || read_u16(payload, 22)? != 0
+        || error_len > MAX_FILE_PANEL_ERROR_LEN
+        || payload.len() != FILE_PANEL_FINISH_PREFIX_LEN + error_len
+        || (status == 0 && error_len != 0)
+    {
         return Err(ProtocolError::InvalidField);
     }
-    Ok(FilePanelFinish { token, status })
+    let error = core::str::from_utf8(&payload[FILE_PANEL_FINISH_PREFIX_LEN..])
+        .map_err(|_| ProtocolError::InvalidField)?;
+    Ok(FilePanelFinish {
+        token,
+        status,
+        error,
+    })
 }
 
 pub fn encode_file_panel_finish(
-    finish: FilePanelFinish,
+    finish: FilePanelFinish<'_>,
     output: &mut [u8],
 ) -> Result<usize, ProtocolError> {
-    if output.len() < FILE_PANEL_FINISH_LEN || !matches!(finish.status, 0 | 1) {
-        return Err(if output.len() < FILE_PANEL_FINISH_LEN {
+    let total = FILE_PANEL_FINISH_PREFIX_LEN
+        .checked_add(finish.error.len())
+        .ok_or(ProtocolError::InvalidLength)?;
+    if output.len() < total
+        || !matches!(finish.status, 0 | 1)
+        || finish.error.len() > MAX_FILE_PANEL_ERROR_LEN
+        || (finish.status == 0 && !finish.error.is_empty())
+    {
+        return Err(if output.len() < total {
             ProtocolError::BufferTooSmall
         } else {
             ProtocolError::InvalidField
@@ -120,9 +142,15 @@ pub fn encode_file_panel_finish(
     }
     output[..FILE_PANEL_TOKEN_LEN].copy_from_slice(&finish.token);
     output[16..20].copy_from_slice(&finish.status.to_le_bytes());
-    output[20..24].fill(0);
-    decode_file_panel_finish(&output[..FILE_PANEL_FINISH_LEN])?;
-    Ok(FILE_PANEL_FINISH_LEN)
+    output[20..22].copy_from_slice(
+        &u16::try_from(finish.error.len())
+            .map_err(|_| ProtocolError::InvalidLength)?
+            .to_le_bytes(),
+    );
+    output[22..24].fill(0);
+    output[24..total].copy_from_slice(finish.error.as_bytes());
+    decode_file_panel_finish(&output[..total])?;
+    Ok(total)
 }
 
 pub fn decode_file_panel_request(payload: &[u8]) -> Result<FilePanelRequest<'_>, ProtocolError> {
@@ -468,6 +496,7 @@ mod tests {
         let finish = FilePanelFinish {
             token: [9; FILE_PANEL_TOKEN_LEN],
             status: 1,
+            error: "Permission denied",
         };
         let length = encode_file_panel_finish(finish, &mut payload).unwrap();
         assert_eq!(

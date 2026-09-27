@@ -418,11 +418,28 @@ pub fn file_panel_finish(
     token: [u8; protocol::FILE_PANEL_TOKEN_LEN],
     succeeded: bool,
 ) -> SysResult<()> {
+    file_panel_finish_with_error(token, if succeeded { None } else { Some("") })
+}
+
+pub fn file_panel_finish_with_error(
+    token: [u8; protocol::FILE_PANEL_TOKEN_LEN],
+    error: Option<&str>,
+) -> SysResult<()> {
+    let failed = error.is_some();
+    let mut error = error.unwrap_or_default();
+    if error.len() > protocol::MAX_FILE_PANEL_ERROR_LEN {
+        let mut end = protocol::MAX_FILE_PANEL_ERROR_LEN;
+        while !error.is_char_boundary(end) {
+            end -= 1;
+        }
+        error = &error[..end];
+    }
     let finish = protocol::FilePanelFinish {
         token,
-        status: if succeeded { 0 } else { 1 },
+        status: if failed { 1 } else { 0 },
+        error,
     };
-    let mut payload = [0u8; protocol::FILE_PANEL_FINISH_LEN];
+    let mut payload = vec![0u8; protocol::FILE_PANEL_FINISH_PREFIX_LEN + finish.error.len()];
     let length = protocol::encode_file_panel_finish(finish, &mut payload).map_err(|_| invalid())?;
     let mut reply = [0u8; protocol::HEADER_LEN + 24];
     status(call(
