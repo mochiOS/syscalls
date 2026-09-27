@@ -64,7 +64,11 @@ fn call<'a>(opcode: u16, payload: &[u8], reply: &'a mut [u8]) -> SysResult<proto
     let id = request_id();
     let mut request = vec![0u8; protocol::HEADER_LEN + payload.len()];
     let length = protocol::encode(opcode, id, 0, payload, &mut request).map_err(|_| invalid())?;
-    let received = crate::ipc::call(service()?, &request[..length], reply)? as usize;
+    // IPC call results pack the sender endpoint into the upper 32 bits and
+    // the copied byte count into the lower 32 bits. Treating the whole value
+    // as a length makes every successful service reply look out of bounds.
+    let received =
+        (crate::ipc::call(service()?, &request[..length], reply)? & 0xffff_ffff) as usize;
     let message =
         protocol::decode(reply.get(..received).ok_or_else(invalid)?).map_err(|_| invalid())?;
     if message.request_id != id {
