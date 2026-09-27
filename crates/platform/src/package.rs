@@ -286,6 +286,14 @@ pub struct LinuxApplication {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct ApplicationMetadata {
+    pub entry: String,
+    pub description: String,
+    pub icon: String,
+    pub resources: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct PackageManifest {
     pub package_id: String,
     pub package_name: String,
@@ -297,6 +305,7 @@ pub struct PackageManifest {
     pub package_abi: Option<String>,
     pub files: Vec<PackageFile>,
     pub binaries: Vec<PackageBinary>,
+    pub application: Option<ApplicationMetadata>,
     pub linux: Option<LinuxApplication>,
 }
 
@@ -428,6 +437,7 @@ enum Section {
     File,
     LegacyPackage,
     LegacyCapabilities,
+    Application,
     Linux,
 }
 
@@ -486,6 +496,9 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
                 Section::Linux if pending_key == "portal_write_paths" => {
                     package.linux.as_mut()?.portal_write_paths = parsed;
                 }
+                Section::Application if pending_key == "resources" => {
+                    package.application.as_mut()?.resources = parsed;
+                }
                 _ => {}
             }
             pending_array = None;
@@ -513,6 +526,10 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
                 "package" => Section::Package,
                 "service" | "driver" => Section::LegacyPackage,
                 "capabilities" => Section::LegacyCapabilities,
+                "application" => {
+                    package.application = Some(ApplicationMetadata::default());
+                    Section::Application
+                }
                 "linux" => {
                     package.linux = Some(LinuxApplication::default());
                     Section::Linux
@@ -616,6 +633,29 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
                 }
             }
             Section::None => {}
+            Section::Application => {
+                let application = package.application.as_mut()?;
+                match key {
+                    "entry" => {
+                        application.entry = unquote(value).unwrap_or_else(|| value.to_string())
+                    }
+                    "description" => {
+                        application.description =
+                            unquote(value).unwrap_or_else(|| value.to_string())
+                    }
+                    "icon" => {
+                        application.icon = unquote(value).unwrap_or_else(|| value.to_string())
+                    }
+                    "resources" => {
+                        if value.trim_start().starts_with('[') && !value.contains(']') {
+                            pending_array = Some((section, key.to_string(), value.to_string()));
+                            continue;
+                        }
+                        application.resources = parse_array_values(value)?;
+                    }
+                    _ => {}
+                }
+            }
             Section::Linux => {
                 let linux = package.linux.as_mut()?;
                 match key {
@@ -673,6 +713,33 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
     }
     if !is_valid_package_id(&package.package_id) {
         return None;
+    }
+
+    if package.package_kind.as_deref() == Some("application") {
+        if package.package_name.len() > 64
+            || matches!(package.package_name.as_str(), "." | "..")
+            || package.package_name.bytes().any(|byte| {
+                byte == b'/' || byte == b'\\' || byte == 0 || byte.is_ascii_control()
+            })
+        {
+            return None;
+        }
+        let application = package.application.as_ref()?;
+        let valid_entry = if package.linux.is_some() {
+            application.entry == alloc::format!("linux:{}", package.package_id)
+        } else {
+            is_valid_relative_bundle_path(&application.entry)
+        };
+        if !valid_entry
+            || (!application.icon.is_empty()
+                && !is_valid_relative_bundle_path(&application.icon))
+            || application
+                .resources
+                .iter()
+                .any(|path| !is_valid_relative_bundle_path(path))
+        {
+            return None;
+        }
     }
 
     if package.binaries.is_empty()
@@ -793,6 +860,18 @@ fn is_valid_absolute_path(path: &str) -> bool {
             .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
+fn is_valid_relative_bundle_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.ends_with('/')
+        && !path.contains("//")
+        && !path.contains('\\')
+        && !path.as_bytes().contains(&0)
+        && path
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
 fn is_valid_writable_linux_path(path: &str) -> bool {
     is_valid_absolute_path(path)
         && !["/dev", "/proc", "/sys", "/run", "/tmp", "/home", "/mochios"]
@@ -874,6 +953,12 @@ mod tests {
             kind = "application"
             architecture = "x86_64"
             abi = "mboot-linux-1"
+
+            [application]
+            entry = "linux:org.example.editor"
+            description = "Editor"
+            icon = ""
+            resources = []
 
             [linux]
             entrypoint = "/usr/bin/editor"
