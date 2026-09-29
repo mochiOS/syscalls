@@ -21,6 +21,7 @@ pub const MAX_NOTIFICATION_TITLE_LEN: usize = 128;
 pub const MAX_NOTIFICATION_BODY_LEN: usize = 1024;
 pub const MAX_NOTIFICATIONS: usize = 128;
 pub const NOTIFICATION_PREFIX_LEN: usize = 24;
+pub const MAX_NOTIFICATION_SETTINGS_LEN: usize = 16 * 1024;
 
 pub const OP_CLIPBOARD_SET_BEGIN: u16 = 0x0100;
 pub const OP_CLIPBOARD_SET_CHUNK: u16 = 0x0101;
@@ -45,6 +46,9 @@ pub const OP_NOTIFICATION_SNAPSHOT: u16 = 0x0601;
 pub const OP_NOTIFICATION_MARK_ALL_READ: u16 = 0x0602;
 pub const OP_NOTIFICATION_REMOVE: u16 = 0x0603;
 pub const OP_NOTIFICATION_CLEAR: u16 = 0x0604;
+pub const OP_NOTIFICATION_SETTINGS_SNAPSHOT: u16 = 0x0605;
+pub const OP_NOTIFICATION_FOCUS_SET: u16 = 0x0606;
+pub const OP_NOTIFICATION_APPLICATION_SET: u16 = 0x0607;
 
 pub const OP_STATUS: u16 = 0x8000;
 pub const OP_CLIPBOARD_METADATA: u16 = 0x8103;
@@ -55,6 +59,7 @@ pub const OP_FILE_PANEL_RESULT: u16 = 0x8300;
 pub const OP_FILE_PANEL_OPERATION_ERROR: u16 = 0x8302;
 pub const OP_CONTROL_CENTER_CARD_SNAPSHOT_RESULT: u16 = 0x8501;
 pub const OP_NOTIFICATION_SNAPSHOT_RESULT: u16 = 0x8601;
+pub const OP_NOTIFICATION_SETTINGS_SNAPSHOT_RESULT: u16 = 0x8605;
 
 pub const FILE_PANEL_MODE_OPEN: u16 = 1;
 pub const FILE_PANEL_MODE_SAVE: u16 = 2;
@@ -132,6 +137,108 @@ pub struct Notification<'a> {
     pub bundle_id: &'a str,
     pub title: &'a str,
     pub body: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotificationSettings<'a> {
+    pub focus_enabled: bool,
+    /// Newline-separated bundle identifiers whose notifications are disabled.
+    pub disabled_bundle_ids: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NotificationApplicationSetting<'a> {
+    pub enabled: bool,
+    pub bundle_id: &'a str,
+}
+
+pub fn encode_notification_settings(
+    settings: NotificationSettings<'_>,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    let identifiers = settings.disabled_bundle_ids.as_bytes();
+    let total = 4usize
+        .checked_add(identifiers.len())
+        .ok_or(ProtocolError::InvalidLength)?;
+    if output.len() < total || total > MAX_NOTIFICATION_SETTINGS_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    if settings.disabled_bundle_ids.lines().any(|bundle_id| {
+        bundle_id.is_empty()
+            || bundle_id.len() > MAX_BUNDLE_ID_LEN
+            || bundle_id.chars().any(char::is_control)
+    }) {
+        return Err(ProtocolError::InvalidField);
+    }
+    output[0] = u8::from(settings.focus_enabled);
+    output[1..4].fill(0);
+    output[4..total].copy_from_slice(identifiers);
+    Ok(total)
+}
+
+pub fn decode_notification_settings(
+    payload: &[u8],
+) -> Result<NotificationSettings<'_>, ProtocolError> {
+    if payload.len() < 4
+        || payload.len() > MAX_NOTIFICATION_SETTINGS_LEN
+        || payload[0] > 1
+        || payload[1..4] != [0; 3]
+    {
+        return Err(ProtocolError::InvalidField);
+    }
+    let disabled_bundle_ids =
+        core::str::from_utf8(&payload[4..]).map_err(|_| ProtocolError::InvalidField)?;
+    if disabled_bundle_ids.lines().any(|bundle_id| {
+        bundle_id.is_empty()
+            || bundle_id.len() > MAX_BUNDLE_ID_LEN
+            || bundle_id.chars().any(char::is_control)
+    }) {
+        return Err(ProtocolError::InvalidField);
+    }
+    Ok(NotificationSettings {
+        focus_enabled: payload[0] != 0,
+        disabled_bundle_ids,
+    })
+}
+
+pub fn encode_notification_application_setting(
+    setting: NotificationApplicationSetting<'_>,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    let total = 1usize
+        .checked_add(setting.bundle_id.len())
+        .ok_or(ProtocolError::InvalidLength)?;
+    if output.len() < total {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    if setting.bundle_id.is_empty()
+        || setting.bundle_id.len() > MAX_BUNDLE_ID_LEN
+        || setting.bundle_id.chars().any(char::is_control)
+    {
+        return Err(ProtocolError::InvalidField);
+    }
+    output[0] = u8::from(setting.enabled);
+    output[1..total].copy_from_slice(setting.bundle_id.as_bytes());
+    Ok(total)
+}
+
+pub fn decode_notification_application_setting(
+    payload: &[u8],
+) -> Result<NotificationApplicationSetting<'_>, ProtocolError> {
+    if payload.is_empty() || payload[0] > 1 {
+        return Err(ProtocolError::InvalidField);
+    }
+    let bundle_id = core::str::from_utf8(&payload[1..]).map_err(|_| ProtocolError::InvalidField)?;
+    if bundle_id.is_empty()
+        || bundle_id.len() > MAX_BUNDLE_ID_LEN
+        || bundle_id.chars().any(char::is_control)
+    {
+        return Err(ProtocolError::InvalidField);
+    }
+    Ok(NotificationApplicationSetting {
+        enabled: payload[0] != 0,
+        bundle_id,
+    })
 }
 
 pub fn encode_notification(
@@ -773,6 +880,30 @@ mod tests {
         assert_eq!(
             decode_notification(&payload[..length - 1]),
             Err(ProtocolError::InvalidLength)
+        );
+    }
+
+    #[test]
+    fn notification_settings_round_trip() {
+        let settings = NotificationSettings {
+            focus_enabled: true,
+            disabled_bundle_ids: "org.mochios.mail\norg.mochios.test",
+        };
+        let mut payload = [0u8; 256];
+        let length = encode_notification_settings(settings, &mut payload).unwrap();
+        assert_eq!(
+            decode_notification_settings(&payload[..length]),
+            Ok(settings)
+        );
+
+        let application = NotificationApplicationSetting {
+            enabled: false,
+            bundle_id: "org.mochios.test",
+        };
+        let length = encode_notification_application_setting(application, &mut payload).unwrap();
+        assert_eq!(
+            decode_notification_application_setting(&payload[..length]),
+            Ok(application)
         );
     }
 }

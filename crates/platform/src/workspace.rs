@@ -44,6 +44,12 @@ pub struct Notification {
     pub body: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NotificationSettings {
+    pub focus_enabled: bool,
+    pub disabled_bundle_ids: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FilePanelMode {
     Open,
@@ -279,6 +285,50 @@ pub fn notifications() -> SysResult<Vec<Notification>> {
         return Err(invalid());
     }
     Ok(notifications)
+}
+
+pub fn notification_settings() -> SysResult<NotificationSettings> {
+    let mut reply = vec![0u8; protocol::HEADER_LEN + protocol::MAX_NOTIFICATION_SETTINGS_LEN];
+    let message = call(protocol::OP_NOTIFICATION_SETTINGS_SNAPSHOT, &[], &mut reply)?;
+    if message.opcode != protocol::OP_NOTIFICATION_SETTINGS_SNAPSHOT_RESULT {
+        return Err(invalid());
+    }
+    let settings =
+        protocol::decode_notification_settings(message.payload).map_err(|_| invalid())?;
+    Ok(NotificationSettings {
+        focus_enabled: settings.focus_enabled,
+        disabled_bundle_ids: settings
+            .disabled_bundle_ids
+            .lines()
+            .map(ToString::to_string)
+            .collect(),
+    })
+}
+
+pub fn set_notification_focus_enabled(enabled: bool) -> SysResult<()> {
+    let mut reply = [0u8; protocol::HEADER_LEN + 24];
+    status(call(
+        protocol::OP_NOTIFICATION_FOCUS_SET,
+        &[u8::from(enabled)],
+        &mut reply,
+    )?)?;
+    Ok(())
+}
+
+pub fn set_application_notifications_enabled(bundle_id: &str, enabled: bool) -> SysResult<()> {
+    let mut payload = vec![0u8; 1 + protocol::MAX_BUNDLE_ID_LEN];
+    let length = protocol::encode_notification_application_setting(
+        protocol::NotificationApplicationSetting { enabled, bundle_id },
+        &mut payload,
+    )
+    .map_err(|_| invalid())?;
+    let mut reply = [0u8; protocol::HEADER_LEN + 24];
+    status(call(
+        protocol::OP_NOTIFICATION_APPLICATION_SET,
+        &payload[..length],
+        &mut reply,
+    )?)?;
+    Ok(())
 }
 
 fn notification_command(opcode: u16, id: Option<u64>) -> SysResult<()> {
