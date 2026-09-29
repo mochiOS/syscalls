@@ -308,13 +308,16 @@ pub mod process {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    pub const RECORD_SIZE: usize = 88;
+    pub const RECORD_SIZE: usize = 112;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Record {
         pub pid: u64,
         pub state: u64,
         pub parent_pid: u64,
+        pub cpu_ticks: u64,
+        pub memory_bytes: u64,
+        pub thread_count: u64,
     }
 
     pub fn find_by_name(name: &str) -> SysResult<u64> {
@@ -369,6 +372,9 @@ pub mod process {
                 pid: read_u64(record, 0),
                 state: read_u64(record, 16),
                 parent_pid: read_u64(record, 24),
+                cpu_ticks: read_u64(record, 32),
+                memory_bytes: read_u64(record, 40),
+                thread_count: read_u64(record, 48),
             });
         }
         Ok(records)
