@@ -718,9 +718,10 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
     if package.package_kind.as_deref() == Some("application") {
         if package.package_name.len() > 64
             || matches!(package.package_name.as_str(), "." | "..")
-            || package.package_name.bytes().any(|byte| {
-                byte == b'/' || byte == b'\\' || byte == 0 || byte.is_ascii_control()
-            })
+            || package
+                .package_name
+                .bytes()
+                .any(|byte| byte == b'/' || byte == b'\\' || byte == 0 || byte.is_ascii_control())
         {
             return None;
         }
@@ -731,8 +732,7 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
             is_valid_relative_bundle_path(&application.entry)
         };
         if !valid_entry
-            || (!application.icon.is_empty()
-                && !is_valid_relative_bundle_path(&application.icon))
+            || (!application.icon.is_empty() && !is_valid_relative_bundle_path(&application.icon))
             || application
                 .resources
                 .iter()

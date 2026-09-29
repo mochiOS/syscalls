@@ -34,6 +34,16 @@ pub struct ControlCenterCard {
     pub rows: Vec<ControlCenterCardRow>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notification {
+    pub id: u64,
+    pub created_at: u64,
+    pub read: bool,
+    pub bundle_id: String,
+    pub title: String,
+    pub body: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FilePanelMode {
     Open,
@@ -209,6 +219,89 @@ pub fn control_center_cards() -> SysResult<Vec<ControlCenterCard>> {
         return Err(invalid());
     }
     Ok(cards)
+}
+
+pub fn post_notification(bundle_id: &str, title: &str, body: &str) -> SysResult<u64> {
+    let mut payload = vec![0u8; protocol::MAX_MESSAGE_LEN - protocol::HEADER_LEN];
+    let length = protocol::encode_notification(
+        protocol::Notification {
+            id: 0,
+            created_at: 0,
+            read: false,
+            bundle_id,
+            title,
+            body,
+        },
+        &mut payload,
+    )
+    .map_err(|_| invalid())?;
+    let mut reply = [0u8; protocol::HEADER_LEN + 24];
+    let (_, id) = status(call(
+        protocol::OP_NOTIFICATION_POST,
+        &payload[..length],
+        &mut reply,
+    )?)?;
+    Ok(id)
+}
+
+pub fn notifications() -> SysResult<Vec<Notification>> {
+    let mut reply = vec![0u8; protocol::MAX_MESSAGE_LEN];
+    let message = call(protocol::OP_NOTIFICATION_SNAPSHOT, &[], &mut reply)?;
+    if message.opcode != protocol::OP_NOTIFICATION_SNAPSHOT_RESULT || message.payload.len() < 4 {
+        return Err(invalid());
+    }
+    let count = protocol::read_u16(message.payload, 0).map_err(|_| invalid())? as usize;
+    if count > protocol::MAX_NOTIFICATIONS
+        || protocol::read_u16(message.payload, 2).map_err(|_| invalid())? != 0
+    {
+        return Err(invalid());
+    }
+    let mut notifications = Vec::with_capacity(count);
+    let mut offset = 4;
+    for _ in 0..count {
+        let length = protocol::read_u32(message.payload, offset).map_err(|_| invalid())? as usize;
+        offset = offset.checked_add(4).ok_or_else(invalid)?;
+        let end = offset.checked_add(length).ok_or_else(invalid)?;
+        let wire =
+            protocol::decode_notification(message.payload.get(offset..end).ok_or_else(invalid)?)
+                .map_err(|_| invalid())?;
+        notifications.push(Notification {
+            id: wire.id,
+            created_at: wire.created_at,
+            read: wire.read,
+            bundle_id: wire.bundle_id.to_string(),
+            title: wire.title.to_string(),
+            body: wire.body.to_string(),
+        });
+        offset = end;
+    }
+    if offset != message.payload.len() {
+        return Err(invalid());
+    }
+    Ok(notifications)
+}
+
+fn notification_command(opcode: u16, id: Option<u64>) -> SysResult<()> {
+    let payload = id.map(u64::to_le_bytes);
+    let mut reply = [0u8; protocol::HEADER_LEN + 24];
+    status(call(
+        opcode,
+        payload.as_ref().map_or(&[], |bytes| bytes.as_slice()),
+        &mut reply,
+    )?)?;
+    Ok(())
+}
+
+pub fn mark_all_notifications_read() -> SysResult<()> {
+    notification_command(protocol::OP_NOTIFICATION_MARK_ALL_READ, None)
+}
+
+pub fn remove_notification(id: u64) -> SysResult<()> {
+    notification_command(protocol::OP_NOTIFICATION_REMOVE, Some(id))
+}
+
+pub fn clear_notifications() -> SysResult<()> {
+    notification_command(protocol::OP_NOTIFICATION_CLEAR, None)
 }
 
 pub fn set_clipboard(content_type: &str, bytes: &[u8]) -> SysResult<()> {

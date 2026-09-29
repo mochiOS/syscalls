@@ -17,6 +17,10 @@ pub const MAX_CONTROL_CENTER_CARD_TITLE_LEN: usize = 96;
 pub const MAX_CONTROL_CENTER_CARD_BODY_LEN: usize = 2048;
 pub const MAX_CONTROL_CENTER_CARDS: usize = 64;
 pub const CONTROL_CENTER_CARD_PREFIX_LEN: usize = 8;
+pub const MAX_NOTIFICATION_TITLE_LEN: usize = 128;
+pub const MAX_NOTIFICATION_BODY_LEN: usize = 1024;
+pub const MAX_NOTIFICATIONS: usize = 128;
+pub const NOTIFICATION_PREFIX_LEN: usize = 24;
 
 pub const OP_CLIPBOARD_SET_BEGIN: u16 = 0x0100;
 pub const OP_CLIPBOARD_SET_CHUNK: u16 = 0x0101;
@@ -36,6 +40,11 @@ pub const OP_APPLICATION_REGISTER: u16 = 0x0400;
 pub const OP_APPLICATION_ACTIVATE: u16 = 0x0401;
 pub const OP_CONTROL_CENTER_CARD_REGISTER: u16 = 0x0500;
 pub const OP_CONTROL_CENTER_CARD_SNAPSHOT: u16 = 0x0501;
+pub const OP_NOTIFICATION_POST: u16 = 0x0600;
+pub const OP_NOTIFICATION_SNAPSHOT: u16 = 0x0601;
+pub const OP_NOTIFICATION_MARK_ALL_READ: u16 = 0x0602;
+pub const OP_NOTIFICATION_REMOVE: u16 = 0x0603;
+pub const OP_NOTIFICATION_CLEAR: u16 = 0x0604;
 
 pub const OP_STATUS: u16 = 0x8000;
 pub const OP_CLIPBOARD_METADATA: u16 = 0x8103;
@@ -45,6 +54,7 @@ pub const OP_ASSOCIATION_HANDLERS_RESULT: u16 = 0x8204;
 pub const OP_FILE_PANEL_RESULT: u16 = 0x8300;
 pub const OP_FILE_PANEL_OPERATION_ERROR: u16 = 0x8302;
 pub const OP_CONTROL_CENTER_CARD_SNAPSHOT_RESULT: u16 = 0x8501;
+pub const OP_NOTIFICATION_SNAPSHOT_RESULT: u16 = 0x8601;
 
 pub const FILE_PANEL_MODE_OPEN: u16 = 1;
 pub const FILE_PANEL_MODE_SAVE: u16 = 2;
@@ -112,6 +122,108 @@ pub struct ControlCenterCard<'a> {
     pub title: &'a str,
     /// Newline-separated rows. Each row is `label\x1fvalue`.
     pub body: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Notification<'a> {
+    pub id: u64,
+    pub created_at: u64,
+    pub read: bool,
+    pub bundle_id: &'a str,
+    pub title: &'a str,
+    pub body: &'a str,
+}
+
+pub fn encode_notification(
+    notification: Notification<'_>,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    let fields = [
+        notification.bundle_id.as_bytes(),
+        notification.title.as_bytes(),
+        notification.body.as_bytes(),
+    ];
+    let limits = [
+        MAX_BUNDLE_ID_LEN,
+        MAX_NOTIFICATION_TITLE_LEN,
+        MAX_NOTIFICATION_BODY_LEN,
+    ];
+    if fields
+        .iter()
+        .zip(limits)
+        .any(|(field, limit)| field.is_empty() || field.len() > limit)
+    {
+        return Err(ProtocolError::InvalidField);
+    }
+    let total = fields
+        .iter()
+        .try_fold(NOTIFICATION_PREFIX_LEN, |total, field| {
+            total
+                .checked_add(field.len())
+                .ok_or(ProtocolError::InvalidLength)
+        })?;
+    if output.len() < total || total > MAX_MESSAGE_LEN - HEADER_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    output[..8].copy_from_slice(&notification.id.to_le_bytes());
+    output[8..16].copy_from_slice(&notification.created_at.to_le_bytes());
+    output[16] = u8::from(notification.read);
+    output[17] = 0;
+    for (index, field) in fields.iter().enumerate() {
+        output[18 + index * 2..20 + index * 2].copy_from_slice(
+            &u16::try_from(field.len())
+                .map_err(|_| ProtocolError::InvalidLength)?
+                .to_le_bytes(),
+        );
+    }
+    let mut offset = NOTIFICATION_PREFIX_LEN;
+    for field in fields {
+        output[offset..offset + field.len()].copy_from_slice(field);
+        offset += field.len();
+    }
+    decode_notification(&output[..total])?;
+    Ok(total)
+}
+
+pub fn decode_notification(payload: &[u8]) -> Result<Notification<'_>, ProtocolError> {
+    if payload.len() < NOTIFICATION_PREFIX_LEN || payload[16] > 1 || payload[17] != 0 {
+        return Err(ProtocolError::InvalidField);
+    }
+    let lengths = [
+        read_u16(payload, 18)? as usize,
+        read_u16(payload, 20)? as usize,
+        read_u16(payload, 22)? as usize,
+    ];
+    let limits = [
+        MAX_BUNDLE_ID_LEN,
+        MAX_NOTIFICATION_TITLE_LEN,
+        MAX_NOTIFICATION_BODY_LEN,
+    ];
+    let expected = lengths
+        .iter()
+        .try_fold(NOTIFICATION_PREFIX_LEN, |total, length| {
+            total
+                .checked_add(*length)
+                .ok_or(ProtocolError::InvalidLength)
+        })?;
+    if expected != payload.len() {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let mut offset = NOTIFICATION_PREFIX_LEN;
+    let mut next = |index: usize| {
+        let length = lengths[index];
+        let value = validate_utf8_field(payload, offset, length, limits[index])?;
+        offset += length;
+        Ok(value)
+    };
+    Ok(Notification {
+        id: read_u64(payload, 0)?,
+        created_at: read_u64(payload, 8)?,
+        read: payload[16] != 0,
+        bundle_id: next(0)?,
+        title: next(1)?,
+        body: next(2)?,
+    })
 }
 
 pub fn encode_control_center_card(
@@ -641,6 +753,25 @@ mod tests {
         assert_eq!(decode_control_center_card(&payload[..length]), Ok(card));
         assert_eq!(
             decode_control_center_card(&payload[..length - 1]),
+            Err(ProtocolError::InvalidLength)
+        );
+    }
+
+    #[test]
+    fn notification_round_trip() {
+        let notification = Notification {
+            id: 42,
+            created_at: 900,
+            read: true,
+            bundle_id: "org.mochios.example",
+            title: "Export complete",
+            body: "The document is ready.",
+        };
+        let mut payload = [0u8; 512];
+        let length = encode_notification(notification, &mut payload).unwrap();
+        assert_eq!(decode_notification(&payload[..length]), Ok(notification));
+        assert_eq!(
+            decode_notification(&payload[..length - 1]),
             Err(ProtocolError::InvalidLength)
         );
     }

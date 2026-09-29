@@ -278,7 +278,10 @@ pub mod device {
     use super::syscall::{self, SysResult};
     pub use mnu_abi::{DeviceControlRequest, DeviceControlResponse};
 
-    pub fn control(authority: &str, request: DeviceControlRequest) -> SysResult<DeviceControlResponse> {
+    pub fn control(
+        authority: &str,
+        request: DeviceControlRequest,
+    ) -> SysResult<DeviceControlResponse> {
         let mut response = DeviceControlResponse::default();
         syscall::call4(
             syscall::SyscallNumber::DeviceControl,
@@ -329,9 +332,7 @@ pub mod process {
         )
     }
 
-    pub fn thread_security_context(
-        thread_id: u64,
-    ) -> SysResult<syscall::ThreadSecurityContext> {
+    pub fn thread_security_context(thread_id: u64) -> SysResult<syscall::ThreadSecurityContext> {
         let mut context = syscall::ThreadSecurityContext::default();
         syscall::call3(
             syscall::SyscallNumber::GetThreadSecurityContext,
@@ -980,9 +981,7 @@ pub mod storage {
 pub mod boot {
     use super::syscall::{self, SysResult};
 
-    pub use mnu_abi::boot::{
-        BOOT_SYSTEM_SLOT_A, BOOT_SYSTEM_SLOT_B, BOOT_SYSTEM_SLOT_LEGACY,
-    };
+    pub use mnu_abi::boot::{BOOT_SYSTEM_SLOT_A, BOOT_SYSTEM_SLOT_B, BOOT_SYSTEM_SLOT_LEGACY};
 
     /// Returns 0 for legacy images, 1 for system A, or 2 for system B.
     pub fn system_slot() -> SysResult<u64> {
@@ -1003,9 +1002,7 @@ pub mod boot {
 pub mod performance {
     use super::syscall::{self, SysResult};
 
-    pub use mnu_abi::performance::{
-        KernelPerformanceSnapshot, LatencyMetric, VfsActivitySnapshot,
-    };
+    pub use mnu_abi::performance::{KernelPerformanceSnapshot, LatencyMetric, VfsActivitySnapshot};
 
     pub fn snapshot() -> SysResult<KernelPerformanceSnapshot> {
         let mut snapshot = KernelPerformanceSnapshot::default();
@@ -1208,20 +1205,18 @@ pub mod capability {
     pub use mochios_capability_protocol::{
         AUTHORIZE_EXEC_OPCODE, CAPABILITY_DECISION_OPCODE, CAPABILITY_PERSISTENT_QUERY_OPCODE,
         CAPABILITY_PROMPT_OPCODE, CAPABILITY_RESPONSE_OPCODE, CapabilityClass, CapabilityDecision,
-        CapabilityDecisionRequest,
-        CapabilityRequest, ExecutableIdentity, MAX_CAPABILITY_NAME_LEN, MAX_DECISION_PAYLOAD_SIZE,
-        MAX_EXECUTABLE_PATH_LEN, MAX_PAYLOAD_SIZE, MAX_REASON_LEN, MAX_RESOURCE_PATH_LEN,
-        PACKAGE_INDEX_CHANGED_OPCODE, PROTOCOL_VERSION, ProtocolError, RESOLVE_CAPABILITIES_OPCODE,
-        RESOLVE_EXECUTION_SECURITY_OPCODE,
-        RESOLVE_CAPABILITIES_REPLY_STATUS_LEN, RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN,
+        CapabilityDecisionRequest, CapabilityRequest, ExecutableIdentity, MAX_CAPABILITY_NAME_LEN,
+        MAX_DECISION_PAYLOAD_SIZE, MAX_EXECUTABLE_PATH_LEN, MAX_PAYLOAD_SIZE, MAX_REASON_LEN,
+        MAX_RESOURCE_PATH_LEN, PACKAGE_INDEX_CHANGED_OPCODE, PROTOCOL_VERSION, ProtocolError,
+        RESOLVE_CAPABILITIES_OPCODE, RESOLVE_CAPABILITIES_REPLY_STATUS_LEN,
+        RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN, RESOLVE_EXECUTION_SECURITY_OPCODE,
         ResolveCapabilitiesReply, ResolveExecutionSecurityReply, ResourceDescriptor,
-        decode_authorize_exec_request,
-        decode_decision_request, decode_request, decode_resolve_capabilities_reply,
-        decode_resolve_capabilities_request, decode_resolve_execution_security_reply,
-        decode_resolve_execution_security_request, encode_authorize_exec_request,
-        encode_decision_request, encode_request, encode_resolve_capabilities_reply,
-        encode_resolve_capabilities_request, encode_resolve_execution_security_reply,
-        encode_resolve_execution_security_request,
+        decode_authorize_exec_request, decode_decision_request, decode_request,
+        decode_resolve_capabilities_reply, decode_resolve_capabilities_request,
+        decode_resolve_execution_security_reply, decode_resolve_execution_security_request,
+        encode_authorize_exec_request, encode_decision_request, encode_request,
+        encode_resolve_capabilities_reply, encode_resolve_capabilities_request,
+        encode_resolve_execution_security_reply, encode_resolve_execution_security_request,
     };
 
     pub fn capability_from_string(name: &str) -> CapabilityClass {
