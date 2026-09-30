@@ -24,6 +24,11 @@ pub const OP_TRUNCATE: u16 = 15;
 pub const OP_SYNC: u16 = 16;
 pub const OP_STATUS: u16 = 0x8000;
 
+/// Registers an IPC endpoint as an opaque filesystem provider.
+pub const SYS_FILESYSTEM_REGISTER: u64 = 621;
+/// Mounts a registered filesystem provider at a caller-supplied path.
+pub const SYS_FILESYSTEM_MOUNT: u64 = 622;
+
 /// `Header::flags` carries the requested byte count for `OP_READ` and
 /// `OP_READDIR`.
 pub const MAX_IO_LEN: usize = MAX_MESSAGE_LEN - HEADER_LEN;
