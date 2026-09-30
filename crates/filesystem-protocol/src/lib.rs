@@ -24,8 +24,11 @@ pub const OP_TRUNCATE: u16 = 15;
 pub const OP_SYNC: u16 = 16;
 pub const OP_STATUS: u16 = 0x8000;
 
-/// `Header::flags` carries the requested byte count for `OP_READ`.
+/// `Header::flags` carries the requested byte count for `OP_READ` and
+/// `OP_READDIR`.
 pub const MAX_IO_LEN: usize = MAX_MESSAGE_LEN - HEADER_LEN;
+pub const DIRENT_HEADER_LEN: usize = 16;
+pub const MAX_NAME_LEN: usize = 255;
 
 pub const NODE_TYPE_REGULAR: u32 = 1;
 pub const NODE_TYPE_DIRECTORY: u32 = 2;
@@ -52,6 +55,13 @@ pub enum ProtocolError {
     InvalidMagic,
     UnsupportedVersion,
     InvalidLength,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DirEntryHeader {
+    pub node_id: u64,
+    pub kind: u32,
+    pub name_len: u16,
 }
 
 pub fn encode(header: Header, payload: &[u8], output: &mut [u8]) -> Result<usize, ProtocolError> {
@@ -113,6 +123,55 @@ pub fn decode(input: &[u8]) -> Result<(Header, &[u8]), ProtocolError> {
     ))
 }
 
+pub fn encode_dir_entry(
+    node_id: u64,
+    kind: u32,
+    name: &[u8],
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    if name.is_empty() || name.len() > MAX_NAME_LEN || name.contains(&0) || name.contains(&b'/') {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let total = DIRENT_HEADER_LEN + name.len();
+    if output.len() < total {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    output[..DIRENT_HEADER_LEN].fill(0);
+    put_u64(output, 0, node_id);
+    put_u32(output, 8, kind);
+    put_u16(output, 12, name.len() as u16);
+    output[DIRENT_HEADER_LEN..total].copy_from_slice(name);
+    Ok(total)
+}
+
+pub fn decode_dir_entry(input: &[u8]) -> Result<(DirEntryHeader, &[u8], usize), ProtocolError> {
+    if input.len() < DIRENT_HEADER_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    let name_len = get_u16(input, 12);
+    if name_len == 0 || usize::from(name_len) > MAX_NAME_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let total = DIRENT_HEADER_LEN
+        .checked_add(usize::from(name_len))
+        .ok_or(ProtocolError::InvalidLength)?;
+    let name = input
+        .get(DIRENT_HEADER_LEN..total)
+        .ok_or(ProtocolError::BufferTooSmall)?;
+    if name.contains(&0) || name.contains(&b'/') {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok((
+        DirEntryHeader {
+            node_id: get_u64(input, 0),
+            kind: get_u32(input, 8),
+            name_len,
+        },
+        name,
+        total,
+    ))
+}
+
 fn put_u16(output: &mut [u8], offset: usize, value: u16) {
     output[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }
@@ -157,5 +216,17 @@ mod tests {
         let (decoded, decoded_payload) = decode(&bytes[..length]).unwrap();
         assert_eq!(decoded, header);
         assert_eq!(decoded_payload, payload);
+    }
+
+    #[test]
+    fn directory_entry_round_trip() {
+        let mut bytes = [0u8; 64];
+        let length = encode_dir_entry(42, NODE_TYPE_DIRECTORY, b"Documents", &mut bytes).unwrap();
+        let (header, name, consumed) = decode_dir_entry(&bytes[..length]).unwrap();
+        assert_eq!(header.node_id, 42);
+        assert_eq!(header.kind, NODE_TYPE_DIRECTORY);
+        assert_eq!(header.name_len, 9);
+        assert_eq!(name, b"Documents");
+        assert_eq!(consumed, length);
     }
 }
