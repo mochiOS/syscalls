@@ -2424,12 +2424,13 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
             if increment < 0 {
                 return Err(EINVAL);
             }
-            let mapped = syscall_errno(syscall::raw_syscall5(
+            let mapped = syscall_errno(syscall::raw_syscall6(
                 syscall::SyscallNumber::MemoryMap,
                 0,
                 heap.page_size as u64,
                 PROT_READ_WRITE,
                 MAP_PRIVATE_ANON,
+                0,
                 0,
             ))? as usize;
             let mapped_end = mapped.checked_add(heap.page_size).ok_or(ENOMEM)?;
@@ -2458,12 +2459,13 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
             let target_end = align_up(new_break, heap.page_size).ok_or(ENOMEM)?;
             let map_len = target_end.checked_sub(heap.mapped_end).ok_or(ENOMEM)?;
             if map_len != 0 {
-                let mapped = syscall_errno(syscall::raw_syscall5(
+                let mapped = syscall_errno(syscall::raw_syscall6(
                     syscall::SyscallNumber::MemoryMap,
                     heap.mapped_end as u64,
                     map_len as u64,
                     PROT_READ_WRITE,
                     MAP_PRIVATE_ANON,
+                    0,
                     0,
                 ))?;
                 if mapped as usize != heap.mapped_end {
@@ -2493,16 +2495,17 @@ pub extern "C" fn mmap(
     offset: CLong,
 ) -> *mut c_void {
     let result = (|| {
-        if len == 0 || offset != 0 {
+        if len == 0 || offset < 0 || (offset as u64) & 4095 != 0 {
             return Err(EINVAL);
         }
-        let mapped = syscall_errno(syscall::raw_syscall5(
+        let mapped = syscall_errno(syscall::raw_syscall6(
             syscall::SyscallNumber::MemoryMap,
             addr as u64,
             len as u64,
             prot as u64,
             flags as u64,
             fd as u64,
+            offset as u64,
         ))?;
         Ok(mapped as *mut c_void)
     })();

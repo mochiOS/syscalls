@@ -65,12 +65,13 @@ impl UserAllocator {
     fn request_pages(&self, len: usize) -> Option<usize> {
         let pages = len.div_ceil(PAGE_SIZE);
         let bytes = pages.checked_mul(PAGE_SIZE)?;
-        let ret = syscall::raw_syscall5(
+        let ret = syscall::raw_syscall6(
             syscall::SyscallNumber::MemoryMap,
             0,
             bytes as u64,
             3,
             MAP_PRIVATE_ANON,
+            0,
             0,
         )
         .raw();

@@ -833,13 +833,25 @@ pub mod memory {
     }
 
     pub fn mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64) -> SysResult<u64> {
-        syscall::call5(
+        mmap_at_offset(addr, len, prot, flags, fd, 0)
+    }
+
+    pub fn mmap_at_offset(
+        addr: u64,
+        len: u64,
+        prot: u64,
+        flags: u64,
+        fd: u64,
+        offset: u64,
+    ) -> SysResult<u64> {
+        syscall::call6(
             syscall::SyscallNumber::MemoryMap,
             addr,
             len,
             prot,
             flags,
             fd,
+            offset,
         )
     }
 
