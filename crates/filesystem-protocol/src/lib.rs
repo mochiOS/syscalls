@@ -28,6 +28,7 @@ pub const OP_STATUS: u16 = 0x8000;
 /// `OP_READDIR`.
 pub const MAX_IO_LEN: usize = MAX_MESSAGE_LEN - HEADER_LEN;
 pub const DIRENT_HEADER_LEN: usize = 16;
+pub const METADATA_LEN: usize = 8;
 pub const MAX_NAME_LEN: usize = 255;
 
 pub const NODE_TYPE_REGULAR: u32 = 1;
@@ -62,6 +63,34 @@ pub struct DirEntryHeader {
     pub node_id: u64,
     pub kind: u32,
     pub name_len: u16,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NodeMetadata {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+pub fn encode_metadata(
+    metadata: NodeMetadata,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    if output.len() < METADATA_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    put_u32(output, 0, metadata.uid);
+    put_u32(output, 4, metadata.gid);
+    Ok(METADATA_LEN)
+}
+
+pub fn decode_metadata(input: &[u8]) -> Result<NodeMetadata, ProtocolError> {
+    if input.len() != METADATA_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(NodeMetadata {
+        uid: get_u32(input, 0),
+        gid: get_u32(input, 4),
+    })
 }
 
 pub fn encode(header: Header, payload: &[u8], output: &mut [u8]) -> Result<usize, ProtocolError> {
@@ -228,5 +257,13 @@ mod tests {
         assert_eq!(header.name_len, 9);
         assert_eq!(name, b"Documents");
         assert_eq!(consumed, length);
+    }
+
+    #[test]
+    fn metadata_round_trip() {
+        let metadata = NodeMetadata { uid: 501, gid: 20 };
+        let mut bytes = [0u8; METADATA_LEN];
+        assert_eq!(encode_metadata(metadata, &mut bytes).unwrap(), METADATA_LEN);
+        assert_eq!(decode_metadata(&bytes).unwrap(), metadata);
     }
 }
