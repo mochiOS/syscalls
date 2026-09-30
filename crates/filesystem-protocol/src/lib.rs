@@ -24,6 +24,14 @@ pub const OP_TRUNCATE: u16 = 15;
 pub const OP_SYNC: u16 = 16;
 pub const OP_STATUS: u16 = 0x8000;
 
+/// `Header::flags` carries the requested byte count for `OP_READ`.
+pub const MAX_IO_LEN: usize = MAX_MESSAGE_LEN - HEADER_LEN;
+
+pub const NODE_TYPE_REGULAR: u32 = 1;
+pub const NODE_TYPE_DIRECTORY: u32 = 2;
+pub const NODE_TYPE_SYMLINK: u32 = 3;
+pub const NODE_TYPE_SPECIAL: u32 = 4;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Header {
     pub opcode: u16,
