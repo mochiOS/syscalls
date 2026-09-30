@@ -29,6 +29,9 @@ pub const SETATTR_MODE: u32 = 1 << 0;
 pub const SETATTR_UID: u32 = 1 << 1;
 pub const SETATTR_GID: u32 = 1 << 2;
 
+/// Follow the final symbolic-link component during `OP_LOOKUP`.
+pub const LOOKUP_FOLLOW_SYMLINKS: u32 = 1 << 0;
+
 /// Registers an IPC endpoint as an opaque filesystem provider.
 pub const SYS_FILESYSTEM_REGISTER: u64 = 621;
 /// Mounts a registered filesystem provider at a caller-supplied path.
