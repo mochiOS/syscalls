@@ -1096,6 +1096,17 @@ pub mod file {
         )
     }
 
+    pub fn read_link(path: &str, output: &mut [u8]) -> SysResult<usize> {
+        let path = super::path::CPath::<256>::new(path)?;
+        let read = syscall::call3(
+            syscall::SyscallNumber::Readlink,
+            path.as_ptr(),
+            output.as_mut_ptr() as u64,
+            output.len() as u64,
+        )?;
+        usize::try_from(read).map_err(|_| syscall::SysError::from_raw(syscall::ERANGE as i64))
+    }
+
     pub fn rename(src: &str, dst: &str) -> SysResult<u64> {
         let src = super::path::CPath::<256>::new(src)?;
         let dst = super::path::CPath::<256>::new(dst)?;

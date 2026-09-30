@@ -2681,6 +2681,31 @@ pub extern "C" fn symlink(target: *const c_char, link_path: *const c_char) -> c_
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn _readlink(path: *const c_char, output: *mut c_char, size: usize) -> isize {
+    if path.is_null() || output.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    if size == 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let result = syscall_errno(syscall::raw_syscall3(
+        syscall::SyscallNumber::Readlink,
+        path as u64,
+        output as u64,
+        size as u64,
+    ))
+    .and_then(|read| isize::try_from(read).map_err(|_| EIO));
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn readlink(path: *const c_char, output: *mut c_char, size: usize) -> isize {
+    _readlink(path, output, size)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn _mkdir(path: *const c_char, mode: c_int) -> c_int {
     if path.is_null() {
         set_errno(EFAULT);
