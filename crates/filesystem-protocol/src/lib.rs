@@ -22,7 +22,12 @@ pub const OP_SYMLINK: u16 = 13;
 pub const OP_READLINK: u16 = 14;
 pub const OP_TRUNCATE: u16 = 15;
 pub const OP_SYNC: u16 = 16;
+pub const OP_SETATTR: u16 = 17;
 pub const OP_STATUS: u16 = 0x8000;
+
+pub const SETATTR_MODE: u32 = 1 << 0;
+pub const SETATTR_UID: u32 = 1 << 1;
+pub const SETATTR_GID: u32 = 1 << 2;
 
 /// Registers an IPC endpoint as an opaque filesystem provider.
 pub const SYS_FILESYSTEM_REGISTER: u64 = 621;
