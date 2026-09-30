@@ -570,6 +570,10 @@ name = "mochios-driver-control-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "mochios-filesystem-protocol"
+version = "0.1.0"
+
+[[package]]
 name = "mochios-http-client"
 version = "0.1.0"
 

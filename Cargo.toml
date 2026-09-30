@@ -5,6 +5,7 @@ members = [
     "crates/certificate",
     "crates/certificate-database",
     "crates/driver-control-protocol",
+    "crates/filesystem-protocol",
     "crates/http-client",
     "crates/linux-gui-protocol",
     "crates/linux-portal-protocol",
