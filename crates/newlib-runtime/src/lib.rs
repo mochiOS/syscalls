@@ -2661,6 +2661,26 @@ pub extern "C" fn link(old_path: *const c_char, new_path: *const c_char) -> c_in
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn _symlink(target: *const c_char, link_path: *const c_char) -> c_int {
+    if target.is_null() || link_path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    let result = syscall_errno(syscall::raw_syscall2(
+        syscall::SyscallNumber::Symlink,
+        target as u64,
+        link_path as u64,
+    ))
+    .map(|_| 0);
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn symlink(target: *const c_char, link_path: *const c_char) -> c_int {
+    _symlink(target, link_path)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn _mkdir(path: *const c_char, mode: c_int) -> c_int {
     if path.is_null() {
         set_errno(EFAULT);

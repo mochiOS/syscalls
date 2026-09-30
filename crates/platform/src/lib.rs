@@ -1086,6 +1086,16 @@ pub mod file {
         syscall::call1(syscall::SyscallNumber::FileRemove, path.as_ptr())
     }
 
+    pub fn symlink(target: &str, link_path: &str) -> SysResult<u64> {
+        let target = super::path::CPath::<256>::new(target)?;
+        let link_path = super::path::CPath::<256>::new(link_path)?;
+        syscall::call2(
+            syscall::SyscallNumber::Symlink,
+            target.as_ptr(),
+            link_path.as_ptr(),
+        )
+    }
+
     pub fn rename(src: &str, dst: &str) -> SysResult<u64> {
         let src = super::path::CPath::<256>::new(src)?;
         let dst = super::path::CPath::<256>::new(dst)?;
