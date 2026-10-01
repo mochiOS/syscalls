@@ -1199,9 +1199,6 @@ pub mod file {
                 }
                 offset += reclen;
             }
-            if (read as usize) < buf.len() {
-                break;
-            }
         }
         let _ = close(fd);
         Ok(out)
