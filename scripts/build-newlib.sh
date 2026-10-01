@@ -113,6 +113,9 @@ install -C -m 0644 "$TARGET_DIR/x86_64-unknown-mochios/release/libmochi_user_new
 install -C -m 0644 "$USER_ROOT/runtime/linker.ld" "$SDK/lib/linker.ld"
 install -C -m 0644 "$USER_ROOT/targets/x86_64-unknown-mochios.json" "$SDK/share/x86_64-unknown-mochios.json"
 install -C -m 0755 "$USER_ROOT/scripts/mochios-cc" "$SDK/bin/mochios-cc"
+LIBGCC="$(x86_64-elf-gcc -print-libgcc-file-name)"
+[[ -f "$LIBGCC" ]] || { echo "x86_64-elf-gcc did not provide libgcc.a: $LIBGCC" >&2; exit 1; }
+install -C -m 0644 "$LIBGCC" "$SDK/lib/libgcc.a"
 
 SYSROOT_STAMP="$SDK/sysroot/.newlib-installed"
 
