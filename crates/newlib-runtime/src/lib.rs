@@ -2529,6 +2529,23 @@ pub extern "C" fn munmap(addr: *mut c_void, len: usize) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c_int {
+    let result = (|| {
+        if addr.is_null() || len == 0 || (addr as usize) & (PAGE_SIZE - 1) != 0 {
+            return Err(EINVAL);
+        }
+        let _ = syscall_errno(syscall::raw_syscall3(
+            syscall::SyscallNumber::MemorySync,
+            addr as u64,
+            len as u64,
+            flags as u64,
+        ))?;
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn sysconf(name: c_int) -> CLong {
     match name {
         SC_OPEN_MAX => MAX_FDS as CLong,
