@@ -1076,7 +1076,7 @@ pub mod performance {
 }
 
 pub mod file {
-    use super::syscall::{self, SysResult};
+    use super::syscall::{self, SysError, SysResult};
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
 
@@ -1122,6 +1122,53 @@ pub mod file {
 
     pub fn seek(fd: u64, offset: i64, whence: u64) -> SysResult<u64> {
         syscall::call3(syscall::SyscallNumber::FileSeek, fd, offset as u64, whence)
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Metadata {
+        pub mode: u32,
+        pub size: u64,
+        pub uid: u32,
+        pub gid: u32,
+    }
+
+    impl Metadata {
+        const FILE_TYPE_MASK: u32 = 0xf000;
+        const REGULAR_FILE: u32 = 0x8000;
+        const DIRECTORY: u32 = 0x4000;
+
+        pub const fn is_file(self) -> bool {
+            self.mode & Self::FILE_TYPE_MASK == Self::REGULAR_FILE
+        }
+
+        pub const fn is_directory(self) -> bool {
+            self.mode & Self::FILE_TYPE_MASK == Self::DIRECTORY
+        }
+    }
+
+    /// Reads metadata from an already-authorized handle. Paths are not
+    /// re-resolved, so this preserves capability authority across renames and
+    /// after unlink.
+    pub fn metadata(fd: u64) -> SysResult<Metadata> {
+        const LINUX_STAT_SIZE: usize = 144;
+        let mut bytes = [0u8; LINUX_STAT_SIZE];
+        syscall::call2(
+            syscall::SyscallNumber::FileStat,
+            fd,
+            bytes.as_mut_ptr() as u64,
+        )?;
+        let mode = u32::from_ne_bytes(bytes[24..28].try_into().unwrap_or_default());
+        let uid = u32::from_ne_bytes(bytes[28..32].try_into().unwrap_or_default());
+        let gid = u32::from_ne_bytes(bytes[32..36].try_into().unwrap_or_default());
+        let signed_size = i64::from_ne_bytes(bytes[48..56].try_into().unwrap_or_default());
+        let size = u64::try_from(signed_size)
+            .map_err(|_| SysError::from_raw(syscall::EOVERFLOW as i64))?;
+        Ok(Metadata {
+            mode,
+            size,
+            uid,
+            gid,
+        })
     }
 
     pub fn create_dir(path: &str, mode: u64) -> SysResult<u64> {
