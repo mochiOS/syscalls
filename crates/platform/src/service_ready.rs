@@ -2,12 +2,14 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 pub const MESSAGE_LEN: usize = 20;
 pub const SESSION_MESSAGE_LEN: usize = 28;
-pub const MAX_MESSAGE_LEN: usize = SESSION_MESSAGE_LEN;
+pub const ENDPOINT_MESSAGE_LEN: usize = 28;
+pub const MAX_MESSAGE_LEN: usize = ENDPOINT_MESSAGE_LEN;
 
 const MAGIC: u32 = 0x5952_4453;
 const VERSION: u16 = 1;
 const KIND_NOTIFICATION: u16 = 1;
 const KIND_SESSION: u16 = 2;
+const KIND_ENDPOINT: u16 = 3;
 const BOOTSTRAP_ARG_PREFIX: &[u8] = b"--service-ready=";
 
 static BOOTSTRAP_ENDPOINT: AtomicU64 = AtomicU64::new(0);
@@ -138,6 +140,21 @@ pub fn session_notification(
     message
 }
 
+pub fn endpoint_notification(
+    token: u64,
+    status: i32,
+    endpoint: u64,
+) -> [u8; ENDPOINT_MESSAGE_LEN] {
+    let mut message = [0u8; ENDPOINT_MESSAGE_LEN];
+    message[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+    message[4..6].copy_from_slice(&VERSION.to_le_bytes());
+    message[6..8].copy_from_slice(&KIND_ENDPOINT.to_le_bytes());
+    message[8..16].copy_from_slice(&token.to_le_bytes());
+    message[16..20].copy_from_slice(&status.to_le_bytes());
+    message[20..28].copy_from_slice(&endpoint.to_le_bytes());
+    message
+}
+
 pub fn decode_notification(message: &[u8]) -> Result<(u64, i32), DecodeError> {
     if message.len() != MESSAGE_LEN {
         return Err(DecodeError::InvalidLength);
@@ -202,6 +219,30 @@ pub fn decode_session_notification(
     Ok((token, status, SessionIdentity { uid, gid }))
 }
 
+pub fn decode_endpoint_notification(
+    message: &[u8],
+) -> Result<(u64, i32, u64), DecodeError> {
+    if message.len() != ENDPOINT_MESSAGE_LEN {
+        return Err(DecodeError::InvalidLength);
+    }
+    let magic = u32::from_le_bytes(message[0..4].try_into().unwrap());
+    if magic != MAGIC {
+        return Err(DecodeError::InvalidMagic);
+    }
+    let version = u16::from_le_bytes(message[4..6].try_into().unwrap());
+    if version != VERSION {
+        return Err(DecodeError::UnsupportedVersion);
+    }
+    let kind = u16::from_le_bytes(message[6..8].try_into().unwrap());
+    if kind != KIND_ENDPOINT {
+        return Err(DecodeError::InvalidKind);
+    }
+    let token = u64::from_le_bytes(message[8..16].try_into().unwrap());
+    let status = i32::from_le_bytes(message[16..20].try_into().unwrap());
+    let endpoint = u64::from_le_bytes(message[20..28].try_into().unwrap());
+    Ok((token, status, endpoint))
+}
+
 pub fn validate_notification(message: &[u8], expected_token: u64) -> Result<(), ResultError> {
     let (token, status) = decode_notification(message).map_err(ResultError::InvalidMessage)?;
     if token != expected_token {
@@ -248,6 +289,18 @@ pub fn notify_session(
 }
 
 #[cfg(not(test))]
+pub fn notify_endpoint(
+    target: Target,
+    status: i32,
+    endpoint: u64,
+) -> super::syscall::SysResult<u64> {
+    send_when_ready(
+        target.endpoint,
+        &endpoint_notification(target.token, status, endpoint),
+    )
+}
+
+#[cfg(not(test))]
 fn send_when_ready(endpoint: u64, message: &[u8]) -> super::syscall::SysResult<u64> {
     loop {
         match super::ipc::send(endpoint, message) {
@@ -290,6 +343,23 @@ mod tests {
         assert_eq!(
             decode_session_notification(&message),
             Ok((0x0807_0605_0403_0201, 0, identity))
+        );
+    }
+
+    #[test]
+    fn endpoint_notification_has_stable_encoding() {
+        let message = endpoint_notification(
+            0x0807_0605_0403_0201,
+            0,
+            0x100f_0e0d_0c0b_0a09,
+        );
+        assert_eq!(
+            decode_endpoint_notification(&message),
+            Ok((
+                0x0807_0605_0403_0201,
+                0,
+                0x100f_0e0d_0c0b_0a09,
+            ))
         );
     }
 
