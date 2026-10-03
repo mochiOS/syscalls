@@ -1153,7 +1153,7 @@ pub mod file {
         const LINUX_STAT_SIZE: usize = 144;
         let mut bytes = [0u8; LINUX_STAT_SIZE];
         syscall::call2(
-            syscall::SyscallNumber::FileStat,
+            syscall::SyscallNumber::FileFstat,
             fd,
             bytes.as_mut_ptr() as u64,
         )?;
