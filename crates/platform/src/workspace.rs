@@ -123,7 +123,8 @@ fn call_with_handle<'a>(
         rights: mnu_abi::FILE_HANDLE_RIGHT_READ
             | mnu_abi::FILE_HANDLE_RIGHT_SEEK
             | mnu_abi::FILE_HANDLE_RIGHT_STAT
-            | mnu_abi::FILE_HANDLE_RIGHT_TRANSFER,
+            | mnu_abi::FILE_HANDLE_RIGHT_TRANSFER
+            | mochi_user_syscall::IPC_FILE_HANDLE_FLAG_FRESH_OFFSET,
     };
     let received = (crate::ipc::call_handles(service()?, &request[..length], reply, &handles)?
         & 0xffff_ffff) as usize;

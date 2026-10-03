@@ -6,12 +6,16 @@ extern crate std;
 use core::arch::asm;
 
 pub use mnu_abi::{
-    EACCES, EAGAIN, EBADF, ECHILD, EEXIST, EFAULT, EINVAL, EIO, EISDIR, EMFILE, ENODATA, ENOENT,
-    EMSGSIZE, ENOMEM, ENOSPC, ENOSYS, ENOTDIR, ENOTSUP, ENOTTY, ENXIO, EPERM, EPIPE, ERANGE, ESRCH,
-    FILE_HANDLE_RIGHT_ALL, FILE_HANDLE_RIGHT_READ, FILE_HANDLE_RIGHT_SEEK, FILE_HANDLE_RIGHT_STAT,
-    FILE_HANDLE_RIGHT_TRANSFER, IpcFileHandle, IpcFileHandles, SUCCESS, SyscallNumber,
-    ThreadSecurityContext,
+    EACCES, EAGAIN, EBADF, ECHILD, EEXIST, EFAULT, EINVAL, EIO, EISDIR, EMFILE, EMSGSIZE, ENODATA,
+    ENOENT, ENOMEM, ENOSPC, ENOSYS, ENOTDIR, ENOTSUP, ENOTTY, ENXIO, EOVERFLOW, EPERM, EPIPE,
+    ERANGE, ESRCH, FILE_HANDLE_RIGHT_ALL, FILE_HANDLE_RIGHT_READ, FILE_HANDLE_RIGHT_SEEK,
+    FILE_HANDLE_RIGHT_STAT, FILE_HANDLE_RIGHT_TRANSFER, IpcFileHandle, IpcFileHandles, SUCCESS,
+    SyscallNumber, ThreadSecurityContext,
 };
+
+/// Requests an independent open-file description starting at offset zero when
+/// attaching a regular file to IPC. This is an option, not a receiver right.
+pub const IPC_FILE_HANDLE_FLAG_FRESH_OFFSET: u32 = 1 << 31;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SysError {
