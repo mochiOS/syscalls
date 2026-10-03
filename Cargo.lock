@@ -598,6 +598,10 @@ name = "mochios-package-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "mochios-posix-protocol"
+version = "0.1.0"
+
+[[package]]
 name = "mochios-signature-protocol"
 version = "0.1.0"
 
