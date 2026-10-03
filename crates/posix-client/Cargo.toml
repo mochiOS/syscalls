@@ -1,0 +1,12 @@
+[package]
+name = "mochios-posix-client"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+
+[dependencies]
+mochi-user-platform = { path = "../platform" }
+mochios-posix-protocol = { path = "../posix-protocol" }
+
+[lib]
+path = "src/lib.rs"

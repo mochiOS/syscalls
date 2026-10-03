@@ -598,6 +598,14 @@ name = "mochios-package-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "mochios-posix-client"
+version = "0.1.0"
+dependencies = [
+ "mochi-user-platform",
+ "mochios-posix-protocol",
+]
+
+[[package]]
 name = "mochios-posix-protocol"
 version = "0.1.0"
 

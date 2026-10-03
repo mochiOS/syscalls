@@ -11,6 +11,7 @@ members = [
     "crates/linux-portal-protocol",
     "crates/net-device-protocol",
     "crates/package-protocol",
+    "crates/posix-client",
     "crates/posix-protocol",
     "crates/network-stack",
     "crates/tls-client",
