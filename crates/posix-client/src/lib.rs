@@ -97,11 +97,13 @@ impl<T: Transport> Client<T> {
     }
 }
 
+#[cfg(feature = "endpoint")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EndpointTransport {
     endpoint: u64,
 }
 
+#[cfg(feature = "endpoint")]
 impl EndpointTransport {
     pub const fn new(endpoint: u64) -> Self {
         Self { endpoint }
@@ -112,6 +114,7 @@ impl EndpointTransport {
     }
 }
 
+#[cfg(feature = "endpoint")]
 impl Transport for EndpointTransport {
     type Error = mochi_user_platform::syscall::SysError;
 

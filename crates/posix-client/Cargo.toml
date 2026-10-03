@@ -5,8 +5,12 @@ edition.workspace = true
 license = "Apache-2.0"
 
 [dependencies]
-mochi-user-platform = { path = "../platform" }
+mochi-user-platform = { path = "../platform", optional = true }
 mochios-posix-protocol = { path = "../posix-protocol" }
+
+[features]
+default = ["endpoint"]
+endpoint = ["dep:mochi-user-platform"]
 
 [lib]
 path = "src/lib.rs"
