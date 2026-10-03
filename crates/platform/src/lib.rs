@@ -223,6 +223,15 @@ pub mod logger {
             .map_err(|_| syscall::SysError::from_raw(syscall::EINVAL as i64))?;
         ipc::send(endpoint, buf.as_bytes()).map(|_| ())
     }
+
+    /// Tells logger.service that boot-critical startup is complete and queued
+    /// records may be persisted. The empty-text control byte cannot be emitted
+    /// by the formatting helpers above.
+    pub fn flush_pending() -> syscall::SysResult<()> {
+        let endpoint =
+            endpoint().ok_or_else(|| syscall::SysError::from_raw(syscall::ENOENT as i64))?;
+        ipc::send(endpoint, &[0]).map(|_| ())
+    }
 }
 
 struct FmtWriter(u64);
