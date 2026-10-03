@@ -398,6 +398,8 @@ pub mod process {
 pub mod ipc {
     use super::syscall::{self, SysResult};
 
+    pub use mnu_abi::{IpcFileHandle, IpcFileHandles};
+
     pub fn create() -> SysResult<u64> {
         syscall::call2(syscall::SyscallNumber::IpcCreate, 0, 0)
     }
@@ -408,6 +410,16 @@ pub mod ipc {
             endpoint,
             bytes.as_ptr() as u64,
             bytes.len() as u64,
+        )
+    }
+
+    pub fn send_handles(endpoint: u64, bytes: &[u8], handles: &IpcFileHandles) -> SysResult<u64> {
+        syscall::call4(
+            syscall::SyscallNumber::IpcSendHandles,
+            endpoint,
+            bytes.as_ptr() as u64,
+            bytes.len() as u64,
+            handles as *const IpcFileHandles as u64,
         )
     }
 
@@ -429,6 +441,25 @@ pub mod ipc {
         )
     }
 
+    pub fn wait_handles(
+        endpoint: u64,
+        buf: &mut [u8],
+        handles: &mut IpcFileHandles,
+    ) -> SysResult<u64> {
+        *handles = IpcFileHandles::default();
+        syscall::call4(
+            syscall::SyscallNumber::IpcRecvHandles,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            handles as *mut IpcFileHandles as u64,
+            endpoint,
+        )
+    }
+
+    pub fn try_wait_handles(buf: &mut [u8], handles: &mut IpcFileHandles) -> SysResult<u64> {
+        wait_handles(0, buf, handles)
+    }
+
     pub fn endpoint_alive(endpoint: u64) -> bool {
         syscall::call1(syscall::SyscallNumber::IpcEndpointAlive, endpoint).is_ok()
     }
@@ -445,6 +476,23 @@ pub mod ipc {
             request.len() as u64,
             reply.as_mut_ptr() as u64,
             reply.len() as u64,
+        )
+    }
+
+    pub fn call_handles(
+        dest_thread_id: u64,
+        request: &[u8],
+        reply: &mut [u8],
+        handles: &IpcFileHandles,
+    ) -> SysResult<u64> {
+        syscall::call6(
+            syscall::SyscallNumber::IpcCallHandles,
+            dest_thread_id,
+            request.as_ptr() as u64,
+            request.len() as u64,
+            reply.as_mut_ptr() as u64,
+            reply.len() as u64,
+            handles as *const IpcFileHandles as u64,
         )
     }
 
@@ -1037,7 +1085,7 @@ pub mod file {
     }
 
     pub fn open_path(path: &str, flags: u64) -> SysResult<u64> {
-        let path = super::path::CPath::<256>::new(path)?;
+        let path = super::path::CPath::<4096>::new(path)?;
         open(path.as_ptr(), flags)
     }
 

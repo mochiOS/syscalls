@@ -22,6 +22,8 @@ pub const MAX_NOTIFICATION_BODY_LEN: usize = 1024;
 pub const MAX_NOTIFICATIONS: usize = 128;
 pub const NOTIFICATION_PREFIX_LEN: usize = 24;
 pub const MAX_NOTIFICATION_SETTINGS_LEN: usize = 16 * 1024;
+pub const DOCUMENT_DELIVERY_MAGIC: [u8; 8] = *b"MAPPDOC1";
+pub const DOCUMENT_DELIVERY_PREFIX_LEN: usize = 16;
 
 pub const OP_CLIPBOARD_SET_BEGIN: u16 = 0x0100;
 pub const OP_CLIPBOARD_SET_CHUNK: u16 = 0x0101;
@@ -91,6 +93,76 @@ pub struct Message<'a> {
     pub request_id: u64,
     pub flags: u32,
     pub payload: &'a [u8],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DocumentDelivery<'a> {
+    pub path: &'a str,
+    pub content_type: &'a str,
+}
+
+pub fn encode_document_delivery(
+    path: &str,
+    content_type: &str,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    if path.is_empty()
+        || path.len() > MAX_PATH_LEN
+        || content_type.is_empty()
+        || content_type.len() > MAX_CONTENT_TYPE_LEN
+        || path.as_bytes().contains(&0)
+        || content_type.as_bytes().contains(&0)
+    {
+        return Err(ProtocolError::InvalidField);
+    }
+    let length = DOCUMENT_DELIVERY_PREFIX_LEN
+        .checked_add(path.len())
+        .and_then(|value| value.checked_add(content_type.len()))
+        .ok_or(ProtocolError::InvalidLength)?;
+    if output.len() < length {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    output[..length].fill(0);
+    output[..8].copy_from_slice(&DOCUMENT_DELIVERY_MAGIC);
+    output[8..10].copy_from_slice(&(path.len() as u16).to_le_bytes());
+    output[10..12].copy_from_slice(&(content_type.len() as u16).to_le_bytes());
+    output[DOCUMENT_DELIVERY_PREFIX_LEN..DOCUMENT_DELIVERY_PREFIX_LEN + path.len()]
+        .copy_from_slice(path.as_bytes());
+    output[DOCUMENT_DELIVERY_PREFIX_LEN + path.len()..length]
+        .copy_from_slice(content_type.as_bytes());
+    Ok(length)
+}
+
+pub fn decode_document_delivery(input: &[u8]) -> Result<DocumentDelivery<'_>, ProtocolError> {
+    if input.len() < DOCUMENT_DELIVERY_PREFIX_LEN
+        || input[..8] != DOCUMENT_DELIVERY_MAGIC
+        || input[12..16] != [0; 4]
+    {
+        return Err(ProtocolError::InvalidField);
+    }
+    let path_len = u16::from_le_bytes([input[8], input[9]]) as usize;
+    let content_type_len = u16::from_le_bytes([input[10], input[11]]) as usize;
+    let length = DOCUMENT_DELIVERY_PREFIX_LEN
+        .checked_add(path_len)
+        .and_then(|value| value.checked_add(content_type_len))
+        .ok_or(ProtocolError::InvalidLength)?;
+    if length != input.len() || path_len == 0 || content_type_len == 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let path = core::str::from_utf8(
+        &input[DOCUMENT_DELIVERY_PREFIX_LEN..DOCUMENT_DELIVERY_PREFIX_LEN + path_len],
+    )
+    .map_err(|_| ProtocolError::InvalidField)?;
+    let content_type = core::str::from_utf8(&input[DOCUMENT_DELIVERY_PREFIX_LEN + path_len..])
+        .map_err(|_| ProtocolError::InvalidField)?;
+    if path.len() > MAX_PATH_LEN
+        || content_type.len() > MAX_CONTENT_TYPE_LEN
+        || path.as_bytes().contains(&0)
+        || content_type.as_bytes().contains(&0)
+    {
+        return Err(ProtocolError::InvalidField);
+    }
+    Ok(DocumentDelivery { path, content_type })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

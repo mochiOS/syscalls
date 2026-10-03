@@ -107,6 +107,34 @@ fn call<'a>(opcode: u16, payload: &[u8], reply: &'a mut [u8]) -> SysResult<proto
     Ok(message)
 }
 
+fn call_with_handle<'a>(
+    opcode: u16,
+    payload: &[u8],
+    reply: &'a mut [u8],
+    fd: i32,
+) -> SysResult<protocol::Message<'a>> {
+    let id = request_id();
+    let mut request = vec![0u8; protocol::HEADER_LEN + payload.len()];
+    let length = protocol::encode(opcode, id, 0, payload, &mut request).map_err(|_| invalid())?;
+    let mut handles = crate::ipc::IpcFileHandles::default();
+    handles.count = 1;
+    handles.handles[0] = crate::ipc::IpcFileHandle {
+        fd,
+        rights: mnu_abi::FILE_HANDLE_RIGHT_READ
+            | mnu_abi::FILE_HANDLE_RIGHT_SEEK
+            | mnu_abi::FILE_HANDLE_RIGHT_STAT
+            | mnu_abi::FILE_HANDLE_RIGHT_TRANSFER,
+    };
+    let received = (crate::ipc::call_handles(service()?, &request[..length], reply, &handles)?
+        & 0xffff_ffff) as usize;
+    let message =
+        protocol::decode(reply.get(..received).ok_or_else(invalid)?).map_err(|_| invalid())?;
+    if message.request_id != id {
+        return Err(invalid());
+    }
+    Ok(message)
+}
+
 fn status(message: protocol::Message<'_>) -> SysResult<(u64, u64)> {
     let (status, generation, value) = protocol::decode_status(message).map_err(|_| invalid())?;
     if status != 0 {
@@ -572,6 +600,19 @@ pub fn open_document_with(
     bundle_id: &str,
     roles: u16,
 ) -> SysResult<u64> {
+    let fd = crate::file::open_path(path, 0)? as i32;
+    let result = open_document_handle_with(path, content_type, bundle_id, roles, fd);
+    let _ = crate::file::close(fd as u64);
+    result
+}
+
+pub fn open_document_handle_with(
+    path: &str,
+    content_type: &str,
+    bundle_id: &str,
+    roles: u16,
+    fd: i32,
+) -> SysResult<u64> {
     if path.is_empty()
         || path.len() > protocol::MAX_PATH_LEN
         || content_type.is_empty()
@@ -591,7 +632,12 @@ pub fn open_document_with(
     payload.extend_from_slice(content_type.as_bytes());
     payload.extend_from_slice(bundle_id.as_bytes());
     let mut reply = [0u8; protocol::HEADER_LEN + 24];
-    let (_, process_id) = status(call(protocol::OP_DOCUMENT_OPEN, &payload, &mut reply)?)?;
+    let (_, process_id) = status(call_with_handle(
+        protocol::OP_DOCUMENT_OPEN,
+        &payload,
+        &mut reply,
+        fd,
+    )?)?;
     Ok(process_id)
 }
 
