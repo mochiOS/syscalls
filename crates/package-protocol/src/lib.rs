@@ -18,6 +18,10 @@ pub const OP_LIST: u16 = 4;
 pub const OP_STATUS: u16 = 0x8000;
 pub const OP_LIST_RESULT: u16 = 0x8004;
 
+/// Early-boot package.service receives its POSIX endpoint after the service
+/// becomes available. The endpoint is carried as a restricted IPC Handle.
+pub const INSTALL_POSIX_ENDPOINT_OPCODE: u32 = 0x4d50_5850;
+
 pub const PACKAGE_FLAG_BUILT_IN: u32 = 1 << 0;
 pub const PACKAGE_FLAG_REMOVABLE: u32 = 1 << 1;
 
