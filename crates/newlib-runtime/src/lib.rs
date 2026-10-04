@@ -1599,8 +1599,49 @@ fn execve_with_fd_state(
 }
 
 #[inline(never)]
-fn process_spawn_raw() -> u64 {
-    syscall::raw_syscall2(syscall::SyscallNumber::ProcessSpawn, 0, 0).raw()
+fn clone_registered_process() -> Result<u64, c_int> {
+    let handle = syscall_errno(syscall::raw_syscall0(syscall::SyscallNumber::ProcessClone))?;
+    if handle == 0 {
+        return Ok(0);
+    }
+    let handle = match u32::try_from(handle) {
+        Ok(handle) => handle,
+        Err(_) => return Err(EOVERFLOW),
+    };
+    let result = (|| {
+        let mut status = syscall::ProcessStatus::default();
+        syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::ProcessHandleStatus,
+            u64::from(handle),
+            (&mut status as *mut syscall::ProcessStatus) as u64,
+        ))?;
+        let process_id = status.process_id;
+        c_int::try_from(process_id).map_err(|_| EOVERFLOW)?;
+        let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+        client
+            .register_child(ObjectHandleAttachment {
+                handle,
+                rights: syscall::HANDLE_RIGHT_WAIT,
+            })
+            .map_err(map_posix_client_error)?;
+        syscall_errno(syscall::raw_syscall1(
+            syscall::SyscallNumber::ProcessHandleResume,
+            u64::from(handle),
+        ))?;
+        Ok(process_id)
+    })();
+    if result.is_err() {
+        let _ = syscall::raw_syscall2(
+            syscall::SyscallNumber::ProcessHandleTerminate,
+            u64::from(handle),
+            SPAWN_FAIL_EXIT_STATUS as u64,
+        );
+    }
+    let _ = syscall::raw_syscall1(
+        syscall::SyscallNumber::HandleClose,
+        u64::from(handle),
+    );
+    result
 }
 
 fn unsupported_spawn_attr(attr: *const c_void) -> Result<(), c_int> {
@@ -2085,8 +2126,10 @@ pub extern "C" fn pipe(fds: *mut c_int) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fork() -> c_int {
-    let result = syscall_errno(syscall::RawSyscallResult::new(process_spawn_raw()));
-    result_with_errno(result.map(|pid| pid as c_int), -1)
+    result_with_errno(
+        clone_registered_process().and_then(|pid| c_int::try_from(pid).map_err(|_| EOVERFLOW)),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -3706,7 +3749,7 @@ pub extern "C" fn _posix_spawn(
         );
     }
 
-    let child_pid = match syscall_errno(syscall::RawSyscallResult::new(process_spawn_raw())) {
+    let child_pid = match clone_registered_process() {
         Ok(value) => value,
         Err(errno_value) => return errno_value,
     };
