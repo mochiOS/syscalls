@@ -1,11 +1,13 @@
 #![no_std]
 
+#[cfg(feature = "fd-table")]
 extern crate alloc;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use mochios_posix_protocol as protocol;
 
+#[cfg(feature = "fd-table")]
 pub mod fd;
 
 pub trait Transport {
@@ -588,13 +590,160 @@ impl ObjectTransport for EndpointTransport {
     }
 }
 
+/// Minimal endpoint transport for runtimes which cannot depend on the full
+/// user platform crate (notably the newlib compatibility runtime).
+#[cfg(feature = "syscall-endpoint")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SyscallEndpointTransport {
+    endpoint: u32,
+}
+
+#[cfg(feature = "syscall-endpoint")]
+impl SyscallEndpointTransport {
+    pub const fn new(endpoint: u32) -> Self {
+        Self { endpoint }
+    }
+
+    pub fn from_launch_context() -> Result<Self, mochi_user_syscall::SysError> {
+        let raw = mochi_user_syscall::call1(
+            mochi_user_syscall::SyscallNumber::LaunchHandleGet,
+            protocol::CONTROL_HANDLE_KEY,
+        )?;
+        let endpoint = u32::try_from(raw).map_err(|_| {
+            mochi_user_syscall::SysError::from_raw(-(mochi_user_syscall::EOVERFLOW as i64))
+        })?;
+        Ok(Self::new(endpoint))
+    }
+
+    pub const fn endpoint(self) -> u32 {
+        self.endpoint
+    }
+}
+
+#[cfg(feature = "syscall-endpoint")]
+impl Client<SyscallEndpointTransport> {
+    /// Connects using only the raw mnu syscall crate, then creates the
+    /// authenticated POSIX session for this process.
+    pub fn from_syscall_launch_context() -> Result<Self, ClientError<mochi_user_syscall::SysError>>
+    {
+        let transport =
+            SyscallEndpointTransport::from_launch_context().map_err(ClientError::Transport)?;
+        let client = Self::new(transport);
+        client.register_session()?;
+        Ok(client)
+    }
+}
+
+#[cfg(feature = "syscall-endpoint")]
+impl Transport for SyscallEndpointTransport {
+    type Error = mochi_user_syscall::SysError;
+
+    fn call(&self, request: &[u8], response: &mut [u8]) -> Result<usize, Self::Error> {
+        let received = mochi_user_syscall::call5(
+            mochi_user_syscall::SyscallNumber::IpcCall,
+            self.endpoint as u64,
+            request.as_ptr() as u64,
+            request.len() as u64,
+            response.as_mut_ptr() as u64,
+            response.len() as u64,
+        )?;
+        let length = (received & 0xffff_ffff) as usize;
+        if length > response.len() {
+            return Err(mochi_user_syscall::SysError::from_raw(-(
+                mochi_user_syscall::EOVERFLOW as i64
+            )));
+        }
+        Ok(length)
+    }
+}
+
+#[cfg(feature = "syscall-endpoint")]
+impl ObjectTransport for SyscallEndpointTransport {
+    type Handle = u32;
+
+    fn call_with_handles(
+        &self,
+        request: &[u8],
+        response: &mut [u8],
+        handles: &mut ObjectHandles<Self::Handle>,
+    ) -> Result<usize, Self::Error> {
+        let mut native = mochi_user_syscall::IpcObjectHandles::default();
+        native.count = handles.len() as u32;
+        for (index, attachment) in handles.iter().enumerate() {
+            native.handles[index].handle = attachment.handle;
+            native.handles[index].rights = attachment.rights;
+        }
+        let received = mochi_user_syscall::call6(
+            mochi_user_syscall::SyscallNumber::IpcCallObjectHandles,
+            self.endpoint as u64,
+            request.as_ptr() as u64,
+            request.len() as u64,
+            response.as_mut_ptr() as u64,
+            response.len() as u64,
+            (&mut native as *mut mochi_user_syscall::IpcObjectHandles) as u64,
+        )?;
+        let count = usize::try_from(native.count).map_err(|_| {
+            mochi_user_syscall::SysError::from_raw(-(mochi_user_syscall::EOVERFLOW as i64))
+        })?;
+        if count > MAX_OBJECT_HANDLES || native.reserved != 0 {
+            close_syscall_attachments(&native, count);
+            return Err(mochi_user_syscall::SysError::from_raw(-(
+                mochi_user_syscall::EINVAL as i64
+            )));
+        }
+        if native
+            .handles
+            .iter()
+            .take(count)
+            .any(|attachment| attachment.handle == 0 || attachment.reserved != 0)
+        {
+            close_syscall_attachments(&native, count);
+            return Err(mochi_user_syscall::SysError::from_raw(-(
+                mochi_user_syscall::EINVAL as i64
+            )));
+        }
+        handles.clear();
+        for attachment in native.handles.iter().take(count) {
+            handles
+                .push(ObjectHandleAttachment {
+                    handle: attachment.handle,
+                    rights: attachment.rights,
+                })
+                .map_err(|_| {
+                    mochi_user_syscall::SysError::from_raw(-(
+                        mochi_user_syscall::EOVERFLOW as i64
+                    ))
+                })?;
+        }
+        let length = (received & 0xffff_ffff) as usize;
+        if length > response.len() {
+            return Err(mochi_user_syscall::SysError::from_raw(-(
+                mochi_user_syscall::EOVERFLOW as i64
+            )));
+        }
+        Ok(length)
+    }
+}
+
+#[cfg(feature = "syscall-endpoint")]
+fn close_syscall_attachments(native: &mochi_user_syscall::IpcObjectHandles, count: usize) {
+    for attachment in native.handles.iter().take(count.min(MAX_OBJECT_HANDLES)) {
+        if attachment.handle != 0 {
+            let _ = mochi_user_syscall::call1(
+                mochi_user_syscall::SyscallNumber::HandleClose,
+                attachment.handle as u64,
+            );
+        }
+    }
+}
+
 /// Native fast-path backend for descriptors that already contain an object
 /// handle. No request is sent to `posix.service` for these operations.
-#[cfg(feature = "endpoint")]
+#[cfg(all(feature = "endpoint", feature = "fd-table"))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NativeFileOps;
 
-#[cfg(feature = "endpoint")]
+#[cfg(all(feature = "endpoint", feature = "fd-table"))]
 impl fd::HandleOps<mochi_user_platform::handle::Handle> for NativeFileOps {
     type Error = mochi_user_platform::syscall::SysError;
 
@@ -611,7 +760,7 @@ impl fd::HandleOps<mochi_user_platform::handle::Handle> for NativeFileOps {
     }
 }
 
-#[cfg(feature = "endpoint")]
+#[cfg(all(feature = "endpoint", feature = "fd-table"))]
 impl fd::FileOps<mochi_user_platform::handle::Handle> for NativeFileOps {
     type Error = mochi_user_platform::syscall::SysError;
 

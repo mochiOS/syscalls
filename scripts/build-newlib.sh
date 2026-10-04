@@ -103,7 +103,7 @@ fi
 
 cd "$USER_ROOT"
 RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build --remap-path-prefix=$USER_ROOT=/src/user" \
-cargo "${cargo_args[@]}" build -Z json-target-spec -Z build-std=core,compiler_builtins \
+cargo "${cargo_args[@]}" build -Z json-target-spec -Z build-std=core,alloc,compiler_builtins \
     --manifest-path "$USER_ROOT/Cargo.toml" --package mochi-user-newlib-runtime \
     --release --target "$USER_ROOT/targets/x86_64-unknown-mochios.json" \
     --target-dir "$TARGET_DIR" "${patch_args[@]}"

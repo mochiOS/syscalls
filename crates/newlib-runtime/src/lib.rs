@@ -11,6 +11,7 @@ use mochios_capability_protocol::{
     CapabilityDecision, CapabilityExecutableIdentity, CapabilityPromptRequest,
     CapabilityResourceDescriptor, MAX_CAPABILITY_NAME_LEN, MAX_REASON_LEN,
 };
+use mochios_posix_client::{Client as PosixClient, ClientError as PosixClientError, StatAtBase};
 
 const PAGE_SIZE: usize = 4096;
 const MAX_FDS: usize = 64;
@@ -60,6 +61,7 @@ const EISDIR: c_int = 21;
 const EINVAL: c_int = 22;
 const ESPIPE: c_int = 29;
 const EPIPE: c_int = 32;
+const ERANGE: c_int = 34;
 const ENAMETOOLONG: c_int = 36;
 const ENOSYS: c_int = 38;
 
@@ -554,6 +556,19 @@ fn map_kernel_errno(raw: i64) -> c_int {
         EFAULT => EFAULT,
         _ if code > 0 => code,
         _ => EIO,
+    }
+}
+
+fn map_posix_client_error(
+    error: PosixClientError<mochi_user_syscall::SysError>,
+) -> c_int {
+    match error {
+        PosixClientError::Remote(status) => map_kernel_errno(i64::from(status)),
+        PosixClientError::Transport(error) => map_kernel_errno(error.raw()),
+        PosixClientError::ResponseTooLarge => ERANGE,
+        PosixClientError::Protocol(_)
+        | PosixClientError::RequestTooLarge
+        | PosixClientError::MismatchedResponse => EIO,
     }
 }
 
@@ -2791,10 +2806,12 @@ pub extern "C" fn chdir(path: *const c_char) -> c_int {
         return -1;
     }
     let result = (|| {
-        let _ = syscall_errno(syscall::raw_syscall1(
-            syscall::SyscallNumber::Chdir,
-            path as u64,
-        ))?;
+        let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+        let client =
+            PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+        client
+            .chdir_at(StatAtBase::ProcessCwd, path)
+            .map_err(map_posix_client_error)?;
         Ok(0)
     })();
     result_with_errno(result, -1)
@@ -2807,11 +2824,11 @@ pub extern "C" fn getcwd(buffer: *mut c_char, size: usize) -> *mut c_char {
         return ptr::null_mut();
     }
     let result = (|| {
-        let _ = syscall_errno(syscall::raw_syscall2(
-            syscall::SyscallNumber::Getcwd,
-            buffer as u64,
-            size as u64,
-        ))?;
+        let client =
+            PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+        let output = unsafe { core::slice::from_raw_parts_mut(buffer.cast::<u8>(), size - 1) };
+        let length = client.getcwd(output).map_err(map_posix_client_error)?;
+        unsafe { buffer.add(length).write(0) };
         Ok(buffer)
     })();
     result_with_errno(result, ptr::null_mut())
