@@ -16,6 +16,78 @@ pub trait Transport {
     fn call(&self, request: &[u8], response: &mut [u8]) -> Result<usize, Self::Error>;
 }
 
+pub const MAX_OBJECT_HANDLES: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObjectHandleAttachment<H> {
+    pub handle: H,
+    pub rights: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObjectHandles<H> {
+    entries: [Option<ObjectHandleAttachment<H>>; MAX_OBJECT_HANDLES],
+    count: usize,
+}
+
+impl<H: Copy> ObjectHandles<H> {
+    pub const fn new() -> Self {
+        Self {
+            entries: [const { None }; MAX_OBJECT_HANDLES],
+            count: 0,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn get(&self, index: usize) -> Option<ObjectHandleAttachment<H>> {
+        (index < self.count).then(|| self.entries[index]).flatten()
+    }
+
+    pub fn push(&mut self, attachment: ObjectHandleAttachment<H>) -> Result<(), ()> {
+        if self.count == MAX_OBJECT_HANDLES {
+            return Err(());
+        }
+        self.entries[self.count] = Some(attachment);
+        self.count += 1;
+        Ok(())
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.fill(None);
+        self.count = 0;
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = ObjectHandleAttachment<H>> + '_ {
+        self.entries[..self.count].iter().filter_map(|entry| *entry)
+    }
+}
+
+impl<H: Copy> Default for ObjectHandles<H> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub trait ObjectTransport: Transport {
+    type Handle: Copy;
+
+    /// Performs one request while replacing outgoing attachments with the
+    /// receiver-local handles attached to the response.
+    fn call_with_handles(
+        &self,
+        request: &[u8],
+        response: &mut [u8],
+        handles: &mut ObjectHandles<Self::Handle>,
+    ) -> Result<usize, Self::Error>;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClientError<E> {
     Transport(E),
@@ -121,6 +193,60 @@ impl<T: Transport> Client<T> {
     }
 }
 
+impl<T: ObjectTransport> Client<T> {
+    pub fn request_with_handles(
+        &self,
+        opcode: u16,
+        flags: u32,
+        payload: &[u8],
+        response_payload: &mut [u8],
+        handles: &mut ObjectHandles<T::Handle>,
+    ) -> Result<usize, ClientError<T::Error>> {
+        if payload.len() > CONTROL_MESSAGE_LEN - protocol::HEADER_LEN {
+            return Err(ClientError::RequestTooLarge);
+        }
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let mut request_bytes = [0u8; CONTROL_MESSAGE_LEN];
+        let request_len = protocol::encode(
+            protocol::Header {
+                opcode,
+                request_id,
+                flags,
+                payload_len: payload.len() as u32,
+                status: protocol::STATUS_OK,
+            },
+            payload,
+            &mut request_bytes,
+        )
+        .map_err(ClientError::Protocol)?;
+
+        let mut response_bytes = [0u8; CONTROL_MESSAGE_LEN];
+        let response_len = self
+            .transport
+            .call_with_handles(
+                &request_bytes[..request_len],
+                &mut response_bytes,
+                handles,
+            )
+            .map_err(ClientError::Transport)?;
+        let response_bytes = response_bytes
+            .get(..response_len)
+            .ok_or(ClientError::ResponseTooLarge)?;
+        let (header, payload) = protocol::decode(response_bytes).map_err(ClientError::Protocol)?;
+        if header.opcode != protocol::OP_STATUS || header.request_id != request_id {
+            return Err(ClientError::MismatchedResponse);
+        }
+        if header.status != protocol::STATUS_OK {
+            return Err(ClientError::Remote(header.status));
+        }
+        if payload.len() > response_payload.len() {
+            return Err(ClientError::ResponseTooLarge);
+        }
+        response_payload[..payload.len()].copy_from_slice(payload);
+        Ok(payload.len())
+    }
+}
+
 #[cfg(feature = "endpoint")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EndpointTransport {
@@ -161,6 +287,78 @@ impl Transport for EndpointTransport {
 
     fn call(&self, request: &[u8], response: &mut [u8]) -> Result<usize, Self::Error> {
         let received = mochi_user_platform::ipc::call(self.endpoint as u64, request, response)?;
+        let length = (received & 0xffff_ffff) as usize;
+        if length > response.len() {
+            return Err(mochi_user_platform::syscall::SysError::from_raw(
+                mochi_user_platform::syscall::EOVERFLOW as i64,
+            ));
+        }
+        Ok(length)
+    }
+}
+
+#[cfg(feature = "endpoint")]
+impl ObjectTransport for EndpointTransport {
+    type Handle = mochi_user_platform::handle::Handle;
+
+    fn call_with_handles(
+        &self,
+        request: &[u8],
+        response: &mut [u8],
+        handles: &mut ObjectHandles<Self::Handle>,
+    ) -> Result<usize, Self::Error> {
+        let mut native = mochi_user_platform::ipc::IpcObjectHandles::default();
+        native.count = handles.len() as u32;
+        for (index, attachment) in handles.iter().enumerate() {
+            native.handles[index].handle = attachment.handle;
+            native.handles[index].rights = attachment.rights;
+        }
+        let received = mochi_user_platform::ipc::call_object_handles(
+            self.endpoint,
+            request,
+            response,
+            &mut native,
+        )?;
+        let count = usize::try_from(native.count).map_err(|_| {
+            mochi_user_platform::syscall::SysError::from_raw(
+                mochi_user_platform::syscall::EOVERFLOW as i64,
+            )
+        })?;
+        if count > MAX_OBJECT_HANDLES || native.reserved != 0 {
+            for attachment in native.handles.iter().take(count.min(MAX_OBJECT_HANDLES)) {
+                if attachment.handle != 0 {
+                    let _ = mochi_user_platform::handle::close(attachment.handle);
+                }
+            }
+            return Err(mochi_user_platform::syscall::SysError::from_raw(
+                mochi_user_platform::syscall::EINVAL as i64,
+            ));
+        }
+        for attachment in native.handles.iter().take(count) {
+            if attachment.handle == 0 || attachment.reserved != 0 {
+                for received in native.handles.iter().take(count) {
+                    if received.handle != 0 {
+                        let _ = mochi_user_platform::handle::close(received.handle);
+                    }
+                }
+                return Err(mochi_user_platform::syscall::SysError::from_raw(
+                    mochi_user_platform::syscall::EINVAL as i64,
+                ));
+            }
+        }
+        handles.clear();
+        for attachment in native.handles.iter().take(count) {
+            handles
+                .push(ObjectHandleAttachment {
+                    handle: attachment.handle,
+                    rights: attachment.rights,
+                })
+                .map_err(|_| {
+                    mochi_user_platform::syscall::SysError::from_raw(
+                        mochi_user_platform::syscall::EOVERFLOW as i64,
+                    )
+                })?;
+        }
         let length = (received & 0xffff_ffff) as usize;
         if length > response.len() {
             return Err(mochi_user_platform::syscall::SysError::from_raw(
