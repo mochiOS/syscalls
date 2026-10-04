@@ -249,11 +249,10 @@ pub fn validate_notification(message: &[u8], expected_token: u64) -> Result<(), 
 #[cfg(not(test))]
 pub fn generate_token() -> super::syscall::SysResult<u64> {
     let mut token = 0u64;
-    let written = super::syscall::call3(
-        super::syscall::SyscallNumber::Getrandom,
+    let written = super::syscall::call2(
+        super::syscall::SyscallNumber::RandomFill,
         core::ptr::addr_of_mut!(token) as u64,
         core::mem::size_of::<u64>() as u64,
-        0,
     )?;
     if written != core::mem::size_of::<u64>() as u64 || token == 0 {
         return Err(super::syscall::SysError::from_raw(

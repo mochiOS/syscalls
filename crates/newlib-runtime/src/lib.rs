@@ -2960,6 +2960,39 @@ pub extern "C" fn times(buf: *mut Tms) -> i64 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn getrandom(buffer: *mut c_void, length: usize, flags: u32) -> isize {
+    if !mochios_posix_client::random::flags_are_supported(flags) {
+        set_errno(EINVAL);
+        return -1;
+    }
+    if length != 0 && buffer.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    result_with_errno(
+        syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::RandomFill,
+            buffer as u64,
+            length as u64,
+        ))
+        .and_then(|written| isize::try_from(written).map_err(|_| EOVERFLOW)),
+        -1,
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn getentropy(buffer: *mut c_void, length: usize) -> c_int {
+    if length > 256 {
+        set_errno(EIO);
+        return -1;
+    }
+    if getrandom(buffer, length, 0) < 0 {
+        return -1;
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn clock_gettime(clock_id: c_int, tp: *mut Timespec) -> c_int {
     if tp.is_null() {
         set_errno(EFAULT);
