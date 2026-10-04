@@ -654,6 +654,21 @@ pub mod handle {
         )?)
     }
 
+    /// Creates a transferable object backed by the caller-supplied provider
+    /// endpoint and an opaque provider-owned identifier.
+    pub fn create_provider_object(
+        endpoint: Handle,
+        object_id: u64,
+        rights: u64,
+    ) -> SysResult<Handle> {
+        decode(syscall::call3(
+            syscall::SyscallNumber::ProviderObjectCreate,
+            endpoint as u64,
+            object_id,
+            rights,
+        )?)
+    }
+
     pub fn read(handle: Handle, buffer: &mut [u8]) -> SysResult<usize> {
         let length = syscall::call3(
             syscall::SyscallNumber::HandleRead,
