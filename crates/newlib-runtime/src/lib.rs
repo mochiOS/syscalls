@@ -2886,10 +2886,7 @@ pub extern "C" fn _unlink(path: *const c_char) -> c_int {
         return -1;
     }
     let result = (|| {
-        let _ = syscall_errno(syscall::raw_syscall1(
-            syscall::SyscallNumber::FileRemove,
-            path as u64,
-        ))?;
+        unlink_posix_at(-2, path, 0)?;
         Ok(0)
     })();
     result_with_errno(result, -1)
@@ -2898,6 +2895,45 @@ pub extern "C" fn _unlink(path: *const c_char) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn unlink(path: *const c_char) -> c_int {
     _unlink(path)
+}
+
+fn unlink_posix_at(dirfd: c_int, path: *const c_char, flags: c_int) -> Result<(), c_int> {
+    const AT_REMOVEDIR: c_int = 0x0008;
+    if flags & !AT_REMOVEDIR != 0 {
+        return Err(EINVAL);
+    }
+    let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+    let base = if path.starts_with('/') {
+        StatAtBase::ProcessRoot
+    } else if dirfd == -2 || i64::from(dirfd) == AT_FDCWD {
+        StatAtBase::ProcessCwd
+    } else {
+        let entry = with_fd_entry(dirfd)?;
+        if entry.kind != FdKind::ObjectDirectory {
+            return Err(ENOTDIR);
+        }
+        StatAtBase::Directory(ObjectHandleAttachment {
+            handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+            rights: entry.rights,
+        })
+    };
+    let mut options = 0;
+    if flags & AT_REMOVEDIR != 0 {
+        options |= posix_protocol::UNLINK_REMOVE_DIRECTORY;
+    }
+    let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+    client
+        .unlink_at(base, options, path)
+        .map_err(map_posix_client_error)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn unlinkat(dirfd: c_int, path: *const c_char, flags: c_int) -> c_int {
+    if path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    result_with_errno(unlink_posix_at(dirfd, path, flags).map(|_| 0), -1)
 }
 
 #[unsafe(no_mangle)]
@@ -3021,13 +3057,7 @@ pub extern "C" fn _rmdir(path: *const c_char) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
-    let result = (|| {
-        let _ = syscall_errno(syscall::raw_syscall1(
-            syscall::SyscallNumber::Rmdir,
-            path as u64,
-        ))?;
-        Ok(0)
-    })();
+    let result = unlink_posix_at(-2, path, 0x0008).map(|_| 0);
     result_with_errno(result, -1)
 }
 

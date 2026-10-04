@@ -83,6 +83,7 @@ pub const OP_FSYNC: u16 = 15;
 pub const OP_FGETFL: u16 = 16;
 pub const OP_FSETFL: u16 = 17;
 pub const OP_MKDIR_AT: u16 = 18;
+pub const OP_UNLINK_AT: u16 = 19;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -134,6 +135,9 @@ pub const OPEN_OPTIONS_ALL: u32 = OPEN_READ
     | OPEN_NOFOLLOW;
 
 pub const MUTABLE_STATUS_FLAGS: u32 = OPEN_APPEND | OPEN_NONBLOCK;
+
+pub const UNLINK_REMOVE_DIRECTORY: u32 = 1 << 0;
+pub const UNLINK_FLAGS_ALL: u32 = UNLINK_REMOVE_DIRECTORY;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

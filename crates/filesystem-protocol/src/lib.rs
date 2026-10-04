@@ -52,6 +52,8 @@ pub const OP_GET_FLAGS_HANDLE: u16 = 25;
 pub const OP_SET_FLAGS_HANDLE: u16 = 26;
 /// Atomically resolves a parent directory and creates one directory within it.
 pub const OP_MKDIR_AT: u16 = 27;
+/// Atomically resolves and removes one directory entry.
+pub const OP_UNLINK_AT: u16 = 28;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const OPEN_STATUS_APPEND: u32 = 1 << 0;
@@ -61,6 +63,13 @@ pub const OPEN_STATUS_FLAGS_ALL: u32 = OPEN_STATUS_APPEND | OPEN_STATUS_NONBLOCK
 pub const MKDIR_AT_BASE_ATTACHED: u32 = 1 << 0;
 pub const MKDIR_AT_ROOT_ATTACHED: u32 = 1 << 1;
 pub const MKDIR_AT_FLAGS_ALL: u32 = MKDIR_AT_BASE_ATTACHED | MKDIR_AT_ROOT_ATTACHED;
+
+pub const UNLINK_AT_REMOVE_DIRECTORY: u32 = 1 << 0;
+pub const UNLINK_AT_BASE_ATTACHED: u32 = 1 << 1;
+pub const UNLINK_AT_ROOT_ATTACHED: u32 = 1 << 2;
+pub const UNLINK_AT_FLAGS_ALL: u32 = UNLINK_AT_REMOVE_DIRECTORY
+    | UNLINK_AT_BASE_ATTACHED
+    | UNLINK_AT_ROOT_ATTACHED;
 
 pub const SETATTR_MODE: u32 = 1 << 0;
 pub const SETATTR_UID: u32 = 1 << 1;
