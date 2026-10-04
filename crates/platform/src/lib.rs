@@ -624,8 +624,9 @@ pub mod handle {
 
     pub use mnu_abi::{
         HANDLE_RIGHT_ALL, HANDLE_RIGHT_DUPLICATE, HANDLE_RIGHT_MAP, HANDLE_RIGHT_READ,
-        HANDLE_RIGHT_RECEIVE, HANDLE_RIGHT_SEND, HANDLE_RIGHT_SIGNAL, HANDLE_RIGHT_TRANSFER,
-        HANDLE_RIGHT_WAIT, HANDLE_RIGHT_WRITE,
+        HANDLE_RIGHT_RECEIVE, HANDLE_RIGHT_SEEK, HANDLE_RIGHT_SEND, HANDLE_RIGHT_SIGNAL,
+        HANDLE_RIGHT_TRANSFER, HANDLE_RIGHT_WAIT, HANDLE_RIGHT_WRITE, HANDLE_SEEK_CURRENT,
+        HANDLE_SEEK_END, HANDLE_SEEK_START,
     };
 
     fn decode(raw: u64) -> SysResult<Handle> {
@@ -651,6 +652,38 @@ pub mod handle {
             syscall::SyscallNumber::LaunchHandleGet,
             key,
         )?)
+    }
+
+    pub fn read(handle: Handle, buffer: &mut [u8]) -> SysResult<usize> {
+        let length = syscall::call3(
+            syscall::SyscallNumber::HandleRead,
+            handle as u64,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+        )?;
+        usize::try_from(length).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+    }
+
+    pub fn write(handle: Handle, buffer: &[u8]) -> SysResult<usize> {
+        let length = syscall::call3(
+            syscall::SyscallNumber::HandleWrite,
+            handle as u64,
+            buffer.as_ptr() as u64,
+            buffer.len() as u64,
+        )?;
+        usize::try_from(length).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+    }
+
+    /// Moves the shared cursor of an I/O object using a native seek basis.
+    /// Compatibility layers must translate POSIX `SEEK_*` values before
+    /// calling this function.
+    pub fn seek(handle: Handle, offset: i64, basis: u64) -> SysResult<u64> {
+        syscall::call3(
+            syscall::SyscallNumber::HandleSeek,
+            handle as u64,
+            offset as u64,
+            basis,
+        )
     }
 }
 

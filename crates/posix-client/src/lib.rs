@@ -170,3 +170,44 @@ impl Transport for EndpointTransport {
         Ok(length)
     }
 }
+
+/// Native fast-path backend for descriptors that already contain an object
+/// handle. No request is sent to `posix.service` for these operations.
+#[cfg(feature = "endpoint")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NativeFileOps;
+
+#[cfg(feature = "endpoint")]
+impl fd::FileOps<mochi_user_platform::handle::Handle> for NativeFileOps {
+    type Error = mochi_user_platform::syscall::SysError;
+
+    fn read(
+        &mut self,
+        handle: mochi_user_platform::handle::Handle,
+        buffer: &mut [u8],
+    ) -> Result<usize, Self::Error> {
+        mochi_user_platform::handle::read(handle, buffer)
+    }
+
+    fn write(
+        &mut self,
+        handle: mochi_user_platform::handle::Handle,
+        buffer: &[u8],
+    ) -> Result<usize, Self::Error> {
+        mochi_user_platform::handle::write(handle, buffer)
+    }
+
+    fn seek(
+        &mut self,
+        handle: mochi_user_platform::handle::Handle,
+        offset: i64,
+        basis: fd::SeekBasis,
+    ) -> Result<u64, Self::Error> {
+        let basis = match basis {
+            fd::SeekBasis::Start => mochi_user_platform::handle::HANDLE_SEEK_START,
+            fd::SeekBasis::Current => mochi_user_platform::handle::HANDLE_SEEK_CURRENT,
+            fd::SeekBasis::End => mochi_user_platform::handle::HANDLE_SEEK_END,
+        };
+        mochi_user_platform::handle::seek(handle, offset, basis)
+    }
+}

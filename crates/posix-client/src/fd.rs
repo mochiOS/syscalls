@@ -17,6 +17,30 @@ pub trait HandleOps<H> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeekBasis {
+    Start,
+    Current,
+    End,
+}
+
+/// Fast-path operations on an already resolved kernel object.
+///
+/// Implementations receive the object handle, never the process-local POSIX
+/// descriptor number.
+pub trait FileOps<H> {
+    type Error;
+
+    fn read(&mut self, handle: H, buffer: &mut [u8]) -> Result<usize, Self::Error>;
+    fn write(&mut self, handle: H, buffer: &[u8]) -> Result<usize, Self::Error>;
+    fn seek(
+        &mut self,
+        handle: H,
+        offset: i64,
+        basis: SeekBasis,
+    ) -> Result<u64, Self::Error>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FdError<E> {
     BadDescriptor,
     InvalidDescriptor,
@@ -80,6 +104,43 @@ impl<H: Copy> FdTable<H> {
             .ok_or(FdError::BadDescriptor)?;
         operations.close_handle(entry.handle);
         Ok(())
+    }
+
+    pub fn read<O: FileOps<H>>(
+        &self,
+        fd: i32,
+        buffer: &mut [u8],
+        operations: &mut O,
+    ) -> Result<usize, FdError<O::Error>> {
+        let entry = self.get(fd).ok_or(FdError::BadDescriptor)?;
+        operations
+            .read(entry.handle, buffer)
+            .map_err(FdError::Handle)
+    }
+
+    pub fn write<O: FileOps<H>>(
+        &self,
+        fd: i32,
+        buffer: &[u8],
+        operations: &mut O,
+    ) -> Result<usize, FdError<O::Error>> {
+        let entry = self.get(fd).ok_or(FdError::BadDescriptor)?;
+        operations
+            .write(entry.handle, buffer)
+            .map_err(FdError::Handle)
+    }
+
+    pub fn seek<O: FileOps<H>>(
+        &self,
+        fd: i32,
+        offset: i64,
+        basis: SeekBasis,
+        operations: &mut O,
+    ) -> Result<u64, FdError<O::Error>> {
+        let entry = self.get(fd).ok_or(FdError::BadDescriptor)?;
+        operations
+            .seek(entry.handle, offset, basis)
+            .map_err(FdError::Handle)
     }
 
     pub fn duplicate<O: HandleOps<H>>(
