@@ -413,9 +413,7 @@ pub mod process {
         items: &mut [syscall::HandleWaitItem],
         deadline_nanoseconds: u64,
     ) -> SysResult<usize> {
-        if items.len() > syscall::HANDLE_WAIT_MANY_MAX_ITEMS
-            || (items.is_empty() && deadline_nanoseconds == syscall::HANDLE_WAIT_INFINITE)
-        {
+        if items.len() > syscall::HANDLE_WAIT_MANY_MAX_ITEMS {
             return Err(syscall::SysError::from_raw(syscall::EINVAL as i64));
         }
         let index = syscall::call3(

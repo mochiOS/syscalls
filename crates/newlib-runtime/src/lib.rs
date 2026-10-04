@@ -415,6 +415,19 @@ struct Timespec {
     tv_nsec: CLong,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Timeval {
+    tv_sec: CLong,
+    tv_usec: CLong,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct FdSet {
+    bits: [u64; 1],
+}
+
 #[derive(Clone, Copy)]
 struct SpawnSnapshot {
     path: *const c_char,
@@ -2106,6 +2119,187 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
             }
             _ => Err(EINVAL),
         }
+    })();
+    result_with_errno(result, -1)
+}
+
+fn monotonic_nanoseconds() -> Result<u64, c_int> {
+    let mut instant = mnu_abi::ClockInstant::default();
+    syscall_errno(syscall::raw_syscall2(
+        syscall::SyscallNumber::ClockRead,
+        mnu_abi::ClockId::Monotonic as u64,
+        (&mut instant as *mut mnu_abi::ClockInstant) as u64,
+    ))?;
+    if instant.nanoseconds >= 1_000_000_000 || instant.reserved != 0 {
+        return Err(EIO);
+    }
+    instant
+        .seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|seconds| seconds.checked_add(u64::from(instant.nanoseconds)))
+        .ok_or(EOVERFLOW)
+}
+
+fn select_deadline(timeout: *const Timeval) -> Result<u64, c_int> {
+    if timeout.is_null() {
+        return Ok(syscall::HANDLE_WAIT_INFINITE);
+    }
+    let timeout = unsafe { timeout.read() };
+    if timeout.tv_sec < 0 || !(0..1_000_000).contains(&timeout.tv_usec) {
+        return Err(EINVAL);
+    }
+    let duration = u64::try_from(timeout.tv_sec)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+        .and_then(|seconds| {
+            u64::try_from(timeout.tv_usec)
+                .ok()
+                .and_then(|microseconds| seconds.checked_add(microseconds * 1_000))
+        })
+        .ok_or(EOVERFLOW)?;
+    if duration == 0 {
+        return Ok(syscall::HANDLE_WAIT_POLL);
+    }
+    monotonic_nanoseconds()?
+        .checked_add(duration)
+        .ok_or(EOVERFLOW)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn select(
+    nfds: c_int,
+    readfds: *mut FdSet,
+    writefds: *mut FdSet,
+    exceptfds: *mut FdSet,
+    timeout: *mut Timeval,
+) -> c_int {
+    let result = (|| {
+        if nfds < 0 || nfds as usize > MAX_FDS {
+            return Err(EINVAL);
+        }
+        let requested_read = if readfds.is_null() {
+            0
+        } else {
+            unsafe { readfds.read().bits[0] }
+        };
+        let requested_write = if writefds.is_null() {
+            0
+        } else {
+            unsafe { writefds.read().bits[0] }
+        };
+        let requested_except = if exceptfds.is_null() {
+            0
+        } else {
+            unsafe { exceptfds.read().bits[0] }
+        };
+        let valid_mask = if nfds == 64 {
+            u64::MAX
+        } else if nfds == 0 {
+            0
+        } else {
+            (1u64 << nfds) - 1
+        };
+        let requested_read = requested_read & valid_mask;
+        let requested_write = requested_write & valid_mask;
+        let requested_except = requested_except & valid_mask;
+        let requested = requested_read | requested_write | requested_except;
+        let requested_deadline = select_deadline(timeout)?;
+
+        let mut ready_read = 0u64;
+        let mut ready_write = 0u64;
+        let ready_except = 0u64;
+        let mut items = [syscall::HandleWaitItem::default(); MAX_FDS];
+        let mut item_fds = [0usize; MAX_FDS];
+        let mut item_count = 0usize;
+        for fd in 0..nfds as usize {
+            let mask = 1u64 << fd;
+            if requested & mask == 0 {
+                continue;
+            }
+            let entry = with_fd_entry(fd as c_int)?;
+            match entry.kind {
+                FdKind::ObjectStreamRead if requested_read & mask != 0 => {
+                    items[item_count] = syscall::HandleWaitItem {
+                        handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                        reserved: 0,
+                        interests: syscall::HANDLE_SIGNAL_READABLE
+                            | syscall::HANDLE_SIGNAL_PEER_CLOSED,
+                        observed: 0,
+                    };
+                    item_fds[item_count] = fd;
+                    item_count += 1;
+                    if requested_write & mask != 0 {
+                        ready_write |= requested_write & mask;
+                    }
+                }
+                FdKind::ObjectStreamWrite if requested_write & mask != 0 => {
+                    items[item_count] = syscall::HandleWaitItem {
+                        handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                        reserved: 0,
+                        interests: syscall::HANDLE_SIGNAL_WRITABLE
+                            | syscall::HANDLE_SIGNAL_PEER_CLOSED,
+                        observed: 0,
+                    };
+                    item_fds[item_count] = fd;
+                    item_count += 1;
+                    if requested_read & mask != 0 {
+                        ready_read |= requested_read & mask;
+                    }
+                }
+                FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite => {
+                    ready_read |= requested_read & mask;
+                    ready_write |= requested_write & mask;
+                }
+                _ => {
+                    ready_read |= requested_read & mask;
+                    ready_write |= requested_write & mask;
+                }
+            }
+        }
+
+        let deadline = if ready_read | ready_write | ready_except != 0 {
+            syscall::HANDLE_WAIT_POLL
+        } else {
+            requested_deadline
+        };
+        let wait_result = syscall_errno(syscall::raw_syscall3(
+            syscall::SyscallNumber::HandleWaitMany,
+            items.as_mut_ptr() as u64,
+            item_count as u64,
+            deadline,
+        ));
+        match wait_result {
+            Ok(_) => {}
+            Err(errno) if errno == EAGAIN => {}
+            Err(errno) => return Err(errno),
+        }
+        for index in 0..item_count {
+            let fd = item_fds[index];
+            let mask = 1u64 << fd;
+            let observed = items[index].observed;
+            if observed
+                & (syscall::HANDLE_SIGNAL_READABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED)
+                != 0
+            {
+                ready_read |= requested_read & mask;
+            }
+            if observed
+                & (syscall::HANDLE_SIGNAL_WRITABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED)
+                != 0
+            {
+                ready_write |= requested_write & mask;
+            }
+        }
+        if !readfds.is_null() {
+            unsafe { readfds.write(FdSet { bits: [ready_read] }) };
+        }
+        if !writefds.is_null() {
+            unsafe { writefds.write(FdSet { bits: [ready_write] }) };
+        }
+        if !exceptfds.is_null() {
+            unsafe { exceptfds.write(FdSet { bits: [ready_except] }) };
+        }
+        Ok((ready_read | ready_write | ready_except).count_ones() as c_int)
     })();
     result_with_errno(result, -1)
 }
