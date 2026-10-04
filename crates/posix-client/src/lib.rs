@@ -642,6 +642,48 @@ impl<T: ObjectTransport> Client<T> {
         Ok(())
     }
 
+    pub fn symlink_at(
+        &self,
+        target: &str,
+        base: StatAtBase<T::Handle>,
+        link_path: &str,
+    ) -> Result<(), ClientError<T::Error>> {
+        let (base, directory) = match base {
+            StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
+            StatAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
+            StatAtBase::Directory(handle) => {
+                (protocol::OpenBase::AttachedDirectory, Some(handle))
+            }
+        };
+        let mut payload = [0u8; protocol::SYMLINK_AT_HEADER_LEN + protocol::MAX_PATH_LEN * 2];
+        let payload_len = protocol::encode_symlink_at(
+            protocol::SymlinkAtRequest {
+                base,
+                target,
+                link_path,
+            },
+            &mut payload,
+        )
+        .map_err(ClientError::Protocol)?;
+        let mut handles = ObjectHandles::new();
+        if let Some(directory) = directory {
+            handles
+                .push(directory)
+                .map_err(|_| ClientError::RequestTooLarge)?;
+        }
+        self.request_with_handles(
+            protocol::OP_SYMLINK_AT,
+            0,
+            &payload[..payload_len],
+            &mut [],
+            &mut handles,
+        )?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(())
+    }
+
     fn file_operation(
         &self,
         opcode: u16,

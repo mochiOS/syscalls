@@ -86,6 +86,7 @@ pub const OP_MKDIR_AT: u16 = 18;
 pub const OP_UNLINK_AT: u16 = 19;
 pub const OP_RENAME_AT: u16 = 20;
 pub const OP_TRUNCATE_AT: u16 = 21;
+pub const OP_SYMLINK_AT: u16 = 22;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -103,6 +104,7 @@ pub const STAT_AT_HEADER_LEN: usize = 12;
 pub const ACCESS_AT_HEADER_LEN: usize = 16;
 pub const RENAME_AT_HEADER_LEN: usize = 16;
 pub const TRUNCATE_AT_HEADER_LEN: usize = 16;
+pub const SYMLINK_AT_HEADER_LEN: usize = 16;
 pub const FILE_STATUS_LEN: usize = 112;
 pub const MAX_PATH_LEN: usize = 4096;
 pub const MAX_CONTROL_PAYLOAD_LEN: usize = RENAME_AT_HEADER_LEN + MAX_PATH_LEN * 2;
@@ -198,6 +200,13 @@ pub struct TruncateAtRequest<'a> {
     pub base: OpenBase,
     pub length: u64,
     pub path: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SymlinkAtRequest<'a> {
+    pub base: OpenBase,
+    pub target: &'a str,
+    pub link_path: &'a str,
 }
 
 /// Architecture-independent representation of the POSIX `struct stat` data.
@@ -597,6 +606,67 @@ pub fn decode_truncate_at(input: &[u8]) -> Result<TruncateAtRequest<'_>, Protoco
     }
     let path = core::str::from_utf8(path_bytes).map_err(|_| ProtocolError::InvalidLength)?;
     Ok(TruncateAtRequest { base, length, path })
+}
+
+pub fn encode_symlink_at(
+    request: SymlinkAtRequest<'_>,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    let target = request.target.as_bytes();
+    let link_path = request.link_path.as_bytes();
+    if target.is_empty()
+        || link_path.is_empty()
+        || target.len() > MAX_PATH_LEN
+        || link_path.len() > MAX_PATH_LEN
+        || target.contains(&0)
+        || link_path.contains(&0)
+    {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let total = SYMLINK_AT_HEADER_LEN
+        .checked_add(target.len())
+        .and_then(|length| length.checked_add(link_path.len()))
+        .ok_or(ProtocolError::InvalidLength)?;
+    if output.len() < total {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    output[..SYMLINK_AT_HEADER_LEN].fill(0);
+    output[0] = request.base as u8;
+    put_u32(output, 4, target.len() as u32);
+    put_u32(output, 8, link_path.len() as u32);
+    output[SYMLINK_AT_HEADER_LEN..SYMLINK_AT_HEADER_LEN + target.len()]
+        .copy_from_slice(target);
+    output[SYMLINK_AT_HEADER_LEN + target.len()..total].copy_from_slice(link_path);
+    Ok(total)
+}
+
+pub fn decode_symlink_at(input: &[u8]) -> Result<SymlinkAtRequest<'_>, ProtocolError> {
+    if input.len() < SYMLINK_AT_HEADER_LEN || input[1..4] != [0; 3] || input[12..16] != [0; 4] {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let base = OpenBase::from_raw(input[0]).ok_or(ProtocolError::InvalidLength)?;
+    let target_len = get_u32(input, 4) as usize;
+    let link_len = get_u32(input, 8) as usize;
+    if target_len == 0
+        || link_len == 0
+        || target_len > MAX_PATH_LEN
+        || link_len > MAX_PATH_LEN
+        || input.len() != SYMLINK_AT_HEADER_LEN + target_len + link_len
+    {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let target_bytes = &input[SYMLINK_AT_HEADER_LEN..SYMLINK_AT_HEADER_LEN + target_len];
+    let link_bytes = &input[SYMLINK_AT_HEADER_LEN + target_len..];
+    if target_bytes.contains(&0) || link_bytes.contains(&0) {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let target = core::str::from_utf8(target_bytes).map_err(|_| ProtocolError::InvalidLength)?;
+    let link_path = core::str::from_utf8(link_bytes).map_err(|_| ProtocolError::InvalidLength)?;
+    Ok(SymlinkAtRequest {
+        base,
+        target,
+        link_path,
+    })
 }
 
 pub fn encode_access_at(

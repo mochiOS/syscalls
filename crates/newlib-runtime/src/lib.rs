@@ -2960,18 +2960,40 @@ pub extern "C" fn _symlink(target: *const c_char, link_path: *const c_char) -> c
         set_errno(EFAULT);
         return -1;
     }
-    let result = syscall_errno(syscall::raw_syscall2(
-        syscall::SyscallNumber::Symlink,
-        target as u64,
-        link_path as u64,
-    ))
-    .map(|_| 0);
+    let result = symlink_posix_at(target, -2, link_path).map(|_| 0);
     result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn symlink(target: *const c_char, link_path: *const c_char) -> c_int {
     _symlink(target, link_path)
+}
+
+fn symlink_posix_at(
+    target: *const c_char,
+    dirfd: c_int,
+    link_path: *const c_char,
+) -> Result<(), c_int> {
+    let target = core::str::from_utf8(unsafe { c_bytes(target) }).map_err(|_| EINVAL)?;
+    let link_path = core::str::from_utf8(unsafe { c_bytes(link_path) }).map_err(|_| EINVAL)?;
+    let base = rename_posix_base(dirfd, link_path)?;
+    let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+    client
+        .symlink_at(target, base, link_path)
+        .map_err(map_posix_client_error)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn symlinkat(
+    target: *const c_char,
+    dirfd: c_int,
+    link_path: *const c_char,
+) -> c_int {
+    if target.is_null() || link_path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    result_with_errno(symlink_posix_at(target, dirfd, link_path).map(|_| 0), -1)
 }
 
 #[unsafe(no_mangle)]

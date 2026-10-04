@@ -58,6 +58,8 @@ pub const OP_UNLINK_AT: u16 = 28;
 pub const OP_RENAME_AT: u16 = 29;
 /// Atomically resolves and truncates one Handle-anchored path.
 pub const OP_TRUNCATE_AT: u16 = 30;
+/// Atomically creates a symbolic link at a Handle-anchored path.
+pub const OP_SYMLINK_AT: u16 = 31;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const OPEN_STATUS_APPEND: u32 = 1 << 0;
@@ -85,6 +87,10 @@ pub const RENAME_AT_FLAGS_ALL: u32 = RENAME_AT_OLD_BASE_ATTACHED
 pub const TRUNCATE_AT_BASE_ATTACHED: u32 = 1 << 0;
 pub const TRUNCATE_AT_ROOT_ATTACHED: u32 = 1 << 1;
 pub const TRUNCATE_AT_FLAGS_ALL: u32 = TRUNCATE_AT_BASE_ATTACHED | TRUNCATE_AT_ROOT_ATTACHED;
+
+pub const SYMLINK_AT_BASE_ATTACHED: u32 = 1 << 0;
+pub const SYMLINK_AT_ROOT_ATTACHED: u32 = 1 << 1;
+pub const SYMLINK_AT_FLAGS_ALL: u32 = SYMLINK_AT_BASE_ATTACHED | SYMLINK_AT_ROOT_ATTACHED;
 
 pub const SETATTR_MODE: u32 = 1 << 0;
 pub const SETATTR_UID: u32 = 1 << 1;
