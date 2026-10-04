@@ -29,25 +29,52 @@ impl MpkgIndex {
     }
 }
 
+/// Random-access input used by the package parser.
+///
+/// Opening paths and owning descriptors are deliberately outside this trait;
+/// callers may back it with a native Handle, an IPC object, or a test buffer.
+pub trait MpkgReader {
+    fn len(&mut self) -> Result<u64, SysError>;
+    fn read_exact_at(&mut self, offset: u64, output: &mut [u8]) -> Result<(), SysError>;
+}
+
+struct LegacyFileReader {
+    fd: u64,
+}
+
+impl MpkgReader for LegacyFileReader {
+    fn len(&mut self) -> Result<u64, SysError> {
+        super::file::seek(self.fd, 0, 2)
+    }
+
+    fn read_exact_at(&mut self, offset: u64, output: &mut [u8]) -> Result<(), SysError> {
+        super::file::seek(
+            self.fd,
+            i64::try_from(offset).map_err(|_| package_error(ERANGE))?,
+            0,
+        )?;
+        read_exact(self.fd, output)
+    }
+}
+
 fn package_error(errno: u64) -> SysError {
     SysError::from_raw(errno as i64)
 }
 
 pub fn index_mpkg(path: &str) -> Result<MpkgIndex, SysError> {
     let fd = super::file::open_path(path, 0)?;
-    let result = index_mpkg_fd(fd);
+    let result = index_mpkg_reader(&mut LegacyFileReader { fd });
     let _ = super::file::close(fd);
     result
 }
 
-fn index_mpkg_fd(fd: u64) -> Result<MpkgIndex, SysError> {
-    let file_len = super::file::seek(fd, 0, 2)?;
+pub fn index_mpkg_reader(reader: &mut impl MpkgReader) -> Result<MpkgIndex, SysError> {
+    let file_len = reader.len()?;
     if !(MPKG_HEADER_LEN..=MAX_MPKG_LEN).contains(&file_len) {
         return Err(package_error(ERANGE));
     }
-    super::file::seek(fd, 0, 0)?;
     let mut header = [0u8; MPKG_HEADER_LEN as usize];
-    read_exact(fd, &mut header)?;
+    reader.read_exact_at(0, &mut header)?;
     if &header[..4] != b"MPKG"
         || u16::from_le_bytes([header[4], header[5]]) != 1
         || u16::from_le_bytes([header[6], header[7]]) != 0
@@ -71,11 +98,10 @@ fn index_mpkg_fd(fd: u64) -> Result<MpkgIndex, SysError> {
         if entries.len() >= MAX_MPKG_ENTRIES {
             return Err(package_error(ERANGE));
         }
-        super::file::seek(fd, offset as i64, 0)?;
         let mut block = [0u8; TAR_BLOCK_LEN as usize];
-        read_exact(fd, &mut block)?;
+        reader.read_exact_at(offset, &mut block)?;
         if block.iter().all(|byte| *byte == 0) {
-            if !range_is_zero(fd, offset, file_len - offset)? {
+            if !range_is_zero(reader, offset, file_len - offset)? {
                 return Err(package_error(EINVAL));
             }
             terminated = true;
@@ -129,8 +155,7 @@ fn index_mpkg_fd(fd: u64) -> Result<MpkgIndex, SysError> {
             data.try_reserve_exact(size as usize)
                 .map_err(|_| package_error(ENOMEM))?;
             data.resize(size as usize, 0);
-            super::file::seek(fd, data_offset as i64, 0)?;
-            read_exact(fd, &mut data)?;
+            reader.read_exact_at(data_offset, &mut data)?;
             manifest = Some(data);
         }
         entries.push(MpkgEntry {
@@ -156,24 +181,29 @@ fn index_mpkg_fd(fd: u64) -> Result<MpkgIndex, SysError> {
 }
 
 pub fn read_mpkg_range(path: &str, offset: u64, size: u64) -> Result<Vec<u8>, SysError> {
-    let size = usize::try_from(size).map_err(|_| package_error(ERANGE))?;
     let fd = super::file::open_path(path, 0)?;
-    let result = (|| {
-        super::file::seek(
-            fd,
-            i64::try_from(offset).map_err(|_| package_error(ERANGE))?,
-            0,
-        )?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(size)
-            .map_err(|_| package_error(ENOMEM))?;
-        bytes.resize(size, 0);
-        read_exact(fd, &mut bytes)?;
-        Ok(bytes)
-    })();
+    let result = read_mpkg_range_reader(&mut LegacyFileReader { fd }, offset, size);
     let _ = super::file::close(fd);
     result
+}
+
+pub fn read_mpkg_range_reader(
+    reader: &mut impl MpkgReader,
+    offset: u64,
+    size: u64,
+) -> Result<Vec<u8>, SysError> {
+    let end = offset.checked_add(size).ok_or(package_error(ERANGE))?;
+    if end > reader.len()? {
+        return Err(package_error(EINVAL));
+    }
+    let size = usize::try_from(size).map_err(|_| package_error(ERANGE))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(size)
+        .map_err(|_| package_error(ENOMEM))?;
+    bytes.resize(size, 0);
+    reader.read_exact_at(offset, &mut bytes)?;
+    Ok(bytes)
 }
 
 fn read_exact(fd: u64, output: &mut [u8]) -> Result<(), SysError> {
@@ -192,21 +222,24 @@ fn read_exact(fd: u64, output: &mut [u8]) -> Result<(), SysError> {
     Ok(())
 }
 
-fn range_is_zero(fd: u64, offset: u64, length: u64) -> Result<bool, SysError> {
-    super::file::seek(
-        fd,
-        i64::try_from(offset).map_err(|_| package_error(ERANGE))?,
-        0,
-    )?;
+fn range_is_zero(
+    reader: &mut impl MpkgReader,
+    offset: u64,
+    length: u64,
+) -> Result<bool, SysError> {
     let mut remaining = length;
+    let mut cursor = offset;
     let mut buffer = [0u8; 4096];
     while remaining > 0 {
         let requested = core::cmp::min(remaining, buffer.len() as u64) as usize;
-        read_exact(fd, &mut buffer[..requested])?;
+        reader.read_exact_at(cursor, &mut buffer[..requested])?;
         if buffer[..requested].iter().any(|byte| *byte != 0) {
             return Ok(false);
         }
         remaining -= requested as u64;
+        cursor = cursor
+            .checked_add(requested as u64)
+            .ok_or(package_error(ERANGE))?;
     }
     Ok(true)
 }
