@@ -178,6 +178,23 @@ impl Transport for EndpointTransport {
 pub struct NativeFileOps;
 
 #[cfg(feature = "endpoint")]
+impl fd::HandleOps<mochi_user_platform::handle::Handle> for NativeFileOps {
+    type Error = mochi_user_platform::syscall::SysError;
+
+    fn clone_handle(
+        &mut self,
+        handle: mochi_user_platform::handle::Handle,
+        rights: u64,
+    ) -> Result<mochi_user_platform::handle::Handle, Self::Error> {
+        mochi_user_platform::handle::duplicate(handle, rights)
+    }
+
+    fn close_handle(&mut self, handle: mochi_user_platform::handle::Handle) {
+        let _ = mochi_user_platform::handle::close(handle);
+    }
+}
+
+#[cfg(feature = "endpoint")]
 impl fd::FileOps<mochi_user_platform::handle::Handle> for NativeFileOps {
     type Error = mochi_user_platform::syscall::SysError;
 

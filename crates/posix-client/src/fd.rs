@@ -5,6 +5,7 @@ pub const FD_CLOEXEC: u32 = 1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry<H> {
     pub handle: H,
+    pub rights: u64,
     pub descriptor_flags: u32,
 }
 
@@ -12,7 +13,7 @@ pub trait HandleOps<H> {
     type Error;
 
     /// Clones a reference to the same underlying open-file description.
-    fn clone_handle(&mut self, handle: H) -> Result<H, Self::Error>;
+    fn clone_handle(&mut self, handle: H, rights: u64) -> Result<H, Self::Error>;
     fn close_handle(&mut self, handle: H);
 }
 
@@ -150,10 +151,11 @@ impl<H: Copy> FdTable<H> {
     ) -> Result<i32, FdError<O::Error>> {
         let source = self.get(fd).ok_or(FdError::BadDescriptor)?;
         let handle = operations
-            .clone_handle(source.handle)
+            .clone_handle(source.handle, source.rights)
             .map_err(FdError::Handle)?;
         self.install_typed(Entry {
             handle,
+            rights: source.rights,
             descriptor_flags: source.descriptor_flags & !FD_CLOEXEC,
         })
     }
@@ -173,7 +175,7 @@ impl<H: Copy> FdTable<H> {
         }
         let source = self.get(source_fd).ok_or(FdError::BadDescriptor)?;
         let handle = operations
-            .clone_handle(source.handle)
+            .clone_handle(source.handle, source.rights)
             .map_err(FdError::Handle)?;
         let target_index = target_fd as usize;
         if target_index >= self.entries.len() {
@@ -181,6 +183,7 @@ impl<H: Copy> FdTable<H> {
         }
         if let Some(replaced) = self.entries[target_index].replace(Entry {
             handle,
+            rights: source.rights,
             descriptor_flags: source.descriptor_flags & !FD_CLOEXEC,
         }) {
             operations.close_handle(replaced.handle);
