@@ -63,6 +63,8 @@ pub const OP_SYMLINK_AT: u16 = 31;
 /// Atomically resolves a Handle-anchored path without following its final
 /// component and returns the symbolic-link target.
 pub const OP_READLINK_AT: u16 = 32;
+/// Atomically changes mode bits on a Handle-anchored path.
+pub const OP_CHMOD_AT: u16 = 33;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const OPEN_STATUS_APPEND: u32 = 1 << 0;
@@ -98,6 +100,10 @@ pub const SYMLINK_AT_FLAGS_ALL: u32 = SYMLINK_AT_BASE_ATTACHED | SYMLINK_AT_ROOT
 pub const READLINK_AT_BASE_ATTACHED: u32 = 1 << 0;
 pub const READLINK_AT_ROOT_ATTACHED: u32 = 1 << 1;
 pub const READLINK_AT_FLAGS_ALL: u32 = READLINK_AT_BASE_ATTACHED | READLINK_AT_ROOT_ATTACHED;
+
+pub const CHMOD_AT_BASE_ATTACHED: u32 = 1 << 0;
+pub const CHMOD_AT_ROOT_ATTACHED: u32 = 1 << 1;
+pub const CHMOD_AT_FLAGS_ALL: u32 = CHMOD_AT_BASE_ATTACHED | CHMOD_AT_ROOT_ATTACHED;
 
 pub const SETATTR_MODE: u32 = 1 << 0;
 pub const SETATTR_UID: u32 = 1 << 1;

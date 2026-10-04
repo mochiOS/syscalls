@@ -2231,15 +2231,35 @@ pub extern "C" fn chmod(path: *const c_char, mode: u32) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
-    result_with_errno(
-        syscall_errno(syscall::raw_syscall2(
-            syscall::SyscallNumber::Chmod,
-            path as u64,
-            mode as u64,
-        ))
-        .map(|_| 0),
-        -1,
-    )
+    let result = chmod_posix_at(-2, path, mode).map(|_| 0);
+    result_with_errno(result, -1)
+}
+
+fn chmod_posix_at(dirfd: c_int, path: *const c_char, mode: u32) -> Result<(), c_int> {
+    let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+    let base = rename_posix_base(dirfd, path)?;
+    let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+    client
+        .chmod_at(base, path, mode)
+        .map_err(map_posix_client_error)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fchmodat(
+    dirfd: c_int,
+    path: *const c_char,
+    mode: u32,
+    flags: c_int,
+) -> c_int {
+    if path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    if flags != 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    result_with_errno(chmod_posix_at(dirfd, path, mode).map(|_| 0), -1)
 }
 
 #[unsafe(no_mangle)]
