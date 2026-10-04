@@ -669,6 +669,15 @@ pub mod handle {
         )?)
     }
 
+    /// Returns the provider-owned identifier of an attached object. This is
+    /// accepted only on the exact endpoint thread that created the object.
+    pub fn identify_provider_object(handle: Handle) -> SysResult<u64> {
+        syscall::call1(
+            syscall::SyscallNumber::ProviderObjectIdentify,
+            handle as u64,
+        )
+    }
+
     pub fn read(handle: Handle, buffer: &mut [u8]) -> SysResult<usize> {
         let length = syscall::call3(
             syscall::SyscallNumber::HandleRead,
