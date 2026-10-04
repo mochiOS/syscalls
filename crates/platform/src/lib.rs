@@ -359,6 +359,14 @@ pub mod process {
             })
     }
 
+    /// Clones the current address space and process-local native handles. The
+    /// parent receives a handle for the child and the child receives zero.
+    pub fn clone_process() -> SysResult<u32> {
+        syscall::call0(syscall::SyscallNumber::ProcessClone).and_then(|handle| {
+            u32::try_from(handle).map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))
+        })
+    }
+
     pub fn handle_status(handle: u32) -> SysResult<syscall::ProcessStatus> {
         let mut status = syscall::ProcessStatus::default();
         syscall::call2(
