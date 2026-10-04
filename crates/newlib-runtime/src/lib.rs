@@ -2029,22 +2029,34 @@ pub extern "C" fn setgroups(_ngroups: c_int, _grouplist: *const c_int) -> c_int 
 
 #[unsafe(no_mangle)]
 pub extern "C" fn getuid() -> u32 {
-    syscall::call0(syscall::SyscallNumber::Getuid).unwrap_or(0) as u32
+    PosixClient::from_syscall_launch_context()
+        .and_then(|client| client.session_info())
+        .map(|session| session.real_uid)
+        .unwrap_or(0)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn geteuid() -> u32 {
-    syscall::call0(syscall::SyscallNumber::Geteuid).unwrap_or(0) as u32
+    PosixClient::from_syscall_launch_context()
+        .and_then(|client| client.session_info())
+        .map(|session| session.effective_uid)
+        .unwrap_or(0)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn getgid() -> u32 {
-    syscall::call0(syscall::SyscallNumber::Getgid).unwrap_or(0) as u32
+    PosixClient::from_syscall_launch_context()
+        .and_then(|client| client.session_info())
+        .map(|session| session.real_gid)
+        .unwrap_or(0)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn getegid() -> u32 {
-    syscall::call0(syscall::SyscallNumber::Getegid).unwrap_or(0) as u32
+    PosixClient::from_syscall_launch_context()
+        .and_then(|client| client.session_info())
+        .map(|session| session.effective_gid)
+        .unwrap_or(0)
 }
 
 #[unsafe(no_mangle)]
