@@ -81,6 +81,22 @@ impl<H: Copy> FdTable<H> {
         Ok(fd)
     }
 
+    pub fn install_at<O: HandleOps<H>>(
+        &mut self,
+        fd: i32,
+        entry: Entry<H>,
+        operations: &mut O,
+    ) -> Result<(), FdError<O::Error>> {
+        let index = usize::try_from(fd).map_err(|_| FdError::InvalidDescriptor)?;
+        if index >= self.entries.len() {
+            self.entries.resize(index + 1, None);
+        }
+        if let Some(replaced) = self.entries[index].replace(entry) {
+            operations.close_handle(replaced.handle);
+        }
+        Ok(())
+    }
+
     pub fn set_descriptor_flags(&mut self, fd: i32, flags: u32) -> Result<(), FdError<()>> {
         let index = usize::try_from(fd).map_err(|_| FdError::BadDescriptor)?;
         let entry = self

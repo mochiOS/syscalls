@@ -16,6 +16,55 @@ pub const MAX_MESSAGE_LEN: usize = 64 * 1024;
 /// uninterpreted integer.
 pub const CONTROL_HANDLE_KEY: u64 = u64::from_le_bytes(*b"POSXCTRL");
 
+const FD_HANDLE_KEY_PREFIX: u64 = 0x504f_5348_0000_0000;
+const FD_FLAGS_KEY_PREFIX: u64 = 0x504f_5346_0000_0000;
+const FD_RIGHTS_KEY_PREFIX: u64 = 0x504f_5352_0000_0000;
+const FD_KEY_INDEX_MASK: u64 = u32::MAX as u64;
+
+pub const fn fd_handle_key(fd: i32) -> Option<u64> {
+    if fd < 0 {
+        return None;
+    }
+    Some(FD_HANDLE_KEY_PREFIX | fd as u32 as u64)
+}
+
+pub const fn fd_flags_key(fd: i32) -> Option<u64> {
+    if fd < 0 {
+        return None;
+    }
+    Some(FD_FLAGS_KEY_PREFIX | fd as u32 as u64)
+}
+
+pub const fn fd_rights_key(fd: i32) -> Option<u64> {
+    if fd < 0 {
+        return None;
+    }
+    Some(FD_RIGHTS_KEY_PREFIX | fd as u32 as u64)
+}
+
+pub const fn encode_fd_flags(open_flags: u32, descriptor_flags: u32) -> u64 {
+    open_flags as u64 | ((descriptor_flags as u64) << 32)
+}
+
+pub const fn decode_fd_flags(value: u64) -> (u32, u32) {
+    (value as u32, (value >> 32) as u32)
+}
+
+pub const fn inherited_fd_from_key(key: u64) -> Option<i32> {
+    let prefix = key & !FD_KEY_INDEX_MASK;
+    if prefix != FD_HANDLE_KEY_PREFIX
+        && prefix != FD_FLAGS_KEY_PREFIX
+        && prefix != FD_RIGHTS_KEY_PREFIX
+    {
+        return None;
+    }
+    let index = (key & FD_KEY_INDEX_MASK) as u32;
+    if index > i32::MAX as u32 {
+        return None;
+    }
+    Some(index as i32)
+}
+
 pub const OP_PING: u16 = 1;
 pub const OP_SESSION_REGISTER: u16 = 2;
 pub const OP_SESSION_INFO: u16 = 3;
