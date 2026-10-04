@@ -2516,12 +2516,15 @@ pub extern "C" fn truncate(path: *const c_char, length: i64) -> c_int {
         return -1;
     }
     result_with_errno(
-        syscall_errno(syscall::raw_syscall2(
-            syscall::SyscallNumber::Truncate,
-            path as u64,
-            length as u64,
-        ))
-        .map(|_| 0),
+        (|| {
+            let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+            let client =
+                PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+            client
+                .truncate_at(StatAtBase::ProcessCwd, path, length as u64)
+                .map_err(map_posix_client_error)?;
+            Ok(0)
+        })(),
         -1,
     )
 }
