@@ -18,10 +18,25 @@ pub const CONTROL_HANDLE_KEY: u64 = u64::from_le_bytes(*b"POSXCTRL");
 
 pub const OP_PING: u16 = 1;
 pub const OP_SESSION_REGISTER: u16 = 2;
+pub const OP_SESSION_INFO: u16 = 3;
+pub const OP_UMASK_SET: u16 = 4;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
+pub const STATUS_ESRCH: i32 = -3;
 pub const STATUS_ENOSYS: i32 = -38;
+
+pub const SESSION_INFO_LEN: usize = 20;
+pub const UMASK_PAYLOAD_LEN: usize = 4;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionInfo {
+    pub real_uid: u32,
+    pub effective_uid: u32,
+    pub real_gid: u32,
+    pub effective_gid: u32,
+    pub umask: u32,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Header {
@@ -98,6 +113,46 @@ pub fn decode(input: &[u8]) -> Result<(Header, &[u8]), ProtocolError> {
         },
         &input[HEADER_LEN..total],
     ))
+}
+
+pub fn encode_session_info(info: SessionInfo, output: &mut [u8]) -> Result<(), ProtocolError> {
+    if output.len() < SESSION_INFO_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    put_u32(output, 0, info.real_uid);
+    put_u32(output, 4, info.effective_uid);
+    put_u32(output, 8, info.real_gid);
+    put_u32(output, 12, info.effective_gid);
+    put_u32(output, 16, info.umask);
+    Ok(())
+}
+
+pub fn decode_session_info(input: &[u8]) -> Result<SessionInfo, ProtocolError> {
+    if input.len() != SESSION_INFO_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(SessionInfo {
+        real_uid: get_u32(input, 0),
+        effective_uid: get_u32(input, 4),
+        real_gid: get_u32(input, 8),
+        effective_gid: get_u32(input, 12),
+        umask: get_u32(input, 16),
+    })
+}
+
+pub fn encode_umask(value: u32, output: &mut [u8]) -> Result<(), ProtocolError> {
+    if output.len() < UMASK_PAYLOAD_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    put_u32(output, 0, value);
+    Ok(())
+}
+
+pub fn decode_umask(input: &[u8]) -> Result<u32, ProtocolError> {
+    if input.len() != UMASK_PAYLOAD_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(get_u32(input, 0))
 }
 
 fn put_u16(output: &mut [u8], offset: usize, value: u16) {
