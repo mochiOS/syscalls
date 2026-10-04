@@ -2028,6 +2028,19 @@ pub extern "C" fn setgroups(_ngroups: c_int, _grouplist: *const c_int) -> c_int 
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn umask(mask: u32) -> u32 {
+    match PosixClient::from_syscall_launch_context()
+        .and_then(|client| client.set_umask(mask))
+    {
+        Ok(previous) => previous,
+        Err(error) => {
+            set_errno(map_posix_client_error(error));
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn getuid() -> u32 {
     PosixClient::from_syscall_launch_context()
         .and_then(|client| client.session_info())
