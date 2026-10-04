@@ -407,10 +407,16 @@ pub mod process {
 pub mod ipc {
     use super::syscall::{self, SysResult};
 
-    pub use mnu_abi::{IpcFileHandle, IpcFileHandles};
+    pub use mnu_abi::{IpcFileHandle, IpcFileHandles, IpcObjectHandle, IpcObjectHandles};
 
     pub fn create() -> SysResult<u64> {
         syscall::call2(syscall::SyscallNumber::IpcCreate, 0, 0)
+    }
+
+    /// Creates an IPC endpoint represented by a process-local object handle.
+    pub fn create_handle() -> SysResult<u32> {
+        let raw = syscall::call2(syscall::SyscallNumber::IpcCreateHandle, 0, 0)?;
+        u32::try_from(raw).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
     }
 
     pub fn send(endpoint: u64, bytes: &[u8]) -> SysResult<u64> {
@@ -429,6 +435,21 @@ pub mod ipc {
             bytes.as_ptr() as u64,
             bytes.len() as u64,
             handles as *const IpcFileHandles as u64,
+        )
+    }
+
+    /// Sends a message with rights-restricted process-local object handles.
+    pub fn send_object_handles(
+        endpoint: u64,
+        bytes: &[u8],
+        handles: &IpcObjectHandles,
+    ) -> SysResult<u64> {
+        syscall::call4(
+            syscall::SyscallNumber::IpcSendObjectHandles,
+            endpoint,
+            bytes.as_ptr() as u64,
+            bytes.len() as u64,
+            handles as *const IpcObjectHandles as u64,
         )
     }
 
@@ -467,6 +488,30 @@ pub mod ipc {
 
     pub fn try_wait_handles(buf: &mut [u8], handles: &mut IpcFileHandles) -> SysResult<u64> {
         wait_handles(0, buf, handles)
+    }
+
+    /// Waits for a message and installs attached object handles locally.
+    pub fn wait_object_handles(
+        endpoint: u64,
+        buf: &mut [u8],
+        handles: &mut IpcObjectHandles,
+    ) -> SysResult<u64> {
+        *handles = IpcObjectHandles::default();
+        syscall::call4(
+            syscall::SyscallNumber::IpcRecvObjectHandles,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+            handles as *mut IpcObjectHandles as u64,
+            endpoint,
+        )
+    }
+
+    /// Tries to receive a message with object handles without blocking.
+    pub fn try_wait_object_handles(
+        buf: &mut [u8],
+        handles: &mut IpcObjectHandles,
+    ) -> SysResult<u64> {
+        wait_object_handles(0, buf, handles)
     }
 
     pub fn endpoint_alive(endpoint: u64) -> bool {
@@ -532,6 +577,44 @@ pub mod ipc {
             page_count as u64,
             local_base,
         )
+    }
+}
+
+/// Operations on process-local kernel object handles.
+pub mod handle {
+    use super::syscall::{self, SysResult};
+
+    pub type Handle = u32;
+
+    pub use mnu_abi::{
+        HANDLE_RIGHT_ALL, HANDLE_RIGHT_DUPLICATE, HANDLE_RIGHT_MAP, HANDLE_RIGHT_READ,
+        HANDLE_RIGHT_RECEIVE, HANDLE_RIGHT_SEND, HANDLE_RIGHT_SIGNAL, HANDLE_RIGHT_TRANSFER,
+        HANDLE_RIGHT_WAIT, HANDLE_RIGHT_WRITE,
+    };
+
+    fn decode(raw: u64) -> SysResult<Handle> {
+        u32::try_from(raw).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+    }
+
+    pub fn close(handle: Handle) -> SysResult<()> {
+        syscall::call1(syscall::SyscallNumber::HandleClose, handle as u64).map(|_| ())
+    }
+
+    /// Duplicates a handle while monotonically reducing its rights.
+    pub fn duplicate(handle: Handle, requested_rights: u64) -> SysResult<Handle> {
+        decode(syscall::call2(
+            syscall::SyscallNumber::HandleDuplicate,
+            handle as u64,
+            requested_rights,
+        )?)
+    }
+
+    /// Looks up a handle inherited under an opaque launch-context key.
+    pub fn inherited(key: u64) -> SysResult<Handle> {
+        decode(syscall::call1(
+            syscall::SyscallNumber::LaunchHandleGet,
+            key,
+        )?)
     }
 }
 
