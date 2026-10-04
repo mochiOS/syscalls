@@ -730,6 +730,17 @@ pub mod handle {
         )?)
     }
 
+    /// Binds an already-owned handle to an opaque key in this process's
+    /// context. The binding neither duplicates the handle nor changes rights.
+    pub fn bind_context(key: u64, handle: Handle) -> SysResult<()> {
+        syscall::call2(
+            syscall::SyscallNumber::ContextHandleBind,
+            key,
+            handle as u64,
+        )
+        .map(|_| ())
+    }
+
     /// Retrieves an opaque value inherited through the process LaunchContext.
     pub fn inherited_value(key: u64) -> SysResult<u64> {
         let mut value = 0u64;
