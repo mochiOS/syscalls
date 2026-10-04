@@ -129,8 +129,11 @@ if [[ ! -f "$SYSROOT_STAMP" ||
 else
 	echo "[cache] reuse newlib SDK sysroot"
 fi
+cp -a "$USER_ROOT/libc-port/include/." "$SDK/sysroot/include/"
 
 "$SDK/bin/mochios-cc" -O2 "$USER_ROOT/libc-port/tests/hello.c" -o "$OUT_ROOT/hello/hello.elf"
 [[ -z "$(nm -u "$OUT_ROOT/hello/hello.elf")" ]] || { echo "unresolved symbols in hello.elf" >&2; exit 1; }
+"$SDK/bin/mochios-cc" -O2 "$USER_ROOT/libc-port/tests/poll.c" -o "$OUT_ROOT/hello/poll.elf"
+[[ -z "$(nm -u "$OUT_ROOT/hello/poll.elf")" ]] || { echo "unresolved symbols in poll.elf" >&2; exit 1; }
 readelf -h "$OUT_ROOT/hello/hello.elf"
 echo "[done] SDK: $SDK"

@@ -428,6 +428,24 @@ struct FdSet {
     bits: [u64; 1],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct PollFd {
+    fd: c_int,
+    events: i16,
+    revents: i16,
+}
+
+const POLLIN: i16 = 0x0001;
+const POLLPRI: i16 = 0x0002;
+const POLLOUT: i16 = 0x0004;
+const POLLERR: i16 = 0x0008;
+const POLLHUP: i16 = 0x0010;
+const POLLNVAL: i16 = 0x0020;
+const POLLRDNORM: i16 = 0x0040;
+const POLLRDBAND: i16 = 0x0080;
+const POLLWRBAND: i16 = 0x0100;
+
 #[derive(Clone, Copy)]
 struct SpawnSnapshot {
     path: *const c_char,
@@ -2140,6 +2158,15 @@ fn monotonic_nanoseconds() -> Result<u64, c_int> {
         .ok_or(EOVERFLOW)
 }
 
+fn deadline_after_nanoseconds(duration: u64) -> Result<u64, c_int> {
+    if duration == 0 {
+        return Ok(syscall::HANDLE_WAIT_POLL);
+    }
+    monotonic_nanoseconds()?
+        .checked_add(duration)
+        .ok_or(EOVERFLOW)
+}
+
 fn select_deadline(timeout: *const Timeval) -> Result<u64, c_int> {
     if timeout.is_null() {
         return Ok(syscall::HANDLE_WAIT_INFINITE);
@@ -2157,12 +2184,7 @@ fn select_deadline(timeout: *const Timeval) -> Result<u64, c_int> {
                 .and_then(|microseconds| seconds.checked_add(microseconds * 1_000))
         })
         .ok_or(EOVERFLOW)?;
-    if duration == 0 {
-        return Ok(syscall::HANDLE_WAIT_POLL);
-    }
-    monotonic_nanoseconds()?
-        .checked_add(duration)
-        .ok_or(EOVERFLOW)
+    deadline_after_nanoseconds(duration)
 }
 
 #[unsafe(no_mangle)]
@@ -2300,6 +2322,126 @@ pub extern "C" fn select(
             unsafe { exceptfds.write(FdSet { bits: [ready_except] }) };
         }
         Ok((ready_read | ready_write | ready_except).count_ones() as c_int)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: c_int) -> c_int {
+    let result = (|| {
+        let count = usize::try_from(nfds).map_err(|_| EINVAL)?;
+        if count > MAX_FDS {
+            return Err(EINVAL);
+        }
+        if count != 0 && fds.is_null() {
+            return Err(EFAULT);
+        }
+        let deadline = match timeout_ms {
+            -1 => syscall::HANDLE_WAIT_INFINITE,
+            value if value < -1 => return Err(EINVAL),
+            value => {
+                let duration = u64::try_from(value)
+                    .map_err(|_| EINVAL)?
+                    .checked_mul(1_000_000)
+                    .ok_or(EOVERFLOW)?;
+                deadline_after_nanoseconds(duration)?
+            }
+        };
+
+        const READ_EVENTS: i16 = POLLIN | POLLPRI | POLLRDNORM | POLLRDBAND;
+        const WRITE_EVENTS: i16 = POLLOUT | POLLWRBAND;
+        let mut pollfds = [PollFd::default(); MAX_FDS];
+        let mut items = [syscall::HandleWaitItem::default(); MAX_FDS];
+        let mut item_pollfds = [0usize; MAX_FDS];
+        let mut item_kinds = [FdKind::Unused; MAX_FDS];
+        let mut item_count = 0usize;
+        let mut immediately_ready = false;
+        for index in 0..count {
+            pollfds[index] = unsafe { fds.add(index).read() };
+            pollfds[index].revents = 0;
+            let fd = pollfds[index].fd;
+            if fd < 0 {
+                continue;
+            }
+            let Ok(entry) = with_fd_entry(fd) else {
+                pollfds[index].revents = POLLNVAL;
+                immediately_ready = true;
+                continue;
+            };
+            match entry.kind {
+                FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite => {
+                    let mut interests = syscall::HANDLE_SIGNAL_PEER_CLOSED;
+                    if entry.kind == FdKind::ObjectStreamRead
+                        && pollfds[index].events & READ_EVENTS != 0
+                    {
+                        interests |= syscall::HANDLE_SIGNAL_READABLE;
+                    }
+                    if entry.kind == FdKind::ObjectStreamWrite
+                        && pollfds[index].events & WRITE_EVENTS != 0
+                    {
+                        interests |= syscall::HANDLE_SIGNAL_WRITABLE;
+                    }
+                    items[item_count] = syscall::HandleWaitItem {
+                        handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                        reserved: 0,
+                        interests,
+                        observed: 0,
+                    };
+                    item_pollfds[item_count] = index;
+                    item_kinds[item_count] = entry.kind;
+                    item_count += 1;
+                }
+                _ => {
+                    pollfds[index].revents = pollfds[index].events & (READ_EVENTS | WRITE_EVENTS);
+                    immediately_ready |= pollfds[index].revents != 0;
+                }
+            }
+        }
+
+        let wait_deadline = if immediately_ready {
+            syscall::HANDLE_WAIT_POLL
+        } else {
+            deadline
+        };
+        match syscall_errno(syscall::raw_syscall3(
+            syscall::SyscallNumber::HandleWaitMany,
+            items.as_mut_ptr() as u64,
+            item_count as u64,
+            wait_deadline,
+        )) {
+            Ok(_) => {}
+            Err(errno) if errno == EAGAIN => {}
+            Err(errno) => return Err(errno),
+        }
+        for item_index in 0..item_count {
+            let poll_index = item_pollfds[item_index];
+            let observed = items[item_index].observed;
+            if observed & syscall::HANDLE_SIGNAL_READABLE != 0 {
+                pollfds[poll_index].revents |= pollfds[poll_index].events & READ_EVENTS;
+            }
+            if observed & syscall::HANDLE_SIGNAL_WRITABLE != 0 {
+                pollfds[poll_index].revents |= pollfds[poll_index].events & WRITE_EVENTS;
+            }
+            if observed & syscall::HANDLE_SIGNAL_PEER_CLOSED != 0 {
+                match item_kinds[item_index] {
+                    FdKind::ObjectStreamRead => {
+                        pollfds[poll_index].revents |= POLLHUP;
+                        pollfds[poll_index].revents |=
+                            pollfds[poll_index].events & READ_EVENTS;
+                    }
+                    FdKind::ObjectStreamWrite => pollfds[poll_index].revents |= POLLERR,
+                    _ => {}
+                }
+            }
+        }
+        let mut ready = 0usize;
+        for index in 0..count {
+            if pollfds[index].revents != 0 {
+                ready += 1;
+            }
+            unsafe { fds.add(index).write(pollfds[index]) };
+        }
+        c_int::try_from(ready).map_err(|_| EOVERFLOW)
     })();
     result_with_errno(result, -1)
 }
