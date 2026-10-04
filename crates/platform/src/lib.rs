@@ -991,39 +991,35 @@ pub mod service_ready;
 
 pub mod time {
     use super::syscall::{self, SysResult};
-    use mnu_abi::EOVERFLOW;
+    use mnu_abi::{ClockId, ClockInstant, EOVERFLOW};
 
     pub fn ticks() -> SysResult<u64> {
         syscall::call0(syscall::SyscallNumber::TimeNow)
     }
 
     pub fn utc_seconds() -> SysResult<u64> {
-        let mut timespec = [0i64; 2];
+        let mut instant = ClockInstant::default();
         syscall::call2(
-            syscall::SyscallNumber::ClockGettime,
-            0,
-            timespec.as_mut_ptr() as u64,
+            syscall::SyscallNumber::ClockRead,
+            ClockId::Realtime as u64,
+            (&mut instant as *mut ClockInstant) as u64,
         )?;
-        u64::try_from(timespec[0]).map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))
+        Ok(instant.seconds)
     }
 
     pub fn monotonic_milliseconds() -> SysResult<u64> {
-        let mut timespec = [0i64; 2];
+        let mut instant = ClockInstant::default();
         syscall::call2(
-            syscall::SyscallNumber::ClockGettime,
-            1,
-            timespec.as_mut_ptr() as u64,
+            syscall::SyscallNumber::ClockRead,
+            ClockId::Monotonic as u64,
+            (&mut instant as *mut ClockInstant) as u64,
         )?;
-        let seconds = u64::try_from(timespec[0])
-            .map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))?;
-        let nanoseconds = u64::try_from(timespec[1])
-            .map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))?;
-        if nanoseconds >= 1_000_000_000 {
+        if instant.nanoseconds >= 1_000_000_000 || instant.reserved != 0 {
             return Err(syscall::SysError::from_raw(syscall::EIO as i64));
         }
-        seconds
+        instant.seconds
             .checked_mul(1_000)
-            .and_then(|milliseconds| milliseconds.checked_add(nanoseconds / 1_000_000))
+            .and_then(|milliseconds| milliseconds.checked_add(u64::from(instant.nanoseconds) / 1_000_000))
             .ok_or_else(|| syscall::SysError::from_raw(EOVERFLOW as i64))
     }
 }

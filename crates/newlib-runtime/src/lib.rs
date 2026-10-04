@@ -69,6 +69,7 @@ const EPIPE: c_int = 32;
 const ERANGE: c_int = 34;
 const ENAMETOOLONG: c_int = 36;
 const ENOSYS: c_int = 38;
+const EOVERFLOW: c_int = 75;
 
 type InitFn = unsafe extern "C" fn();
 type CLong = i64;
@@ -2965,23 +2966,36 @@ pub extern "C" fn clock_gettime(clock_id: c_int, tp: *mut Timespec) -> c_int {
         return -1;
     }
 
-    let kernel_clock_id = match clock_id {
-        0 | 5 | 8 => 0,
-        1 | 4 | 6 | 7 | 9 => 1,
-        2 => 2,
-        3 => 3,
+    let native_clock = match mochios_posix_client::time::classify_clock_id(clock_id) {
+        Some(mochios_posix_client::time::ClockKind::Realtime) => mnu_abi::ClockId::Realtime,
+        Some(mochios_posix_client::time::ClockKind::Monotonic) => mnu_abi::ClockId::Monotonic,
+        Some(mochios_posix_client::time::ClockKind::ProcessCpu) => mnu_abi::ClockId::ProcessCpu,
+        Some(mochios_posix_client::time::ClockKind::ThreadCpu) => mnu_abi::ClockId::ThreadCpu,
         _ => {
             set_errno(EINVAL);
             return -1;
         }
     };
 
+    let mut instant = mnu_abi::ClockInstant::default();
     let result = syscall_errno(syscall::raw_syscall2(
-        syscall::SyscallNumber::ClockGettime,
-        kernel_clock_id,
-        tp as u64,
+        syscall::SyscallNumber::ClockRead,
+        native_clock as u64,
+        (&mut instant as *mut mnu_abi::ClockInstant) as u64,
     ))
-    .map(|_| 0);
+    .and_then(|_| {
+        if instant.nanoseconds >= 1_000_000_000 || instant.reserved != 0 {
+            return Err(EIO);
+        }
+        let seconds = i64::try_from(instant.seconds).map_err(|_| EOVERFLOW)?;
+        unsafe {
+            tp.write(Timespec {
+                tv_sec: seconds,
+                tv_nsec: i64::from(instant.nanoseconds),
+            });
+        }
+        Ok(0)
+    });
     result_with_errno(result, -1)
 }
 

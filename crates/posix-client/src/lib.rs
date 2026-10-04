@@ -9,6 +9,7 @@ use mochios_posix_protocol as protocol;
 
 #[cfg(feature = "fd-table")]
 pub mod fd;
+pub mod time;
 
 pub trait Transport {
     type Error;
