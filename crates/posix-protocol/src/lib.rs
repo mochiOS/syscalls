@@ -93,11 +93,14 @@ pub const OP_CHOWN_AT: u16 = 25;
 pub const OP_FCHMOD: u16 = 26;
 pub const OP_FCHOWN: u16 = 27;
 pub const OP_PROCESS_FORKED: u16 = 28;
+pub const OP_WAIT_CHILD: u16 = 29;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
 pub const STATUS_ENOENT: i32 = -2;
 pub const STATUS_ESRCH: i32 = -3;
+pub const STATUS_ECHILD: i32 = -10;
+pub const STATUS_EAGAIN: i32 = -11;
 pub const STATUS_ENOSYS: i32 = -38;
 
 pub const SESSION_INFO_LEN: usize = 20;
@@ -114,6 +117,8 @@ pub const TRUNCATE_AT_HEADER_LEN: usize = 16;
 pub const SYMLINK_AT_HEADER_LEN: usize = 16;
 pub const CHOWN_AT_HEADER_LEN: usize = 20;
 pub const FILE_STATUS_LEN: usize = 112;
+pub const WAIT_REQUEST_LEN: usize = 16;
+pub const WAIT_RESULT_LEN: usize = 16;
 pub const MAX_PATH_LEN: usize = 4096;
 pub const MAX_CONTROL_PAYLOAD_LEN: usize = RENAME_AT_HEADER_LEN + MAX_PATH_LEN * 2;
 pub const CONTROL_MESSAGE_LEN: usize = HEADER_LEN + MAX_CONTROL_PAYLOAD_LEN;
@@ -154,6 +159,9 @@ pub const MUTABLE_STATUS_FLAGS: u32 = OPEN_APPEND | OPEN_NONBLOCK;
 
 pub const UNLINK_REMOVE_DIRECTORY: u32 = 1 << 0;
 pub const UNLINK_FLAGS_ALL: u32 = UNLINK_REMOVE_DIRECTORY;
+
+pub const WAIT_NOHANG: u32 = 1 << 0;
+pub const WAIT_OPTIONS_ALL: u32 = WAIT_NOHANG;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -259,6 +267,18 @@ pub struct SessionInfo {
     pub real_gid: u32,
     pub effective_gid: u32,
     pub umask: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WaitRequest {
+    pub selector: i64,
+    pub options: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WaitResult {
+    pub process_id: u64,
+    pub status: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -391,6 +411,52 @@ pub fn decode_credential_id(input: &[u8]) -> Result<u32, ProtocolError> {
         return Err(ProtocolError::InvalidLength);
     }
     Ok(get_u32(input, 0))
+}
+
+pub fn encode_wait_request(
+    request: WaitRequest,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < WAIT_REQUEST_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    output[..WAIT_REQUEST_LEN].fill(0);
+    put_u64(output, 0, request.selector as u64);
+    put_u32(output, 8, request.options);
+    Ok(())
+}
+
+pub fn decode_wait_request(input: &[u8]) -> Result<WaitRequest, ProtocolError> {
+    if input.len() != WAIT_REQUEST_LEN || get_u32(input, 12) != 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(WaitRequest {
+        selector: get_u64(input, 0) as i64,
+        options: get_u32(input, 8),
+    })
+}
+
+pub fn encode_wait_result(
+    result: WaitResult,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < WAIT_RESULT_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    output[..WAIT_RESULT_LEN].fill(0);
+    put_u64(output, 0, result.process_id);
+    put_u32(output, 8, result.status);
+    Ok(())
+}
+
+pub fn decode_wait_result(input: &[u8]) -> Result<WaitResult, ProtocolError> {
+    if input.len() != WAIT_RESULT_LEN || get_u32(input, 12) != 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(WaitResult {
+        process_id: get_u64(input, 0),
+        status: get_u32(input, 8),
+    })
 }
 
 pub fn encode_file_length(value: u64, output: &mut [u8]) -> Result<(), ProtocolError> {

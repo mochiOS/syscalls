@@ -154,6 +154,27 @@ impl<T: Transport> Client<T> {
         protocol::decode_session_info(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    pub fn wait_child(
+        &self,
+        selector: i64,
+        options: u32,
+    ) -> Result<protocol::WaitResult, ClientError<T::Error>> {
+        let mut request = [0u8; protocol::WAIT_REQUEST_LEN];
+        protocol::encode_wait_request(
+            protocol::WaitRequest { selector, options },
+            &mut request,
+        )
+        .map_err(ClientError::Protocol)?;
+        let mut response = [0u8; protocol::WAIT_RESULT_LEN];
+        let length = self.request(
+            protocol::OP_WAIT_CHILD,
+            0,
+            &request,
+            &mut response,
+        )?;
+        protocol::decode_wait_result(&response[..length]).map_err(ClientError::Protocol)
+    }
+
     /// Updates the process umask and returns its previous value, matching the
     /// atomic state transition required by POSIX `umask()`.
     pub fn set_umask(&self, mask: u32) -> Result<u32, ClientError<T::Error>> {
