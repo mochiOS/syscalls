@@ -2967,11 +2967,12 @@ pub extern "C" fn _mkdir(path: *const c_char, mode: c_int) -> c_int {
         return -1;
     }
     let result = (|| {
-        let _ = syscall_errno(syscall::raw_syscall2(
-            syscall::SyscallNumber::FileCreateDir,
-            path as u64,
-            mode as u64,
-        ))?;
+        let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+        let client =
+            PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+        client
+            .mkdir_at(OpenAtBase::ProcessCwd, mode as u32, path)
+            .map_err(map_posix_client_error)?;
         Ok(0)
     })();
     result_with_errno(result, -1)
@@ -2980,6 +2981,38 @@ pub extern "C" fn _mkdir(path: *const c_char, mode: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn mkdir(path: *const c_char, mode: c_int) -> c_int {
     _mkdir(path, mode)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: c_int) -> c_int {
+    if path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    let result = (|| {
+        let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+        let base = if path.starts_with('/') {
+            OpenAtBase::ProcessRoot
+        } else if dirfd == -2 || i64::from(dirfd) == AT_FDCWD {
+            OpenAtBase::ProcessCwd
+        } else {
+            let entry = with_fd_entry(dirfd)?;
+            if entry.kind != FdKind::ObjectDirectory {
+                return Err(ENOTDIR);
+            }
+            OpenAtBase::Directory(ObjectHandleAttachment {
+                handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                rights: entry.rights,
+            })
+        };
+        let client =
+            PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+        client
+            .mkdir_at(base, mode as u32, path)
+            .map_err(map_posix_client_error)?;
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]

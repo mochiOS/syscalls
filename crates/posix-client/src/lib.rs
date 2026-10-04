@@ -473,6 +473,49 @@ impl<T: ObjectTransport> Client<T> {
         self.file_operation(protocol::OP_FSETFL, &payload, file)
     }
 
+    pub fn mkdir_at(
+        &self,
+        base: OpenAtBase<T::Handle>,
+        mode: u32,
+        path: &str,
+    ) -> Result<(), ClientError<T::Error>> {
+        let (base, directory) = match base {
+            OpenAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
+            OpenAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
+            OpenAtBase::Directory(handle) => {
+                (protocol::OpenBase::AttachedDirectory, Some(handle))
+            }
+        };
+        let mut payload = [0u8; protocol::OPEN_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
+        let payload_len = protocol::encode_open_at(
+            protocol::OpenAtRequest {
+                base,
+                options: 0,
+                mode,
+                path,
+            },
+            &mut payload,
+        )
+        .map_err(ClientError::Protocol)?;
+        let mut handles = ObjectHandles::new();
+        if let Some(directory) = directory {
+            handles
+                .push(directory)
+                .map_err(|_| ClientError::RequestTooLarge)?;
+        }
+        self.request_with_handles(
+            protocol::OP_MKDIR_AT,
+            0,
+            &payload[..payload_len],
+            &mut [],
+            &mut handles,
+        )?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(())
+    }
+
     fn file_operation(
         &self,
         opcode: u16,

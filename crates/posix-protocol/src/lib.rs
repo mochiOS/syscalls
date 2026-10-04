@@ -82,6 +82,7 @@ pub const OP_FTRUNCATE: u16 = 14;
 pub const OP_FSYNC: u16 = 15;
 pub const OP_FGETFL: u16 = 16;
 pub const OP_FSETFL: u16 = 17;
+pub const OP_MKDIR_AT: u16 = 18;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
