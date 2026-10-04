@@ -11,7 +11,10 @@ use mochios_capability_protocol::{
     CapabilityDecision, CapabilityExecutableIdentity, CapabilityPromptRequest,
     CapabilityResourceDescriptor, MAX_CAPABILITY_NAME_LEN, MAX_REASON_LEN,
 };
+use mochios_filesystem_protocol as filesystem_protocol;
 use mochios_posix_client::{Client as PosixClient, ClientError as PosixClientError, StatAtBase};
+use mochios_posix_client::{ObjectHandleAttachment, OpenAtBase};
+use mochios_posix_protocol as posix_protocol;
 use mochios_posix_protocol::{FileStatus as PosixFileStatus, STAT_NOFOLLOW};
 
 const PAGE_SIZE: usize = 4096;
@@ -28,7 +31,7 @@ const SC_NPROCESSORS_ONLN: c_int = 10;
 const SC_THREAD_STACK_MIN: c_int = 39;
 const SC_GETPW_R_SIZE_MAX: c_int = 51;
 const SC_HOST_NAME_MAX: c_int = 65;
-const O_CLOEXEC: c_int = 0x80000;
+const O_CLOEXEC: c_int = 0x40000;
 const FD_CLOEXEC: c_int = 1;
 const F_GETFD: c_int = 1;
 const F_SETFD: c_int = 2;
@@ -60,6 +63,7 @@ const EEXIST: c_int = 17;
 const ENOTDIR: c_int = 20;
 const EISDIR: c_int = 21;
 const EINVAL: c_int = 22;
+const EMFILE: c_int = 24;
 const ESPIPE: c_int = 29;
 const EPIPE: c_int = 32;
 const ERANGE: c_int = 34;
@@ -198,7 +202,9 @@ enum FdKind {
     Stdin = 1,
     Stdout = 2,
     Stderr = 3,
-    File = 4,
+    LegacyFile = 4,
+    ObjectFile = 5,
+    ObjectDirectory = 6,
 }
 
 #[derive(Clone, Copy)]
@@ -206,6 +212,7 @@ enum FdKind {
 struct FdEntry {
     in_use: bool,
     lower_handle: u64,
+    rights: u64,
     kind: FdKind,
     open_flags: c_int,
     fd_flags: c_int,
@@ -218,6 +225,7 @@ impl FdEntry {
         Self {
             in_use: false,
             lower_handle: 0,
+            rights: 0,
             kind: FdKind::Unused,
             open_flags: 0,
             fd_flags: 0,
@@ -230,6 +238,7 @@ impl FdEntry {
         Self {
             in_use: true,
             lower_handle: fd,
+            rights: 0,
             kind,
             open_flags: 0,
             fd_flags: 0,
@@ -969,32 +978,77 @@ fn open_requires_write_access(flags: c_int) -> bool {
     access_mode != 0 || (flags & (0x0008 | 0x0200 | 0x0400)) != 0
 }
 
-fn kernel_open_flags(flags: c_int) -> u64 {
-    const NEWLIB_O_APPEND: u64 = 0x0008;
-    const NEWLIB_O_CREAT: u64 = 0x0200;
-    const NEWLIB_O_TRUNC: u64 = 0x0400;
-    const NEWLIB_O_EXCL: u64 = 0x0800;
-    const NEWLIB_MASK: u64 = NEWLIB_O_APPEND | NEWLIB_O_CREAT | NEWLIB_O_TRUNC | NEWLIB_O_EXCL;
-    const KERNEL_O_CREAT: u64 = 0o100;
-    const KERNEL_O_EXCL: u64 = 0o200;
-    const KERNEL_O_TRUNC: u64 = 0o1000;
-    const KERNEL_O_APPEND: u64 = 0o2000;
+fn posix_open_options(flags: c_int) -> Result<u32, c_int> {
+    const O_APPEND: c_int = 0x0008;
+    const O_CREAT: c_int = 0x0200;
+    const O_TRUNC: c_int = 0x0400;
+    const O_EXCL: c_int = 0x0800;
+    const O_NONBLOCK: c_int = 0x4000;
+    const O_NOFOLLOW: c_int = 0x100000;
+    const O_DIRECTORY: c_int = 0x200000;
+    const SUPPORTED: c_int =
+        0x3 | O_APPEND | O_CREAT | O_TRUNC | O_EXCL | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW
+            | O_DIRECTORY;
+    if flags & !SUPPORTED != 0 {
+        return Err(EINVAL);
+    }
+    let mut options = match flags & 0x3 {
+        0 => posix_protocol::OPEN_READ,
+        1 => posix_protocol::OPEN_WRITE,
+        2 => posix_protocol::OPEN_READ | posix_protocol::OPEN_WRITE,
+        _ => return Err(EINVAL),
+    };
+    for (source, target) in [
+        (O_APPEND, posix_protocol::OPEN_APPEND),
+        (O_CREAT, posix_protocol::OPEN_CREATE),
+        (O_TRUNC, posix_protocol::OPEN_TRUNCATE),
+        (O_EXCL, posix_protocol::OPEN_EXCLUSIVE),
+        (O_NONBLOCK, posix_protocol::OPEN_NONBLOCK),
+        (O_NOFOLLOW, posix_protocol::OPEN_NOFOLLOW),
+        (O_DIRECTORY, posix_protocol::OPEN_DIRECTORY),
+    ] {
+        if flags & source != 0 {
+            options |= target;
+        }
+    }
+    Ok(options)
+}
 
-    let input = flags as u64;
-    let mut output = input & !NEWLIB_MASK;
-    if (input & NEWLIB_O_APPEND) != 0 {
-        output |= KERNEL_O_APPEND;
+fn open_posix_object(path: &str, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
+    let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+    let opened = client
+        .open_at(
+            OpenAtBase::ProcessCwd,
+            posix_open_options(flags)?,
+            mode as u32,
+            path,
+        )
+        .map_err(map_posix_client_error)?;
+    let status = match client.fstat(opened) {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = syscall_errno(syscall::raw_syscall1(
+                syscall::SyscallNumber::HandleClose,
+                u64::from(opened.handle),
+            ));
+            return Err(map_posix_client_error(error));
+        }
+    };
+    let kind = if status.mode & 0o170000 == 0o040000 {
+        FdKind::ObjectDirectory
+    } else {
+        FdKind::ObjectFile
+    };
+    match allocate_object_fd(opened.handle, opened.rights, kind, flags) {
+        Ok(fd) => Ok(fd),
+        Err(error) => {
+            let _ = syscall_errno(syscall::raw_syscall1(
+                syscall::SyscallNumber::HandleClose,
+                u64::from(opened.handle),
+            ));
+            Err(error)
+        }
     }
-    if (input & NEWLIB_O_CREAT) != 0 {
-        output |= KERNEL_O_CREAT;
-    }
-    if (input & NEWLIB_O_TRUNC) != 0 {
-        output |= KERNEL_O_TRUNC;
-    }
-    if (input & NEWLIB_O_EXCL) != 0 {
-        output |= KERNEL_O_EXCL;
-    }
-    output
 }
 
 fn retry_open_with_prompt(path: *const c_char, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
@@ -1017,22 +1071,7 @@ fn retry_open_with_prompt(path: *const c_char, flags: c_int, mode: c_int) -> Res
         | CapabilityDecision::AllowForProcess
         | CapabilityDecision::AllowPersistently
         | CapabilityDecision::AllowAllUserGrantable => {
-            let lower = syscall_errno(syscall::raw_syscall4(
-                syscall::SyscallNumber::FileOpenAt,
-                AT_FDCWD as u64,
-                path as u64,
-                kernel_open_flags(flags),
-                mode as u64,
-            ))?;
-            let fd = allocate_fd(lower, flags)?;
-            let offset = syscall_errno(syscall::raw_syscall3(
-                syscall::SyscallNumber::FileSeek,
-                lower,
-                0,
-                SEEK_CUR as u64,
-            ))
-            .unwrap_or(0);
-            store_position(fd, offset);
+            let fd = open_posix_object(path_str, flags, mode)?;
             if decision == CapabilityDecision::AllowOnce {
                 drop_capability(capability);
             }
@@ -1091,6 +1130,7 @@ fn restore_fd_state_from_env(envp: *mut *mut c_char, fds: &mut [FdEntry; MAX_FDS
             return false;
         };
         let fd_flags = fields.next().and_then(parse_decimal).unwrap_or(0);
+        let rights = fields.next().and_then(parse_decimal).unwrap_or(0);
         if fd >= MAX_FDS {
             return false;
         }
@@ -1098,12 +1138,15 @@ fn restore_fd_state_from_env(envp: *mut *mut c_char, fds: &mut [FdEntry; MAX_FDS
             1 => FdKind::Stdin,
             2 => FdKind::Stdout,
             3 => FdKind::Stderr,
-            4 => FdKind::File,
+            4 => FdKind::LegacyFile,
+            5 => FdKind::ObjectFile,
+            6 => FdKind::ObjectDirectory,
             _ => return false,
         };
         fds[fd] = FdEntry {
             in_use: true,
             lower_handle: lower_handle as u64,
+            rights: rights as u64,
             kind,
             open_flags: open_flags as c_int,
             fd_flags: fd_flags as c_int,
@@ -1145,7 +1188,9 @@ fn serialize_fd_state(
             FdKind::Stdin => 1usize,
             FdKind::Stdout => 2usize,
             FdKind::Stderr => 3usize,
-            FdKind::File => 4usize,
+            FdKind::LegacyFile => 4usize,
+            FdKind::ObjectFile => 5usize,
+            FdKind::ObjectDirectory => 6usize,
         };
         push_decimal(fd, encoded, &mut length)?;
         push_byte(encoded, &mut length, b',')?;
@@ -1160,6 +1205,8 @@ fn serialize_fd_state(
         push_decimal(entry.close_owned as usize, encoded, &mut length)?;
         push_byte(encoded, &mut length, b',')?;
         push_decimal(entry.fd_flags.max(0) as usize, encoded, &mut length)?;
+        push_byte(encoded, &mut length, b',')?;
+        push_decimal(entry.rights as usize, encoded, &mut length)?;
         push_byte(encoded, &mut length, b';')?;
     }
     push_byte(encoded, &mut length, 0)?;
@@ -1339,18 +1386,32 @@ fn duplicate_live_fd(old_fd: c_int, new_fd: c_int) -> Result<c_int, c_int> {
     if state.fds[new_fd as usize].in_use {
         let existing = state.fds[new_fd as usize];
         if existing.close_owned {
+            let number = match existing.kind {
+                FdKind::ObjectFile | FdKind::ObjectDirectory => {
+                    syscall::SyscallNumber::HandleClose
+                }
+                _ => syscall::SyscallNumber::FileClose,
+            };
             let _ = syscall_errno(syscall::raw_syscall1(
-                syscall::SyscallNumber::FileClose,
+                number,
                 existing.lower_handle,
             ));
         }
         state.fds[new_fd as usize] = FdEntry::unused();
     }
 
-    let lower = syscall_errno(syscall::raw_syscall1(
-        syscall::SyscallNumber::Dup,
-        old_entry.lower_handle,
-    ))?;
+    let lower = if matches!(old_entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
+        syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::HandleDuplicate,
+            old_entry.lower_handle,
+            old_entry.rights,
+        ))?
+    } else {
+        syscall_errno(syscall::raw_syscall1(
+            syscall::SyscallNumber::Dup,
+            old_entry.lower_handle,
+        ))?
+    };
     let mut new_entry = old_entry;
     new_entry.lower_handle = lower;
     new_entry.fd_flags &= !FD_CLOEXEC;
@@ -1541,13 +1602,32 @@ fn with_fd_entry(fd: c_int) -> Result<FdEntry, c_int> {
 }
 
 fn allocate_fd(lower_handle: u64, flags: c_int) -> Result<c_int, c_int> {
+    allocate_fd_entry(lower_handle, 0, FdKind::LegacyFile, flags)
+}
+
+fn allocate_object_fd(
+    handle: u32,
+    rights: u64,
+    kind: FdKind,
+    flags: c_int,
+) -> Result<c_int, c_int> {
+    allocate_fd_entry(u64::from(handle), rights, kind, flags)
+}
+
+fn allocate_fd_entry(
+    lower_handle: u64,
+    rights: u64,
+    kind: FdKind,
+    flags: c_int,
+) -> Result<c_int, c_int> {
     let state = unsafe { state_mut() };
     for index in 3..MAX_FDS {
         if !state.fds[index].in_use {
             state.fds[index] = FdEntry {
                 in_use: true,
                 lower_handle,
-                kind: FdKind::File,
+                rights,
+                kind,
                 open_flags: flags,
                 fd_flags: if flags & O_CLOEXEC != 0 {
                     FD_CLOEXEC
@@ -1560,7 +1640,7 @@ fn allocate_fd(lower_handle: u64, flags: c_int) -> Result<c_int, c_int> {
             return Ok(index as c_int);
         }
     }
-    Err(ENOMEM)
+    Err(EMFILE)
 }
 
 fn store_position(fd: c_int, position: u64) {
@@ -1585,7 +1665,9 @@ fn advance_position(fd: c_int, amount: u64) {
 fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result<isize, c_int> {
     let number = match entry.kind {
         FdKind::Stdout | FdKind::Stderr => syscall::SyscallNumber::Write,
-        FdKind::File => syscall::SyscallNumber::FileWrite,
+        FdKind::LegacyFile => syscall::SyscallNumber::FileWrite,
+        FdKind::ObjectFile => syscall::SyscallNumber::HandleWrite,
+        FdKind::ObjectDirectory => return Err(EISDIR),
         _ => return Err(EBADF),
     };
     let written = syscall_errno(syscall::raw_syscall3(
@@ -1605,7 +1687,9 @@ fn syscall_read(
 ) -> Result<isize, c_int> {
     let number = match entry.kind {
         FdKind::Stdin => syscall::SyscallNumber::Read,
-        FdKind::File => syscall::SyscallNumber::FileRead,
+        FdKind::LegacyFile => syscall::SyscallNumber::FileRead,
+        FdKind::ObjectFile => syscall::SyscallNumber::HandleRead,
+        FdKind::ObjectDirectory => return Err(EISDIR),
         _ => return Err(EBADF),
     };
     let read = syscall_errno(syscall::raw_syscall3(
@@ -1614,7 +1698,7 @@ fn syscall_read(
         buffer as u64,
         length as u64,
     ))?;
-    if matches!(entry.kind, FdKind::File) {
+    if matches!(entry.kind, FdKind::LegacyFile) {
         advance_position(fd, read);
     }
     Ok(read as isize)
@@ -1639,11 +1723,16 @@ fn read_u64_ne(bytes: &[u8], offset: usize) -> u64 {
 
 fn refill_dir_stream(stream: &mut DirStream) -> Result<bool, c_int> {
     let entry = with_fd_entry(stream.fd)?;
-    if entry.kind != FdKind::File {
+    if !matches!(entry.kind, FdKind::LegacyFile | FdKind::ObjectDirectory) {
         return Err(EBADF);
     }
+    let number = match entry.kind {
+        FdKind::LegacyFile => syscall::SyscallNumber::FileReadDir,
+        FdKind::ObjectDirectory => syscall::SyscallNumber::HandleRead,
+        _ => return Err(EBADF),
+    };
     let read = syscall_errno(syscall::raw_syscall3(
-        syscall::SyscallNumber::FileReadDir,
+        number,
         entry.lower_handle,
         stream.buffer.as_mut_ptr() as u64,
         stream.buffer.len() as u64,
@@ -1659,27 +1748,32 @@ fn next_dirent(stream: &mut DirStream) -> Result<Option<NewlibDirent>, c_int> {
             return Ok(None);
         }
 
+        let entry = with_fd_entry(stream.fd)?;
         let offset = stream.buffer_offset;
-        if stream.buffer_len.saturating_sub(offset) < 19 {
-            return Err(EIO);
-        }
-
         let record = &stream.buffer[offset..stream.buffer_len];
-        let reclen = read_u16_ne(record, 16) as usize;
-        if reclen < 19 || offset.saturating_add(reclen) > stream.buffer_len {
-            return Err(EIO);
-        }
-
-        let inode = read_u64_ne(record, 0);
-        let dtype = record[18];
-        let name_start = offset + 19;
-        let name_end = offset + reclen;
-        let name = &stream.buffer[name_start..name_end];
-        let nul = name
-            .iter()
-            .position(|byte| *byte == 0)
-            .unwrap_or(name.len());
-        let copy_len = core::cmp::min(nul, DIRENT_NAME_MAX - 1);
+        let (inode, dtype, name, consumed) = if entry.kind == FdKind::ObjectDirectory {
+            let (header, name, consumed) =
+                filesystem_protocol::decode_dir_entry(record).map_err(|_| EIO)?;
+            let dtype = match header.kind {
+                filesystem_protocol::NODE_TYPE_REGULAR => 8,
+                filesystem_protocol::NODE_TYPE_DIRECTORY => 4,
+                filesystem_protocol::NODE_TYPE_SYMLINK => 10,
+                _ => 0,
+            };
+            (header.node_id, dtype, name, consumed)
+        } else {
+            if record.len() < 19 {
+                return Err(EIO);
+            }
+            let reclen = read_u16_ne(record, 16) as usize;
+            if reclen < 19 || reclen > record.len() {
+                return Err(EIO);
+            }
+            let name = &record[19..reclen];
+            let nul = name.iter().position(|byte| *byte == 0).unwrap_or(name.len());
+            (read_u64_ne(record, 0), record[18], &name[..nul], reclen)
+        };
+        let copy_len = core::cmp::min(name.len(), DIRENT_NAME_MAX - 1);
 
         let mut out = NewlibDirent::empty();
         out.d_ino = inode;
@@ -1688,7 +1782,7 @@ fn next_dirent(stream: &mut DirStream) -> Result<Option<NewlibDirent>, c_int> {
             out.d_name[index] = name[index] as c_char;
         }
 
-        stream.buffer_offset += reclen;
+        stream.buffer_offset += consumed;
         return Ok(Some(out));
     }
 }
@@ -1850,23 +1944,8 @@ pub extern "C" fn _open(path: *const c_char, flags: c_int, mode: c_int) -> c_int
         return -1;
     }
     let result = (|| {
-        let lower = syscall_errno(syscall::raw_syscall4(
-            syscall::SyscallNumber::FileOpenAt,
-            AT_FDCWD as u64,
-            path as u64,
-            kernel_open_flags(flags),
-            mode as u64,
-        ))?;
-        let fd = allocate_fd(lower, flags)?;
-        let offset = syscall_errno(syscall::raw_syscall3(
-            syscall::SyscallNumber::FileSeek,
-            lower,
-            0,
-            SEEK_CUR as u64,
-        ))
-        .unwrap_or(0);
-        store_position(fd, offset);
-        Ok(fd)
+        let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+        open_posix_object(path, flags, mode)
     })();
     match result {
         Ok(fd) => fd,
@@ -1890,10 +1969,13 @@ pub extern "C" fn _close(fd: c_int) -> c_int {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
         if entry.close_owned {
-            let _ = syscall_errno(syscall::raw_syscall1(
-                syscall::SyscallNumber::FileClose,
-                entry.lower_handle,
-            ))?;
+            let number = match entry.kind {
+                FdKind::ObjectFile | FdKind::ObjectDirectory => {
+                    syscall::SyscallNumber::HandleClose
+                }
+                _ => syscall::SyscallNumber::FileClose,
+            };
+            let _ = syscall_errno(syscall::raw_syscall1(number, entry.lower_handle))?;
         }
         unsafe {
             state_mut().fds[fd as usize] = FdEntry::unused();
@@ -1992,12 +2074,6 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
         match cmd {
             F_GETFD => Ok(entry.fd_flags),
             F_SETFD => {
-                let _ = syscall_errno(syscall::raw_syscall3(
-                    syscall::SyscallNumber::Fcntl,
-                    entry.lower_handle,
-                    F_SETFD as u64,
-                    (arg & FD_CLOEXEC) as u64,
-                ))?;
                 unsafe {
                     state_mut().fds[fd as usize].fd_flags = arg & FD_CLOEXEC;
                 }
@@ -2005,6 +2081,9 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
             }
             F_GETFL => Ok(entry.open_flags),
             F_SETFL => {
+                if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
+                    return Err(ENOSYS);
+                }
                 unsafe {
                     state_mut().fds[fd as usize].open_flags = arg;
                 }
@@ -2256,14 +2335,29 @@ pub extern "C" fn readdir(dirp: *mut c_void) -> *mut NewlibDirent {
 pub extern "C" fn _lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if entry.kind != FdKind::File {
+        if !matches!(entry.kind, FdKind::LegacyFile | FdKind::ObjectFile) {
             return Err(ESPIPE);
         }
+        let number = if entry.kind == FdKind::ObjectFile {
+            syscall::SyscallNumber::HandleSeek
+        } else {
+            syscall::SyscallNumber::FileSeek
+        };
+        let basis = if entry.kind == FdKind::ObjectFile {
+            match whence {
+                0 => syscall::HANDLE_SEEK_START,
+                1 => syscall::HANDLE_SEEK_CURRENT,
+                2 => syscall::HANDLE_SEEK_END,
+                _ => return Err(EINVAL),
+            }
+        } else {
+            whence as u64
+        };
         let next = syscall_errno(syscall::raw_syscall3(
-            syscall::SyscallNumber::FileSeek,
+            number,
             entry.lower_handle,
             offset as u64,
-            whence as u64,
+            basis,
         ))?;
         store_position(fd, next);
         Ok(next as i64)
@@ -2286,8 +2380,14 @@ fn sync_file_descriptor(
     number: syscall::SyscallNumber,
 ) -> Result<c_int, c_int> {
         let entry = with_fd_entry(fd)?;
-        if !matches!(entry.kind, FdKind::File) {
+        if !matches!(
+            entry.kind,
+            FdKind::LegacyFile | FdKind::ObjectFile | FdKind::ObjectDirectory
+        ) {
             return Err(EBADF);
+        }
+        if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
+            return Err(ENOSYS);
         }
         syscall_errno(syscall::raw_syscall1(number, entry.lower_handle))?;
         Ok(0)
@@ -2314,8 +2414,11 @@ pub extern "C" fn _ftruncate(fd: c_int, length: i64) -> c_int {
     }
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if !matches!(entry.kind, FdKind::File) {
+        if !matches!(entry.kind, FdKind::LegacyFile | FdKind::ObjectFile) {
             return Err(EBADF);
+        }
+        if entry.kind == FdKind::ObjectFile {
+            return Err(ENOSYS);
         }
         syscall_errno(syscall::raw_syscall2(
             syscall::SyscallNumber::Ftruncate,
@@ -2364,6 +2467,24 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
     }
     let result = (|| {
         let entry = with_fd_entry(fd)?;
+        if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
+            let handle = u32::try_from(entry.lower_handle).map_err(|_| EBADF)?;
+            let client =
+                PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+            let status = client
+                .fstat(ObjectHandleAttachment {
+                    handle,
+                    rights: entry.rights,
+                })
+                .map_err(map_posix_client_error)?;
+            unsafe {
+                ptr::write(
+                    stat_buf.cast::<NewlibStat>(),
+                    translate_posix_stat(&status),
+                )
+            };
+            return Ok(0);
+        }
         let mut kernel_stat = KernelStat {
             st_dev: 0,
             st_ino: 0,

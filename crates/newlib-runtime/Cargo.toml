@@ -10,5 +10,6 @@ crate-type = ["staticlib"]
 mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 mochi-user-syscall = { path = "../syscall" }
 mochios-capability-protocol = { path = "../capability-protocol", default-features = false }
+mochios-filesystem-protocol = { path = "../filesystem-protocol" }
 mochios-posix-client = { path = "../posix-client", default-features = false, features = ["syscall-endpoint"] }
 mochios-posix-protocol = { path = "../posix-protocol" }
