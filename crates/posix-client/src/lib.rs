@@ -101,6 +101,13 @@ pub enum StatAtBase<H> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessAtBase<H> {
+    ProcessRoot,
+    ProcessCwd,
+    Directory(ObjectHandleAttachment<H>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClientError<E> {
     Transport(E),
     Protocol(protocol::ProtocolError),
@@ -300,6 +307,50 @@ impl<T: ObjectTransport> Client<T> {
             return Err(ClientError::MismatchedResponse);
         }
         protocol::decode_file_status(&response[..response_len]).map_err(ClientError::Protocol)
+    }
+
+    pub fn access_at(
+        &self,
+        base: AccessAtBase<T::Handle>,
+        flags: u32,
+        modes: u32,
+        path: &str,
+    ) -> Result<(), ClientError<T::Error>> {
+        let (base, directory) = match base {
+            AccessAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
+            AccessAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
+            AccessAtBase::Directory(handle) => {
+                (protocol::OpenBase::AttachedDirectory, Some(handle))
+            }
+        };
+        let mut payload = [0u8; protocol::ACCESS_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
+        let payload_len = protocol::encode_access_at(
+            protocol::AccessAtRequest {
+                base,
+                flags,
+                modes,
+                path,
+            },
+            &mut payload,
+        )
+        .map_err(ClientError::Protocol)?;
+        let mut handles = ObjectHandles::new();
+        if let Some(directory) = directory {
+            handles
+                .push(directory)
+                .map_err(|_| ClientError::RequestTooLarge)?;
+        }
+        self.request_with_handles(
+            protocol::OP_ACCESS_AT,
+            0,
+            &payload[..payload_len],
+            &mut [],
+            &mut handles,
+        )?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(())
     }
 
     pub fn request_with_handles(

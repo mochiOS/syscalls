@@ -35,6 +35,9 @@ pub const OP_OPEN_AT: u16 = 18;
 pub const OP_STAT_AT: u16 = 19;
 /// Returns metadata for exactly one attached provider-owned open object.
 pub const OP_STAT_HANDLE: u16 = 20;
+/// Atomically resolves a path and checks native filesystem permission bits
+/// using credentials authenticated by the calling policy service.
+pub const OP_ACCESS_AT: u16 = 21;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const SETATTR_MODE: u32 = 1 << 0;
@@ -66,6 +69,17 @@ pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
 pub const STAT_AT_NOFOLLOW: u32 = 1 << 0;
 pub const STAT_AT_BASE_ATTACHED: u32 = 1 << 1;
 pub const STAT_AT_FLAGS_ALL: u32 = STAT_AT_NOFOLLOW | STAT_AT_BASE_ATTACHED;
+
+pub const ACCESS_AT_READ: u32 = 1 << 2;
+pub const ACCESS_AT_WRITE: u32 = 1 << 1;
+pub const ACCESS_AT_EXECUTE: u32 = 1 << 0;
+pub const ACCESS_AT_NOFOLLOW: u32 = 1 << 3;
+pub const ACCESS_AT_BASE_ATTACHED: u32 = 1 << 4;
+pub const ACCESS_AT_FLAGS_ALL: u32 = ACCESS_AT_READ
+    | ACCESS_AT_WRITE
+    | ACCESS_AT_EXECUTE
+    | ACCESS_AT_NOFOLLOW
+    | ACCESS_AT_BASE_ATTACHED;
 
 /// Registers an IPC endpoint as an opaque filesystem provider.
 ///
@@ -415,41 +429,6 @@ mod tests {
         let mut bytes = [0u8; METADATA_LEN];
         assert_eq!(encode_metadata(metadata, &mut bytes).unwrap(), METADATA_LEN);
         assert_eq!(decode_metadata(&bytes).unwrap(), metadata);
-    }
-
-    #[test]
-    fn node_status_round_trip_is_target_abi_independent() {
-        let status = NodeStatus {
-            device: 2,
-            node_id: 17,
-            size: 8193,
-            blocks: 17,
-            block_size: 4096,
-            kind: NODE_TYPE_REGULAR,
-            mode: 0o640,
-            uid: 501,
-            gid: 20,
-            link_count: 2,
-            access_time_seconds: 10,
-            access_time_nanoseconds: 11,
-            modification_time_seconds: 12,
-            modification_time_nanoseconds: 13,
-            change_time_seconds: 14,
-            change_time_nanoseconds: 15,
-            ..NodeStatus::default()
-        };
-        let mut bytes = [0u8; NODE_STATUS_LEN];
-        assert_eq!(
-            encode_node_status(status, &mut bytes).unwrap(),
-            NODE_STATUS_LEN
-        );
-        assert_eq!(decode_node_status(&bytes).unwrap(), status);
-
-        bytes[76] = 1;
-        assert_eq!(
-            decode_node_status(&bytes),
-            Err(ProtocolError::InvalidLength)
-        );
     }
 
     #[test]

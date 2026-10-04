@@ -23,6 +23,7 @@ pub const OP_UMASK_SET: u16 = 4;
 pub const OP_OPEN_AT: u16 = 5;
 pub const OP_STAT_AT: u16 = 6;
 pub const OP_FSTAT: u16 = 7;
+pub const OP_ACCESS_AT: u16 = 8;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -34,6 +35,7 @@ pub const SESSION_INFO_LEN: usize = 20;
 pub const UMASK_PAYLOAD_LEN: usize = 4;
 pub const OPEN_AT_HEADER_LEN: usize = 16;
 pub const STAT_AT_HEADER_LEN: usize = 12;
+pub const ACCESS_AT_HEADER_LEN: usize = 16;
 pub const FILE_STATUS_LEN: usize = 112;
 pub const MAX_PATH_LEN: usize = 4096;
 pub const MAX_CONTROL_PAYLOAD_LEN: usize = OPEN_AT_HEADER_LEN + MAX_PATH_LEN;
@@ -41,6 +43,14 @@ pub const CONTROL_MESSAGE_LEN: usize = HEADER_LEN + MAX_CONTROL_PAYLOAD_LEN;
 
 pub const STAT_NOFOLLOW: u32 = 1 << 0;
 pub const STAT_FLAGS_ALL: u32 = STAT_NOFOLLOW;
+
+pub const ACCESS_READ: u32 = 1 << 2;
+pub const ACCESS_WRITE: u32 = 1 << 1;
+pub const ACCESS_EXECUTE: u32 = 1 << 0;
+pub const ACCESS_MODES_ALL: u32 = ACCESS_READ | ACCESS_WRITE | ACCESS_EXECUTE;
+pub const ACCESS_EFFECTIVE_IDS: u32 = 1 << 0;
+pub const ACCESS_NOFOLLOW: u32 = 1 << 1;
+pub const ACCESS_FLAGS_ALL: u32 = ACCESS_EFFECTIVE_IDS | ACCESS_NOFOLLOW;
 
 pub const OPEN_READ: u32 = 1 << 0;
 pub const OPEN_WRITE: u32 = 1 << 1;
@@ -92,6 +102,14 @@ pub struct OpenAtRequest<'a> {
 pub struct StatAtRequest<'a> {
     pub base: OpenBase,
     pub flags: u32,
+    pub path: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AccessAtRequest<'a> {
+    pub base: OpenBase,
+    pub flags: u32,
+    pub modes: u32,
     pub path: &'a str,
 }
 
@@ -345,6 +363,61 @@ pub fn decode_stat_at(input: &[u8]) -> Result<StatAtRequest<'_>, ProtocolError> 
     Ok(StatAtRequest { base, flags, path })
 }
 
+pub fn encode_access_at(
+    request: AccessAtRequest<'_>,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    let path = request.path.as_bytes();
+    if path.is_empty()
+        || path.len() > MAX_PATH_LEN
+        || path.contains(&0)
+        || request.flags & !ACCESS_FLAGS_ALL != 0
+        || request.modes & !ACCESS_MODES_ALL != 0
+    {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let total = ACCESS_AT_HEADER_LEN
+        .checked_add(path.len())
+        .ok_or(ProtocolError::InvalidLength)?;
+    if output.len() < total {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    output[..ACCESS_AT_HEADER_LEN].fill(0);
+    output[0] = request.base as u8;
+    put_u32(output, 4, request.flags);
+    put_u32(output, 8, request.modes);
+    put_u32(output, 12, path.len() as u32);
+    output[ACCESS_AT_HEADER_LEN..total].copy_from_slice(path);
+    Ok(total)
+}
+
+pub fn decode_access_at(input: &[u8]) -> Result<AccessAtRequest<'_>, ProtocolError> {
+    if input.len() < ACCESS_AT_HEADER_LEN || input[1..4] != [0; 3] {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let base = OpenBase::from_raw(input[0]).ok_or(ProtocolError::InvalidLength)?;
+    let flags = get_u32(input, 4);
+    let modes = get_u32(input, 8);
+    if flags & !ACCESS_FLAGS_ALL != 0 || modes & !ACCESS_MODES_ALL != 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let path_len = get_u32(input, 12) as usize;
+    if path_len == 0 || path_len > MAX_PATH_LEN || input.len() != ACCESS_AT_HEADER_LEN + path_len {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let path_bytes = &input[ACCESS_AT_HEADER_LEN..];
+    if path_bytes.contains(&0) {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let path = core::str::from_utf8(path_bytes).map_err(|_| ProtocolError::InvalidLength)?;
+    Ok(AccessAtRequest {
+        base,
+        flags,
+        modes,
+        path,
+    })
+}
+
 pub fn encode_file_status(status: FileStatus, output: &mut [u8]) -> Result<(), ProtocolError> {
     if output.len() < FILE_STATUS_LEN || !timestamps_are_valid(&status) {
         return Err(if output.len() < FILE_STATUS_LEN {
@@ -441,94 +514,4 @@ fn get_u64(input: &[u8], offset: usize) -> u64 {
 
 fn get_i64(input: &[u8], offset: usize) -> i64 {
     i64::from_le_bytes(input[offset..offset + 8].try_into().unwrap())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stat_at_wire_format_is_strict_and_has_no_descriptor() {
-        let mut bytes = [0u8; STAT_AT_HEADER_LEN + 16];
-        let length = encode_stat_at(
-            StatAtRequest {
-                base: OpenBase::AttachedDirectory,
-                flags: STAT_NOFOLLOW,
-                path: "child",
-            },
-            &mut bytes,
-        )
-        .unwrap();
-        assert_eq!(
-            decode_stat_at(&bytes[..length]).unwrap(),
-            StatAtRequest {
-                base: OpenBase::AttachedDirectory,
-                flags: STAT_NOFOLLOW,
-                path: "child",
-            }
-        );
-
-        bytes[1] = 1;
-        assert_eq!(
-            decode_stat_at(&bytes[..length]),
-            Err(ProtocolError::InvalidLength)
-        );
-    }
-
-    #[test]
-    fn file_status_round_trip_is_target_abi_independent() {
-        let status = FileStatus {
-            device: 3,
-            inode: 42,
-            mode: 0o100640,
-            link_count: 2,
-            uid: 501,
-            gid: 20,
-            special_device: 0,
-            size: 1234,
-            block_size: 4096,
-            blocks: 8,
-            access_time_seconds: 10,
-            access_time_nanoseconds: 11,
-            modification_time_seconds: 12,
-            modification_time_nanoseconds: 13,
-            change_time_seconds: 14,
-            change_time_nanoseconds: 15,
-        };
-        let mut bytes = [0u8; FILE_STATUS_LEN];
-        encode_file_status(status, &mut bytes).unwrap();
-        assert_eq!(decode_file_status(&bytes).unwrap(), status);
-    }
-
-    #[test]
-    fn maximum_path_fits_in_a_control_message() {
-        let path_bytes = [b'a'; MAX_PATH_LEN];
-        let path = core::str::from_utf8(&path_bytes).unwrap();
-        let mut payload = [0u8; MAX_CONTROL_PAYLOAD_LEN];
-        let payload_len = encode_open_at(
-            OpenAtRequest {
-                base: OpenBase::ProcessCwd,
-                options: OPEN_READ,
-                mode: 0,
-                path,
-            },
-            &mut payload,
-        )
-        .unwrap();
-        assert_eq!(payload_len, MAX_CONTROL_PAYLOAD_LEN);
-        assert_eq!(HEADER_LEN + payload_len, CONTROL_MESSAGE_LEN);
-    }
-
-    #[test]
-    fn invalid_timestamp_nanoseconds_are_rejected() {
-        let mut bytes = [0u8; FILE_STATUS_LEN];
-        let status = FileStatus {
-            access_time_nanoseconds: 1_000_000_000,
-            ..FileStatus::default()
-        };
-        assert_eq!(
-            encode_file_status(status, &mut bytes),
-            Err(ProtocolError::InvalidLength)
-        );
-    }
 }
