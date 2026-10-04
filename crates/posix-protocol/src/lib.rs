@@ -89,6 +89,7 @@ pub const OP_TRUNCATE_AT: u16 = 21;
 pub const OP_SYMLINK_AT: u16 = 22;
 pub const OP_READLINK_AT: u16 = 23;
 pub const OP_CHMOD_AT: u16 = 24;
+pub const OP_CHOWN_AT: u16 = 25;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -107,6 +108,7 @@ pub const ACCESS_AT_HEADER_LEN: usize = 16;
 pub const RENAME_AT_HEADER_LEN: usize = 16;
 pub const TRUNCATE_AT_HEADER_LEN: usize = 16;
 pub const SYMLINK_AT_HEADER_LEN: usize = 16;
+pub const CHOWN_AT_HEADER_LEN: usize = 20;
 pub const FILE_STATUS_LEN: usize = 112;
 pub const MAX_PATH_LEN: usize = 4096;
 pub const MAX_CONTROL_PAYLOAD_LEN: usize = RENAME_AT_HEADER_LEN + MAX_PATH_LEN * 2;
@@ -114,6 +116,8 @@ pub const CONTROL_MESSAGE_LEN: usize = HEADER_LEN + MAX_CONTROL_PAYLOAD_LEN;
 
 pub const STAT_NOFOLLOW: u32 = 1 << 0;
 pub const STAT_FLAGS_ALL: u32 = STAT_NOFOLLOW;
+pub const CHOWN_NOFOLLOW: u32 = 1 << 0;
+pub const CHOWN_FLAGS_ALL: u32 = CHOWN_NOFOLLOW;
 
 pub const ACCESS_READ: u32 = 1 << 2;
 pub const ACCESS_WRITE: u32 = 1 << 1;
@@ -209,6 +213,15 @@ pub struct SymlinkAtRequest<'a> {
     pub base: OpenBase,
     pub target: &'a str,
     pub link_path: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChownAtRequest<'a> {
+    pub base: OpenBase,
+    pub flags: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub path: &'a str,
 }
 
 /// Architecture-independent representation of the POSIX `struct stat` data.
@@ -668,6 +681,62 @@ pub fn decode_symlink_at(input: &[u8]) -> Result<SymlinkAtRequest<'_>, ProtocolE
         base,
         target,
         link_path,
+    })
+}
+
+pub fn encode_chown_at(
+    request: ChownAtRequest<'_>,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    let path = request.path.as_bytes();
+    if path.is_empty()
+        || path.len() > MAX_PATH_LEN
+        || path.contains(&0)
+        || request.flags & !CHOWN_FLAGS_ALL != 0
+    {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let total = CHOWN_AT_HEADER_LEN
+        .checked_add(path.len())
+        .ok_or(ProtocolError::InvalidLength)?;
+    if output.len() < total {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    output[..CHOWN_AT_HEADER_LEN].fill(0);
+    output[0] = request.base as u8;
+    put_u32(output, 4, request.flags);
+    put_u32(output, 8, request.uid);
+    put_u32(output, 12, request.gid);
+    put_u32(output, 16, path.len() as u32);
+    output[CHOWN_AT_HEADER_LEN..total].copy_from_slice(path);
+    Ok(total)
+}
+
+pub fn decode_chown_at(input: &[u8]) -> Result<ChownAtRequest<'_>, ProtocolError> {
+    if input.len() < CHOWN_AT_HEADER_LEN || input[1..4] != [0; 3] {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let base = OpenBase::from_raw(input[0]).ok_or(ProtocolError::InvalidLength)?;
+    let flags = get_u32(input, 4);
+    let path_len = get_u32(input, 16) as usize;
+    if flags & !CHOWN_FLAGS_ALL != 0
+        || path_len == 0
+        || path_len > MAX_PATH_LEN
+        || input.len() != CHOWN_AT_HEADER_LEN + path_len
+    {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let path_bytes = &input[CHOWN_AT_HEADER_LEN..];
+    if path_bytes.contains(&0) {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let path = core::str::from_utf8(path_bytes).map_err(|_| ProtocolError::InvalidLength)?;
+    Ok(ChownAtRequest {
+        base,
+        flags,
+        uid: get_u32(input, 8),
+        gid: get_u32(input, 12),
+        path,
     })
 }
 

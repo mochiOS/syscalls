@@ -2268,16 +2268,54 @@ pub extern "C" fn chown(path: *const c_char, uid: u32, gid: u32) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
+    result_with_errno(chown_posix_at(-2, path, uid, gid, 0).map(|_| 0), -1)
+}
+
+fn chown_posix_at(
+    dirfd: c_int,
+    path: *const c_char,
+    uid: u32,
+    gid: u32,
+    flags: c_int,
+) -> Result<(), c_int> {
+    let protocol_flags = match u64::try_from(flags).map_err(|_| EINVAL)? {
+        0 => 0,
+        AT_SYMLINK_NOFOLLOW => posix_protocol::CHOWN_NOFOLLOW,
+        _ => return Err(EINVAL),
+    };
+    let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+    let base = rename_posix_base(dirfd, path)?;
+    let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+    client
+        .chown_at(base, path, uid, gid, protocol_flags)
+        .map_err(map_posix_client_error)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lchown(path: *const c_char, uid: u32, gid: u32) -> c_int {
+    if path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
     result_with_errno(
-        syscall_errno(syscall::raw_syscall3(
-            syscall::SyscallNumber::Chown,
-            path as u64,
-            uid as u64,
-            gid as u64,
-        ))
-        .map(|_| 0),
+        chown_posix_at(-2, path, uid, gid, AT_SYMLINK_NOFOLLOW as c_int).map(|_| 0),
         -1,
     )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fchownat(
+    dirfd: c_int,
+    path: *const c_char,
+    uid: u32,
+    gid: u32,
+    flags: c_int,
+) -> c_int {
+    if path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    result_with_errno(chown_posix_at(dirfd, path, uid, gid, flags).map(|_| 0), -1)
 }
 
 #[unsafe(no_mangle)]
