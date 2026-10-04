@@ -92,6 +92,7 @@ pub const OP_CHMOD_AT: u16 = 24;
 pub const OP_CHOWN_AT: u16 = 25;
 pub const OP_FCHMOD: u16 = 26;
 pub const OP_FCHOWN: u16 = 27;
+pub const OP_PROCESS_FORKED: u16 = 28;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;

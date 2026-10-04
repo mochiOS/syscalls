@@ -237,6 +237,29 @@ impl<T: Transport> Client<T> {
 }
 
 impl<T: ObjectTransport> Client<T> {
+    /// Registers a freshly cloned process as a POSIX child. Identity is
+    /// derived from the attached ProcessHandle, never from request bytes.
+    pub fn register_child(
+        &self,
+        process: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(process)
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        self.request_with_handles(
+            protocol::OP_PROCESS_FORKED,
+            0,
+            &[],
+            &mut [],
+            &mut handles,
+        )?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(())
+    }
+
     pub fn open_at(
         &self,
         base: OpenAtBase<T::Handle>,
