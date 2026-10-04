@@ -8,6 +8,7 @@ license = "Apache-2.0"
 mochi-user-platform = { path = "../platform", optional = true, default-features = false }
 mochi-user-syscall = { path = "../syscall", optional = true }
 mochios-posix-protocol = { path = "../posix-protocol" }
+mochios-filesystem-protocol = { path = "../filesystem-protocol" }
 
 [features]
 default = ["endpoint", "fd-table"]
