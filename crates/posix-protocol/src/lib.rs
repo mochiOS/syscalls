@@ -84,6 +84,7 @@ pub const OP_FGETFL: u16 = 16;
 pub const OP_FSETFL: u16 = 17;
 pub const OP_MKDIR_AT: u16 = 18;
 pub const OP_UNLINK_AT: u16 = 19;
+pub const OP_RENAME_AT: u16 = 20;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -99,9 +100,10 @@ pub const FILE_FLAGS_PAYLOAD_LEN: usize = 4;
 pub const OPEN_AT_HEADER_LEN: usize = 16;
 pub const STAT_AT_HEADER_LEN: usize = 12;
 pub const ACCESS_AT_HEADER_LEN: usize = 16;
+pub const RENAME_AT_HEADER_LEN: usize = 16;
 pub const FILE_STATUS_LEN: usize = 112;
 pub const MAX_PATH_LEN: usize = 4096;
-pub const MAX_CONTROL_PAYLOAD_LEN: usize = OPEN_AT_HEADER_LEN + MAX_PATH_LEN;
+pub const MAX_CONTROL_PAYLOAD_LEN: usize = RENAME_AT_HEADER_LEN + MAX_PATH_LEN * 2;
 pub const CONTROL_MESSAGE_LEN: usize = HEADER_LEN + MAX_CONTROL_PAYLOAD_LEN;
 
 pub const STAT_NOFOLLOW: u32 = 1 << 0;
@@ -179,6 +181,14 @@ pub struct AccessAtRequest<'a> {
     pub flags: u32,
     pub modes: u32,
     pub path: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RenameAtRequest<'a> {
+    pub old_base: OpenBase,
+    pub new_base: OpenBase,
+    pub old_path: &'a str,
+    pub new_path: &'a str,
 }
 
 /// Architecture-independent representation of the POSIX `struct stat` data.
@@ -474,6 +484,70 @@ pub fn decode_stat_at(input: &[u8]) -> Result<StatAtRequest<'_>, ProtocolError> 
     }
     let path = core::str::from_utf8(path_bytes).map_err(|_| ProtocolError::InvalidLength)?;
     Ok(StatAtRequest { base, flags, path })
+}
+
+pub fn encode_rename_at(
+    request: RenameAtRequest<'_>,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    let old_path = request.old_path.as_bytes();
+    let new_path = request.new_path.as_bytes();
+    if old_path.is_empty()
+        || new_path.is_empty()
+        || old_path.len() > MAX_PATH_LEN
+        || new_path.len() > MAX_PATH_LEN
+        || old_path.contains(&0)
+        || new_path.contains(&0)
+    {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let total = RENAME_AT_HEADER_LEN
+        .checked_add(old_path.len())
+        .and_then(|length| length.checked_add(new_path.len()))
+        .ok_or(ProtocolError::InvalidLength)?;
+    if output.len() < total {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    output[..RENAME_AT_HEADER_LEN].fill(0);
+    output[0] = request.old_base as u8;
+    output[1] = request.new_base as u8;
+    put_u32(output, 8, old_path.len() as u32);
+    put_u32(output, 12, new_path.len() as u32);
+    output[RENAME_AT_HEADER_LEN..RENAME_AT_HEADER_LEN + old_path.len()]
+        .copy_from_slice(old_path);
+    output[RENAME_AT_HEADER_LEN + old_path.len()..total].copy_from_slice(new_path);
+    Ok(total)
+}
+
+pub fn decode_rename_at(input: &[u8]) -> Result<RenameAtRequest<'_>, ProtocolError> {
+    if input.len() < RENAME_AT_HEADER_LEN || input[2..8] != [0; 6] {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let old_base = OpenBase::from_raw(input[0]).ok_or(ProtocolError::InvalidLength)?;
+    let new_base = OpenBase::from_raw(input[1]).ok_or(ProtocolError::InvalidLength)?;
+    let old_len = get_u32(input, 8) as usize;
+    let new_len = get_u32(input, 12) as usize;
+    if old_len == 0
+        || new_len == 0
+        || old_len > MAX_PATH_LEN
+        || new_len > MAX_PATH_LEN
+        || input.len() != RENAME_AT_HEADER_LEN + old_len + new_len
+    {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let old_bytes = &input[RENAME_AT_HEADER_LEN..RENAME_AT_HEADER_LEN + old_len];
+    let new_bytes = &input[RENAME_AT_HEADER_LEN + old_len..];
+    if old_bytes.contains(&0) || new_bytes.contains(&0) {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let old_path = core::str::from_utf8(old_bytes).map_err(|_| ProtocolError::InvalidLength)?;
+    let new_path = core::str::from_utf8(new_bytes).map_err(|_| ProtocolError::InvalidLength)?;
+    Ok(RenameAtRequest {
+        old_base,
+        new_base,
+        old_path,
+        new_path,
+    })
 }
 
 pub fn encode_access_at(

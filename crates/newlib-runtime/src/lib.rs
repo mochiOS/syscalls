@@ -3072,17 +3072,58 @@ pub extern "C" fn _rename(old_path: *const c_char, new_path: *const c_char) -> c
         set_errno(EFAULT);
         return -1;
     }
-    let result = (|| {
-        let _ = syscall_errno(syscall::raw_syscall4(
-            syscall::SyscallNumber::FileRename,
-            AT_FDCWD as u64,
-            old_path as u64,
-            AT_FDCWD as u64,
-            new_path as u64,
-        ))?;
-        Ok(0)
-    })();
+    let result = rename_posix_at(-2, old_path, -2, new_path).map(|_| 0);
     result_with_errno(result, -1)
+}
+
+fn rename_posix_base(dirfd: c_int, path: &str) -> Result<StatAtBase<u32>, c_int> {
+    if path.starts_with('/') {
+        return Ok(StatAtBase::ProcessRoot);
+    }
+    if dirfd == -2 || i64::from(dirfd) == AT_FDCWD {
+        return Ok(StatAtBase::ProcessCwd);
+    }
+    let entry = with_fd_entry(dirfd)?;
+    if entry.kind != FdKind::ObjectDirectory {
+        return Err(ENOTDIR);
+    }
+    Ok(StatAtBase::Directory(ObjectHandleAttachment {
+        handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+        rights: entry.rights,
+    }))
+}
+
+fn rename_posix_at(
+    old_dirfd: c_int,
+    old_path: *const c_char,
+    new_dirfd: c_int,
+    new_path: *const c_char,
+) -> Result<(), c_int> {
+    let old_path = core::str::from_utf8(unsafe { c_bytes(old_path) }).map_err(|_| EINVAL)?;
+    let new_path = core::str::from_utf8(unsafe { c_bytes(new_path) }).map_err(|_| EINVAL)?;
+    let old_base = rename_posix_base(old_dirfd, old_path)?;
+    let new_base = rename_posix_base(new_dirfd, new_path)?;
+    let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+    client
+        .rename_at(old_base, old_path, new_base, new_path)
+        .map_err(map_posix_client_error)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn renameat(
+    old_dirfd: c_int,
+    old_path: *const c_char,
+    new_dirfd: c_int,
+    new_path: *const c_char,
+) -> c_int {
+    if old_path.is_null() || new_path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    result_with_errno(
+        rename_posix_at(old_dirfd, old_path, new_dirfd, new_path).map(|_| 0),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]

@@ -554,6 +554,56 @@ impl<T: ObjectTransport> Client<T> {
         Ok(())
     }
 
+    pub fn rename_at(
+        &self,
+        old_base: StatAtBase<T::Handle>,
+        old_path: &str,
+        new_base: StatAtBase<T::Handle>,
+        new_path: &str,
+    ) -> Result<(), ClientError<T::Error>> {
+        fn split_base<H: Copy>(
+            base: StatAtBase<H>,
+        ) -> (protocol::OpenBase, Option<ObjectHandleAttachment<H>>) {
+            match base {
+                StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
+                StatAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
+                StatAtBase::Directory(handle) => {
+                    (protocol::OpenBase::AttachedDirectory, Some(handle))
+                }
+            }
+        }
+        let (old_base, old_directory) = split_base(old_base);
+        let (new_base, new_directory) = split_base(new_base);
+        let mut payload = [0u8; protocol::RENAME_AT_HEADER_LEN + protocol::MAX_PATH_LEN * 2];
+        let payload_len = protocol::encode_rename_at(
+            protocol::RenameAtRequest {
+                old_base,
+                new_base,
+                old_path,
+                new_path,
+            },
+            &mut payload,
+        )
+        .map_err(ClientError::Protocol)?;
+        let mut handles = ObjectHandles::new();
+        for directory in [old_directory, new_directory].into_iter().flatten() {
+            handles
+                .push(directory)
+                .map_err(|_| ClientError::RequestTooLarge)?;
+        }
+        self.request_with_handles(
+            protocol::OP_RENAME_AT,
+            0,
+            &payload[..payload_len],
+            &mut [],
+            &mut handles,
+        )?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(())
+    }
+
     fn file_operation(
         &self,
         opcode: u16,
