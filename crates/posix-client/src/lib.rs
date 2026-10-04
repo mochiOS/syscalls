@@ -45,6 +45,14 @@ impl<T: Transport> Client<T> {
             .map(|_| ())
     }
 
+    /// Registers the calling process using the peer identity authenticated by
+    /// the IPC transport. No PID or credentials are supplied by the client.
+    pub fn register_session(&self) -> Result<(), ClientError<T::Error>> {
+        let mut response = [];
+        self.request(protocol::OP_SESSION_REGISTER, 0, &[], &mut response)
+            .map(|_| ())
+    }
+
     pub fn request(
         &self,
         opcode: u16,
@@ -100,17 +108,34 @@ impl<T: Transport> Client<T> {
 #[cfg(feature = "endpoint")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EndpointTransport {
-    endpoint: u64,
+    endpoint: mochi_user_platform::handle::Handle,
 }
 
 #[cfg(feature = "endpoint")]
 impl EndpointTransport {
-    pub const fn new(endpoint: u64) -> Self {
+    pub const fn new(endpoint: mochi_user_platform::handle::Handle) -> Self {
         Self { endpoint }
     }
 
-    pub const fn endpoint(self) -> u64 {
+    pub fn from_launch_context() -> Result<Self, mochi_user_platform::syscall::SysError> {
+        mochi_user_platform::handle::inherited(protocol::CONTROL_HANDLE_KEY).map(Self::new)
+    }
+
+    pub const fn endpoint(self) -> mochi_user_platform::handle::Handle {
         self.endpoint
+    }
+}
+
+#[cfg(feature = "endpoint")]
+impl Client<EndpointTransport> {
+    /// Connects to the inherited POSIX endpoint and registers this process's
+    /// authenticated session before returning it to libc/runtime code.
+    pub fn from_launch_context() -> Result<Self, ClientError<mochi_user_platform::syscall::SysError>>
+    {
+        let transport = EndpointTransport::from_launch_context().map_err(ClientError::Transport)?;
+        let client = Self::new(transport);
+        client.register_session()?;
+        Ok(client)
     }
 }
 
@@ -119,7 +144,7 @@ impl Transport for EndpointTransport {
     type Error = mochi_user_platform::syscall::SysError;
 
     fn call(&self, request: &[u8], response: &mut [u8]) -> Result<usize, Self::Error> {
-        let received = mochi_user_platform::ipc::call(self.endpoint, request, response)?;
+        let received = mochi_user_platform::ipc::call(self.endpoint as u64, request, response)?;
         let length = (received & 0xffff_ffff) as usize;
         if length > response.len() {
             return Err(mochi_user_platform::syscall::SysError::from_raw(
