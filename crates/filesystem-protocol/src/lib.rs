@@ -30,6 +30,11 @@ pub const OP_SETATTR: u16 = 17;
 /// Atomically resolves, optionally creates, and opens one path. An optional
 /// provider-owned directory Handle is carried as an IPC attachment.
 pub const OP_OPEN_AT: u16 = 18;
+/// Atomically resolves a path and returns its metadata. An optional
+/// provider-owned directory Handle is carried as an IPC attachment.
+pub const OP_STAT_AT: u16 = 19;
+/// Returns metadata for exactly one attached provider-owned open object.
+pub const OP_STAT_HANDLE: u16 = 20;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const SETATTR_MODE: u32 = 1 << 0;
@@ -58,6 +63,10 @@ pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
     | OPEN_AT_NOFOLLOW
     | OPEN_AT_BASE_ATTACHED;
 
+pub const STAT_AT_NOFOLLOW: u32 = 1 << 0;
+pub const STAT_AT_BASE_ATTACHED: u32 = 1 << 1;
+pub const STAT_AT_FLAGS_ALL: u32 = STAT_AT_NOFOLLOW | STAT_AT_BASE_ATTACHED;
+
 /// Registers an IPC endpoint as an opaque filesystem provider.
 ///
 /// This mirrors `mnu_abi::SyscallNumber::FilesystemRegister`. Keep the wire
@@ -74,6 +83,7 @@ pub const SYS_FILESYSTEM_MOUNT: u64 = 625;
 pub const MAX_IO_LEN: usize = MAX_MESSAGE_LEN - HEADER_LEN;
 pub const DIRENT_HEADER_LEN: usize = 16;
 pub const METADATA_LEN: usize = 8;
+pub const NODE_STATUS_LEN: usize = 112;
 pub const MAX_NAME_LEN: usize = 255;
 
 pub const NODE_TYPE_REGULAR: u32 = 1;
@@ -114,6 +124,101 @@ pub struct DirEntryHeader {
 pub struct NodeMetadata {
     pub uid: u32,
     pub gid: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NodeStatus {
+    pub device: u64,
+    pub node_id: u64,
+    pub size: u64,
+    pub blocks: u64,
+    pub block_size: u32,
+    pub kind: u32,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub link_count: u32,
+    pub special_device: u64,
+    pub access_time_seconds: u64,
+    pub access_time_nanoseconds: u32,
+    pub modification_time_seconds: u64,
+    pub modification_time_nanoseconds: u32,
+    pub change_time_seconds: u64,
+    pub change_time_nanoseconds: u32,
+}
+
+pub fn encode_node_status(
+    status: NodeStatus,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    if output.len() < NODE_STATUS_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    if !node_status_times_are_valid(&status) {
+        return Err(ProtocolError::InvalidLength);
+    }
+    output[..NODE_STATUS_LEN].fill(0);
+    put_u64(output, 0, status.device);
+    put_u64(output, 8, status.node_id);
+    put_u64(output, 16, status.size);
+    put_u64(output, 24, status.blocks);
+    put_u32(output, 32, status.block_size);
+    put_u32(output, 36, status.kind);
+    put_u32(output, 40, status.mode);
+    put_u32(output, 44, status.uid);
+    put_u32(output, 48, status.gid);
+    put_u32(output, 52, status.link_count);
+    put_u64(output, 56, status.special_device);
+    put_u64(output, 64, status.access_time_seconds);
+    put_u32(output, 72, status.access_time_nanoseconds);
+    put_u64(output, 80, status.modification_time_seconds);
+    put_u32(output, 88, status.modification_time_nanoseconds);
+    put_u64(output, 96, status.change_time_seconds);
+    put_u32(output, 104, status.change_time_nanoseconds);
+    Ok(NODE_STATUS_LEN)
+}
+
+pub fn decode_node_status(input: &[u8]) -> Result<NodeStatus, ProtocolError> {
+    if input.len() != NODE_STATUS_LEN
+        || input[76..80] != [0; 4]
+        || input[92..96] != [0; 4]
+        || input[108..112] != [0; 4]
+    {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let status = NodeStatus {
+        device: get_u64(input, 0),
+        node_id: get_u64(input, 8),
+        size: get_u64(input, 16),
+        blocks: get_u64(input, 24),
+        block_size: get_u32(input, 32),
+        kind: get_u32(input, 36),
+        mode: get_u32(input, 40),
+        uid: get_u32(input, 44),
+        gid: get_u32(input, 48),
+        link_count: get_u32(input, 52),
+        special_device: get_u64(input, 56),
+        access_time_seconds: get_u64(input, 64),
+        access_time_nanoseconds: get_u32(input, 72),
+        modification_time_seconds: get_u64(input, 80),
+        modification_time_nanoseconds: get_u32(input, 88),
+        change_time_seconds: get_u64(input, 96),
+        change_time_nanoseconds: get_u32(input, 104),
+    };
+    if !node_status_times_are_valid(&status) {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(status)
+}
+
+fn node_status_times_are_valid(status: &NodeStatus) -> bool {
+    [
+        status.access_time_nanoseconds,
+        status.modification_time_nanoseconds,
+        status.change_time_nanoseconds,
+    ]
+    .into_iter()
+    .all(|nanoseconds| nanoseconds < 1_000_000_000)
 }
 
 pub fn encode_metadata(
@@ -310,6 +415,41 @@ mod tests {
         let mut bytes = [0u8; METADATA_LEN];
         assert_eq!(encode_metadata(metadata, &mut bytes).unwrap(), METADATA_LEN);
         assert_eq!(decode_metadata(&bytes).unwrap(), metadata);
+    }
+
+    #[test]
+    fn node_status_round_trip_is_target_abi_independent() {
+        let status = NodeStatus {
+            device: 2,
+            node_id: 17,
+            size: 8193,
+            blocks: 17,
+            block_size: 4096,
+            kind: NODE_TYPE_REGULAR,
+            mode: 0o640,
+            uid: 501,
+            gid: 20,
+            link_count: 2,
+            access_time_seconds: 10,
+            access_time_nanoseconds: 11,
+            modification_time_seconds: 12,
+            modification_time_nanoseconds: 13,
+            change_time_seconds: 14,
+            change_time_nanoseconds: 15,
+            ..NodeStatus::default()
+        };
+        let mut bytes = [0u8; NODE_STATUS_LEN];
+        assert_eq!(
+            encode_node_status(status, &mut bytes).unwrap(),
+            NODE_STATUS_LEN
+        );
+        assert_eq!(decode_node_status(&bytes).unwrap(), status);
+
+        bytes[76] = 1;
+        assert_eq!(
+            decode_node_status(&bytes),
+            Err(ProtocolError::InvalidLength)
+        );
     }
 
     #[test]
