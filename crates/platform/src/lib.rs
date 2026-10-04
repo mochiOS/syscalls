@@ -404,6 +404,27 @@ pub mod process {
         Ok(status)
     }
 
+    /// Waits for one native signal across process-local object handles and
+    /// returns the index of the first ready item.
+    pub fn wait_many(
+        items: &mut [syscall::HandleWaitItem],
+        deadline_ticks: u64,
+    ) -> SysResult<usize> {
+        if items.is_empty() || items.len() > syscall::HANDLE_WAIT_MANY_MAX_ITEMS {
+            return Err(syscall::SysError::from_raw(syscall::EINVAL as i64));
+        }
+        let index = syscall::call3(
+            syscall::SyscallNumber::HandleWaitMany,
+            items.as_mut_ptr() as u64,
+            items.len() as u64,
+            deadline_ticks,
+        )?;
+        usize::try_from(index)
+            .ok()
+            .filter(|index| *index < items.len())
+            .ok_or_else(|| syscall::SysError::from_raw(syscall::EIO as i64))
+    }
+
     pub fn exit(code: u64) -> ! {
         super::runtime_support::process_exit(code)
     }
