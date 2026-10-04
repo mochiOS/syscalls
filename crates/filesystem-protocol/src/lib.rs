@@ -46,7 +46,15 @@ pub const OP_PATH_HANDLE: u16 = 22;
 pub const OP_TRUNCATE_HANDLE: u16 = 23;
 /// Flushes storage after validating one attached provider-owned open object.
 pub const OP_SYNC_HANDLE: u16 = 24;
+/// Returns status flags stored on exactly one attached open file description.
+pub const OP_GET_FLAGS_HANDLE: u16 = 25;
+/// Replaces mutable status flags on exactly one attached open file description.
+pub const OP_SET_FLAGS_HANDLE: u16 = 26;
 pub const OP_STATUS: u16 = 0x8000;
+
+pub const OPEN_STATUS_APPEND: u32 = 1 << 0;
+pub const OPEN_STATUS_NONBLOCK: u32 = 1 << 1;
+pub const OPEN_STATUS_FLAGS_ALL: u32 = OPEN_STATUS_APPEND | OPEN_STATUS_NONBLOCK;
 
 pub const SETATTR_MODE: u32 = 1 << 0;
 pub const SETATTR_UID: u32 = 1 << 1;
@@ -65,6 +73,7 @@ pub const OPEN_AT_DIRECTORY: u32 = 1 << 6;
 pub const OPEN_AT_NOFOLLOW: u32 = 1 << 7;
 pub const OPEN_AT_BASE_ATTACHED: u32 = 1 << 8;
 pub const OPEN_AT_ROOT_ATTACHED: u32 = 1 << 9;
+pub const OPEN_AT_NONBLOCK: u32 = 1 << 10;
 pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
     | OPEN_AT_WRITE
     | OPEN_AT_CREATE
@@ -74,7 +83,8 @@ pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
     | OPEN_AT_DIRECTORY
     | OPEN_AT_NOFOLLOW
     | OPEN_AT_BASE_ATTACHED
-    | OPEN_AT_ROOT_ATTACHED;
+    | OPEN_AT_ROOT_ATTACHED
+    | OPEN_AT_NONBLOCK;
 
 pub const STAT_AT_NOFOLLOW: u32 = 1 << 0;
 pub const STAT_AT_BASE_ATTACHED: u32 = 1 << 1;

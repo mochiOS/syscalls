@@ -1014,6 +1014,32 @@ fn posix_open_options(flags: c_int) -> Result<u32, c_int> {
     Ok(options)
 }
 
+fn posix_mutable_status_flags(flags: c_int) -> u32 {
+    const O_APPEND: c_int = 0x0008;
+    const O_NONBLOCK: c_int = 0x4000;
+    let mut result = 0;
+    if flags & O_APPEND != 0 {
+        result |= posix_protocol::OPEN_APPEND;
+    }
+    if flags & O_NONBLOCK != 0 {
+        result |= posix_protocol::OPEN_NONBLOCK;
+    }
+    result
+}
+
+fn newlib_mutable_status_flags(flags: u32) -> c_int {
+    const O_APPEND: c_int = 0x0008;
+    const O_NONBLOCK: c_int = 0x4000;
+    let mut result = 0;
+    if flags & posix_protocol::OPEN_APPEND != 0 {
+        result |= O_APPEND;
+    }
+    if flags & posix_protocol::OPEN_NONBLOCK != 0 {
+        result |= O_NONBLOCK;
+    }
+    result
+}
+
 fn open_posix_object(path: &str, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
     let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
     let opened = client
@@ -2079,10 +2105,32 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
                 }
                 Ok(0)
             }
+            F_GETFL if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) => {
+                let client =
+                    PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+                let flags = client
+                    .get_status_flags(ObjectHandleAttachment {
+                        handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                        rights: entry.rights,
+                    })
+                    .map_err(map_posix_client_error)?;
+                Ok((entry.open_flags & 0x3) | newlib_mutable_status_flags(flags))
+            }
             F_GETFL => Ok(entry.open_flags),
             F_SETFL => {
                 if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
-                    return Err(ENOSYS);
+                    let client = PosixClient::from_syscall_launch_context()
+                        .map_err(map_posix_client_error)?;
+                    client
+                        .set_status_flags(
+                            ObjectHandleAttachment {
+                                handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                                rights: entry.rights,
+                            },
+                            posix_mutable_status_flags(arg),
+                        )
+                        .map_err(map_posix_client_error)?;
+                    return Ok(0);
                 }
                 unsafe {
                     state_mut().fds[fd as usize].open_flags = arg;

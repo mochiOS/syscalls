@@ -446,6 +446,33 @@ impl<T: ObjectTransport> Client<T> {
         self.file_operation(protocol::OP_FSYNC, &[], file)
     }
 
+    pub fn get_status_flags(
+        &self,
+        file: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<u32, ClientError<T::Error>> {
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(file)
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        let mut payload = [0u8; protocol::FILE_FLAGS_PAYLOAD_LEN];
+        let payload_len =
+            self.request_with_handles(protocol::OP_FGETFL, 0, &[], &mut payload, &mut handles)?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        protocol::decode_file_flags(&payload[..payload_len]).map_err(ClientError::Protocol)
+    }
+
+    pub fn set_status_flags(
+        &self,
+        file: ObjectHandleAttachment<T::Handle>,
+        flags: u32,
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut payload = [0u8; protocol::FILE_FLAGS_PAYLOAD_LEN];
+        protocol::encode_file_flags(flags, &mut payload).map_err(ClientError::Protocol)?;
+        self.file_operation(protocol::OP_FSETFL, &payload, file)
+    }
+
     fn file_operation(
         &self,
         opcode: u16,
