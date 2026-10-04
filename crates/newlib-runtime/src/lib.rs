@@ -1974,9 +1974,11 @@ pub extern "C" fn _pipe2(fds: *mut c_int, flags: c_int) -> c_int {
             (&mut pair as *mut syscall::StreamPair) as u64,
         ))?;
         let read_rights = syscall::HANDLE_RIGHT_READ
+            | syscall::HANDLE_RIGHT_WAIT
             | syscall::HANDLE_RIGHT_DUPLICATE
             | syscall::HANDLE_RIGHT_TRANSFER;
         let write_rights = syscall::HANDLE_RIGHT_WRITE
+            | syscall::HANDLE_RIGHT_WAIT
             | syscall::HANDLE_RIGHT_DUPLICATE
             | syscall::HANDLE_RIGHT_TRANSFER;
         let read_fd = match allocate_object_fd(
