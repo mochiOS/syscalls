@@ -39,6 +39,9 @@ pub const OP_STAT_HANDLE: u16 = 20;
 /// Atomically resolves a path and checks native filesystem permission bits
 /// using credentials authenticated by the calling policy service.
 pub const OP_ACCESS_AT: u16 = 21;
+/// Returns the absolute path of an attached open directory relative to an
+/// attached process root. Attachments are ordered as root, then directory.
+pub const OP_PATH_HANDLE: u16 = 22;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const SETATTR_MODE: u32 = 1 << 0;
