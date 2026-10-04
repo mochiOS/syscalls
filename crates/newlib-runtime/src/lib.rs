@@ -12,6 +12,7 @@ use mochios_capability_protocol::{
     CapabilityResourceDescriptor, MAX_CAPABILITY_NAME_LEN, MAX_REASON_LEN,
 };
 use mochios_posix_client::{Client as PosixClient, ClientError as PosixClientError, StatAtBase};
+use mochios_posix_protocol::{FileStatus as PosixFileStatus, STAT_NOFOLLOW};
 
 const PAGE_SIZE: usize = 4096;
 const MAX_FDS: usize = 64;
@@ -526,6 +527,34 @@ fn translate_stat(kernel: &KernelStat) -> NewlibStat {
         },
         st_blksize: kernel.st_blksize,
         st_blocks: kernel.st_blocks,
+        st_spare4: [0; 2],
+    }
+}
+
+fn translate_posix_stat(status: &PosixFileStatus) -> NewlibStat {
+    NewlibStat {
+        st_dev: truncate_u16(status.device),
+        st_ino: truncate_u16(status.inode),
+        st_mode: status.mode,
+        st_nlink: truncate_u16(status.link_count as u64),
+        st_uid: truncate_u16(status.uid as u64),
+        st_gid: truncate_u16(status.gid as u64),
+        st_rdev: truncate_u16(status.special_device),
+        st_size: status.size,
+        st_atim: NewlibTimespec {
+            tv_sec: status.access_time_seconds,
+            tv_nsec: status.access_time_nanoseconds,
+        },
+        st_mtim: NewlibTimespec {
+            tv_sec: status.modification_time_seconds,
+            tv_nsec: status.modification_time_nanoseconds,
+        },
+        st_ctim: NewlibTimespec {
+            tv_sec: status.change_time_seconds,
+            tv_nsec: status.change_time_nanoseconds,
+        },
+        st_blksize: status.block_size,
+        st_blocks: status.blocks,
         st_spare4: [0; 2],
     }
 }
@@ -2356,31 +2385,18 @@ fn stat_with_flags(path: *const c_char, stat_buf: *mut c_void, flags: u64) -> c_
         return -1;
     }
     let result = (|| {
-        let mut kernel_stat = KernelStat {
-            st_dev: 0,
-            st_ino: 0,
-            st_nlink: 0,
-            st_mode: 0,
-            st_uid: 0,
-            st_gid: 0,
-            __pad0: 0,
-            st_rdev: 0,
-            st_size: 0,
-            st_blksize: 0,
-            st_blocks: 0,
-            st_atim: KernelTimespec { sec: 0, nsec: 0 },
-            st_mtim: KernelTimespec { sec: 0, nsec: 0 },
-            st_ctim: KernelTimespec { sec: 0, nsec: 0 },
-            __unused: [0; 24],
+        let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+        let flags = match flags {
+            0 => 0,
+            AT_SYMLINK_NOFOLLOW => STAT_NOFOLLOW,
+            _ => return Err(EINVAL),
         };
-        let _ = syscall_errno(syscall::raw_syscall4(
-            syscall::SyscallNumber::FileStatAt,
-            AT_FDCWD as u64,
-            path as u64,
-            (&mut kernel_stat as *mut KernelStat).cast::<c_void>() as u64,
-            flags,
-        ))?;
-        let translated = translate_stat(&kernel_stat);
+        let client =
+            PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+        let status = client
+            .stat_at(StatAtBase::ProcessCwd, flags, path)
+            .map_err(map_posix_client_error)?;
+        let translated = translate_posix_stat(&status);
         unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), translated) };
         Ok(0)
     })();

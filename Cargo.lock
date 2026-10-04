@@ -519,6 +519,7 @@ dependencies = [
  "mochi-user-syscall",
  "mochios-capability-protocol",
  "mochios-posix-client",
+ "mochios-posix-protocol",
 ]
 
 [[package]]
