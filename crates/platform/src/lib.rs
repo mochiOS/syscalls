@@ -654,6 +654,17 @@ pub mod handle {
         )?)
     }
 
+    /// Retrieves an opaque value inherited through the process LaunchContext.
+    pub fn inherited_value(key: u64) -> SysResult<u64> {
+        let mut value = 0u64;
+        syscall::call2(
+            syscall::SyscallNumber::LaunchValueGet,
+            key,
+            (&mut value as *mut u64) as u64,
+        )?;
+        Ok(value)
+    }
+
     /// Creates a transferable object backed by the caller-supplied provider
     /// endpoint and an opaque provider-owned identifier.
     pub fn create_provider_object(
