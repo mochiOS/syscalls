@@ -21,6 +21,8 @@ pub const OP_SESSION_REGISTER: u16 = 2;
 pub const OP_SESSION_INFO: u16 = 3;
 pub const OP_UMASK_SET: u16 = 4;
 pub const OP_OPEN_AT: u16 = 5;
+pub const OP_STAT_AT: u16 = 6;
+pub const OP_FSTAT: u16 = 7;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -31,7 +33,14 @@ pub const STATUS_ENOSYS: i32 = -38;
 pub const SESSION_INFO_LEN: usize = 20;
 pub const UMASK_PAYLOAD_LEN: usize = 4;
 pub const OPEN_AT_HEADER_LEN: usize = 16;
+pub const STAT_AT_HEADER_LEN: usize = 12;
+pub const FILE_STATUS_LEN: usize = 112;
 pub const MAX_PATH_LEN: usize = 4096;
+pub const MAX_CONTROL_PAYLOAD_LEN: usize = OPEN_AT_HEADER_LEN + MAX_PATH_LEN;
+pub const CONTROL_MESSAGE_LEN: usize = HEADER_LEN + MAX_CONTROL_PAYLOAD_LEN;
+
+pub const STAT_NOFOLLOW: u32 = 1 << 0;
+pub const STAT_FLAGS_ALL: u32 = STAT_NOFOLLOW;
 
 pub const OPEN_READ: u32 = 1 << 0;
 pub const OPEN_WRITE: u32 = 1 << 1;
@@ -77,6 +86,37 @@ pub struct OpenAtRequest<'a> {
     pub options: u32,
     pub mode: u32,
     pub path: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatAtRequest<'a> {
+    pub base: OpenBase,
+    pub flags: u32,
+    pub path: &'a str,
+}
+
+/// Architecture-independent representation of the POSIX `struct stat` data.
+///
+/// This structure is serialized field by field. It is never copied as a Rust
+/// structure and therefore does not expose compiler padding or a target ABI.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FileStatus {
+    pub device: u64,
+    pub inode: u64,
+    pub mode: u32,
+    pub link_count: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub special_device: u64,
+    pub size: i64,
+    pub block_size: i64,
+    pub blocks: i64,
+    pub access_time_seconds: i64,
+    pub access_time_nanoseconds: i64,
+    pub modification_time_seconds: i64,
+    pub modification_time_nanoseconds: i64,
+    pub change_time_seconds: i64,
+    pub change_time_nanoseconds: i64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -258,6 +298,119 @@ pub fn decode_open_at(input: &[u8]) -> Result<OpenAtRequest<'_>, ProtocolError> 
     })
 }
 
+pub fn encode_stat_at(
+    request: StatAtRequest<'_>,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    let path = request.path.as_bytes();
+    if path.is_empty()
+        || path.len() > MAX_PATH_LEN
+        || path.contains(&0)
+        || request.flags & !STAT_FLAGS_ALL != 0
+    {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let total = STAT_AT_HEADER_LEN
+        .checked_add(path.len())
+        .ok_or(ProtocolError::InvalidLength)?;
+    if output.len() < total {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    output[..STAT_AT_HEADER_LEN].fill(0);
+    output[0] = request.base as u8;
+    put_u32(output, 4, request.flags);
+    put_u32(output, 8, path.len() as u32);
+    output[STAT_AT_HEADER_LEN..total].copy_from_slice(path);
+    Ok(total)
+}
+
+pub fn decode_stat_at(input: &[u8]) -> Result<StatAtRequest<'_>, ProtocolError> {
+    if input.len() < STAT_AT_HEADER_LEN || input[1..4] != [0; 3] {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let base = OpenBase::from_raw(input[0]).ok_or(ProtocolError::InvalidLength)?;
+    let flags = get_u32(input, 4);
+    if flags & !STAT_FLAGS_ALL != 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let path_len = get_u32(input, 8) as usize;
+    if path_len == 0 || path_len > MAX_PATH_LEN || input.len() != STAT_AT_HEADER_LEN + path_len {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let path_bytes = &input[STAT_AT_HEADER_LEN..];
+    if path_bytes.contains(&0) {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let path = core::str::from_utf8(path_bytes).map_err(|_| ProtocolError::InvalidLength)?;
+    Ok(StatAtRequest { base, flags, path })
+}
+
+pub fn encode_file_status(status: FileStatus, output: &mut [u8]) -> Result<(), ProtocolError> {
+    if output.len() < FILE_STATUS_LEN || !timestamps_are_valid(&status) {
+        return Err(if output.len() < FILE_STATUS_LEN {
+            ProtocolError::BufferTooSmall
+        } else {
+            ProtocolError::InvalidLength
+        });
+    }
+    output[..FILE_STATUS_LEN].fill(0);
+    put_u64(output, 0, status.device);
+    put_u64(output, 8, status.inode);
+    put_u32(output, 16, status.mode);
+    put_u32(output, 20, status.link_count);
+    put_u32(output, 24, status.uid);
+    put_u32(output, 28, status.gid);
+    put_u64(output, 32, status.special_device);
+    put_i64(output, 40, status.size);
+    put_i64(output, 48, status.block_size);
+    put_i64(output, 56, status.blocks);
+    put_i64(output, 64, status.access_time_seconds);
+    put_i64(output, 72, status.access_time_nanoseconds);
+    put_i64(output, 80, status.modification_time_seconds);
+    put_i64(output, 88, status.modification_time_nanoseconds);
+    put_i64(output, 96, status.change_time_seconds);
+    put_i64(output, 104, status.change_time_nanoseconds);
+    Ok(())
+}
+
+pub fn decode_file_status(input: &[u8]) -> Result<FileStatus, ProtocolError> {
+    if input.len() != FILE_STATUS_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let status = FileStatus {
+        device: get_u64(input, 0),
+        inode: get_u64(input, 8),
+        mode: get_u32(input, 16),
+        link_count: get_u32(input, 20),
+        uid: get_u32(input, 24),
+        gid: get_u32(input, 28),
+        special_device: get_u64(input, 32),
+        size: get_i64(input, 40),
+        block_size: get_i64(input, 48),
+        blocks: get_i64(input, 56),
+        access_time_seconds: get_i64(input, 64),
+        access_time_nanoseconds: get_i64(input, 72),
+        modification_time_seconds: get_i64(input, 80),
+        modification_time_nanoseconds: get_i64(input, 88),
+        change_time_seconds: get_i64(input, 96),
+        change_time_nanoseconds: get_i64(input, 104),
+    };
+    if !timestamps_are_valid(&status) {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(status)
+}
+
+fn timestamps_are_valid(status: &FileStatus) -> bool {
+    [
+        status.access_time_nanoseconds,
+        status.modification_time_nanoseconds,
+        status.change_time_nanoseconds,
+    ]
+    .into_iter()
+    .all(|nanoseconds| (0..1_000_000_000).contains(&nanoseconds))
+}
+
 fn put_u16(output: &mut [u8], offset: usize, value: u16) {
     output[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }
@@ -267,6 +420,10 @@ fn put_u32(output: &mut [u8], offset: usize, value: u32) {
 }
 
 fn put_u64(output: &mut [u8], offset: usize, value: u64) {
+    output[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_i64(output: &mut [u8], offset: usize, value: i64) {
     output[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
@@ -280,4 +437,98 @@ fn get_u32(input: &[u8], offset: usize) -> u32 {
 
 fn get_u64(input: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(input[offset..offset + 8].try_into().unwrap())
+}
+
+fn get_i64(input: &[u8], offset: usize) -> i64 {
+    i64::from_le_bytes(input[offset..offset + 8].try_into().unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stat_at_wire_format_is_strict_and_has_no_descriptor() {
+        let mut bytes = [0u8; STAT_AT_HEADER_LEN + 16];
+        let length = encode_stat_at(
+            StatAtRequest {
+                base: OpenBase::AttachedDirectory,
+                flags: STAT_NOFOLLOW,
+                path: "child",
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        assert_eq!(
+            decode_stat_at(&bytes[..length]).unwrap(),
+            StatAtRequest {
+                base: OpenBase::AttachedDirectory,
+                flags: STAT_NOFOLLOW,
+                path: "child",
+            }
+        );
+
+        bytes[1] = 1;
+        assert_eq!(
+            decode_stat_at(&bytes[..length]),
+            Err(ProtocolError::InvalidLength)
+        );
+    }
+
+    #[test]
+    fn file_status_round_trip_is_target_abi_independent() {
+        let status = FileStatus {
+            device: 3,
+            inode: 42,
+            mode: 0o100640,
+            link_count: 2,
+            uid: 501,
+            gid: 20,
+            special_device: 0,
+            size: 1234,
+            block_size: 4096,
+            blocks: 8,
+            access_time_seconds: 10,
+            access_time_nanoseconds: 11,
+            modification_time_seconds: 12,
+            modification_time_nanoseconds: 13,
+            change_time_seconds: 14,
+            change_time_nanoseconds: 15,
+        };
+        let mut bytes = [0u8; FILE_STATUS_LEN];
+        encode_file_status(status, &mut bytes).unwrap();
+        assert_eq!(decode_file_status(&bytes).unwrap(), status);
+    }
+
+    #[test]
+    fn maximum_path_fits_in_a_control_message() {
+        let path_bytes = [b'a'; MAX_PATH_LEN];
+        let path = core::str::from_utf8(&path_bytes).unwrap();
+        let mut payload = [0u8; MAX_CONTROL_PAYLOAD_LEN];
+        let payload_len = encode_open_at(
+            OpenAtRequest {
+                base: OpenBase::ProcessCwd,
+                options: OPEN_READ,
+                mode: 0,
+                path,
+            },
+            &mut payload,
+        )
+        .unwrap();
+        assert_eq!(payload_len, MAX_CONTROL_PAYLOAD_LEN);
+        assert_eq!(HEADER_LEN + payload_len, CONTROL_MESSAGE_LEN);
+    }
+
+    #[test]
+    fn invalid_timestamp_nanoseconds_are_rejected() {
+        let mut bytes = [0u8; FILE_STATUS_LEN];
+        let status = FileStatus {
+            access_time_nanoseconds: 1_000_000_000,
+            ..FileStatus::default()
+        };
+        assert_eq!(
+            encode_file_status(status, &mut bytes),
+            Err(ProtocolError::InvalidLength)
+        );
+    }
 }

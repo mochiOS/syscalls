@@ -8,8 +8,6 @@ use mochios_posix_protocol as protocol;
 
 pub mod fd;
 
-const CONTROL_MESSAGE_LEN: usize = 4096;
-
 pub trait Transport {
     type Error;
 
@@ -96,6 +94,13 @@ pub enum OpenAtBase<H> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatAtBase<H> {
+    ProcessRoot,
+    ProcessCwd,
+    Directory(ObjectHandleAttachment<H>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClientError<E> {
     Transport(E),
     Protocol(protocol::ProtocolError),
@@ -155,11 +160,11 @@ impl<T: Transport> Client<T> {
         payload: &[u8],
         response_payload: &mut [u8],
     ) -> Result<usize, ClientError<T::Error>> {
-        if payload.len() > CONTROL_MESSAGE_LEN - protocol::HEADER_LEN {
+        if payload.len() > protocol::MAX_CONTROL_PAYLOAD_LEN {
             return Err(ClientError::RequestTooLarge);
         }
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let mut request_bytes = [0u8; CONTROL_MESSAGE_LEN];
+        let mut request_bytes = [0u8; protocol::CONTROL_MESSAGE_LEN];
         let request_len = protocol::encode(
             protocol::Header {
                 opcode,
@@ -173,7 +178,7 @@ impl<T: Transport> Client<T> {
         )
         .map_err(ClientError::Protocol)?;
 
-        let mut response_bytes = [0u8; CONTROL_MESSAGE_LEN];
+        let mut response_bytes = [0u8; protocol::CONTROL_MESSAGE_LEN];
         let response_len = self
             .transport
             .call(&request_bytes[..request_len], &mut response_bytes)
@@ -245,6 +250,58 @@ impl<T: ObjectTransport> Client<T> {
         handles.get(0).ok_or(ClientError::MismatchedResponse)
     }
 
+    pub fn stat_at(
+        &self,
+        base: StatAtBase<T::Handle>,
+        flags: u32,
+        path: &str,
+    ) -> Result<protocol::FileStatus, ClientError<T::Error>> {
+        let (base, directory) = match base {
+            StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
+            StatAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
+            StatAtBase::Directory(handle) => (protocol::OpenBase::AttachedDirectory, Some(handle)),
+        };
+        let mut payload = [0u8; protocol::STAT_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
+        let payload_len =
+            protocol::encode_stat_at(protocol::StatAtRequest { base, flags, path }, &mut payload)
+                .map_err(ClientError::Protocol)?;
+        let mut handles = ObjectHandles::new();
+        if let Some(directory) = directory {
+            handles
+                .push(directory)
+                .map_err(|_| ClientError::RequestTooLarge)?;
+        }
+        let mut response = [0u8; protocol::FILE_STATUS_LEN];
+        let response_len = self.request_with_handles(
+            protocol::OP_STAT_AT,
+            0,
+            &payload[..payload_len],
+            &mut response,
+            &mut handles,
+        )?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        protocol::decode_file_status(&response[..response_len]).map_err(ClientError::Protocol)
+    }
+
+    pub fn fstat(
+        &self,
+        file: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<protocol::FileStatus, ClientError<T::Error>> {
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(file)
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        let mut response = [0u8; protocol::FILE_STATUS_LEN];
+        let response_len =
+            self.request_with_handles(protocol::OP_FSTAT, 0, &[], &mut response, &mut handles)?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        protocol::decode_file_status(&response[..response_len]).map_err(ClientError::Protocol)
+    }
+
     pub fn request_with_handles(
         &self,
         opcode: u16,
@@ -253,11 +310,11 @@ impl<T: ObjectTransport> Client<T> {
         response_payload: &mut [u8],
         handles: &mut ObjectHandles<T::Handle>,
     ) -> Result<usize, ClientError<T::Error>> {
-        if payload.len() > CONTROL_MESSAGE_LEN - protocol::HEADER_LEN {
+        if payload.len() > protocol::MAX_CONTROL_PAYLOAD_LEN {
             return Err(ClientError::RequestTooLarge);
         }
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let mut request_bytes = [0u8; CONTROL_MESSAGE_LEN];
+        let mut request_bytes = [0u8; protocol::CONTROL_MESSAGE_LEN];
         let request_len = protocol::encode(
             protocol::Header {
                 opcode,
@@ -271,7 +328,7 @@ impl<T: ObjectTransport> Client<T> {
         )
         .map_err(ClientError::Protocol)?;
 
-        let mut response_bytes = [0u8; CONTROL_MESSAGE_LEN];
+        let mut response_bytes = [0u8; protocol::CONTROL_MESSAGE_LEN];
         let response_len = self
             .transport
             .call_with_handles(
