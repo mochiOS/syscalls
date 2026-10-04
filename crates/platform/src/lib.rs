@@ -114,6 +114,9 @@ pub mod logger {
 
     static LOGGER_ENDPOINT: AtomicU64 = AtomicU64::new(0);
 
+    /// Installs the POSIX endpoint attached to an early-boot logger request.
+    pub const INSTALL_POSIX_ENDPOINT_OPCODE: u32 = 0x4c50_5850;
+
     #[cfg(any(feature = "runtime", feature = "std"))]
     fn parse_decimal_u64(bytes: &[u8]) -> Option<u64> {
         if bytes.is_empty() {
