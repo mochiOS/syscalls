@@ -27,8 +27,9 @@ pub const OP_READLINK: u16 = 14;
 pub const OP_TRUNCATE: u16 = 15;
 pub const OP_SYNC: u16 = 16;
 pub const OP_SETATTR: u16 = 17;
-/// Atomically resolves, optionally creates, and opens one path. An optional
-/// provider-owned directory Handle is carried as an IPC attachment.
+/// Atomically resolves, optionally creates, and opens one path. Optional root
+/// and base provider-owned directory Handles are carried as IPC attachments,
+/// in that order.
 pub const OP_OPEN_AT: u16 = 18;
 /// Atomically resolves a path and returns its metadata. An optional
 /// provider-owned directory Handle is carried as an IPC attachment.
@@ -56,6 +57,7 @@ pub const OPEN_AT_APPEND: u32 = 1 << 5;
 pub const OPEN_AT_DIRECTORY: u32 = 1 << 6;
 pub const OPEN_AT_NOFOLLOW: u32 = 1 << 7;
 pub const OPEN_AT_BASE_ATTACHED: u32 = 1 << 8;
+pub const OPEN_AT_ROOT_ATTACHED: u32 = 1 << 9;
 pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
     | OPEN_AT_WRITE
     | OPEN_AT_CREATE
@@ -64,22 +66,27 @@ pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
     | OPEN_AT_APPEND
     | OPEN_AT_DIRECTORY
     | OPEN_AT_NOFOLLOW
-    | OPEN_AT_BASE_ATTACHED;
+    | OPEN_AT_BASE_ATTACHED
+    | OPEN_AT_ROOT_ATTACHED;
 
 pub const STAT_AT_NOFOLLOW: u32 = 1 << 0;
 pub const STAT_AT_BASE_ATTACHED: u32 = 1 << 1;
-pub const STAT_AT_FLAGS_ALL: u32 = STAT_AT_NOFOLLOW | STAT_AT_BASE_ATTACHED;
+pub const STAT_AT_ROOT_ATTACHED: u32 = 1 << 2;
+pub const STAT_AT_FLAGS_ALL: u32 =
+    STAT_AT_NOFOLLOW | STAT_AT_BASE_ATTACHED | STAT_AT_ROOT_ATTACHED;
 
 pub const ACCESS_AT_READ: u32 = 1 << 2;
 pub const ACCESS_AT_WRITE: u32 = 1 << 1;
 pub const ACCESS_AT_EXECUTE: u32 = 1 << 0;
 pub const ACCESS_AT_NOFOLLOW: u32 = 1 << 3;
 pub const ACCESS_AT_BASE_ATTACHED: u32 = 1 << 4;
+pub const ACCESS_AT_ROOT_ATTACHED: u32 = 1 << 5;
 pub const ACCESS_AT_FLAGS_ALL: u32 = ACCESS_AT_READ
     | ACCESS_AT_WRITE
     | ACCESS_AT_EXECUTE
     | ACCESS_AT_NOFOLLOW
-    | ACCESS_AT_BASE_ATTACHED;
+    | ACCESS_AT_BASE_ATTACHED
+    | ACCESS_AT_ROOT_ATTACHED;
 
 /// Registers an IPC endpoint as an opaque filesystem provider.
 ///
