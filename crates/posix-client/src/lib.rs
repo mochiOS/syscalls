@@ -89,6 +89,13 @@ pub trait ObjectTransport: Transport {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenAtBase<H> {
+    ProcessRoot,
+    ProcessCwd,
+    Directory(ObjectHandleAttachment<H>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClientError<E> {
     Transport(E),
     Protocol(protocol::ProtocolError),
@@ -194,6 +201,50 @@ impl<T: Transport> Client<T> {
 }
 
 impl<T: ObjectTransport> Client<T> {
+    pub fn open_at(
+        &self,
+        base: OpenAtBase<T::Handle>,
+        options: u32,
+        mode: u32,
+        path: &str,
+    ) -> Result<ObjectHandleAttachment<T::Handle>, ClientError<T::Error>> {
+        let (base, directory) = match base {
+            OpenAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
+            OpenAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
+            OpenAtBase::Directory(handle) => {
+                (protocol::OpenBase::AttachedDirectory, Some(handle))
+            }
+        };
+        let mut payload = [0u8; protocol::OPEN_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
+        let payload_len = protocol::encode_open_at(
+            protocol::OpenAtRequest {
+                base,
+                options,
+                mode,
+                path,
+            },
+            &mut payload,
+        )
+        .map_err(ClientError::Protocol)?;
+        let mut handles = ObjectHandles::new();
+        if let Some(directory) = directory {
+            handles
+                .push(directory)
+                .map_err(|_| ClientError::RequestTooLarge)?;
+        }
+        self.request_with_handles(
+            protocol::OP_OPEN_AT,
+            0,
+            &payload[..payload_len],
+            &mut [],
+            &mut handles,
+        )?;
+        if handles.len() != 1 {
+            return Err(ClientError::MismatchedResponse);
+        }
+        handles.get(0).ok_or(ClientError::MismatchedResponse)
+    }
+
     pub fn request_with_handles(
         &self,
         opcode: u16,
