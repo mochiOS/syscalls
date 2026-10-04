@@ -206,9 +206,10 @@ enum FdKind {
     Stdin = 1,
     Stdout = 2,
     Stderr = 3,
-    LegacyFile = 4,
     ObjectFile = 5,
     ObjectDirectory = 6,
+    ObjectStreamRead = 7,
+    ObjectStreamWrite = 8,
 }
 
 #[derive(Clone, Copy)]
@@ -261,33 +262,6 @@ struct HeapState {
     mapped_end: usize,
     maximum_end: usize,
     page_size: usize,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct KernelTimespec {
-    sec: i64,
-    nsec: i64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct KernelStat {
-    st_dev: u64,
-    st_ino: u64,
-    st_nlink: u64,
-    st_mode: u32,
-    st_uid: u32,
-    st_gid: u32,
-    __pad0: u32,
-    st_rdev: u64,
-    st_size: i64,
-    st_blksize: i64,
-    st_blocks: i64,
-    st_atim: KernelTimespec,
-    st_mtim: KernelTimespec,
-    st_ctim: KernelTimespec,
-    __unused: [u8; 24],
 }
 
 #[repr(C)]
@@ -530,30 +504,21 @@ fn truncate_u16(value: u64) -> u16 {
     core::cmp::min(value, u16::MAX as u64) as u16
 }
 
-fn translate_stat(kernel: &KernelStat) -> NewlibStat {
+fn stream_stat() -> NewlibStat {
     NewlibStat {
-        st_dev: truncate_u16(kernel.st_dev),
-        st_ino: truncate_u16(kernel.st_ino),
-        st_mode: kernel.st_mode,
-        st_nlink: truncate_u16(kernel.st_nlink),
-        st_uid: truncate_u16(kernel.st_uid as u64),
-        st_gid: truncate_u16(kernel.st_gid as u64),
-        st_rdev: truncate_u16(kernel.st_rdev),
-        st_size: kernel.st_size,
-        st_atim: NewlibTimespec {
-            tv_sec: kernel.st_atim.sec,
-            tv_nsec: kernel.st_atim.nsec,
-        },
-        st_mtim: NewlibTimespec {
-            tv_sec: kernel.st_mtim.sec,
-            tv_nsec: kernel.st_mtim.nsec,
-        },
-        st_ctim: NewlibTimespec {
-            tv_sec: kernel.st_ctim.sec,
-            tv_nsec: kernel.st_ctim.nsec,
-        },
-        st_blksize: kernel.st_blksize,
-        st_blocks: kernel.st_blocks,
+        st_dev: 0,
+        st_ino: 0,
+        st_mode: 0o010000 | 0o600,
+        st_nlink: 1,
+        st_uid: 0,
+        st_gid: 0,
+        st_rdev: 0,
+        st_size: 0,
+        st_atim: NewlibTimespec { tv_sec: 0, tv_nsec: 0 },
+        st_mtim: NewlibTimespec { tv_sec: 0, tv_nsec: 0 },
+        st_ctim: NewlibTimespec { tv_sec: 0, tv_nsec: 0 },
+        st_blksize: 4096,
+        st_blocks: 0,
         st_spare4: [0; 2],
     }
 }
@@ -1182,9 +1147,10 @@ fn restore_fd_state_from_env(envp: *mut *mut c_char, fds: &mut [FdEntry; MAX_FDS
             1 => FdKind::Stdin,
             2 => FdKind::Stdout,
             3 => FdKind::Stderr,
-            4 => FdKind::LegacyFile,
             5 => FdKind::ObjectFile,
             6 => FdKind::ObjectDirectory,
+            7 => FdKind::ObjectStreamRead,
+            8 => FdKind::ObjectStreamWrite,
             _ => return false,
         };
         fds[fd] = FdEntry {
@@ -1232,9 +1198,10 @@ fn serialize_fd_state(
             FdKind::Stdin => 1usize,
             FdKind::Stdout => 2usize,
             FdKind::Stderr => 3usize,
-            FdKind::LegacyFile => 4usize,
             FdKind::ObjectFile => 5usize,
             FdKind::ObjectDirectory => 6usize,
+            FdKind::ObjectStreamRead => 7usize,
+            FdKind::ObjectStreamWrite => 8usize,
         };
         push_decimal(fd, encoded, &mut length)?;
         push_byte(encoded, &mut length, b',')?;
@@ -1430,36 +1397,33 @@ fn duplicate_live_fd(old_fd: c_int, new_fd: c_int) -> Result<c_int, c_int> {
     if state.fds[new_fd as usize].in_use {
         let existing = state.fds[new_fd as usize];
         if existing.close_owned {
-            let number = match existing.kind {
-                FdKind::ObjectFile | FdKind::ObjectDirectory => {
-                    syscall::SyscallNumber::HandleClose
-                }
-                _ => syscall::SyscallNumber::FileClose,
-            };
             let _ = syscall_errno(syscall::raw_syscall1(
-                number,
+                syscall::SyscallNumber::HandleClose,
                 existing.lower_handle,
             ));
         }
         state.fds[new_fd as usize] = FdEntry::unused();
     }
 
-    let lower = if matches!(old_entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
-        syscall_errno(syscall::raw_syscall2(
-            syscall::SyscallNumber::HandleDuplicate,
-            old_entry.lower_handle,
-            old_entry.rights,
-        ))?
-    } else {
-        syscall_errno(syscall::raw_syscall1(
-            syscall::SyscallNumber::Dup,
-            old_entry.lower_handle,
-        ))?
+    let (lower, close_owned) = match old_entry.kind {
+        FdKind::ObjectFile
+        | FdKind::ObjectDirectory
+        | FdKind::ObjectStreamRead
+        | FdKind::ObjectStreamWrite => (
+            syscall_errno(syscall::raw_syscall2(
+                syscall::SyscallNumber::HandleDuplicate,
+                old_entry.lower_handle,
+                old_entry.rights,
+            ))?,
+            true,
+        ),
+        FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => (old_entry.lower_handle, false),
+        FdKind::Unused => return Err(EBADF),
     };
     let mut new_entry = old_entry;
     new_entry.lower_handle = lower;
     new_entry.fd_flags &= !FD_CLOEXEC;
-    new_entry.close_owned = true;
+    new_entry.close_owned = close_owned;
     state.fds[new_fd as usize] = FdEntry {
         lower_handle: lower,
         ..new_entry
@@ -1686,10 +1650,6 @@ fn with_fd_entry(fd: c_int) -> Result<FdEntry, c_int> {
     Ok(entry)
 }
 
-fn allocate_fd(lower_handle: u64, flags: c_int) -> Result<c_int, c_int> {
-    allocate_fd_entry(lower_handle, 0, FdKind::LegacyFile, flags)
-}
-
 fn allocate_object_fd(
     handle: u32,
     rights: u64,
@@ -1728,30 +1688,11 @@ fn allocate_fd_entry(
     Err(EMFILE)
 }
 
-fn store_position(fd: c_int, position: u64) {
-    unsafe {
-        let state = state_mut();
-        if fd >= 0 && (fd as usize) < MAX_FDS && state.fds[fd as usize].in_use {
-            state.fds[fd as usize].position = position;
-        }
-    }
-}
-
-fn advance_position(fd: c_int, amount: u64) {
-    unsafe {
-        let state = state_mut();
-        if fd >= 0 && (fd as usize) < MAX_FDS && state.fds[fd as usize].in_use {
-            state.fds[fd as usize].position =
-                state.fds[fd as usize].position.saturating_add(amount);
-        }
-    }
-}
-
 fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result<isize, c_int> {
     let number = match entry.kind {
         FdKind::Stdout | FdKind::Stderr => syscall::SyscallNumber::Write,
-        FdKind::LegacyFile => syscall::SyscallNumber::FileWrite,
-        FdKind::ObjectFile => syscall::SyscallNumber::HandleWrite,
+        FdKind::ObjectFile | FdKind::ObjectStreamWrite => syscall::SyscallNumber::HandleWrite,
+        FdKind::ObjectStreamRead => return Err(EBADF),
         FdKind::ObjectDirectory => return Err(EISDIR),
         _ => return Err(EBADF),
     };
@@ -1764,16 +1705,11 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
     Ok(written as isize)
 }
 
-fn syscall_read(
-    fd: c_int,
-    entry: FdEntry,
-    buffer: *mut c_void,
-    length: usize,
-) -> Result<isize, c_int> {
+fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<isize, c_int> {
     let number = match entry.kind {
         FdKind::Stdin => syscall::SyscallNumber::Read,
-        FdKind::LegacyFile => syscall::SyscallNumber::FileRead,
-        FdKind::ObjectFile => syscall::SyscallNumber::HandleRead,
+        FdKind::ObjectFile | FdKind::ObjectStreamRead => syscall::SyscallNumber::HandleRead,
+        FdKind::ObjectStreamWrite => return Err(EBADF),
         FdKind::ObjectDirectory => return Err(EISDIR),
         _ => return Err(EBADF),
     };
@@ -1783,41 +1719,16 @@ fn syscall_read(
         buffer as u64,
         length as u64,
     ))?;
-    if matches!(entry.kind, FdKind::LegacyFile) {
-        advance_position(fd, read);
-    }
     Ok(read as isize)
-}
-
-fn read_u16_ne(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_ne_bytes([bytes[offset], bytes[offset + 1]])
-}
-
-fn read_u64_ne(bytes: &[u8], offset: usize) -> u64 {
-    u64::from_ne_bytes([
-        bytes[offset],
-        bytes[offset + 1],
-        bytes[offset + 2],
-        bytes[offset + 3],
-        bytes[offset + 4],
-        bytes[offset + 5],
-        bytes[offset + 6],
-        bytes[offset + 7],
-    ])
 }
 
 fn refill_dir_stream(stream: &mut DirStream) -> Result<bool, c_int> {
     let entry = with_fd_entry(stream.fd)?;
-    if !matches!(entry.kind, FdKind::LegacyFile | FdKind::ObjectDirectory) {
+    if entry.kind != FdKind::ObjectDirectory {
         return Err(EBADF);
     }
-    let number = match entry.kind {
-        FdKind::LegacyFile => syscall::SyscallNumber::FileReadDir,
-        FdKind::ObjectDirectory => syscall::SyscallNumber::HandleRead,
-        _ => return Err(EBADF),
-    };
     let read = syscall_errno(syscall::raw_syscall3(
-        number,
+        syscall::SyscallNumber::HandleRead,
         entry.lower_handle,
         stream.buffer.as_mut_ptr() as u64,
         stream.buffer.len() as u64,
@@ -1836,28 +1747,15 @@ fn next_dirent(stream: &mut DirStream) -> Result<Option<NewlibDirent>, c_int> {
         let entry = with_fd_entry(stream.fd)?;
         let offset = stream.buffer_offset;
         let record = &stream.buffer[offset..stream.buffer_len];
-        let (inode, dtype, name, consumed) = if entry.kind == FdKind::ObjectDirectory {
-            let (header, name, consumed) =
-                filesystem_protocol::decode_dir_entry(record).map_err(|_| EIO)?;
-            let dtype = match header.kind {
-                filesystem_protocol::NODE_TYPE_REGULAR => 8,
-                filesystem_protocol::NODE_TYPE_DIRECTORY => 4,
-                filesystem_protocol::NODE_TYPE_SYMLINK => 10,
-                _ => 0,
-            };
-            (header.node_id, dtype, name, consumed)
-        } else {
-            if record.len() < 19 {
-                return Err(EIO);
-            }
-            let reclen = read_u16_ne(record, 16) as usize;
-            if reclen < 19 || reclen > record.len() {
-                return Err(EIO);
-            }
-            let name = &record[19..reclen];
-            let nul = name.iter().position(|byte| *byte == 0).unwrap_or(name.len());
-            (read_u64_ne(record, 0), record[18], &name[..nul], reclen)
+        let (header, name, consumed) =
+            filesystem_protocol::decode_dir_entry(record).map_err(|_| EIO)?;
+        let dtype = match header.kind {
+            filesystem_protocol::NODE_TYPE_REGULAR => 8,
+            filesystem_protocol::NODE_TYPE_DIRECTORY => 4,
+            filesystem_protocol::NODE_TYPE_SYMLINK => 10,
+            _ => 0,
         };
+        let (inode, name) = (header.node_id, name);
         let copy_len = core::cmp::min(name.len(), DIRENT_NAME_MAX - 1);
 
         let mut out = NewlibDirent::empty();
@@ -1913,9 +1811,7 @@ pub extern "C" fn _write(fd: c_int, buffer: *const c_void, length: usize) -> isi
     }
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        let written = syscall_write(entry, buffer, length)?;
-        advance_position(fd, written as u64);
-        Ok(written)
+        syscall_write(entry, buffer, length)
     })();
     result_with_errno(result, -1)
 }
@@ -1972,7 +1868,7 @@ pub extern "C" fn _read(fd: c_int, buffer: *mut c_void, length: usize) -> isize 
     }
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        syscall_read(fd, entry, buffer, length)
+        syscall_read(entry, buffer, length)
     })();
     result_with_errno(result, -1)
 }
@@ -2054,13 +1950,10 @@ pub extern "C" fn _close(fd: c_int) -> c_int {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
         if entry.close_owned {
-            let number = match entry.kind {
-                FdKind::ObjectFile | FdKind::ObjectDirectory => {
-                    syscall::SyscallNumber::HandleClose
-                }
-                _ => syscall::SyscallNumber::FileClose,
-            };
-            let _ = syscall_errno(syscall::raw_syscall1(number, entry.lower_handle))?;
+            let _ = syscall_errno(syscall::raw_syscall1(
+                syscall::SyscallNumber::HandleClose,
+                entry.lower_handle,
+            ))?;
         }
         unsafe {
             state_mut().fds[fd as usize] = FdEntry::unused();
@@ -2086,33 +1979,48 @@ pub extern "C" fn _pipe2(fds: *mut c_int, flags: c_int) -> c_int {
         return -1;
     }
     let result = (|| {
-        let mut lower = [0i32; 2];
-        let _ = syscall_errno(syscall::raw_syscall2(
-            syscall::SyscallNumber::Pipe2,
-            lower.as_mut_ptr() as u64,
-            flags as u64,
+        let mut pair = syscall::StreamPair::default();
+        let _ = syscall_errno(syscall::raw_syscall1(
+            syscall::SyscallNumber::StreamPairCreate,
+            (&mut pair as *mut syscall::StreamPair) as u64,
         ))?;
-        let read_fd = match allocate_fd(lower[0] as u64, flags) {
+        let read_rights = syscall::HANDLE_RIGHT_READ
+            | syscall::HANDLE_RIGHT_DUPLICATE
+            | syscall::HANDLE_RIGHT_TRANSFER;
+        let write_rights = syscall::HANDLE_RIGHT_WRITE
+            | syscall::HANDLE_RIGHT_DUPLICATE
+            | syscall::HANDLE_RIGHT_TRANSFER;
+        let read_fd = match allocate_object_fd(
+            pair.read,
+            read_rights,
+            FdKind::ObjectStreamRead,
+            flags,
+        ) {
             Ok(fd) => fd,
             Err(errno) => {
                 let _ = syscall_errno(syscall::raw_syscall1(
-                    syscall::SyscallNumber::FileClose,
-                    lower[0] as u64,
+                    syscall::SyscallNumber::HandleClose,
+                    u64::from(pair.read),
                 ));
                 let _ = syscall_errno(syscall::raw_syscall1(
-                    syscall::SyscallNumber::FileClose,
-                    lower[1] as u64,
+                    syscall::SyscallNumber::HandleClose,
+                    u64::from(pair.write),
                 ));
                 return Err(errno);
             }
         };
-        let write_fd = match allocate_fd(lower[1] as u64, flags) {
+        let write_fd = match allocate_object_fd(
+            pair.write,
+            write_rights,
+            FdKind::ObjectStreamWrite,
+            flags,
+        ) {
             Ok(fd) => fd,
             Err(errno) => {
                 let _ = _close(read_fd);
                 let _ = syscall_errno(syscall::raw_syscall1(
-                    syscall::SyscallNumber::FileClose,
-                    lower[1] as u64,
+                    syscall::SyscallNumber::HandleClose,
+                    u64::from(pair.write),
                 ));
                 return Err(errno);
             }
@@ -2193,15 +2101,16 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
                         .map_err(map_posix_client_error)?;
                     return Ok(0);
                 }
+                if matches!(entry.kind, FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite) {
+                    return if posix_mutable_status_flags(arg) == 0 {
+                        Ok(0)
+                    } else {
+                        Err(EINVAL)
+                    };
+                }
                 unsafe {
                     state_mut().fds[fd as usize].open_flags = arg;
                 }
-                let _ = syscall_errno(syscall::raw_syscall3(
-                    syscall::SyscallNumber::Fcntl,
-                    entry.lower_handle,
-                    F_SETFL as u64,
-                    arg as u64,
-                ))?;
                 Ok(0)
             }
             _ => Err(EINVAL),
@@ -2558,31 +2467,21 @@ pub extern "C" fn readdir(dirp: *mut c_void) -> *mut NewlibDirent {
 pub extern "C" fn _lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if !matches!(entry.kind, FdKind::LegacyFile | FdKind::ObjectFile) {
+        if entry.kind != FdKind::ObjectFile {
             return Err(ESPIPE);
         }
-        let number = if entry.kind == FdKind::ObjectFile {
-            syscall::SyscallNumber::HandleSeek
-        } else {
-            syscall::SyscallNumber::FileSeek
-        };
-        let basis = if entry.kind == FdKind::ObjectFile {
-            match whence {
-                0 => syscall::HANDLE_SEEK_START,
-                1 => syscall::HANDLE_SEEK_CURRENT,
-                2 => syscall::HANDLE_SEEK_END,
-                _ => return Err(EINVAL),
-            }
-        } else {
-            whence as u64
+        let basis = match whence {
+            0 => syscall::HANDLE_SEEK_START,
+            1 => syscall::HANDLE_SEEK_CURRENT,
+            2 => syscall::HANDLE_SEEK_END,
+            _ => return Err(EINVAL),
         };
         let next = syscall_errno(syscall::raw_syscall3(
-            number,
+            syscall::SyscallNumber::HandleSeek,
             entry.lower_handle,
             offset as u64,
             basis,
         ))?;
-        store_position(fd, next);
         Ok(next as i64)
     })();
     result_with_errno(result, -1)
@@ -2595,33 +2494,22 @@ pub extern "C" fn lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _fsync(fd: c_int) -> c_int {
-    result_with_errno(sync_file_descriptor(fd, syscall::SyscallNumber::Fsync), -1)
+    result_with_errno(sync_file_descriptor(fd), -1)
 }
 
-fn sync_file_descriptor(
-    fd: c_int,
-    number: syscall::SyscallNumber,
-) -> Result<c_int, c_int> {
-        let entry = with_fd_entry(fd)?;
-        if !matches!(
-            entry.kind,
-            FdKind::LegacyFile | FdKind::ObjectFile | FdKind::ObjectDirectory
-        ) {
-            return Err(EBADF);
-        }
-        if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
-            let client =
-                posix_client().map_err(map_posix_client_error)?;
-            client
-                .fsync(ObjectHandleAttachment {
-                    handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
-                    rights: entry.rights,
-                })
-                .map_err(map_posix_client_error)?;
-            return Ok(0);
-        }
-        syscall_errno(syscall::raw_syscall1(number, entry.lower_handle))?;
-        Ok(0)
+fn sync_file_descriptor(fd: c_int) -> Result<c_int, c_int> {
+    let entry = with_fd_entry(fd)?;
+    if !matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
+        return Err(EBADF);
+    }
+    let client = posix_client().map_err(map_posix_client_error)?;
+    client
+        .fsync(ObjectHandleAttachment {
+            handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+            rights: entry.rights,
+        })
+        .map_err(map_posix_client_error)?;
+    Ok(0)
 }
 
 #[unsafe(no_mangle)]
@@ -2631,10 +2519,7 @@ pub extern "C" fn fsync(fd: c_int) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fdatasync(fd: c_int) -> c_int {
-    result_with_errno(
-        sync_file_descriptor(fd, syscall::SyscallNumber::Fdatasync),
-        -1,
-    )
+    result_with_errno(sync_file_descriptor(fd), -1)
 }
 
 #[unsafe(no_mangle)]
@@ -2645,31 +2530,19 @@ pub extern "C" fn _ftruncate(fd: c_int, length: i64) -> c_int {
     }
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if !matches!(entry.kind, FdKind::LegacyFile | FdKind::ObjectFile) {
+        if entry.kind != FdKind::ObjectFile {
             return Err(EBADF);
         }
-        if entry.kind == FdKind::ObjectFile {
-            let client =
-                posix_client().map_err(map_posix_client_error)?;
-            client
-                .ftruncate(
-                    ObjectHandleAttachment {
-                        handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
-                        rights: entry.rights,
-                    },
-                    length as u64,
-                )
-                .map_err(map_posix_client_error)?;
-            return Ok(0);
-        }
-        syscall_errno(syscall::raw_syscall2(
-            syscall::SyscallNumber::Ftruncate,
-            entry.lower_handle,
-            length as u64,
-        ))?;
-        if entry.position > length as u64 {
-            store_position(fd, length as u64);
-        }
+        let client = posix_client().map_err(map_posix_client_error)?;
+        client
+            .ftruncate(
+                ObjectHandleAttachment {
+                    handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                    rights: entry.rights,
+                },
+                length as u64,
+            )
+            .map_err(map_posix_client_error)?;
         Ok(0)
     })();
     result_with_errno(result, -1)
@@ -2730,31 +2603,11 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
             };
             return Ok(0);
         }
-        let mut kernel_stat = KernelStat {
-            st_dev: 0,
-            st_ino: 0,
-            st_nlink: 0,
-            st_mode: 0,
-            st_uid: 0,
-            st_gid: 0,
-            __pad0: 0,
-            st_rdev: 0,
-            st_size: 0,
-            st_blksize: 0,
-            st_blocks: 0,
-            st_atim: KernelTimespec { sec: 0, nsec: 0 },
-            st_mtim: KernelTimespec { sec: 0, nsec: 0 },
-            st_ctim: KernelTimespec { sec: 0, nsec: 0 },
-            __unused: [0; 24],
-        };
-        let _ = syscall_errno(syscall::raw_syscall2(
-            syscall::SyscallNumber::FileFstat,
-            entry.lower_handle,
-            (&mut kernel_stat as *mut KernelStat).cast::<c_void>() as u64,
-        ))?;
-        let translated = translate_stat(&kernel_stat);
-        unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), translated) };
-        Ok(0)
+        if matches!(entry.kind, FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite) {
+            unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), stream_stat()) };
+            return Ok(0);
+        }
+        Err(EBADF)
     })();
     result_with_errno(result, -1)
 }
