@@ -1349,13 +1349,22 @@ fn clone_current_fd_table() -> [FdEntry; MAX_FDS] {
     unsafe { state_mut().fds }
 }
 
-fn clear_fd_entry(fds: &mut [FdEntry; MAX_FDS], fd: c_int) {
-    if fd >= 0 && (fd as usize) < MAX_FDS {
-        fds[fd as usize] = FdEntry::unused();
+fn close_fd_entry(fds: &mut [FdEntry; MAX_FDS], fd: c_int) -> Result<(), c_int> {
+    if fd < 0 || fd as usize >= MAX_FDS || !fds[fd as usize].in_use {
+        return Err(EBADF);
     }
+    let entry = fds[fd as usize];
+    if entry.close_owned {
+        syscall_errno(syscall::raw_syscall1(
+            syscall::SyscallNumber::HandleClose,
+            entry.lower_handle,
+        ))?;
+    }
+    fds[fd as usize] = FdEntry::unused();
+    Ok(())
 }
 
-fn rewrite_fd_entry(
+fn duplicate_fd_entry(
     fds: &mut [FdEntry; MAX_FDS],
     old_fd: c_int,
     new_fd: c_int,
@@ -1369,40 +1378,6 @@ fn rewrite_fd_entry(
     }
     if old_fd == new_fd {
         return Ok(());
-    }
-    let new_index = new_fd as usize;
-    let mut new_entry = old_entry;
-    // posix_spawn の child-side file actions は fork 後・execve 前の一時 FD table を
-    // 組み替えるだけでよい。kernel の dup2 syscall は process-local FD 番号を要求するため、
-    // runtime 内部の lower_handle を渡してはいけない。
-    new_entry.close_owned = old_entry.close_owned;
-    new_entry.fd_flags &= !FD_CLOEXEC;
-    fds[new_index] = new_entry;
-    Ok(())
-}
-
-fn duplicate_live_fd(old_fd: c_int, new_fd: c_int) -> Result<c_int, c_int> {
-    if old_fd < 0 || new_fd < 0 || old_fd as usize >= MAX_FDS || new_fd as usize >= MAX_FDS {
-        return Err(EBADF);
-    }
-    let state = unsafe { state_mut() };
-    let old_entry = state.fds[old_fd as usize];
-    if !old_entry.in_use {
-        return Err(EBADF);
-    }
-    if old_fd == new_fd {
-        return Ok(new_fd);
-    }
-
-    if state.fds[new_fd as usize].in_use {
-        let existing = state.fds[new_fd as usize];
-        if existing.close_owned {
-            let _ = syscall_errno(syscall::raw_syscall1(
-                syscall::SyscallNumber::HandleClose,
-                existing.lower_handle,
-            ));
-        }
-        state.fds[new_fd as usize] = FdEntry::unused();
     }
 
     let (lower, close_owned) = match old_entry.kind {
@@ -1420,14 +1395,28 @@ fn duplicate_live_fd(old_fd: c_int, new_fd: c_int) -> Result<c_int, c_int> {
         FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => (old_entry.lower_handle, false),
         FdKind::Unused => return Err(EBADF),
     };
+    if fds[new_fd as usize].in_use {
+        if let Err(error) = close_fd_entry(fds, new_fd) {
+            if close_owned {
+                let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, lower);
+            }
+            return Err(error);
+        }
+    }
     let mut new_entry = old_entry;
     new_entry.lower_handle = lower;
     new_entry.fd_flags &= !FD_CLOEXEC;
     new_entry.close_owned = close_owned;
-    state.fds[new_fd as usize] = FdEntry {
+    fds[new_fd as usize] = FdEntry {
         lower_handle: lower,
         ..new_entry
     };
+    Ok(())
+}
+
+fn duplicate_live_fd(old_fd: c_int, new_fd: c_int) -> Result<c_int, c_int> {
+    let state = unsafe { state_mut() };
+    duplicate_fd_entry(&mut state.fds, old_fd, new_fd)?;
     Ok(new_fd)
 }
 
@@ -1450,11 +1439,11 @@ fn apply_spawn_file_actions(
         // Safety: current walks the STAILQ built by newlib's posix_spawn_file_actions APIs.
         let entry = unsafe { &*current };
         match entry.fae_action {
-            FAE_CLOSE => clear_fd_entry(fds, entry.fae_fildes),
+            FAE_CLOSE => close_fd_entry(fds, entry.fae_fildes)?,
             FAE_DUP2 => {
                 // Safety: the active union field is determined by fae_action.
                 let new_fd = unsafe { entry.fae_data.dup2.newfildes };
-                rewrite_fd_entry(fds, entry.fae_fildes, new_fd)?;
+                duplicate_fd_entry(fds, entry.fae_fildes, new_fd)?;
             }
             FAE_OPEN | FAE_CHDIR | FAE_FCHDIR => return Err(ENOSYS),
             _ => return Err(EINVAL),
