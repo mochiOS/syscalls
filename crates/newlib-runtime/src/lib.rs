@@ -2263,6 +2263,28 @@ pub extern "C" fn fchmodat(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn fchmod(fd: c_int, mode: u32) -> c_int {
+    let result = (|| {
+        let entry = with_fd_entry(fd)?;
+        if !matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
+            return Err(EBADF);
+        }
+        let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+        client
+            .fchmod(
+                ObjectHandleAttachment {
+                    handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                    rights: entry.rights,
+                },
+                mode,
+            )
+            .map_err(map_posix_client_error)?;
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn chown(path: *const c_char, uid: u32, gid: u32) -> c_int {
     if path.is_null() {
         set_errno(EFAULT);
@@ -2316,6 +2338,29 @@ pub extern "C" fn fchownat(
         return -1;
     }
     result_with_errno(chown_posix_at(dirfd, path, uid, gid, flags).map(|_| 0), -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fchown(fd: c_int, uid: u32, gid: u32) -> c_int {
+    let result = (|| {
+        let entry = with_fd_entry(fd)?;
+        if !matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
+            return Err(EBADF);
+        }
+        let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+        client
+            .fchown(
+                ObjectHandleAttachment {
+                    handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                    rights: entry.rights,
+                },
+                uid,
+                gid,
+            )
+            .map_err(map_posix_client_error)?;
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]

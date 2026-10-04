@@ -90,6 +90,8 @@ pub const OP_SYMLINK_AT: u16 = 22;
 pub const OP_READLINK_AT: u16 = 23;
 pub const OP_CHMOD_AT: u16 = 24;
 pub const OP_CHOWN_AT: u16 = 25;
+pub const OP_FCHMOD: u16 = 26;
+pub const OP_FCHOWN: u16 = 27;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -102,6 +104,7 @@ pub const UMASK_PAYLOAD_LEN: usize = 4;
 pub const CREDENTIAL_ID_PAYLOAD_LEN: usize = 4;
 pub const FILE_LENGTH_PAYLOAD_LEN: usize = 8;
 pub const FILE_FLAGS_PAYLOAD_LEN: usize = 4;
+pub const FILE_OWNER_PAYLOAD_LEN: usize = 8;
 pub const OPEN_AT_HEADER_LEN: usize = 16;
 pub const STAT_AT_HEADER_LEN: usize = 12;
 pub const ACCESS_AT_HEADER_LEN: usize = 16;
@@ -738,6 +741,22 @@ pub fn decode_chown_at(input: &[u8]) -> Result<ChownAtRequest<'_>, ProtocolError
         gid: get_u32(input, 12),
         path,
     })
+}
+
+pub fn encode_file_owner(uid: u32, gid: u32, output: &mut [u8]) -> Result<(), ProtocolError> {
+    if output.len() < FILE_OWNER_PAYLOAD_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    put_u32(output, 0, uid);
+    put_u32(output, 4, gid);
+    Ok(())
+}
+
+pub fn decode_file_owner(input: &[u8]) -> Result<(u32, u32), ProtocolError> {
+    if input.len() != FILE_OWNER_PAYLOAD_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok((get_u32(input, 0), get_u32(input, 4)))
 }
 
 pub fn encode_access_at(

@@ -815,6 +815,25 @@ impl<T: ObjectTransport> Client<T> {
         Ok(())
     }
 
+    pub fn fchmod(
+        &self,
+        file: ObjectHandleAttachment<T::Handle>,
+        mode: u32,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.file_operation(protocol::OP_FCHMOD, &mode.to_le_bytes(), file)
+    }
+
+    pub fn fchown(
+        &self,
+        file: ObjectHandleAttachment<T::Handle>,
+        uid: u32,
+        gid: u32,
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut payload = [0; protocol::FILE_OWNER_PAYLOAD_LEN];
+        protocol::encode_file_owner(uid, gid, &mut payload).map_err(ClientError::Protocol)?;
+        self.file_operation(protocol::OP_FCHOWN, &payload, file)
+    }
+
     fn file_operation(
         &self,
         opcode: u16,

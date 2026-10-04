@@ -67,6 +67,10 @@ pub const OP_READLINK_AT: u16 = 32;
 pub const OP_CHMOD_AT: u16 = 33;
 /// Atomically changes ownership on a Handle-anchored path.
 pub const OP_CHOWN_AT: u16 = 34;
+/// Changes mode bits on one attached provider-owned open object.
+pub const OP_CHMOD_HANDLE: u16 = 35;
+/// Changes ownership on one attached provider-owned open object.
+pub const OP_CHOWN_HANDLE: u16 = 36;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const OPEN_STATUS_APPEND: u32 = 1 << 0;
