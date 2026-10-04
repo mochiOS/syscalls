@@ -3590,26 +3590,17 @@ pub extern "C" fn _waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_
             return Err(EINVAL);
         }
         let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
-        loop {
-            match client.wait_child(pid as i64, options as u32) {
-                Ok(waited) => {
-                    if waited.process_id == 0 {
-                        return Ok(0);
-                    }
-                    let waited_pid = c_int::try_from(waited.process_id).map_err(|_| EOVERFLOW)?;
-                    if !status.is_null() {
-                        unsafe { status.write(waited.status as c_int) };
-                    }
-                    return Ok(waited_pid);
-                }
-                Err(PosixClientError::Remote(posix_protocol::STATUS_EAGAIN))
-                    if options & WNOHANG == 0 =>
-                {
-                    let _ = syscall::raw_syscall0(syscall::SyscallNumber::ThreadYield);
-                }
-                Err(error) => return Err(map_posix_client_error(error)),
-            }
+        let waited = client
+            .wait_child(pid as i64, options as u32)
+            .map_err(map_posix_client_error)?;
+        if waited.process_id == 0 {
+            return Ok(0);
         }
+        let waited_pid = c_int::try_from(waited.process_id).map_err(|_| EOVERFLOW)?;
+        if !status.is_null() {
+            unsafe { status.write(waited.status as c_int) };
+        }
+        Ok(waited_pid)
     })();
     result_with_errno(result, -1)
 }
