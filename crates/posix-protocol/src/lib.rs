@@ -75,6 +75,7 @@ pub const OP_FSTAT: u16 = 7;
 pub const OP_ACCESS_AT: u16 = 8;
 pub const OP_CHDIR_AT: u16 = 9;
 pub const OP_FCHDIR: u16 = 10;
+pub const OP_GETCWD: u16 = 11;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;

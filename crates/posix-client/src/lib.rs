@@ -160,6 +160,12 @@ impl<T: Transport> Client<T> {
         protocol::decode_umask(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    /// Writes the current working directory without a trailing NUL and
+    /// returns the number of bytes written.
+    pub fn getcwd(&self, output: &mut [u8]) -> Result<usize, ClientError<T::Error>> {
+        self.request(protocol::OP_GETCWD, 0, &[], output)
+    }
+
     pub fn request(
         &self,
         opcode: u16,
