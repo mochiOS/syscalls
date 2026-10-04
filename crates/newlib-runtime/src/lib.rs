@@ -2408,13 +2408,24 @@ pub extern "C" fn fchown(fd: c_int, uid: u32, gid: u32) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn setpgid(_pid: c_int, _pgid: c_int) -> c_int {
-    0
+pub extern "C" fn setpgid(pid: c_int, pgid: c_int) -> c_int {
+    let result = PosixClient::from_syscall_launch_context()
+        .map_err(map_posix_client_error)
+        .and_then(|client| {
+            client
+                .set_process_group(pid as i64, pgid as i64)
+                .map_err(map_posix_client_error)
+        });
+    result_with_errno(result.map(|_| 0), -1)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn setsid() -> c_int {
-    1
+    let result = PosixClient::from_syscall_launch_context()
+        .map_err(map_posix_client_error)
+        .and_then(|client| client.create_session().map_err(map_posix_client_error))
+        .and_then(|session| c_int::try_from(session).map_err(|_| EOVERFLOW));
+    result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
@@ -2951,8 +2962,10 @@ pub extern "C" fn sysconf(name: c_int) -> CLong {
 #[unsafe(no_mangle)]
 pub extern "C" fn _getpid() -> c_int {
     result_with_errno(
-        syscall_errno(syscall::raw_syscall0(syscall::SyscallNumber::GetPid))
-            .and_then(|pid| c_int::try_from(pid).map_err(|_| EIO)),
+        PosixClient::from_syscall_launch_context()
+            .map_err(map_posix_client_error)
+            .and_then(|client| client.process_info(0).map_err(map_posix_client_error))
+            .and_then(|info| c_int::try_from(info.process_id).map_err(|_| EOVERFLOW)),
         -1,
     )
 }
@@ -2960,6 +2973,39 @@ pub extern "C" fn _getpid() -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn getpid() -> c_int {
     _getpid()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn getppid() -> c_int {
+    result_with_errno(
+        PosixClient::from_syscall_launch_context()
+            .map_err(map_posix_client_error)
+            .and_then(|client| client.process_info(0).map_err(map_posix_client_error))
+            .and_then(|info| c_int::try_from(info.parent_id).map_err(|_| EOVERFLOW)),
+        -1,
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn getpgid(pid: c_int) -> c_int {
+    result_with_errno(
+        PosixClient::from_syscall_launch_context()
+            .map_err(map_posix_client_error)
+            .and_then(|client| client.process_info(pid as i64).map_err(map_posix_client_error))
+            .and_then(|info| c_int::try_from(info.process_group_id).map_err(|_| EOVERFLOW)),
+        -1,
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn getsid(pid: c_int) -> c_int {
+    result_with_errno(
+        PosixClient::from_syscall_launch_context()
+            .map_err(map_posix_client_error)
+            .and_then(|client| client.process_info(pid as i64).map_err(map_posix_client_error))
+            .and_then(|info| c_int::try_from(info.session_id).map_err(|_| EOVERFLOW)),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]

@@ -94,9 +94,13 @@ pub const OP_FCHMOD: u16 = 26;
 pub const OP_FCHOWN: u16 = 27;
 pub const OP_PROCESS_FORKED: u16 = 28;
 pub const OP_WAIT_CHILD: u16 = 29;
+pub const OP_PROCESS_INFO: u16 = 30;
+pub const OP_SET_PROCESS_GROUP: u16 = 31;
+pub const OP_CREATE_SESSION: u16 = 32;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
+pub const STATUS_EPERM: i32 = -1;
 pub const STATUS_ENOENT: i32 = -2;
 pub const STATUS_ESRCH: i32 = -3;
 pub const STATUS_ECHILD: i32 = -10;
@@ -119,6 +123,9 @@ pub const CHOWN_AT_HEADER_LEN: usize = 20;
 pub const FILE_STATUS_LEN: usize = 112;
 pub const WAIT_REQUEST_LEN: usize = 16;
 pub const WAIT_RESULT_LEN: usize = 16;
+pub const PROCESS_ID_REQUEST_LEN: usize = 8;
+pub const PROCESS_GROUP_REQUEST_LEN: usize = 16;
+pub const PROCESS_INFO_LEN: usize = 32;
 pub const MAX_PATH_LEN: usize = 4096;
 pub const MAX_CONTROL_PAYLOAD_LEN: usize = RENAME_AT_HEADER_LEN + MAX_PATH_LEN * 2;
 pub const CONTROL_MESSAGE_LEN: usize = HEADER_LEN + MAX_CONTROL_PAYLOAD_LEN;
@@ -279,6 +286,14 @@ pub struct WaitRequest {
 pub struct WaitResult {
     pub process_id: u64,
     pub status: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProcessInfo {
+    pub process_id: u64,
+    pub parent_id: u64,
+    pub process_group_id: u64,
+    pub session_id: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -456,6 +471,67 @@ pub fn decode_wait_result(input: &[u8]) -> Result<WaitResult, ProtocolError> {
     Ok(WaitResult {
         process_id: get_u64(input, 0),
         status: get_u32(input, 8),
+    })
+}
+
+pub fn encode_process_id_request(value: i64, output: &mut [u8]) -> Result<(), ProtocolError> {
+    if output.len() < PROCESS_ID_REQUEST_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    put_u64(output, 0, value as u64);
+    Ok(())
+}
+
+pub fn decode_process_id_request(input: &[u8]) -> Result<i64, ProtocolError> {
+    if input.len() != PROCESS_ID_REQUEST_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(get_u64(input, 0) as i64)
+}
+
+pub fn encode_process_group_request(
+    process_id: i64,
+    process_group_id: i64,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < PROCESS_GROUP_REQUEST_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    put_u64(output, 0, process_id as u64);
+    put_u64(output, 8, process_group_id as u64);
+    Ok(())
+}
+
+pub fn decode_process_group_request(input: &[u8]) -> Result<(i64, i64), ProtocolError> {
+    if input.len() != PROCESS_GROUP_REQUEST_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok((get_u64(input, 0) as i64, get_u64(input, 8) as i64))
+}
+
+pub fn encode_process_info(
+    info: ProcessInfo,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < PROCESS_INFO_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    put_u64(output, 0, info.process_id);
+    put_u64(output, 8, info.parent_id);
+    put_u64(output, 16, info.process_group_id);
+    put_u64(output, 24, info.session_id);
+    Ok(())
+}
+
+pub fn decode_process_info(input: &[u8]) -> Result<ProcessInfo, ProtocolError> {
+    if input.len() != PROCESS_INFO_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(ProcessInfo {
+        process_id: get_u64(input, 0),
+        parent_id: get_u64(input, 8),
+        process_group_id: get_u64(input, 16),
+        session_id: get_u64(input, 24),
     })
 }
 

@@ -175,6 +175,48 @@ impl<T: Transport> Client<T> {
         protocol::decode_wait_result(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    pub fn process_info(
+        &self,
+        process_id: i64,
+    ) -> Result<protocol::ProcessInfo, ClientError<T::Error>> {
+        let mut request = [0u8; protocol::PROCESS_ID_REQUEST_LEN];
+        protocol::encode_process_id_request(process_id, &mut request)
+            .map_err(ClientError::Protocol)?;
+        let mut response = [0u8; protocol::PROCESS_INFO_LEN];
+        let length = self.request(
+            protocol::OP_PROCESS_INFO,
+            0,
+            &request,
+            &mut response,
+        )?;
+        protocol::decode_process_info(&response[..length]).map_err(ClientError::Protocol)
+    }
+
+    pub fn set_process_group(
+        &self,
+        process_id: i64,
+        process_group_id: i64,
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut request = [0u8; protocol::PROCESS_GROUP_REQUEST_LEN];
+        protocol::encode_process_group_request(process_id, process_group_id, &mut request)
+            .map_err(ClientError::Protocol)?;
+        self.request(protocol::OP_SET_PROCESS_GROUP, 0, &request, &mut [])
+            .map(|_| ())
+    }
+
+    pub fn create_session(&self) -> Result<u64, ClientError<T::Error>> {
+        let mut response = [0u8; protocol::PROCESS_INFO_LEN];
+        let length = self.request(
+            protocol::OP_CREATE_SESSION,
+            0,
+            &[],
+            &mut response,
+        )?;
+        protocol::decode_process_info(&response[..length])
+            .map(|info| info.session_id)
+            .map_err(ClientError::Protocol)
+    }
+
     /// Updates the process umask and returns its previous value, matching the
     /// atomic state transition required by POSIX `umask()`.
     pub fn set_umask(&self, mask: u32) -> Result<u32, ClientError<T::Error>> {
