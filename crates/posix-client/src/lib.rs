@@ -684,6 +684,52 @@ impl<T: ObjectTransport> Client<T> {
         Ok(())
     }
 
+    /// Reads a symbolic-link target without appending a trailing NUL byte.
+    pub fn readlink_at(
+        &self,
+        base: StatAtBase<T::Handle>,
+        path: &str,
+        output: &mut [u8],
+    ) -> Result<usize, ClientError<T::Error>> {
+        let (base, directory) = match base {
+            StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
+            StatAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
+            StatAtBase::Directory(handle) => {
+                (protocol::OpenBase::AttachedDirectory, Some(handle))
+            }
+        };
+        let mut payload = [0u8; protocol::STAT_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
+        let payload_len = protocol::encode_stat_at(
+            protocol::StatAtRequest {
+                base,
+                flags: 0,
+                path,
+            },
+            &mut payload,
+        )
+        .map_err(ClientError::Protocol)?;
+        let mut handles = ObjectHandles::new();
+        if let Some(directory) = directory {
+            handles
+                .push(directory)
+                .map_err(|_| ClientError::RequestTooLarge)?;
+        }
+        let mut target = [0u8; protocol::MAX_PATH_LEN];
+        let length = self.request_with_handles(
+            protocol::OP_READLINK_AT,
+            0,
+            &payload[..payload_len],
+            &mut target,
+            &mut handles,
+        )?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        let copied = core::cmp::min(length, output.len());
+        output[..copied].copy_from_slice(&target[..copied]);
+        Ok(copied)
+    }
+
     fn file_operation(
         &self,
         opcode: u16,

@@ -3006,19 +3006,47 @@ pub extern "C" fn _readlink(path: *const c_char, output: *mut c_char, size: usiz
         set_errno(EINVAL);
         return -1;
     }
-    let result = syscall_errno(syscall::raw_syscall3(
-        syscall::SyscallNumber::Readlink,
-        path as u64,
-        output as u64,
-        size as u64,
-    ))
-    .and_then(|read| isize::try_from(read).map_err(|_| EIO));
+    let result = readlink_posix_at(-2, path, output, size);
     result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn readlink(path: *const c_char, output: *mut c_char, size: usize) -> isize {
     _readlink(path, output, size)
+}
+
+fn readlink_posix_at(
+    dirfd: c_int,
+    path: *const c_char,
+    output: *mut c_char,
+    size: usize,
+) -> Result<isize, c_int> {
+    let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+    let base = rename_posix_base(dirfd, path)?;
+    let output = unsafe { core::slice::from_raw_parts_mut(output.cast::<u8>(), size) };
+    let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+    let read = client
+        .readlink_at(base, path, output)
+        .map_err(map_posix_client_error)?;
+    isize::try_from(read).map_err(|_| EIO)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn readlinkat(
+    dirfd: c_int,
+    path: *const c_char,
+    output: *mut c_char,
+    size: usize,
+) -> isize {
+    if path.is_null() || output.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    if size == 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    result_with_errno(readlink_posix_at(dirfd, path, output, size), -1)
 }
 
 #[unsafe(no_mangle)]

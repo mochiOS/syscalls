@@ -87,6 +87,7 @@ pub const OP_UNLINK_AT: u16 = 19;
 pub const OP_RENAME_AT: u16 = 20;
 pub const OP_TRUNCATE_AT: u16 = 21;
 pub const OP_SYMLINK_AT: u16 = 22;
+pub const OP_READLINK_AT: u16 = 23;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
