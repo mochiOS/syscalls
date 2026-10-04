@@ -27,6 +27,9 @@ pub const OP_READLINK: u16 = 14;
 pub const OP_TRUNCATE: u16 = 15;
 pub const OP_SYNC: u16 = 16;
 pub const OP_SETATTR: u16 = 17;
+/// Atomically resolves, optionally creates, and opens one path. An optional
+/// provider-owned directory Handle is carried as an IPC attachment.
+pub const OP_OPEN_AT: u16 = 18;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const SETATTR_MODE: u32 = 1 << 0;
@@ -35,6 +38,25 @@ pub const SETATTR_GID: u32 = 1 << 2;
 
 /// Follow the final symbolic-link component during `OP_LOOKUP`.
 pub const LOOKUP_FOLLOW_SYMLINKS: u32 = 1 << 0;
+
+pub const OPEN_AT_READ: u32 = 1 << 0;
+pub const OPEN_AT_WRITE: u32 = 1 << 1;
+pub const OPEN_AT_CREATE: u32 = 1 << 2;
+pub const OPEN_AT_EXCLUSIVE: u32 = 1 << 3;
+pub const OPEN_AT_TRUNCATE: u32 = 1 << 4;
+pub const OPEN_AT_APPEND: u32 = 1 << 5;
+pub const OPEN_AT_DIRECTORY: u32 = 1 << 6;
+pub const OPEN_AT_NOFOLLOW: u32 = 1 << 7;
+pub const OPEN_AT_BASE_ATTACHED: u32 = 1 << 8;
+pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
+    | OPEN_AT_WRITE
+    | OPEN_AT_CREATE
+    | OPEN_AT_EXCLUSIVE
+    | OPEN_AT_TRUNCATE
+    | OPEN_AT_APPEND
+    | OPEN_AT_DIRECTORY
+    | OPEN_AT_NOFOLLOW
+    | OPEN_AT_BASE_ATTACHED;
 
 /// Registers an IPC endpoint as an opaque filesystem provider.
 ///
