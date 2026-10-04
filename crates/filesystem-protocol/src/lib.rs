@@ -42,6 +42,10 @@ pub const OP_ACCESS_AT: u16 = 21;
 /// Returns the absolute path of an attached open directory relative to an
 /// attached process root. Attachments are ordered as root, then directory.
 pub const OP_PATH_HANDLE: u16 = 22;
+/// Truncates exactly one attached provider-owned open object.
+pub const OP_TRUNCATE_HANDLE: u16 = 23;
+/// Flushes storage after validating one attached provider-owned open object.
+pub const OP_SYNC_HANDLE: u16 = 24;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const SETATTR_MODE: u32 = 1 << 0;

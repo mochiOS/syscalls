@@ -2387,7 +2387,15 @@ fn sync_file_descriptor(
             return Err(EBADF);
         }
         if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
-            return Err(ENOSYS);
+            let client =
+                PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+            client
+                .fsync(ObjectHandleAttachment {
+                    handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                    rights: entry.rights,
+                })
+                .map_err(map_posix_client_error)?;
+            return Ok(0);
         }
         syscall_errno(syscall::raw_syscall1(number, entry.lower_handle))?;
         Ok(0)
@@ -2418,7 +2426,18 @@ pub extern "C" fn _ftruncate(fd: c_int, length: i64) -> c_int {
             return Err(EBADF);
         }
         if entry.kind == FdKind::ObjectFile {
-            return Err(ENOSYS);
+            let client =
+                PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+            client
+                .ftruncate(
+                    ObjectHandleAttachment {
+                        handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                        rights: entry.rights,
+                    },
+                    length as u64,
+                )
+                .map_err(map_posix_client_error)?;
+            return Ok(0);
         }
         syscall_errno(syscall::raw_syscall2(
             syscall::SyscallNumber::Ftruncate,

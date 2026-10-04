@@ -429,6 +429,40 @@ impl<T: ObjectTransport> Client<T> {
         Ok(())
     }
 
+    pub fn ftruncate(
+        &self,
+        file: ObjectHandleAttachment<T::Handle>,
+        length: u64,
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut payload = [0u8; protocol::FILE_LENGTH_PAYLOAD_LEN];
+        protocol::encode_file_length(length, &mut payload).map_err(ClientError::Protocol)?;
+        self.file_operation(protocol::OP_FTRUNCATE, &payload, file)
+    }
+
+    pub fn fsync(
+        &self,
+        file: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.file_operation(protocol::OP_FSYNC, &[], file)
+    }
+
+    fn file_operation(
+        &self,
+        opcode: u16,
+        payload: &[u8],
+        file: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(file)
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        self.request_with_handles(opcode, 0, payload, &mut [], &mut handles)?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(())
+    }
+
     pub fn request_with_handles(
         &self,
         opcode: u16,
