@@ -367,6 +367,19 @@ pub mod process {
         })
     }
 
+    pub fn resume_handle(handle: u32) -> SysResult<()> {
+        syscall::call1(syscall::SyscallNumber::ProcessHandleResume, u64::from(handle)).map(|_| ())
+    }
+
+    pub fn terminate_handle(handle: u32, exit_code: u64) -> SysResult<()> {
+        syscall::call2(
+            syscall::SyscallNumber::ProcessHandleTerminate,
+            u64::from(handle),
+            exit_code,
+        )
+        .map(|_| ())
+    }
+
     pub fn handle_status(handle: u32) -> SysResult<syscall::ProcessStatus> {
         let mut status = syscall::ProcessStatus::default();
         syscall::call2(
