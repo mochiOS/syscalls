@@ -10,6 +10,12 @@ pub const VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 32;
 pub const MAX_MESSAGE_LEN: usize = 64 * 1024;
 
+/// Opaque LaunchContext key under which the POSIX control endpoint is passed.
+///
+/// This value belongs to the POSIX user-space contract. mnu treats it as an
+/// uninterpreted integer.
+pub const CONTROL_HANDLE_KEY: u64 = u64::from_le_bytes(*b"POSXCTRL");
+
 pub const OP_PING: u16 = 1;
 pub const OP_SESSION_REGISTER: u16 = 2;
 pub const OP_STATUS: u16 = 0x8000;
