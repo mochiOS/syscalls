@@ -3018,15 +3018,15 @@ pub extern "C" fn realpath(path: *const c_char, resolved_path: *mut c_char) -> *
     let result = (|| {
         let path_bytes = unsafe { c_bytes(path) };
         let mut cwd_storage = [0u8; 4096];
+        let mut cwd_len = 0usize;
         let out_len = if path_bytes.first() == Some(&b'/') {
             path_bytes.len()
         } else {
-            let _ = syscall_errno(syscall::raw_syscall2(
-                syscall::SyscallNumber::Getcwd,
-                cwd_storage.as_mut_ptr() as u64,
-                cwd_storage.len() as u64,
-            ))?;
-            let cwd_len = cwd_storage.iter().position(|byte| *byte == 0).ok_or(EIO)?;
+            let client =
+                PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+            cwd_len = client
+                .getcwd(&mut cwd_storage[..4095])
+                .map_err(map_posix_client_error)?;
             cwd_len + usize::from(cwd_len != 1) + path_bytes.len()
         };
         let out_ptr = if resolved_path.is_null() {
@@ -3045,7 +3045,6 @@ pub extern "C" fn realpath(path: *const c_char, resolved_path: *mut c_char) -> *
             }
             return Ok(out_ptr);
         }
-        let cwd_len = cwd_storage.iter().position(|byte| *byte == 0).ok_or(EIO)?;
         unsafe {
             ptr::copy_nonoverlapping(cwd_storage.as_ptr(), out, cwd_len);
             let mut written = cwd_len;
