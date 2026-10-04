@@ -352,6 +352,37 @@ pub mod process {
         Ok(context)
     }
 
+    pub fn open_handle_for_endpoint(endpoint: u64, rights: u64) -> SysResult<u32> {
+        syscall::call2(syscall::SyscallNumber::ProcessHandleOpen, endpoint, rights)
+            .and_then(|handle| {
+                u32::try_from(handle).map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))
+            })
+    }
+
+    pub fn handle_status(handle: u32) -> SysResult<syscall::ProcessStatus> {
+        let mut status = syscall::ProcessStatus::default();
+        syscall::call2(
+            syscall::SyscallNumber::ProcessHandleStatus,
+            u64::from(handle),
+            (&mut status as *mut syscall::ProcessStatus) as u64,
+        )?;
+        Ok(status)
+    }
+
+    pub fn wait_handle(
+        handle: u32,
+        deadline_ticks: u64,
+    ) -> SysResult<syscall::ProcessStatus> {
+        let mut status = syscall::ProcessStatus::default();
+        syscall::call3(
+            syscall::SyscallNumber::ProcessHandleWait,
+            u64::from(handle),
+            deadline_ticks,
+            (&mut status as *mut syscall::ProcessStatus) as u64,
+        )?;
+        Ok(status)
+    }
+
     pub fn exit(code: u64) -> ! {
         super::runtime_support::process_exit(code)
     }
