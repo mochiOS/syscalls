@@ -2065,14 +2065,11 @@ pub extern "C" fn setgid(gid: c_int) -> c_int {
         set_errno(EINVAL);
         return -1;
     }
-    result_with_errno(
-        syscall_errno(syscall::raw_syscall1(
-            syscall::SyscallNumber::Setgid,
-            gid as u64,
-        ))
-        .map(|_| 0),
-        -1,
-    )
+    let result = PosixClient::from_syscall_launch_context()
+        .map_err(map_posix_client_error)
+        .and_then(|client| client.set_gid(gid as u32).map_err(map_posix_client_error))
+        .map(|_| 0);
+    result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
@@ -2081,14 +2078,11 @@ pub extern "C" fn setuid(uid: c_int) -> c_int {
         set_errno(EINVAL);
         return -1;
     }
-    result_with_errno(
-        syscall_errno(syscall::raw_syscall1(
-            syscall::SyscallNumber::Setuid,
-            uid as u64,
-        ))
-        .map(|_| 0),
-        -1,
-    )
+    let result = PosixClient::from_syscall_launch_context()
+        .map_err(map_posix_client_error)
+        .and_then(|client| client.set_uid(uid as u32).map_err(map_posix_client_error))
+        .map(|_| 0);
+    result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]

@@ -76,6 +76,8 @@ pub const OP_ACCESS_AT: u16 = 8;
 pub const OP_CHDIR_AT: u16 = 9;
 pub const OP_FCHDIR: u16 = 10;
 pub const OP_GETCWD: u16 = 11;
+pub const OP_SET_UID: u16 = 12;
+pub const OP_SET_GID: u16 = 13;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -85,6 +87,7 @@ pub const STATUS_ENOSYS: i32 = -38;
 
 pub const SESSION_INFO_LEN: usize = 20;
 pub const UMASK_PAYLOAD_LEN: usize = 4;
+pub const CREDENTIAL_ID_PAYLOAD_LEN: usize = 4;
 pub const OPEN_AT_HEADER_LEN: usize = 16;
 pub const STAT_AT_HEADER_LEN: usize = 12;
 pub const ACCESS_AT_HEADER_LEN: usize = 16;
@@ -310,6 +313,21 @@ pub fn encode_umask(value: u32, output: &mut [u8]) -> Result<(), ProtocolError> 
 
 pub fn decode_umask(input: &[u8]) -> Result<u32, ProtocolError> {
     if input.len() != UMASK_PAYLOAD_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(get_u32(input, 0))
+}
+
+pub fn encode_credential_id(value: u32, output: &mut [u8]) -> Result<(), ProtocolError> {
+    if output.len() < CREDENTIAL_ID_PAYLOAD_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    put_u32(output, 0, value);
+    Ok(())
+}
+
+pub fn decode_credential_id(input: &[u8]) -> Result<u32, ProtocolError> {
+    if input.len() != CREDENTIAL_ID_PAYLOAD_LEN {
         return Err(ProtocolError::InvalidLength);
     }
     Ok(get_u32(input, 0))

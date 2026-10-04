@@ -162,6 +162,20 @@ impl<T: Transport> Client<T> {
         protocol::decode_umask(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    pub fn set_uid(&self, uid: u32) -> Result<(), ClientError<T::Error>> {
+        self.set_credential_id(protocol::OP_SET_UID, uid)
+    }
+
+    pub fn set_gid(&self, gid: u32) -> Result<(), ClientError<T::Error>> {
+        self.set_credential_id(protocol::OP_SET_GID, gid)
+    }
+
+    fn set_credential_id(&self, opcode: u16, id: u32) -> Result<(), ClientError<T::Error>> {
+        let mut request = [0u8; protocol::CREDENTIAL_ID_PAYLOAD_LEN];
+        protocol::encode_credential_id(id, &mut request).map_err(ClientError::Protocol)?;
+        self.request(opcode, 0, &request, &mut []).map(|_| ())
+    }
+
     /// Writes the current working directory without a trailing NUL and
     /// returns the number of bytes written.
     pub fn getcwd(&self, output: &mut [u8]) -> Result<usize, ClientError<T::Error>> {
