@@ -12,7 +12,10 @@ use mochios_capability_protocol::{
     CapabilityResourceDescriptor, MAX_CAPABILITY_NAME_LEN, MAX_REASON_LEN,
 };
 use mochios_filesystem_protocol as filesystem_protocol;
-use mochios_posix_client::{Client as PosixClient, ClientError as PosixClientError, StatAtBase};
+use mochios_posix_client::{
+    Client as PosixClient, ClientError as PosixClientError, StatAtBase,
+    SyscallEndpointTransport,
+};
 use mochios_posix_client::{ObjectHandleAttachment, OpenAtBase};
 use mochios_posix_protocol as posix_protocol;
 use mochios_posix_protocol::{FileStatus as PosixFileStatus, STAT_NOFOLLOW};
@@ -406,6 +409,8 @@ impl<T> SingleThreadCell<T> {
 unsafe impl<T> Sync for SingleThreadCell<T> {}
 
 static STATE: SingleThreadCell<RuntimeState> = SingleThreadCell::new(RuntimeState::new());
+static POSIX_CLIENT: SingleThreadCell<Option<PosixClient<SyscallEndpointTransport>>> =
+    SingleThreadCell::new(None);
 static DUMMY_LOCK: LockOpaque = LockOpaque { _private: 0 };
 static FILE_ACTIONS_POOL: SingleThreadCell<[FileActionsSlot; MAX_SPAWN_FILE_ACTIONS]> =
     SingleThreadCell::new([FileActionsSlot::new(); MAX_SPAWN_FILE_ACTIONS]);
@@ -501,6 +506,18 @@ fn align_down(value: usize, align: usize) -> usize {
 unsafe fn state_mut() -> &'static mut RuntimeState {
     // Safety: all accesses are serialized by the single-thread bootstrap model.
     unsafe { &mut *STATE.get() }
+}
+
+fn posix_client(
+) -> Result<&'static PosixClient<SyscallEndpointTransport>, PosixClientError<syscall::SysError>> {
+    // Safety: the bootstrap runtime currently serializes all libc entry points.
+    // The client itself only needs shared access after its one-time initialization.
+    let slot = unsafe { POSIX_CLIENT.get() };
+    if unsafe { (*slot).is_none() } {
+        let client = PosixClient::from_syscall_launch_context()?;
+        unsafe { slot.write(Some(client)) };
+    }
+    Ok(unsafe { (*slot).as_ref().expect("POSIX client initialized") })
 }
 
 fn set_errno(value: c_int) {
@@ -1042,7 +1059,7 @@ fn newlib_mutable_status_flags(flags: u32) -> c_int {
 }
 
 fn open_posix_object(path: &str, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
-    let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+    let client = posix_client().map_err(map_posix_client_error)?;
     let opened = client
         .open_at(
             OpenAtBase::ProcessCwd,
@@ -1617,7 +1634,7 @@ fn clone_registered_process() -> Result<u64, c_int> {
         ))?;
         let process_id = status.process_id;
         c_int::try_from(process_id).map_err(|_| EOVERFLOW)?;
-        let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+        let client = posix_client().map_err(map_posix_client_error)?;
         client
             .register_child(ObjectHandleAttachment {
                 handle,
@@ -2151,7 +2168,7 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
             }
             F_GETFL if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) => {
                 let client =
-                    PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+                    posix_client().map_err(map_posix_client_error)?;
                 let flags = client
                     .get_status_flags(ObjectHandleAttachment {
                         handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
@@ -2163,7 +2180,7 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
             F_GETFL => Ok(entry.open_flags),
             F_SETFL => {
                 if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
-                    let client = PosixClient::from_syscall_launch_context()
+                    let client = posix_client()
                         .map_err(map_posix_client_error)?;
                     client
                         .set_status_flags(
@@ -2200,7 +2217,7 @@ pub extern "C" fn setgroups(_ngroups: c_int, _grouplist: *const c_int) -> c_int 
 
 #[unsafe(no_mangle)]
 pub extern "C" fn umask(mask: u32) -> u32 {
-    match PosixClient::from_syscall_launch_context()
+    match posix_client()
         .and_then(|client| client.set_umask(mask))
     {
         Ok(previous) => previous,
@@ -2213,7 +2230,7 @@ pub extern "C" fn umask(mask: u32) -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn getuid() -> u32 {
-    PosixClient::from_syscall_launch_context()
+    posix_client()
         .and_then(|client| client.session_info())
         .map(|session| session.real_uid)
         .unwrap_or(0)
@@ -2221,7 +2238,7 @@ pub extern "C" fn getuid() -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn geteuid() -> u32 {
-    PosixClient::from_syscall_launch_context()
+    posix_client()
         .and_then(|client| client.session_info())
         .map(|session| session.effective_uid)
         .unwrap_or(0)
@@ -2229,7 +2246,7 @@ pub extern "C" fn geteuid() -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn getgid() -> u32 {
-    PosixClient::from_syscall_launch_context()
+    posix_client()
         .and_then(|client| client.session_info())
         .map(|session| session.real_gid)
         .unwrap_or(0)
@@ -2237,7 +2254,7 @@ pub extern "C" fn getgid() -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn getegid() -> u32 {
-    PosixClient::from_syscall_launch_context()
+    posix_client()
         .and_then(|client| client.session_info())
         .map(|session| session.effective_gid)
         .unwrap_or(0)
@@ -2249,7 +2266,7 @@ pub extern "C" fn setgid(gid: c_int) -> c_int {
         set_errno(EINVAL);
         return -1;
     }
-    let result = PosixClient::from_syscall_launch_context()
+    let result = posix_client()
         .map_err(map_posix_client_error)
         .and_then(|client| client.set_gid(gid as u32).map_err(map_posix_client_error))
         .map(|_| 0);
@@ -2262,7 +2279,7 @@ pub extern "C" fn setuid(uid: c_int) -> c_int {
         set_errno(EINVAL);
         return -1;
     }
-    let result = PosixClient::from_syscall_launch_context()
+    let result = posix_client()
         .map_err(map_posix_client_error)
         .and_then(|client| client.set_uid(uid as u32).map_err(map_posix_client_error))
         .map(|_| 0);
@@ -2282,7 +2299,7 @@ pub extern "C" fn chmod(path: *const c_char, mode: u32) -> c_int {
 fn chmod_posix_at(dirfd: c_int, path: *const c_char, mode: u32) -> Result<(), c_int> {
     let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
     let base = rename_posix_base(dirfd, path)?;
-    let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+    let client = posix_client().map_err(map_posix_client_error)?;
     client
         .chmod_at(base, path, mode)
         .map_err(map_posix_client_error)
@@ -2313,7 +2330,7 @@ pub extern "C" fn fchmod(fd: c_int, mode: u32) -> c_int {
         if !matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
             return Err(EBADF);
         }
-        let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+        let client = posix_client().map_err(map_posix_client_error)?;
         client
             .fchmod(
                 ObjectHandleAttachment {
@@ -2351,7 +2368,7 @@ fn chown_posix_at(
     };
     let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
     let base = rename_posix_base(dirfd, path)?;
-    let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+    let client = posix_client().map_err(map_posix_client_error)?;
     client
         .chown_at(base, path, uid, gid, protocol_flags)
         .map_err(map_posix_client_error)
@@ -2391,7 +2408,7 @@ pub extern "C" fn fchown(fd: c_int, uid: u32, gid: u32) -> c_int {
         if !matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
             return Err(EBADF);
         }
-        let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+        let client = posix_client().map_err(map_posix_client_error)?;
         client
             .fchown(
                 ObjectHandleAttachment {
@@ -2409,7 +2426,7 @@ pub extern "C" fn fchown(fd: c_int, uid: u32, gid: u32) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn setpgid(pid: c_int, pgid: c_int) -> c_int {
-    let result = PosixClient::from_syscall_launch_context()
+    let result = posix_client()
         .map_err(map_posix_client_error)
         .and_then(|client| {
             client
@@ -2421,7 +2438,7 @@ pub extern "C" fn setpgid(pid: c_int, pgid: c_int) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn setsid() -> c_int {
-    let result = PosixClient::from_syscall_launch_context()
+    let result = posix_client()
         .map_err(map_posix_client_error)
         .and_then(|client| client.create_session().map_err(map_posix_client_error))
         .and_then(|session| c_int::try_from(session).map_err(|_| EOVERFLOW));
@@ -2594,7 +2611,7 @@ fn sync_file_descriptor(
         }
         if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
             let client =
-                PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+                posix_client().map_err(map_posix_client_error)?;
             client
                 .fsync(ObjectHandleAttachment {
                     handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
@@ -2633,7 +2650,7 @@ pub extern "C" fn _ftruncate(fd: c_int, length: i64) -> c_int {
         }
         if entry.kind == FdKind::ObjectFile {
             let client =
-                PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+                posix_client().map_err(map_posix_client_error)?;
             client
                 .ftruncate(
                     ObjectHandleAttachment {
@@ -2677,7 +2694,7 @@ pub extern "C" fn truncate(path: *const c_char, length: i64) -> c_int {
         (|| {
             let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
             let client =
-                PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+                posix_client().map_err(map_posix_client_error)?;
             client
                 .truncate_at(StatAtBase::ProcessCwd, path, length as u64)
                 .map_err(map_posix_client_error)?;
@@ -2698,7 +2715,7 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
         if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
             let handle = u32::try_from(entry.lower_handle).map_err(|_| EBADF)?;
             let client =
-                PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+                posix_client().map_err(map_posix_client_error)?;
             let status = client
                 .fstat(ObjectHandleAttachment {
                     handle,
@@ -2760,7 +2777,7 @@ fn stat_with_flags(path: *const c_char, stat_buf: *mut c_void, flags: u64) -> c_
             _ => return Err(EINVAL),
         };
         let client =
-            PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+            posix_client().map_err(map_posix_client_error)?;
         let status = client
             .stat_at(StatAtBase::ProcessCwd, flags, path)
             .map_err(map_posix_client_error)?;
@@ -2962,7 +2979,7 @@ pub extern "C" fn sysconf(name: c_int) -> CLong {
 #[unsafe(no_mangle)]
 pub extern "C" fn _getpid() -> c_int {
     result_with_errno(
-        PosixClient::from_syscall_launch_context()
+        posix_client()
             .map_err(map_posix_client_error)
             .and_then(|client| client.process_info(0).map_err(map_posix_client_error))
             .and_then(|info| c_int::try_from(info.process_id).map_err(|_| EOVERFLOW)),
@@ -2978,7 +2995,7 @@ pub extern "C" fn getpid() -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn getppid() -> c_int {
     result_with_errno(
-        PosixClient::from_syscall_launch_context()
+        posix_client()
             .map_err(map_posix_client_error)
             .and_then(|client| client.process_info(0).map_err(map_posix_client_error))
             .and_then(|info| c_int::try_from(info.parent_id).map_err(|_| EOVERFLOW)),
@@ -2989,7 +3006,7 @@ pub extern "C" fn getppid() -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn getpgid(pid: c_int) -> c_int {
     result_with_errno(
-        PosixClient::from_syscall_launch_context()
+        posix_client()
             .map_err(map_posix_client_error)
             .and_then(|client| client.process_info(pid as i64).map_err(map_posix_client_error))
             .and_then(|info| c_int::try_from(info.process_group_id).map_err(|_| EOVERFLOW)),
@@ -3000,7 +3017,7 @@ pub extern "C" fn getpgid(pid: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn getsid(pid: c_int) -> c_int {
     result_with_errno(
-        PosixClient::from_syscall_launch_context()
+        posix_client()
             .map_err(map_posix_client_error)
             .and_then(|client| client.process_info(pid as i64).map_err(map_posix_client_error))
             .and_then(|info| c_int::try_from(info.session_id).map_err(|_| EOVERFLOW)),
@@ -3163,7 +3180,7 @@ fn unlink_posix_at(dirfd: c_int, path: *const c_char, flags: c_int) -> Result<()
     if flags & AT_REMOVEDIR != 0 {
         options |= posix_protocol::UNLINK_REMOVE_DIRECTORY;
     }
-    let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+    let client = posix_client().map_err(map_posix_client_error)?;
     client
         .unlink_at(base, options, path)
         .map_err(map_posix_client_error)
@@ -3216,7 +3233,7 @@ fn symlink_posix_at(
     let target = core::str::from_utf8(unsafe { c_bytes(target) }).map_err(|_| EINVAL)?;
     let link_path = core::str::from_utf8(unsafe { c_bytes(link_path) }).map_err(|_| EINVAL)?;
     let base = rename_posix_base(dirfd, link_path)?;
-    let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+    let client = posix_client().map_err(map_posix_client_error)?;
     client
         .symlink_at(target, base, link_path)
         .map_err(map_posix_client_error)
@@ -3263,7 +3280,7 @@ fn readlink_posix_at(
     let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
     let base = rename_posix_base(dirfd, path)?;
     let output = unsafe { core::slice::from_raw_parts_mut(output.cast::<u8>(), size) };
-    let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+    let client = posix_client().map_err(map_posix_client_error)?;
     let read = client
         .readlink_at(base, path, output)
         .map_err(map_posix_client_error)?;
@@ -3297,7 +3314,7 @@ pub extern "C" fn _mkdir(path: *const c_char, mode: c_int) -> c_int {
     let result = (|| {
         let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
         let client =
-            PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+            posix_client().map_err(map_posix_client_error)?;
         client
             .mkdir_at(OpenAtBase::ProcessCwd, mode as u32, path)
             .map_err(map_posix_client_error)?;
@@ -3334,7 +3351,7 @@ pub extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: c_int) -> c_i
             })
         };
         let client =
-            PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+            posix_client().map_err(map_posix_client_error)?;
         client
             .mkdir_at(base, mode as u32, path)
             .map_err(map_posix_client_error)?;
@@ -3395,7 +3412,7 @@ fn rename_posix_at(
     let new_path = core::str::from_utf8(unsafe { c_bytes(new_path) }).map_err(|_| EINVAL)?;
     let old_base = rename_posix_base(old_dirfd, old_path)?;
     let new_base = rename_posix_base(new_dirfd, new_path)?;
-    let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+    let client = posix_client().map_err(map_posix_client_error)?;
     client
         .rename_at(old_base, old_path, new_base, new_path)
         .map_err(map_posix_client_error)
@@ -3427,7 +3444,7 @@ pub extern "C" fn chdir(path: *const c_char) -> c_int {
     let result = (|| {
         let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
         let client =
-            PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+            posix_client().map_err(map_posix_client_error)?;
         client
             .chdir_at(StatAtBase::ProcessCwd, path)
             .map_err(map_posix_client_error)?;
@@ -3444,7 +3461,7 @@ pub extern "C" fn getcwd(buffer: *mut c_char, size: usize) -> *mut c_char {
     }
     let result = (|| {
         let client =
-            PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+            posix_client().map_err(map_posix_client_error)?;
         let output = unsafe { core::slice::from_raw_parts_mut(buffer.cast::<u8>(), size - 1) };
         let length = client.getcwd(output).map_err(map_posix_client_error)?;
         unsafe { buffer.add(length).write(0) };
@@ -3467,7 +3484,7 @@ pub extern "C" fn realpath(path: *const c_char, resolved_path: *mut c_char) -> *
             path_bytes.len()
         } else {
             let client =
-                PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+                posix_client().map_err(map_posix_client_error)?;
             cwd_len = client
                 .getcwd(&mut cwd_storage[..4095])
                 .map_err(map_posix_client_error)?;
@@ -3589,7 +3606,7 @@ pub extern "C" fn _waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_
         if options & !WNOHANG != 0 {
             return Err(EINVAL);
         }
-        let client = PosixClient::from_syscall_launch_context().map_err(map_posix_client_error)?;
+        let client = posix_client().map_err(map_posix_client_error)?;
         let waited = client
             .wait_child(pid as i64, options as u32)
             .map_err(map_posix_client_error)?;
