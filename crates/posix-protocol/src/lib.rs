@@ -73,6 +73,8 @@ pub const OP_OPEN_AT: u16 = 5;
 pub const OP_STAT_AT: u16 = 6;
 pub const OP_FSTAT: u16 = 7;
 pub const OP_ACCESS_AT: u16 = 8;
+pub const OP_CHDIR_AT: u16 = 9;
+pub const OP_FCHDIR: u16 = 10;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
