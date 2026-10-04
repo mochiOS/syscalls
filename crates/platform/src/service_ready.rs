@@ -2,14 +2,14 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 pub const MESSAGE_LEN: usize = 20;
 pub const SESSION_MESSAGE_LEN: usize = 28;
-pub const ENDPOINT_MESSAGE_LEN: usize = 28;
-pub const MAX_MESSAGE_LEN: usize = ENDPOINT_MESSAGE_LEN;
+pub const HANDLE_MESSAGE_LEN: usize = MESSAGE_LEN;
+pub const MAX_MESSAGE_LEN: usize = SESSION_MESSAGE_LEN;
 
 const MAGIC: u32 = 0x5952_4453;
 const VERSION: u16 = 1;
 const KIND_NOTIFICATION: u16 = 1;
 const KIND_SESSION: u16 = 2;
-const KIND_ENDPOINT: u16 = 3;
+const KIND_HANDLE: u16 = 3;
 const BOOTSTRAP_ARG_PREFIX: &[u8] = b"--service-ready=";
 
 static BOOTSTRAP_ENDPOINT: AtomicU64 = AtomicU64::new(0);
@@ -140,18 +140,13 @@ pub fn session_notification(
     message
 }
 
-pub fn endpoint_notification(
-    token: u64,
-    status: i32,
-    endpoint: u64,
-) -> [u8; ENDPOINT_MESSAGE_LEN] {
-    let mut message = [0u8; ENDPOINT_MESSAGE_LEN];
+pub fn handle_notification(token: u64, status: i32) -> [u8; HANDLE_MESSAGE_LEN] {
+    let mut message = [0u8; HANDLE_MESSAGE_LEN];
     message[0..4].copy_from_slice(&MAGIC.to_le_bytes());
     message[4..6].copy_from_slice(&VERSION.to_le_bytes());
-    message[6..8].copy_from_slice(&KIND_ENDPOINT.to_le_bytes());
+    message[6..8].copy_from_slice(&KIND_HANDLE.to_le_bytes());
     message[8..16].copy_from_slice(&token.to_le_bytes());
     message[16..20].copy_from_slice(&status.to_le_bytes());
-    message[20..28].copy_from_slice(&endpoint.to_le_bytes());
     message
 }
 
@@ -219,10 +214,8 @@ pub fn decode_session_notification(
     Ok((token, status, SessionIdentity { uid, gid }))
 }
 
-pub fn decode_endpoint_notification(
-    message: &[u8],
-) -> Result<(u64, i32, u64), DecodeError> {
-    if message.len() != ENDPOINT_MESSAGE_LEN {
+pub fn decode_handle_notification(message: &[u8]) -> Result<(u64, i32), DecodeError> {
+    if message.len() != HANDLE_MESSAGE_LEN {
         return Err(DecodeError::InvalidLength);
     }
     let magic = u32::from_le_bytes(message[0..4].try_into().unwrap());
@@ -234,13 +227,12 @@ pub fn decode_endpoint_notification(
         return Err(DecodeError::UnsupportedVersion);
     }
     let kind = u16::from_le_bytes(message[6..8].try_into().unwrap());
-    if kind != KIND_ENDPOINT {
+    if kind != KIND_HANDLE {
         return Err(DecodeError::InvalidKind);
     }
     let token = u64::from_le_bytes(message[8..16].try_into().unwrap());
     let status = i32::from_le_bytes(message[16..20].try_into().unwrap());
-    let endpoint = u64::from_le_bytes(message[20..28].try_into().unwrap());
-    Ok((token, status, endpoint))
+    Ok((token, status))
 }
 
 pub fn validate_notification(message: &[u8], expected_token: u64) -> Result<(), ResultError> {
@@ -289,14 +281,23 @@ pub fn notify_session(
 }
 
 #[cfg(not(test))]
-pub fn notify_endpoint(
+pub fn notify_handle(
     target: Target,
     status: i32,
-    endpoint: u64,
+    handle: super::handle::Handle,
+    rights: u64,
 ) -> super::syscall::SysResult<u64> {
-    send_when_ready(
+    let mut handles = super::ipc::IpcObjectHandles::default();
+    handles.count = 1;
+    handles.handles[0] = super::ipc::IpcObjectHandle {
+        handle,
+        reserved: 0,
+        rights,
+    };
+    send_handles_when_ready(
         target.endpoint,
-        &endpoint_notification(target.token, status, endpoint),
+        &handle_notification(target.token, status),
+        &handles,
     )
 }
 
@@ -304,6 +305,22 @@ pub fn notify_endpoint(
 fn send_when_ready(endpoint: u64, message: &[u8]) -> super::syscall::SysResult<u64> {
     loop {
         match super::ipc::send(endpoint, message) {
+            Err(error) if error.raw() == super::syscall::EAGAIN as i64 => {
+                super::thread::yield_now()
+            }
+            result => return result,
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn send_handles_when_ready(
+    endpoint: u64,
+    message: &[u8],
+    handles: &super::ipc::IpcObjectHandles,
+) -> super::syscall::SysResult<u64> {
+    loop {
+        match super::ipc::send_object_handles(endpoint, message, handles) {
             Err(error) if error.raw() == super::syscall::EAGAIN as i64 => {
                 super::thread::yield_now()
             }
@@ -347,19 +364,17 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_notification_has_stable_encoding() {
-        let message = endpoint_notification(
-            0x0807_0605_0403_0201,
-            0,
-            0x100f_0e0d_0c0b_0a09,
+    fn handle_notification_has_stable_encoding() {
+        let message = handle_notification(0x0807_0605_0403_0201, -5);
+        assert_eq!(
+            message,
+            [
+                0x53, 0x44, 0x52, 0x59, 1, 0, 3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0xfb, 0xff, 0xff, 0xff,
+            ]
         );
         assert_eq!(
-            decode_endpoint_notification(&message),
-            Ok((
-                0x0807_0605_0403_0201,
-                0,
-                0x100f_0e0d_0c0b_0a09,
-            ))
+            decode_handle_notification(&message),
+            Ok((0x0807_0605_0403_0201, -5))
         );
     }
 
