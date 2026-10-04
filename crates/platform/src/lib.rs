@@ -395,13 +395,13 @@ pub mod process {
 
     pub fn wait_handle(
         handle: u32,
-        deadline_ticks: u64,
+        deadline_nanoseconds: u64,
     ) -> SysResult<syscall::ProcessStatus> {
         let mut status = syscall::ProcessStatus::default();
         syscall::call3(
             syscall::SyscallNumber::ProcessHandleWait,
             u64::from(handle),
-            deadline_ticks,
+            deadline_nanoseconds,
             (&mut status as *mut syscall::ProcessStatus) as u64,
         )?;
         Ok(status)
@@ -411,7 +411,7 @@ pub mod process {
     /// returns the index of the first ready item.
     pub fn wait_many(
         items: &mut [syscall::HandleWaitItem],
-        deadline_ticks: u64,
+        deadline_nanoseconds: u64,
     ) -> SysResult<usize> {
         if items.is_empty() || items.len() > syscall::HANDLE_WAIT_MANY_MAX_ITEMS {
             return Err(syscall::SysError::from_raw(syscall::EINVAL as i64));
@@ -420,7 +420,7 @@ pub mod process {
             syscall::SyscallNumber::HandleWaitMany,
             items.as_mut_ptr() as u64,
             items.len() as u64,
-            deadline_ticks,
+            deadline_nanoseconds,
         )?;
         usize::try_from(index)
             .ok()
