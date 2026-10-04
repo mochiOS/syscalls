@@ -16,6 +16,11 @@ pub const CAPABILITY_PERSISTENT_QUERY_OPCODE: u32 = 0x4350_5150;
 pub const RESOLVE_CAPABILITIES_OPCODE: u32 = 0x4341_5053;
 pub const RESOLVE_EXECUTION_SECURITY_OPCODE: u32 = 0x4341_4553;
 pub const PACKAGE_INDEX_CHANGED_OPCODE: u32 = 0x4341_5049;
+/// Installs the rights-restricted POSIX endpoint attached to the request.
+///
+/// capability.service starts before the POSIX compatibility layer, so the
+/// service manager delivers this handle after posix.service becomes ready.
+pub const INSTALL_POSIX_ENDPOINT_OPCODE: u32 = 0x4341_5058;
 pub const AUTHORIZE_EXEC_OPCODE: u32 = 0x4341_4558;
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -915,6 +920,7 @@ mod tests {
         assert_eq!(CAPABILITY_DECISION_OPCODE, 0x4350_5244);
         assert_eq!(CAPABILITY_PERSISTENT_QUERY_OPCODE, 0x4350_5150);
         assert_eq!(RESOLVE_CAPABILITIES_OPCODE, 0x4341_5053);
+        assert_eq!(INSTALL_POSIX_ENDPOINT_OPCODE, 0x4341_5058);
     }
 
     #[test]
