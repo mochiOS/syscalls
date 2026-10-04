@@ -35,6 +35,7 @@ const SC_THREAD_STACK_MIN: c_int = 39;
 const SC_GETPW_R_SIZE_MAX: c_int = 51;
 const SC_HOST_NAME_MAX: c_int = 65;
 const O_CLOEXEC: c_int = 0x40000;
+const O_NONBLOCK: c_int = 0x4000;
 const FD_CLOEXEC: c_int = 1;
 const F_GETFD: c_int = 1;
 const F_SETFD: c_int = 2;
@@ -1994,7 +1995,7 @@ pub extern "C" fn _pipe2(fds: *mut c_int, flags: c_int) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
-    if flags & !O_CLOEXEC != 0 {
+    if flags & !(O_CLOEXEC | O_NONBLOCK) != 0 {
         set_errno(EINVAL);
         return -1;
     }
@@ -2006,12 +2007,33 @@ pub extern "C" fn _pipe2(fds: *mut c_int, flags: c_int) -> c_int {
         ))?;
         let read_rights = syscall::HANDLE_RIGHT_READ
             | syscall::HANDLE_RIGHT_WAIT
+            | syscall::HANDLE_RIGHT_CONTROL
             | syscall::HANDLE_RIGHT_DUPLICATE
             | syscall::HANDLE_RIGHT_TRANSFER;
         let write_rights = syscall::HANDLE_RIGHT_WRITE
             | syscall::HANDLE_RIGHT_WAIT
+            | syscall::HANDLE_RIGHT_CONTROL
             | syscall::HANDLE_RIGHT_DUPLICATE
             | syscall::HANDLE_RIGHT_TRANSFER;
+        if flags & O_NONBLOCK != 0 {
+            for handle in [pair.read, pair.write] {
+                if let Err(errno) = syscall_errno(syscall::raw_syscall2(
+                    syscall::SyscallNumber::HandleOptionsSet,
+                    u64::from(handle),
+                    syscall::HANDLE_OPTION_NONBLOCKING,
+                )) {
+                    let _ = syscall_errno(syscall::raw_syscall1(
+                        syscall::SyscallNumber::HandleClose,
+                        u64::from(pair.read),
+                    ));
+                    let _ = syscall_errno(syscall::raw_syscall1(
+                        syscall::SyscallNumber::HandleClose,
+                        u64::from(pair.write),
+                    ));
+                    return Err(errno);
+                }
+            }
+        }
         let read_fd = match allocate_object_fd(
             pair.read,
             read_rights,
@@ -2107,6 +2129,18 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
                     .map_err(map_posix_client_error)?;
                 Ok((entry.open_flags & 0x3) | newlib_mutable_status_flags(flags))
             }
+            F_GETFL if matches!(entry.kind, FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite) => {
+                let options = syscall_errno(syscall::raw_syscall1(
+                    syscall::SyscallNumber::HandleOptionsGet,
+                    entry.lower_handle,
+                ))?;
+                let nonblocking = if options & syscall::HANDLE_OPTION_NONBLOCKING != 0 {
+                    O_NONBLOCK
+                } else {
+                    0
+                };
+                Ok((entry.open_flags & 0x3) | nonblocking)
+            }
             F_GETFL => Ok(entry.open_flags),
             F_SETFL => {
                 if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
@@ -2124,11 +2158,20 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
                     return Ok(0);
                 }
                 if matches!(entry.kind, FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite) {
-                    return if posix_mutable_status_flags(arg) == 0 {
-                        Ok(0)
+                    if arg & !(O_NONBLOCK | 0x3) != 0 {
+                        return Err(EINVAL);
+                    }
+                    let options = if arg & O_NONBLOCK != 0 {
+                        syscall::HANDLE_OPTION_NONBLOCKING
                     } else {
-                        Err(EINVAL)
+                        0
                     };
+                    let _ = syscall_errno(syscall::raw_syscall2(
+                        syscall::SyscallNumber::HandleOptionsSet,
+                        entry.lower_handle,
+                        options,
+                    ))?;
+                    return Ok(0);
                 }
                 unsafe {
                     state_mut().fds[fd as usize].open_flags = arg;
