@@ -53,6 +53,22 @@ impl<T: Transport> Client<T> {
             .map(|_| ())
     }
 
+    pub fn session_info(&self) -> Result<protocol::SessionInfo, ClientError<T::Error>> {
+        let mut response = [0u8; protocol::SESSION_INFO_LEN];
+        let length = self.request(protocol::OP_SESSION_INFO, 0, &[], &mut response)?;
+        protocol::decode_session_info(&response[..length]).map_err(ClientError::Protocol)
+    }
+
+    /// Updates the process umask and returns its previous value, matching the
+    /// atomic state transition required by POSIX `umask()`.
+    pub fn set_umask(&self, mask: u32) -> Result<u32, ClientError<T::Error>> {
+        let mut request = [0u8; protocol::UMASK_PAYLOAD_LEN];
+        protocol::encode_umask(mask, &mut request).map_err(ClientError::Protocol)?;
+        let mut response = [0u8; protocol::UMASK_PAYLOAD_LEN];
+        let length = self.request(protocol::OP_UMASK_SET, 0, &request, &mut response)?;
+        protocol::decode_umask(&response[..length]).map_err(ClientError::Protocol)
+    }
+
     pub fn request(
         &self,
         opcode: u16,
