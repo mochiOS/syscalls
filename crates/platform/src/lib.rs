@@ -550,12 +550,48 @@ pub mod ipc {
         )
     }
 
+    /// Performs a synchronous call with generic object handles in both
+    /// directions. `handles` initially describes request attachments and is
+    /// replaced with the receiver-local handles attached to the reply.
+    pub fn call_object_handles(
+        endpoint: u32,
+        request: &[u8],
+        reply: &mut [u8],
+        handles: &mut IpcObjectHandles,
+    ) -> SysResult<u64> {
+        syscall::call6(
+            syscall::SyscallNumber::IpcCallObjectHandles,
+            endpoint as u64,
+            request.as_ptr() as u64,
+            request.len() as u64,
+            reply.as_mut_ptr() as u64,
+            reply.len() as u64,
+            handles as *mut IpcObjectHandles as u64,
+        )
+    }
+
     pub fn reply(sender_handle: u64, bytes: &[u8]) -> SysResult<u64> {
         syscall::call3(
             syscall::SyscallNumber::IpcReply,
             sender_handle,
             bytes.as_ptr() as u64,
             bytes.len() as u64,
+        )
+    }
+
+    /// Replies to a synchronous call with rights-restricted generic object
+    /// handles attached to the response.
+    pub fn reply_object_handles(
+        sender_handle: u64,
+        bytes: &[u8],
+        handles: &IpcObjectHandles,
+    ) -> SysResult<u64> {
+        syscall::call4(
+            syscall::SyscallNumber::IpcReplyObjectHandles,
+            sender_handle,
+            bytes.as_ptr() as u64,
+            bytes.len() as u64,
+            handles as *const IpcObjectHandles as u64,
         )
     }
 
