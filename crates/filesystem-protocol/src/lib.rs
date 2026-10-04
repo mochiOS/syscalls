@@ -6,6 +6,10 @@ pub const HEADER_LEN: usize = 64;
 pub const MAX_MESSAGE_LEN: usize = 256 * 1024;
 pub const MAX_PATH_LEN: usize = 4096;
 
+/// Opaque LaunchContext key used to pass the filesystem control endpoint to
+/// another user-space service. mnu does not interpret this value.
+pub const CONTROL_HANDLE_KEY: u64 = u64::from_le_bytes(*b"MFS1CTRL");
+
 pub const OP_MOUNT: u16 = 1;
 pub const OP_UNMOUNT: u16 = 2;
 pub const OP_LOOKUP: u16 = 3;
