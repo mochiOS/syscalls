@@ -546,7 +546,7 @@ pub mod process {
 pub mod ipc {
     use super::syscall::{self, SysResult};
 
-    pub use mnu_abi::{IpcFileHandle, IpcFileHandles, IpcObjectHandle, IpcObjectHandles};
+    pub use mnu_abi::{IpcObjectHandle, IpcObjectHandles};
 
     pub fn create() -> SysResult<u64> {
         syscall::call2(syscall::SyscallNumber::IpcCreate, 0, 0)
@@ -564,16 +564,6 @@ pub mod ipc {
             endpoint,
             bytes.as_ptr() as u64,
             bytes.len() as u64,
-        )
-    }
-
-    pub fn send_handles(endpoint: u64, bytes: &[u8], handles: &IpcFileHandles) -> SysResult<u64> {
-        syscall::call4(
-            syscall::SyscallNumber::IpcSendHandles,
-            endpoint,
-            bytes.as_ptr() as u64,
-            bytes.len() as u64,
-            handles as *const IpcFileHandles as u64,
         )
     }
 
@@ -608,25 +598,6 @@ pub mod ipc {
             buf.len() as u64,
             0,
         )
-    }
-
-    pub fn wait_handles(
-        endpoint: u64,
-        buf: &mut [u8],
-        handles: &mut IpcFileHandles,
-    ) -> SysResult<u64> {
-        *handles = IpcFileHandles::default();
-        syscall::call4(
-            syscall::SyscallNumber::IpcRecvHandles,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-            handles as *mut IpcFileHandles as u64,
-            endpoint,
-        )
-    }
-
-    pub fn try_wait_handles(buf: &mut [u8], handles: &mut IpcFileHandles) -> SysResult<u64> {
-        wait_handles(0, buf, handles)
     }
 
     /// Waits for a message and installs attached object handles locally.
@@ -669,23 +640,6 @@ pub mod ipc {
             request.len() as u64,
             reply.as_mut_ptr() as u64,
             reply.len() as u64,
-        )
-    }
-
-    pub fn call_handles(
-        dest_thread_id: u64,
-        request: &[u8],
-        reply: &mut [u8],
-        handles: &IpcFileHandles,
-    ) -> SysResult<u64> {
-        syscall::call6(
-            syscall::SyscallNumber::IpcCallHandles,
-            dest_thread_id,
-            request.as_ptr() as u64,
-            request.len() as u64,
-            reply.as_mut_ptr() as u64,
-            reply.len() as u64,
-            handles as *const IpcFileHandles as u64,
         )
     }
 

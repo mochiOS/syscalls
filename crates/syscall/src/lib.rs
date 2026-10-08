@@ -17,15 +17,10 @@ pub use mnu_abi::{
     HANDLE_SEEK_END, HANDLE_SEEK_START, HANDLE_SIGNAL_PEER_CLOSED, HANDLE_SIGNAL_READABLE,
     HANDLE_SIGNAL_TERMINATED, HANDLE_SIGNAL_WRITABLE, HANDLE_WAIT_INFINITE,
     HANDLE_WAIT_MANY_MAX_ITEMS, HANDLE_WAIT_POLL, HandleWaitItem, IPC_MAX_OBJECT_HANDLES,
-    IpcFileHandle, IpcFileHandles, IpcObjectHandle, IpcObjectHandles, PROCESS_STATE_EXITED,
-    PROCESS_STATE_RUNNING, PROCESS_WAIT_INFINITE, PROCESS_WAIT_POLL, ProcessStatus, SUCCESS,
-    StreamPair, SyscallNumber, ThreadCreateContext, ThreadSecurityContext, ThreadStatus,
-    ThreadUpcallConfig,
+    IpcObjectHandle, IpcObjectHandles, PROCESS_STATE_EXITED, PROCESS_STATE_RUNNING,
+    PROCESS_WAIT_INFINITE, PROCESS_WAIT_POLL, ProcessStatus, SUCCESS, StreamPair, SyscallNumber,
+    ThreadCreateContext, ThreadSecurityContext, ThreadStatus, ThreadUpcallConfig,
 };
-
-/// Requests an independent open-file description starting at offset zero when
-/// attaching a regular file to IPC. This is an option, not a receiver right.
-pub const IPC_FILE_HANDLE_FLAG_FRESH_OFFSET: u32 = 1 << 31;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SysError {
