@@ -261,6 +261,32 @@ impl<H: Copy> FdTable<H> {
         Ok(target_fd)
     }
 
+    /// Applies the close operation required by `posix_spawn` file actions.
+    ///
+    /// POSIX requires this action to succeed when the descriptor is already
+    /// closed, unlike the public `close(2)` operation.
+    pub fn close_for_spawn<O: HandleOps<H>>(&mut self, fd: i32, operations: &mut O) {
+        if self.get(fd).is_some() {
+            let _ = self.close(fd, operations);
+        }
+    }
+
+    /// Applies the descriptor duplication required by `posix_spawn`.
+    ///
+    /// The destination's close-on-exec flag is always cleared, including the
+    /// `source_fd == target_fd` case where ordinary `dup2` leaves it intact.
+    pub fn duplicate_for_spawn<O: HandleOps<H>>(
+        &mut self,
+        source_fd: i32,
+        target_fd: i32,
+        operations: &mut O,
+    ) -> Result<i32, FdError<O::Error>> {
+        let target_fd = self.duplicate_to(source_fd, target_fd, operations)?;
+        let target = self.get_mut(target_fd).ok_or(FdError::InvalidDescriptor)?;
+        target.descriptor_flags &= !FD_CLOEXEC;
+        Ok(target_fd)
+    }
+
     pub fn close_on_exec<O: HandleOps<H>>(&mut self, operations: &mut O) {
         for slot in &mut self.entries {
             if slot

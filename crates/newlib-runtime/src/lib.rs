@@ -1471,6 +1471,24 @@ unsafe fn c_bytes<'a>(ptr_value: *const c_char) -> &'a [u8] {
     unsafe { core::slice::from_raw_parts(ptr_value.cast::<u8>(), len) }
 }
 
+unsafe fn duplicate_c_string(value: *const c_char) -> Result<*mut c_char, c_int> {
+    if value.is_null() {
+        return Err(EFAULT);
+    }
+    let bytes = unsafe { c_bytes(value) };
+    let allocation_size = bytes.len().checked_add(1).ok_or(ENOMEM)?;
+    let copy = unsafe { malloc(allocation_size) }.cast::<c_char>();
+    if copy.is_null() {
+        return Err(ENOMEM);
+    }
+    // Safety: copy owns allocation_size bytes and value contains bytes.len()
+    // readable bytes followed by a terminator.
+    unsafe {
+        ptr::copy_nonoverlapping(value, copy, allocation_size);
+    }
+    Ok(copy)
+}
+
 fn push_decimal(mut value: usize, out: &mut [u8], length: &mut usize) -> Result<(), c_int> {
     let mut digits = [0u8; 20];
     let mut index = digits.len();
@@ -1845,6 +1863,21 @@ fn newlib_mutable_status_flags(flags: u32) -> c_int {
 }
 
 fn open_posix_object(path: &str, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
+    let entry = open_posix_entry(path, flags, mode)?;
+    let mut state = state();
+    let installed = state.fds.install_from(3, MAX_FDS as c_int, entry);
+    drop(state);
+    match installed {
+        Ok(fd) => Ok(fd),
+        Err(_) => {
+            let mut operations = RuntimeFdOps;
+            operations.close_handle(entry.handle);
+            Err(EMFILE)
+        }
+    }
+}
+
+fn open_posix_entry(path: &str, flags: c_int, mode: c_int) -> Result<FdEntry, c_int> {
     let client = posix_client().map_err(map_posix_client_error)?;
     let opened = client
         .open_at(
@@ -1869,16 +1902,12 @@ fn open_posix_object(path: &str, flags: c_int, mode: c_int) -> Result<c_int, c_i
     } else {
         FdKind::ObjectFile
     };
-    match allocate_object_fd(opened.handle, opened.rights, kind, flags) {
-        Ok(fd) => Ok(fd),
-        Err(error) => {
-            let _ = syscall_errno(syscall::raw_syscall1(
-                syscall::SyscallNumber::HandleClose,
-                u64::from(opened.handle),
-            ));
-            Err(error)
-        }
-    }
+    Ok(object_entry(
+        u64::from(opened.handle),
+        opened.rights,
+        kind,
+        flags,
+    ))
 }
 
 fn retry_open_with_prompt(path: *const c_char, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
@@ -2191,6 +2220,61 @@ fn duplicate_fd_entry(
     Ok(())
 }
 
+fn duplicate_spawn_fd_entry(
+    fds: &mut FdTable<FdObject>,
+    old_fd: c_int,
+    new_fd: c_int,
+) -> Result<(), c_int> {
+    if old_fd < 0 || new_fd < 0 || old_fd as usize >= MAX_FDS || new_fd as usize >= MAX_FDS {
+        return Err(EBADF);
+    }
+    let mut operations = RuntimeFdOps;
+    fds.duplicate_for_spawn(old_fd, new_fd, &mut operations)
+        .map_err(map_fd_error)?;
+    Ok(())
+}
+
+fn install_spawn_open_entry(
+    fds: &mut FdTable<FdObject>,
+    fd: c_int,
+    entry: FdEntry,
+) -> Result<(), c_int> {
+    let mut operations = RuntimeFdOps;
+    if fd < 0 || fd as usize >= MAX_FDS {
+        operations.close_handle(entry.handle);
+        return Err(EBADF);
+    }
+    if let Err(error) = fds.install_at(fd, entry, &mut operations) {
+        operations.close_handle(entry.handle);
+        return Err(map_fd_error(error));
+    }
+    Ok(())
+}
+
+fn change_directory_path(path: &str) -> Result<(), c_int> {
+    let base = rename_posix_base(-2, path)?;
+    let client = posix_client().map_err(map_posix_client_error)?;
+    client.chdir_at(base, path).map_err(map_posix_client_error)
+}
+
+fn change_directory_fd(fds: &FdTable<FdObject>, fd: c_int) -> Result<(), c_int> {
+    let entry = fds.get(fd).ok_or(EBADF)?;
+    change_directory_entry(entry)
+}
+
+fn change_directory_entry(entry: FdEntry) -> Result<(), c_int> {
+    if entry.handle.kind != FdKind::ObjectDirectory {
+        return Err(ENOTDIR);
+    }
+    let client = posix_client().map_err(map_posix_client_error)?;
+    client
+        .fchdir(ObjectHandleAttachment {
+            handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+            rights: entry.rights,
+        })
+        .map_err(map_posix_client_error)
+}
+
 fn duplicate_live_fd(old_fd: c_int, new_fd: c_int) -> Result<c_int, c_int> {
     let mut state = state();
     duplicate_fd_entry(&mut state.fds, old_fd, new_fd)?;
@@ -2216,13 +2300,40 @@ fn apply_spawn_file_actions(
         // Safety: current walks the STAILQ built by newlib's posix_spawn_file_actions APIs.
         let entry = unsafe { &*current };
         match entry.fae_action {
-            FAE_CLOSE => close_fd_entry(fds, entry.fae_fildes)?,
+            FAE_CLOSE => {
+                let mut operations = RuntimeFdOps;
+                fds.close_for_spawn(entry.fae_fildes, &mut operations);
+            }
             FAE_DUP2 => {
                 // Safety: the active union field is determined by fae_action.
                 let new_fd = unsafe { entry.fae_data.dup2.newfildes };
-                duplicate_fd_entry(fds, entry.fae_fildes, new_fd)?;
+                duplicate_spawn_fd_entry(fds, entry.fae_fildes, new_fd)?;
             }
-            FAE_OPEN | FAE_CHDIR | FAE_FCHDIR => return Err(ENOSYS),
+            FAE_OPEN => {
+                // Safety: the active union field is determined by fae_action.
+                let open = unsafe { entry.fae_data.open };
+                if open.path.is_null() {
+                    return Err(EFAULT);
+                }
+                let path =
+                    core::str::from_utf8(unsafe { c_bytes(open.path) }).map_err(|_| EINVAL)?;
+                let opened = open_posix_entry(path, open.oflag, open.mode as c_int)?;
+                install_spawn_open_entry(fds, entry.fae_fildes, opened)?;
+            }
+            FAE_CHDIR => {
+                // Safety: the active union field is determined by fae_action.
+                let path = unsafe { entry.fae_data.dir };
+                if path.is_null() {
+                    return Err(EFAULT);
+                }
+                let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+                change_directory_path(path)?;
+            }
+            FAE_FCHDIR => {
+                // Safety: the active union field is determined by fae_action.
+                let fd = unsafe { entry.fae_data.dirfd };
+                change_directory_fd(fds, fd)?;
+            }
             _ => return Err(EINVAL),
         }
         // Safety: advance within the same STAILQ.
@@ -4960,13 +5071,20 @@ pub extern "C" fn chdir(path: *const c_char) -> c_int {
     }
     let result = (|| {
         let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-        let client = posix_client().map_err(map_posix_client_error)?;
-        client
-            .chdir_at(StatAtBase::ProcessCwd, path)
-            .map_err(map_posix_client_error)?;
+        change_directory_path(path)?;
         Ok(0)
     })();
     result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fchdir(fd: c_int) -> c_int {
+    result_with_errno(
+        with_fd_entry(fd)
+            .and_then(change_directory_entry)
+            .map(|_| 0),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -5759,6 +5877,15 @@ pub extern "C" fn posix_spawn_file_actions_destroy(
     while !current.is_null() {
         // Safety: current walks the action queue owned by actions_ptr.
         let next = unsafe { (*current).fae_list.stqe_next };
+        // Safety: the active union field is selected by fae_action and these
+        // strings were allocated by the corresponding add operation.
+        unsafe {
+            match (*current).fae_action {
+                FAE_OPEN => free((*current).fae_data.open.path.cast()),
+                FAE_CHDIR => free((*current).fae_data.dir.cast()),
+                _ => {}
+            }
+        }
         unsafe { release_file_action_entry(current) };
         current = next;
     }
@@ -5766,6 +5893,45 @@ pub extern "C" fn posix_spawn_file_actions_destroy(
         init_file_actions_list(actions_ptr);
         release_file_actions_object(actions_ptr);
         *actions = ptr::null_mut();
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawn_file_actions_addopen(
+    actions: *mut *mut PosixSpawnFileActions,
+    fildes: c_int,
+    path: *const c_char,
+    oflag: c_int,
+    mode: u32,
+) -> c_int {
+    if actions.is_null() || path.is_null() {
+        return EINVAL;
+    }
+    if fildes < 0 {
+        return EBADF;
+    }
+    // Safety: actions points to the caller's handle storage.
+    let actions_ptr = unsafe { *actions };
+    if actions_ptr.is_null() {
+        return EINVAL;
+    }
+    let path = match unsafe { duplicate_c_string(path) } {
+        Ok(value) => value,
+        Err(errno_value) => return errno_value,
+    };
+    let entry = match unsafe { allocate_file_action_entry() } {
+        Ok(value) => value,
+        Err(errno_value) => {
+            unsafe { free(path.cast()) };
+            return errno_value;
+        }
+    };
+    unsafe {
+        (*entry).fae_action = FAE_OPEN;
+        (*entry).fae_fildes = fildes;
+        (*entry).fae_data.open = PosixSpawnFileActionOpen { path, oflag, mode };
+        append_file_action(actions_ptr, entry);
     }
     0
 }
@@ -5826,6 +5992,82 @@ pub extern "C" fn posix_spawn_file_actions_adddup2(
         append_file_action(actions_ptr, entry);
     }
     0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawn_file_actions_addchdir_np(
+    actions: *mut *mut PosixSpawnFileActions,
+    path: *const c_char,
+) -> c_int {
+    if actions.is_null() || path.is_null() {
+        return EINVAL;
+    }
+    // Safety: actions points to the caller's handle storage.
+    let actions_ptr = unsafe { *actions };
+    if actions_ptr.is_null() {
+        return EINVAL;
+    }
+    let path = match unsafe { duplicate_c_string(path) } {
+        Ok(value) => value,
+        Err(errno_value) => return errno_value,
+    };
+    let entry = match unsafe { allocate_file_action_entry() } {
+        Ok(value) => value,
+        Err(errno_value) => {
+            unsafe { free(path.cast()) };
+            return errno_value;
+        }
+    };
+    unsafe {
+        (*entry).fae_action = FAE_CHDIR;
+        (*entry).fae_data.dir = path;
+        append_file_action(actions_ptr, entry);
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawn_file_actions_addchdir(
+    actions: *mut *mut PosixSpawnFileActions,
+    path: *const c_char,
+) -> c_int {
+    posix_spawn_file_actions_addchdir_np(actions, path)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawn_file_actions_addfchdir_np(
+    actions: *mut *mut PosixSpawnFileActions,
+    fildes: c_int,
+) -> c_int {
+    if actions.is_null() {
+        return EINVAL;
+    }
+    if fildes < 0 {
+        return EBADF;
+    }
+    // Safety: actions points to the caller's handle storage.
+    let actions_ptr = unsafe { *actions };
+    if actions_ptr.is_null() {
+        return EINVAL;
+    }
+    let entry = match unsafe { allocate_file_action_entry() } {
+        Ok(value) => value,
+        Err(errno_value) => return errno_value,
+    };
+    unsafe {
+        (*entry).fae_action = FAE_FCHDIR;
+        (*entry).fae_data.dirfd = fildes;
+        append_file_action(actions_ptr, entry);
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawn_file_actions_addfchdir(
+    actions: *mut *mut PosixSpawnFileActions,
+    fildes: c_int,
+) -> c_int {
+    posix_spawn_file_actions_addfchdir_np(actions, fildes)
 }
 
 #[unsafe(no_mangle)]
