@@ -341,6 +341,16 @@ pub mod thread {
         .map(|_| ())
     }
 
+    pub fn handle_status(handle: u32) -> SysResult<syscall::ThreadStatus> {
+        let mut status = syscall::ThreadStatus::default();
+        syscall::call2(
+            syscall::SyscallNumber::ThreadHandleStatus,
+            u64::from(handle),
+            &mut status as *mut syscall::ThreadStatus as u64,
+        )?;
+        Ok(status)
+    }
+
     pub fn return_from_upcall(token: u64) -> SysResult<()> {
         syscall::call1(syscall::SyscallNumber::ThreadUpcallReturn, token).map(|_| ())
     }
@@ -407,10 +417,11 @@ pub mod process {
     }
 
     pub fn open_handle_for_endpoint(endpoint: u64, rights: u64) -> SysResult<u32> {
-        syscall::call2(syscall::SyscallNumber::ProcessHandleOpen, endpoint, rights)
-            .and_then(|handle| {
+        syscall::call2(syscall::SyscallNumber::ProcessHandleOpen, endpoint, rights).and_then(
+            |handle| {
                 u32::try_from(handle).map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))
-            })
+            },
+        )
     }
 
     /// Clones the current address space and process-local native handles. The
@@ -422,7 +433,11 @@ pub mod process {
     }
 
     pub fn resume_handle(handle: u32) -> SysResult<()> {
-        syscall::call1(syscall::SyscallNumber::ProcessHandleResume, u64::from(handle)).map(|_| ())
+        syscall::call1(
+            syscall::SyscallNumber::ProcessHandleResume,
+            u64::from(handle),
+        )
+        .map(|_| ())
     }
 
     pub fn terminate_handle(handle: u32, exit_code: u64) -> SysResult<()> {
@@ -1155,9 +1170,12 @@ pub mod time {
         if instant.nanoseconds >= 1_000_000_000 || instant.reserved != 0 {
             return Err(syscall::SysError::from_raw(syscall::EIO as i64));
         }
-        instant.seconds
+        instant
+            .seconds
             .checked_mul(1_000)
-            .and_then(|milliseconds| milliseconds.checked_add(u64::from(instant.nanoseconds) / 1_000_000))
+            .and_then(|milliseconds| {
+                milliseconds.checked_add(u64::from(instant.nanoseconds) / 1_000_000)
+            })
             .ok_or_else(|| syscall::SysError::from_raw(EOVERFLOW as i64))
     }
 }
@@ -1663,17 +1681,16 @@ pub mod capability {
     pub use mochios_capability_protocol::{
         AUTHORIZE_EXEC_OPCODE, CAPABILITY_DECISION_OPCODE, CAPABILITY_PERSISTENT_QUERY_OPCODE,
         CAPABILITY_PROMPT_OPCODE, CAPABILITY_RESPONSE_OPCODE, CapabilityClass, CapabilityDecision,
-        CapabilityDecisionRequest, CapabilityRequest, ExecutableIdentity, MAX_CAPABILITY_NAME_LEN,
-        MAX_DECISION_PAYLOAD_SIZE, MAX_EXECUTABLE_PATH_LEN, MAX_PAYLOAD_SIZE, MAX_REASON_LEN,
-        MAX_RESOURCE_PATH_LEN, PACKAGE_INDEX_CHANGED_OPCODE, PROTOCOL_VERSION, ProtocolError,
-        RESOLVE_CAPABILITIES_OPCODE, RESOLVE_CAPABILITIES_REPLY_STATUS_LEN,
-        RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN, RESOLVE_EXECUTION_SECURITY_OPCODE,
-        ResolveCapabilitiesReply, ResolveExecutionSecurityReply, ResourceDescriptor,
-        decode_authorize_exec_request, decode_decision_request, decode_request,
+        CapabilityDecisionRequest, CapabilityRequest, ExecutableIdentity,
+        INSTALL_POSIX_ENDPOINT_OPCODE, MAX_CAPABILITY_NAME_LEN, MAX_DECISION_PAYLOAD_SIZE,
+        MAX_EXECUTABLE_PATH_LEN, MAX_PAYLOAD_SIZE, MAX_REASON_LEN, MAX_RESOURCE_PATH_LEN,
+        PACKAGE_INDEX_CHANGED_OPCODE, PROTOCOL_VERSION, ProtocolError, RESOLVE_CAPABILITIES_OPCODE,
+        RESOLVE_CAPABILITIES_REPLY_STATUS_LEN, RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN,
+        RESOLVE_EXECUTION_SECURITY_OPCODE, ResolveCapabilitiesReply, ResolveExecutionSecurityReply,
+        ResourceDescriptor, decode_authorize_exec_request, decode_decision_request, decode_request,
         decode_resolve_capabilities_reply, decode_resolve_capabilities_request,
         decode_resolve_execution_security_reply, decode_resolve_execution_security_request,
         encode_authorize_exec_request, encode_decision_request, encode_request,
-        INSTALL_POSIX_ENDPOINT_OPCODE,
         encode_resolve_capabilities_reply, encode_resolve_capabilities_request,
         encode_resolve_execution_security_reply, encode_resolve_execution_security_request,
     };

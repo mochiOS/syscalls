@@ -10,14 +10,12 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use mochi_user_syscall as syscall;
 use mochios_capability_protocol::{
     AUTHORIZE_EXEC_OPCODE, CAPABILITY_PERSISTENT_QUERY_OPCODE, CAPABILITY_PROMPT_OPCODE,
-    CapabilityClass,
-    CapabilityDecision, CapabilityExecutableIdentity, CapabilityPromptRequest,
+    CapabilityClass, CapabilityDecision, CapabilityExecutableIdentity, CapabilityPromptRequest,
     CapabilityResourceDescriptor, MAX_CAPABILITY_NAME_LEN, MAX_REASON_LEN,
 };
 use mochios_filesystem_protocol as filesystem_protocol;
 use mochios_posix_client::{
-    Client as PosixClient, ClientError as PosixClientError, StatAtBase,
-    SyscallEndpointTransport,
+    Client as PosixClient, ClientError as PosixClientError, StatAtBase, SyscallEndpointTransport,
 };
 use mochios_posix_client::{ObjectHandleAttachment, OpenAtBase};
 use mochios_posix_protocol as posix_protocol;
@@ -54,6 +52,7 @@ const MAX_SPAWN_FILE_ACTIONS: usize = 8;
 const MAX_SPAWN_FILE_ACTION_ENTRIES: usize = 32;
 const DIR_BUFFER_SIZE: usize = 4096;
 const DIRENT_NAME_MAX: usize = 256;
+const SIGNAL_UPCALL_STACK_SIZE: usize = 64 * 1024;
 
 const EPERM: c_int = 1;
 const ENOENT: c_int = 2;
@@ -172,6 +171,8 @@ struct ThreadControl {
     cancel_type: AtomicU32,
     cancel_pending: AtomicU32,
     signal_mask: AtomicU64,
+    signal_upcall_stack: AtomicUsize,
+    signal_upcall_stack_size: AtomicUsize,
     specific_values: [AtomicUsize; mochios_posix_client::thread::MAX_THREAD_KEYS],
     specific_generations: [AtomicU32; mochios_posix_client::thread::MAX_THREAD_KEYS],
     specific_destructors_running: AtomicU32,
@@ -196,6 +197,8 @@ impl ThreadControl {
             cancel_type: AtomicU32::new(PTHREAD_CANCEL_DEFERRED),
             cancel_pending: AtomicU32::new(0),
             signal_mask: AtomicU64::new(0),
+            signal_upcall_stack: AtomicUsize::new(0),
+            signal_upcall_stack_size: AtomicUsize::new(0),
             specific_values: [const { AtomicUsize::new(0) };
                 mochios_posix_client::thread::MAX_THREAD_KEYS],
             specific_generations: [const { AtomicU32::new(0) };
@@ -760,8 +763,8 @@ fn state() -> RuntimeMutexGuard<'static, RuntimeState> {
     STATE.lock()
 }
 
-fn posix_client(
-) -> Result<&'static PosixClient<SyscallEndpointTransport>, PosixClientError<syscall::SysError>> {
+fn posix_client()
+-> Result<&'static PosixClient<SyscallEndpointTransport>, PosixClientError<syscall::SysError>> {
     POSIX_CLIENT.get_or_try_init(PosixClient::from_syscall_launch_context)
 }
 
@@ -902,6 +905,8 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
             .store(PTHREAD_CANCEL_DEFERRED, Ordering::Relaxed);
         control.cancel_pending.store(0, Ordering::Relaxed);
         control.signal_mask.store(0, Ordering::Relaxed);
+        control.signal_upcall_stack.store(0, Ordering::Relaxed);
+        control.signal_upcall_stack_size.store(0, Ordering::Relaxed);
         for value in &control.specific_values {
             value.store(0, Ordering::Relaxed);
         }
@@ -918,6 +923,15 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
 }
 
 fn release_thread_control(control: &ThreadControl) {
+    let signal_stack = control.signal_upcall_stack.swap(0, Ordering::Relaxed);
+    let signal_stack_size = control.signal_upcall_stack_size.swap(0, Ordering::Relaxed);
+    if signal_stack != 0 && signal_stack_size != 0 {
+        let _ = syscall::raw_syscall2(
+            syscall::SyscallNumber::MemoryUnmap,
+            signal_stack as u64,
+            signal_stack_size as u64,
+        );
+    }
     let reent = control.reent.swap(0, Ordering::Relaxed);
     let reent_mapping_size = control.reent_mapping_size.swap(0, Ordering::Relaxed);
     if reent != 0 && reent_mapping_size != 0 {
@@ -1027,6 +1041,11 @@ fn register_current_thread() -> Option<(Pthread, &'static ThreadControl)> {
         release_thread_control(control);
         return None;
     }
+    if setup_signal_delivery(control).is_err() {
+        control.state.store(THREAD_REAPING, Ordering::Relaxed);
+        release_thread_control(control);
+        return None;
+    }
     Some((token, control))
 }
 
@@ -1042,6 +1061,77 @@ fn register_initial_thread() -> Option<(Pthread, &'static ThreadControl)> {
         .store(unsafe { _impure_ptr } as usize, Ordering::Relaxed);
     control.state.store(THREAD_RUNNING, Ordering::Release);
     Some((token, control))
+}
+
+fn setup_signal_delivery(control: &ThreadControl) -> Result<(), c_int> {
+    let stack = syscall_errno(syscall::raw_syscall6(
+        syscall::SyscallNumber::MemoryMap,
+        0,
+        SIGNAL_UPCALL_STACK_SIZE as u64,
+        PROT_READ_WRITE,
+        MAP_PRIVATE_ANON,
+        0,
+        0,
+    ))? as usize;
+    let config = syscall::ThreadUpcallConfig {
+        entry: posix_signal_upcall as *const () as u64,
+        stack_base: stack as u64,
+        stack_size: SIGNAL_UPCALL_STACK_SIZE as u64,
+        flags: 0,
+        reserved: [0; 4],
+    };
+    let install = syscall_errno(syscall::raw_syscall2(
+        syscall::SyscallNumber::ThreadUpcallInstall,
+        (&config as *const syscall::ThreadUpcallConfig) as u64,
+        core::mem::size_of::<syscall::ThreadUpcallConfig>() as u64,
+    ));
+    if let Err(error) = install {
+        let _ = syscall::raw_syscall2(
+            syscall::SyscallNumber::MemoryUnmap,
+            stack as u64,
+            SIGNAL_UPCALL_STACK_SIZE as u64,
+        );
+        return Err(error);
+    }
+    let handle = match syscall_errno(syscall::raw_syscall0(
+        syscall::SyscallNumber::ThreadHandleCreate,
+    ))
+    .and_then(|handle| u32::try_from(handle).map_err(|_| EOVERFLOW))
+    {
+        Ok(handle) => handle,
+        Err(error) => {
+            let _ = syscall::raw_syscall2(
+                syscall::SyscallNumber::MemoryUnmap,
+                stack as u64,
+                SIGNAL_UPCALL_STACK_SIZE as u64,
+            );
+            return Err(error);
+        }
+    };
+    let registration = posix_client()
+        .map_err(map_posix_client_error)
+        .and_then(|client| {
+            client
+                .register_signal_thread(ObjectHandleAttachment {
+                    handle,
+                    rights: syscall::HANDLE_RIGHT_WAIT | syscall::HANDLE_RIGHT_SIGNAL,
+                })
+                .map_err(map_posix_client_error)
+        });
+    let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, u64::from(handle));
+    if let Err(error) = registration {
+        let _ = syscall::raw_syscall2(
+            syscall::SyscallNumber::MemoryUnmap,
+            stack as u64,
+            SIGNAL_UPCALL_STACK_SIZE as u64,
+        );
+        return Err(error);
+    }
+    control
+        .signal_upcall_stack_size
+        .store(SIGNAL_UPCALL_STACK_SIZE, Ordering::Relaxed);
+    control.signal_upcall_stack.store(stack, Ordering::Release);
+    Ok(())
 }
 
 fn thread_key_control(
@@ -1116,6 +1206,9 @@ unsafe extern "C" fn pthread_start_trampoline(argument: *mut c_void) -> ! {
         Ordering::Release,
         Ordering::Relaxed,
     );
+    if setup_signal_delivery(control).is_err() {
+        process_exit(127);
+    }
     let start_address = control.start.load(Ordering::Acquire);
     if start_address == 0 {
         process_exit(127);
@@ -1155,9 +1248,18 @@ fn stream_stat() -> NewlibStat {
         st_gid: 0,
         st_rdev: 0,
         st_size: 0,
-        st_atim: NewlibTimespec { tv_sec: 0, tv_nsec: 0 },
-        st_mtim: NewlibTimespec { tv_sec: 0, tv_nsec: 0 },
-        st_ctim: NewlibTimespec { tv_sec: 0, tv_nsec: 0 },
+        st_atim: NewlibTimespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+        st_mtim: NewlibTimespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
+        st_ctim: NewlibTimespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        },
         st_blksize: 4096,
         st_blocks: 0,
         st_spare4: [0; 2],
@@ -1221,9 +1323,7 @@ fn map_kernel_errno(raw: i64) -> c_int {
     }
 }
 
-fn map_posix_client_error(
-    error: PosixClientError<mochi_user_syscall::SysError>,
-) -> c_int {
+fn map_posix_client_error(error: PosixClientError<mochi_user_syscall::SysError>) -> c_int {
     match error {
         PosixClientError::Remote(status) => map_kernel_errno(i64::from(status)),
         PosixClientError::Transport(error) => map_kernel_errno(error.raw()),
@@ -1610,8 +1710,14 @@ fn posix_open_options(flags: c_int) -> Result<u32, c_int> {
     const O_NONBLOCK: c_int = 0x4000;
     const O_NOFOLLOW: c_int = 0x100000;
     const O_DIRECTORY: c_int = 0x200000;
-    const SUPPORTED: c_int =
-        0x3 | O_APPEND | O_CREAT | O_TRUNC | O_EXCL | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW
+    const SUPPORTED: c_int = 0x3
+        | O_APPEND
+        | O_CREAT
+        | O_TRUNC
+        | O_EXCL
+        | O_NONBLOCK
+        | O_CLOEXEC
+        | O_NOFOLLOW
             | O_DIRECTORY;
     if flags & !SUPPORTED != 0 {
         return Err(EINVAL);
@@ -2253,10 +2359,7 @@ fn clone_registered_process() -> Result<(u64, [FdEntry; MAX_FDS]), c_int> {
             SPAWN_FAIL_EXIT_STATUS as u64,
         );
     }
-    let _ = syscall::raw_syscall1(
-        syscall::SyscallNumber::HandleClose,
-        u64::from(handle),
-    );
+    let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, u64::from(handle));
     result.map(|process_id| (process_id, inherited_fds))
 }
 
@@ -2409,7 +2512,8 @@ fn next_dirent(stream: &mut DirStream) -> Result<Option<NewlibDirent>, c_int> {
 pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
     let stack = unsafe { parse_stack(initial_sp) };
     unsafe { initialize_runtime(stack) };
-    if register_initial_thread().is_none() {
+    let (_, initial_thread) = register_initial_thread().unwrap_or_else(|| process_exit(127));
+    if setup_signal_delivery(initial_thread).is_err() {
         process_exit(127);
     }
     unsafe { __sinit(_impure_ptr) };
@@ -2643,12 +2747,8 @@ pub extern "C" fn _pipe2(fds: *mut c_int, flags: c_int) -> c_int {
                 }
             }
         }
-        let read_fd = match allocate_object_fd(
-            pair.read,
-            read_rights,
-            FdKind::ObjectStreamRead,
-            flags,
-        ) {
+        let read_fd =
+            match allocate_object_fd(pair.read, read_rights, FdKind::ObjectStreamRead, flags) {
             Ok(fd) => fd,
             Err(errno) => {
                 let _ = syscall_errno(syscall::raw_syscall1(
@@ -2662,12 +2762,8 @@ pub extern "C" fn _pipe2(fds: *mut c_int, flags: c_int) -> c_int {
                 return Err(errno);
             }
         };
-        let write_fd = match allocate_object_fd(
-            pair.write,
-            write_rights,
-            FdKind::ObjectStreamWrite,
-            flags,
-        ) {
+        let write_fd =
+            match allocate_object_fd(pair.write, write_rights, FdKind::ObjectStreamWrite, flags) {
             Ok(fd) => fd,
             Err(errno) => {
                 let _ = _close(read_fd);
@@ -2705,8 +2801,7 @@ pub extern "C" fn pipe(fds: *mut c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn fork() -> c_int {
     result_with_errno(
-        clone_registered_process()
-            .and_then(|(pid, _)| c_int::try_from(pid).map_err(|_| EOVERFLOW)),
+        clone_registered_process().and_then(|(pid, _)| c_int::try_from(pid).map_err(|_| EOVERFLOW)),
         -1,
     )
 }
@@ -2734,8 +2829,7 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
                 Ok(0)
             }
             F_GETFL if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) => {
-                let client =
-                    posix_client().map_err(map_posix_client_error)?;
+                let client = posix_client().map_err(map_posix_client_error)?;
                 let flags = client
                     .get_status_flags(ObjectHandleAttachment {
                         handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
@@ -2744,7 +2838,12 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
                     .map_err(map_posix_client_error)?;
                 Ok((entry.open_flags & 0x3) | newlib_mutable_status_flags(flags))
             }
-            F_GETFL if matches!(entry.kind, FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite) => {
+            F_GETFL
+                if matches!(
+                    entry.kind,
+                    FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite
+                ) =>
+            {
                 let options = syscall_errno(syscall::raw_syscall1(
                     syscall::SyscallNumber::HandleOptionsGet,
                     entry.lower_handle,
@@ -2759,8 +2858,7 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
             F_GETFL => Ok(entry.open_flags),
             F_SETFL => {
                 if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
-                    let client = posix_client()
-                        .map_err(map_posix_client_error)?;
+                    let client = posix_client().map_err(map_posix_client_error)?;
                     client
                         .set_status_flags(
                             ObjectHandleAttachment {
@@ -2772,7 +2870,10 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
                         .map_err(map_posix_client_error)?;
                     return Ok(0);
                 }
-                if matches!(entry.kind, FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite) {
+                if matches!(
+                    entry.kind,
+                    FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite
+                ) {
                     if arg & !(O_NONBLOCK | 0x3) != 0 {
                         return Err(EINVAL);
                     }
@@ -2842,11 +2943,8 @@ pub extern "C" fn __mochios_wait_on_address_u32(
             Err(error) => return (-(i64::from(error))) as u64,
         }
     };
-    match mochios_posix_client::synchronization::wait_u32(
-        unsafe { &*address },
-        expected,
-        deadline,
-    ) {
+    match mochios_posix_client::synchronization::wait_u32(unsafe { &*address }, expected, deadline)
+    {
         Ok(mochios_posix_client::synchronization::WaitStatus::Awoken) => {
             syscall::AddressWaitResult::Awoken as u64
         }
@@ -3008,14 +3106,12 @@ pub extern "C" fn select(
             let fd = item_fds[index];
             let mask = 1u64 << fd;
             let observed = items[index].observed;
-            if observed
-                & (syscall::HANDLE_SIGNAL_READABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED)
+            if observed & (syscall::HANDLE_SIGNAL_READABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED)
                 != 0
             {
                 ready_read |= requested_read & mask;
             }
-            if observed
-                & (syscall::HANDLE_SIGNAL_WRITABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED)
+            if observed & (syscall::HANDLE_SIGNAL_WRITABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED)
                 != 0
             {
                 ready_write |= requested_write & mask;
@@ -3025,10 +3121,18 @@ pub extern "C" fn select(
             unsafe { readfds.write(FdSet { bits: [ready_read] }) };
         }
         if !writefds.is_null() {
-            unsafe { writefds.write(FdSet { bits: [ready_write] }) };
+            unsafe {
+                writefds.write(FdSet {
+                    bits: [ready_write],
+                })
+            };
         }
         if !exceptfds.is_null() {
-            unsafe { exceptfds.write(FdSet { bits: [ready_except] }) };
+            unsafe {
+                exceptfds.write(FdSet {
+                    bits: [ready_except],
+                })
+            };
         }
         Ok((ready_read | ready_write | ready_except).count_ones() as c_int)
     })();
@@ -3135,8 +3239,7 @@ pub extern "C" fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: c_int) -> c_int 
                 match item_kinds[item_index] {
                     FdKind::ObjectStreamRead => {
                         pollfds[poll_index].revents |= POLLHUP;
-                        pollfds[poll_index].revents |=
-                            pollfds[poll_index].events & READ_EVENTS;
+                        pollfds[poll_index].revents |= pollfds[poll_index].events & READ_EVENTS;
                     }
                     FdKind::ObjectStreamWrite => pollfds[poll_index].revents |= POLLERR,
                     _ => {}
@@ -3162,9 +3265,7 @@ pub extern "C" fn setgroups(_ngroups: c_int, _grouplist: *const c_int) -> c_int 
 
 #[unsafe(no_mangle)]
 pub extern "C" fn umask(mask: u32) -> u32 {
-    match posix_client()
-        .and_then(|client| client.set_umask(mask))
-    {
+    match posix_client().and_then(|client| client.set_umask(mask)) {
         Ok(previous) => previous,
         Err(error) => {
             set_errno(map_posix_client_error(error));
@@ -3251,12 +3352,7 @@ fn chmod_posix_at(dirfd: c_int, path: *const c_char, mode: u32) -> Result<(), c_
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fchmodat(
-    dirfd: c_int,
-    path: *const c_char,
-    mode: u32,
-    flags: c_int,
-) -> c_int {
+pub extern "C" fn fchmodat(dirfd: c_int, path: *const c_char, mode: u32, flags: c_int) -> c_int {
     if path.is_null() {
         set_errno(EFAULT);
         return -1;
@@ -3602,8 +3698,7 @@ pub extern "C" fn truncate(path: *const c_char, length: i64) -> c_int {
     result_with_errno(
         (|| {
             let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-            let client =
-                posix_client().map_err(map_posix_client_error)?;
+            let client = posix_client().map_err(map_posix_client_error)?;
             client
                 .truncate_at(StatAtBase::ProcessCwd, path, length as u64)
                 .map_err(map_posix_client_error)?;
@@ -3623,23 +3718,20 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
         let entry = with_fd_entry(fd)?;
         if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
             let handle = u32::try_from(entry.lower_handle).map_err(|_| EBADF)?;
-            let client =
-                posix_client().map_err(map_posix_client_error)?;
+            let client = posix_client().map_err(map_posix_client_error)?;
             let status = client
                 .fstat(ObjectHandleAttachment {
                     handle,
                     rights: entry.rights,
                 })
                 .map_err(map_posix_client_error)?;
-            unsafe {
-                ptr::write(
-                    stat_buf.cast::<NewlibStat>(),
-                    translate_posix_stat(&status),
-                )
-            };
+            unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), translate_posix_stat(&status)) };
             return Ok(0);
         }
-        if matches!(entry.kind, FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite) {
+        if matches!(
+            entry.kind,
+            FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite
+        ) {
             unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), stream_stat()) };
             return Ok(0);
         }
@@ -3665,8 +3757,7 @@ fn stat_with_flags(path: *const c_char, stat_buf: *mut c_void, flags: u64) -> c_
             AT_SYMLINK_NOFOLLOW => STAT_NOFOLLOW,
             _ => return Err(EINVAL),
         };
-        let client =
-            posix_client().map_err(map_posix_client_error)?;
+        let client = posix_client().map_err(map_posix_client_error)?;
         let status = client
             .stat_at(StatAtBase::ProcessCwd, flags, path)
             .map_err(map_posix_client_error)?;
@@ -3910,10 +4001,7 @@ pub unsafe extern "C" fn getrlimit(resource: c_int, limit: *mut NewlibRlimit) ->
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn setrlimit(
-    resource: c_int,
-    limit: *const NewlibRlimit,
-) -> c_int {
+pub unsafe extern "C" fn setrlimit(resource: c_int, limit: *const NewlibRlimit) -> c_int {
     if limit.is_null() {
         set_errno(EFAULT);
         return -1;
@@ -3986,7 +4074,11 @@ pub extern "C" fn getpgid(pid: c_int) -> c_int {
     result_with_errno(
         posix_client()
             .map_err(map_posix_client_error)
-            .and_then(|client| client.process_info(pid as i64).map_err(map_posix_client_error))
+            .and_then(|client| {
+                client
+                    .process_info(pid as i64)
+                    .map_err(map_posix_client_error)
+            })
             .and_then(|info| c_int::try_from(info.process_group_id).map_err(|_| EOVERFLOW)),
         -1,
     )
@@ -3997,7 +4089,11 @@ pub extern "C" fn getsid(pid: c_int) -> c_int {
     result_with_errno(
         posix_client()
             .map_err(map_posix_client_error)
-            .and_then(|client| client.process_info(pid as i64).map_err(map_posix_client_error))
+            .and_then(|client| {
+                client
+                    .process_info(pid as i64)
+                    .map_err(map_posix_client_error)
+            })
             .and_then(|info| c_int::try_from(info.session_id).map_err(|_| EOVERFLOW)),
         -1,
     )
@@ -4037,9 +4133,7 @@ pub unsafe extern "C" fn sigaction(
         set_errno(EINVAL);
         return -1;
     }
-    if !action.is_null()
-        && !mochios_posix_client::signal::can_change_disposition(signal as u32)
-    {
+    if !action.is_null() && !mochios_posix_client::signal::can_change_disposition(signal as u32) {
         set_errno(EINVAL);
         return -1;
     }
@@ -4056,11 +4150,7 @@ pub unsafe extern "C" fn sigaction(
     0
 }
 
-fn update_current_signal_mask(
-    how: c_int,
-    set: *const u64,
-    old_set: *mut u64,
-) -> Result<(), c_int> {
+fn update_current_signal_mask(how: c_int, set: *const u64, old_set: *mut u64) -> Result<(), c_int> {
     let (_, control) = register_current_thread().ok_or(EAGAIN)?;
     let previous = control.signal_mask.load(Ordering::Acquire);
     if !old_set.is_null() {
@@ -4070,27 +4160,22 @@ fn update_current_signal_mask(
         return Ok(());
     }
     let requested = unsafe { set.read() };
-    let updated = mochios_posix_client::signal::update_mask(previous, how, requested)
-        .ok_or(EINVAL)?;
+    let updated =
+        mochios_posix_client::signal::update_mask(previous, how, requested).ok_or(EINVAL)?;
     control.signal_mask.store(updated, Ordering::Release);
+    if previous & !updated != 0 {
+        drain_pending_signals()?;
+    }
     Ok(())
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sigprocmask(
-    how: c_int,
-    set: *const u64,
-    old_set: *mut u64,
-) -> c_int {
+pub unsafe extern "C" fn sigprocmask(how: c_int, set: *const u64, old_set: *mut u64) -> c_int {
     result_with_errno(update_current_signal_mask(how, set, old_set).map(|_| 0), -1)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pthread_sigmask(
-    how: c_int,
-    set: *const u64,
-    old_set: *mut u64,
-) -> c_int {
+pub unsafe extern "C" fn pthread_sigmask(how: c_int, set: *const u64, old_set: *mut u64) -> c_int {
     match update_current_signal_mask(how, set, old_set) {
         Ok(()) => 0,
         Err(error) => error,
@@ -4123,11 +4208,7 @@ pub unsafe extern "C" fn sigpending(set: *mut u64) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn _signal_r(
-    _reent: *mut c_void,
-    signal: c_int,
-    handler: usize,
-) -> usize {
+pub unsafe extern "C" fn _signal_r(_reent: *mut c_void, signal: c_int, handler: usize) -> usize {
     let replacement = SignalAction {
         sa_flags: 0,
         sa_mask: 0,
@@ -4185,6 +4266,47 @@ fn dispatch_signal(signal: c_int) -> c_int {
             0
         }
     }
+}
+
+fn apply_default_signal_action(signal: u32) {
+    match signal {
+        16 | 19 | 20 | 28 => {}
+        17 | 18 | 21 | 22 => {
+            // Native process suspension is a separate generic mechanism. The
+            // pending delivery path remains independent of POSIX numbering.
+        }
+        _ => process_exit(128 + signal as c_int),
+    }
+}
+
+fn drain_pending_signals() -> Result<(), c_int> {
+    let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+    loop {
+        let blocked = control.signal_mask.load(Ordering::Acquire);
+        let signal = posix_client()
+            .map_err(map_posix_client_error)?
+            .dequeue_signal(blocked)
+            .map_err(map_posix_client_error)?;
+        if signal == 0 {
+            return Ok(());
+        }
+        match dispatch_signal(signal as c_int) {
+            0 | 3 => {}
+            1 => apply_default_signal_action(signal),
+            _ => return Err(EINVAL),
+        }
+    }
+}
+
+extern "C" fn posix_signal_upcall(_payload: u64, token: u64) -> ! {
+    let _ = drain_pending_signals();
+    let result = syscall::raw_syscall1(syscall::SyscallNumber::ThreadUpcallReturn, token);
+    let error = result.raw() as i64;
+    process_exit(if error < 0 {
+        map_kernel_errno(error)
+    } else {
+        127
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -4322,9 +4444,9 @@ pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Tim
         }
     };
     if duration != 0 {
-        let deadline = match monotonic_nanoseconds().and_then(|now| {
-            now.checked_add(duration).ok_or(EOVERFLOW)
-        }) {
+        let deadline = match monotonic_nanoseconds()
+            .and_then(|now| now.checked_add(duration).ok_or(EOVERFLOW))
+        {
             Ok(deadline) => deadline,
             Err(error) => {
                 set_errno(error);
@@ -4535,8 +4657,7 @@ pub extern "C" fn _mkdir(path: *const c_char, mode: c_int) -> c_int {
     }
     let result = (|| {
         let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-        let client =
-            posix_client().map_err(map_posix_client_error)?;
+        let client = posix_client().map_err(map_posix_client_error)?;
         client
             .mkdir_at(OpenAtBase::ProcessCwd, mode as u32, path)
             .map_err(map_posix_client_error)?;
@@ -4572,8 +4693,7 @@ pub extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: c_int) -> c_i
                 rights: entry.rights,
             })
         };
-        let client =
-            posix_client().map_err(map_posix_client_error)?;
+        let client = posix_client().map_err(map_posix_client_error)?;
         client
             .mkdir_at(base, mode as u32, path)
             .map_err(map_posix_client_error)?;
@@ -4665,8 +4785,7 @@ pub extern "C" fn chdir(path: *const c_char) -> c_int {
     }
     let result = (|| {
         let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-        let client =
-            posix_client().map_err(map_posix_client_error)?;
+        let client = posix_client().map_err(map_posix_client_error)?;
         client
             .chdir_at(StatAtBase::ProcessCwd, path)
             .map_err(map_posix_client_error)?;
@@ -4682,8 +4801,7 @@ pub extern "C" fn getcwd(buffer: *mut c_char, size: usize) -> *mut c_char {
         return ptr::null_mut();
     }
     let result = (|| {
-        let client =
-            posix_client().map_err(map_posix_client_error)?;
+        let client = posix_client().map_err(map_posix_client_error)?;
         let output = unsafe { core::slice::from_raw_parts_mut(buffer.cast::<u8>(), size - 1) };
         let length = client.getcwd(output).map_err(map_posix_client_error)?;
         unsafe { buffer.add(length).write(0) };
@@ -4705,8 +4823,7 @@ pub extern "C" fn realpath(path: *const c_char, resolved_path: *mut c_char) -> *
         let out_len = if path_bytes.first() == Some(&b'/') {
             path_bytes.len()
         } else {
-            let client =
-                posix_client().map_err(map_posix_client_error)?;
+            let client = posix_client().map_err(map_posix_client_error)?;
             cwd_len = client
                 .getcwd(&mut cwd_storage[..4095])
                 .map_err(map_posix_client_error)?;
@@ -4866,7 +4983,12 @@ pub unsafe extern "C" fn pthread_create(
     };
 
     let (stack_address, stack_size, owns_stack, detachstate) = if attr.is_null() {
-        (ptr::null_mut(), PTHREAD_DEFAULT_STACK_SIZE, true, PTHREAD_CREATE_JOINABLE)
+        (
+            ptr::null_mut(),
+            PTHREAD_DEFAULT_STACK_SIZE,
+            true,
+            PTHREAD_CREATE_JOINABLE,
+        )
     } else {
         let attr = unsafe { &*attr };
         if attr.is_initialized == 0
@@ -4923,9 +5045,10 @@ pub unsafe extern "C" fn pthread_create(
         }
         return EAGAIN;
     };
-    control
-        .start
-        .store(start.map(|function| function as usize).unwrap_or(0), Ordering::Relaxed);
+    control.start.store(
+        start.map(|function| function as usize).unwrap_or(0),
+        Ordering::Relaxed,
+    );
     control.argument.store(argument as usize, Ordering::Relaxed);
     control.stack_base.store(stack_base, Ordering::Relaxed);
     control.stack_size.store(stack_size, Ordering::Relaxed);
@@ -5179,10 +5302,7 @@ pub extern "C" fn pthread_getspecific(key: PthreadKey) -> *mut c_void {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_setcancelstate(state: c_int, old_state: *mut c_int) -> c_int {
-    if !matches!(
-        state as u32,
-        PTHREAD_CANCEL_ENABLE | PTHREAD_CANCEL_DISABLE
-    ) {
+    if !matches!(state as u32, PTHREAD_CANCEL_ENABLE | PTHREAD_CANCEL_DISABLE) {
         return EINVAL;
     }
     let (_, control) = match register_current_thread() {
@@ -5193,8 +5313,7 @@ pub unsafe extern "C" fn pthread_setcancelstate(state: c_int, old_state: *mut c_
     if !old_state.is_null() {
         unsafe { old_state.write(previous as c_int) };
     }
-    if state as u32 == PTHREAD_CANCEL_ENABLE
-        && control.cancel_pending.load(Ordering::Acquire) != 0
+    if state as u32 == PTHREAD_CANCEL_ENABLE && control.cancel_pending.load(Ordering::Acquire) != 0
     {
         finish_thread(control, usize::MAX as *mut c_void);
     }

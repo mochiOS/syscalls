@@ -7,13 +7,13 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use mochios_posix_protocol as protocol;
 
+pub mod directory;
 #[cfg(feature = "fd-table")]
 pub mod fd;
-pub mod directory;
 pub mod random;
+pub mod signal;
 #[cfg(feature = "syscall-endpoint")]
 pub mod synchronization;
-pub mod signal;
 pub mod thread;
 pub mod time;
 
@@ -165,18 +165,10 @@ impl<T: Transport> Client<T> {
         options: u32,
     ) -> Result<protocol::WaitResult, ClientError<T::Error>> {
         let mut request = [0u8; protocol::WAIT_REQUEST_LEN];
-        protocol::encode_wait_request(
-            protocol::WaitRequest { selector, options },
-            &mut request,
-        )
+        protocol::encode_wait_request(protocol::WaitRequest { selector, options }, &mut request)
         .map_err(ClientError::Protocol)?;
         let mut response = [0u8; protocol::WAIT_RESULT_LEN];
-        let length = self.request(
-            protocol::OP_WAIT_CHILD,
-            0,
-            &request,
-            &mut response,
-        )?;
+        let length = self.request(protocol::OP_WAIT_CHILD, 0, &request, &mut response)?;
         protocol::decode_wait_result(&response[..length]).map_err(ClientError::Protocol)
     }
 
@@ -188,12 +180,7 @@ impl<T: Transport> Client<T> {
         protocol::encode_process_id_request(process_id, &mut request)
             .map_err(ClientError::Protocol)?;
         let mut response = [0u8; protocol::PROCESS_INFO_LEN];
-        let length = self.request(
-            protocol::OP_PROCESS_INFO,
-            0,
-            &request,
-            &mut response,
-        )?;
+        let length = self.request(protocol::OP_PROCESS_INFO, 0, &request, &mut response)?;
         protocol::decode_process_info(&response[..length]).map_err(ClientError::Protocol)
     }
 
@@ -211,12 +198,7 @@ impl<T: Transport> Client<T> {
 
     pub fn create_session(&self) -> Result<u64, ClientError<T::Error>> {
         let mut response = [0u8; protocol::PROCESS_INFO_LEN];
-        let length = self.request(
-            protocol::OP_CREATE_SESSION,
-            0,
-            &[],
-            &mut response,
-        )?;
+        let length = self.request(protocol::OP_CREATE_SESSION, 0, &[], &mut response)?;
         protocol::decode_process_info(&response[..length])
             .map(|info| info.session_id)
             .map_err(ClientError::Protocol)
@@ -245,12 +227,7 @@ impl<T: Transport> Client<T> {
         let mut request = [0u8; protocol::SIGNAL_MASK_LEN];
         protocol::encode_signal_mask(blocked, &mut request).map_err(ClientError::Protocol)?;
         let mut response = [0u8; protocol::SIGNAL_NUMBER_LEN];
-        let length = self.request(
-            protocol::OP_SIGNAL_DEQUEUE,
-            0,
-            &request,
-            &mut response,
-        )?;
+        let length = self.request(protocol::OP_SIGNAL_DEQUEUE, 0, &request, &mut response)?;
         protocol::decode_signal_number(&response[..length]).map_err(ClientError::Protocol)
     }
 
@@ -279,12 +256,7 @@ impl<T: Transport> Client<T> {
         )
         .map_err(ClientError::Protocol)?;
         let mut response = [0u8; protocol::RESOURCE_LIMIT_LEN];
-        let length = self.request(
-            protocol::OP_RESOURCE_LIMIT,
-            0,
-            &request,
-            &mut response,
-        )?;
+        let length = self.request(protocol::OP_RESOURCE_LIMIT, 0, &request, &mut response)?;
         protocol::decode_resource_limit(&response[..length]).map_err(ClientError::Protocol)
     }
 
@@ -371,6 +343,27 @@ impl<T: Transport> Client<T> {
 }
 
 impl<T: ObjectTransport> Client<T> {
+    pub fn register_signal_thread(
+        &self,
+        thread: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(thread)
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        self.request_with_handles(
+            protocol::OP_SIGNAL_THREAD_REGISTER,
+            0,
+            &[],
+            &mut [],
+            &mut handles,
+        )?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(())
+    }
+
     /// Registers a freshly cloned process as a POSIX child. Identity is
     /// derived from the attached ProcessHandle, never from request bytes.
     pub fn register_child(
@@ -381,13 +374,7 @@ impl<T: ObjectTransport> Client<T> {
         handles
             .push(process)
             .map_err(|_| ClientError::RequestTooLarge)?;
-        self.request_with_handles(
-            protocol::OP_PROCESS_FORKED,
-            0,
-            &[],
-            &mut [],
-            &mut handles,
-        )?;
+        self.request_with_handles(protocol::OP_PROCESS_FORKED, 0, &[], &mut [], &mut handles)?;
         if !handles.is_empty() {
             return Err(ClientError::MismatchedResponse);
         }
@@ -404,9 +391,7 @@ impl<T: ObjectTransport> Client<T> {
         let (base, directory) = match base {
             OpenAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
             OpenAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
-            OpenAtBase::Directory(handle) => {
-                (protocol::OpenBase::AttachedDirectory, Some(handle))
-            }
+            OpenAtBase::Directory(handle) => (protocol::OpenBase::AttachedDirectory, Some(handle)),
         };
         let mut payload = [0u8; protocol::OPEN_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
         let payload_len = protocol::encode_open_at(
@@ -641,9 +626,7 @@ impl<T: ObjectTransport> Client<T> {
         let (base, directory) = match base {
             OpenAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
             OpenAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
-            OpenAtBase::Directory(handle) => {
-                (protocol::OpenBase::AttachedDirectory, Some(handle))
-            }
+            OpenAtBase::Directory(handle) => (protocol::OpenBase::AttachedDirectory, Some(handle)),
         };
         let mut payload = [0u8; protocol::OPEN_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
         let payload_len = protocol::encode_open_at(
@@ -684,15 +667,11 @@ impl<T: ObjectTransport> Client<T> {
         let (base, directory) = match base {
             StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
             StatAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
-            StatAtBase::Directory(handle) => {
-                (protocol::OpenBase::AttachedDirectory, Some(handle))
-            }
+            StatAtBase::Directory(handle) => (protocol::OpenBase::AttachedDirectory, Some(handle)),
         };
         let mut payload = [0u8; protocol::STAT_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
-        let payload_len = protocol::encode_stat_at(
-            protocol::StatAtRequest { base, flags, path },
-            &mut payload,
-        )
+        let payload_len =
+            protocol::encode_stat_at(protocol::StatAtRequest { base, flags, path }, &mut payload)
         .map_err(ClientError::Protocol)?;
         let mut handles = ObjectHandles::new();
         if let Some(directory) = directory {
@@ -772,9 +751,7 @@ impl<T: ObjectTransport> Client<T> {
         let (base, directory) = match base {
             StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
             StatAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
-            StatAtBase::Directory(handle) => {
-                (protocol::OpenBase::AttachedDirectory, Some(handle))
-            }
+            StatAtBase::Directory(handle) => (protocol::OpenBase::AttachedDirectory, Some(handle)),
         };
         let mut payload = [0u8; protocol::TRUNCATE_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
         let payload_len = protocol::encode_truncate_at(
@@ -810,9 +787,7 @@ impl<T: ObjectTransport> Client<T> {
         let (base, directory) = match base {
             StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
             StatAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
-            StatAtBase::Directory(handle) => {
-                (protocol::OpenBase::AttachedDirectory, Some(handle))
-            }
+            StatAtBase::Directory(handle) => (protocol::OpenBase::AttachedDirectory, Some(handle)),
         };
         let mut payload = [0u8; protocol::SYMLINK_AT_HEADER_LEN + protocol::MAX_PATH_LEN * 2];
         let payload_len = protocol::encode_symlink_at(
@@ -853,9 +828,7 @@ impl<T: ObjectTransport> Client<T> {
         let (base, directory) = match base {
             StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
             StatAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
-            StatAtBase::Directory(handle) => {
-                (protocol::OpenBase::AttachedDirectory, Some(handle))
-            }
+            StatAtBase::Directory(handle) => (protocol::OpenBase::AttachedDirectory, Some(handle)),
         };
         let mut payload = [0u8; protocol::STAT_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
         let payload_len = protocol::encode_stat_at(
@@ -898,9 +871,7 @@ impl<T: ObjectTransport> Client<T> {
         let (base, directory) = match base {
             StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
             StatAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
-            StatAtBase::Directory(handle) => {
-                (protocol::OpenBase::AttachedDirectory, Some(handle))
-            }
+            StatAtBase::Directory(handle) => (protocol::OpenBase::AttachedDirectory, Some(handle)),
         };
         let mut payload = [0u8; protocol::OPEN_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
         let payload_len = protocol::encode_open_at(
@@ -915,7 +886,9 @@ impl<T: ObjectTransport> Client<T> {
         .map_err(ClientError::Protocol)?;
         let mut handles = ObjectHandles::new();
         if let Some(directory) = directory {
-            handles.push(directory).map_err(|_| ClientError::RequestTooLarge)?;
+            handles
+                .push(directory)
+                .map_err(|_| ClientError::RequestTooLarge)?;
         }
         self.request_with_handles(
             protocol::OP_CHMOD_AT,
@@ -941,9 +914,7 @@ impl<T: ObjectTransport> Client<T> {
         let (base, directory) = match base {
             StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
             StatAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
-            StatAtBase::Directory(handle) => {
-                (protocol::OpenBase::AttachedDirectory, Some(handle))
-            }
+            StatAtBase::Directory(handle) => (protocol::OpenBase::AttachedDirectory, Some(handle)),
         };
         let mut payload = [0u8; protocol::CHOWN_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
         let payload_len = protocol::encode_chown_at(
@@ -959,7 +930,9 @@ impl<T: ObjectTransport> Client<T> {
         .map_err(ClientError::Protocol)?;
         let mut handles = ObjectHandles::new();
         if let Some(directory) = directory {
-            handles.push(directory).map_err(|_| ClientError::RequestTooLarge)?;
+            handles
+                .push(directory)
+                .map_err(|_| ClientError::RequestTooLarge)?;
         }
         self.request_with_handles(
             protocol::OP_CHOWN_AT,
@@ -1039,11 +1012,7 @@ impl<T: ObjectTransport> Client<T> {
         let mut response_bytes = [0u8; protocol::CONTROL_MESSAGE_LEN];
         let response_len = self
             .transport
-            .call_with_handles(
-                &request_bytes[..request_len],
-                &mut response_bytes,
-                handles,
-            )
+            .call_with_handles(&request_bytes[..request_len], &mut response_bytes, handles)
             .map_err(ClientError::Transport)?;
         let response_bytes = response_bytes
             .get(..response_len)
@@ -1244,9 +1213,9 @@ impl Transport for SyscallEndpointTransport {
         )?;
         let length = (received & 0xffff_ffff) as usize;
         if length > response.len() {
-            return Err(mochi_user_syscall::SysError::from_raw(-(
-                mochi_user_syscall::EOVERFLOW as i64
-            )));
+            return Err(mochi_user_syscall::SysError::from_raw(
+                -(mochi_user_syscall::EOVERFLOW as i64),
+            ));
         }
         Ok(length)
     }
@@ -1282,9 +1251,9 @@ impl ObjectTransport for SyscallEndpointTransport {
         })?;
         if count > MAX_OBJECT_HANDLES || native.reserved != 0 {
             close_syscall_attachments(&native, count);
-            return Err(mochi_user_syscall::SysError::from_raw(-(
-                mochi_user_syscall::EINVAL as i64
-            )));
+            return Err(mochi_user_syscall::SysError::from_raw(
+                -(mochi_user_syscall::EINVAL as i64),
+            ));
         }
         if native
             .handles
@@ -1293,9 +1262,9 @@ impl ObjectTransport for SyscallEndpointTransport {
             .any(|attachment| attachment.handle == 0 || attachment.reserved != 0)
         {
             close_syscall_attachments(&native, count);
-            return Err(mochi_user_syscall::SysError::from_raw(-(
-                mochi_user_syscall::EINVAL as i64
-            )));
+            return Err(mochi_user_syscall::SysError::from_raw(
+                -(mochi_user_syscall::EINVAL as i64),
+            ));
         }
         handles.clear();
         for attachment in native.handles.iter().take(count) {
@@ -1305,16 +1274,14 @@ impl ObjectTransport for SyscallEndpointTransport {
                     rights: attachment.rights,
                 })
                 .map_err(|_| {
-                    mochi_user_syscall::SysError::from_raw(-(
-                        mochi_user_syscall::EOVERFLOW as i64
-                    ))
+                    mochi_user_syscall::SysError::from_raw(-(mochi_user_syscall::EOVERFLOW as i64))
                 })?;
         }
         let length = (received & 0xffff_ffff) as usize;
         if length > response.len() {
-            return Err(mochi_user_syscall::SysError::from_raw(-(
-                mochi_user_syscall::EOVERFLOW as i64
-            )));
+            return Err(mochi_user_syscall::SysError::from_raw(
+                -(mochi_user_syscall::EOVERFLOW as i64),
+            ));
         }
         Ok(length)
     }

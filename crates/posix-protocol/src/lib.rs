@@ -101,6 +101,7 @@ pub const OP_RESOURCE_LIMIT: u16 = 33;
 pub const OP_SIGNAL_SEND: u16 = 34;
 pub const OP_SIGNAL_PENDING: u16 = 35;
 pub const OP_SIGNAL_DEQUEUE: u16 = 36;
+pub const OP_SIGNAL_THREAD_REGISTER: u16 = 37;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -375,13 +376,8 @@ pub enum ProtocolError {
     InvalidLength,
 }
 
-pub fn encode(
-    header: Header,
-    payload: &[u8],
-    output: &mut [u8],
-) -> Result<usize, ProtocolError> {
-    if payload.len() != header.payload_len as usize
-        || payload.len() > MAX_MESSAGE_LEN - HEADER_LEN
+pub fn encode(header: Header, payload: &[u8], output: &mut [u8]) -> Result<usize, ProtocolError> {
+    if payload.len() != header.payload_len as usize || payload.len() > MAX_MESSAGE_LEN - HEADER_LEN
     {
         return Err(ProtocolError::InvalidLength);
     }
@@ -490,10 +486,7 @@ pub fn decode_credential_id(input: &[u8]) -> Result<u32, ProtocolError> {
     Ok(get_u32(input, 0))
 }
 
-pub fn encode_wait_request(
-    request: WaitRequest,
-    output: &mut [u8],
-) -> Result<(), ProtocolError> {
+pub fn encode_wait_request(request: WaitRequest, output: &mut [u8]) -> Result<(), ProtocolError> {
     if output.len() < WAIT_REQUEST_LEN {
         return Err(ProtocolError::BufferTooSmall);
     }
@@ -513,10 +506,7 @@ pub fn decode_wait_request(input: &[u8]) -> Result<WaitRequest, ProtocolError> {
     })
 }
 
-pub fn encode_wait_result(
-    result: WaitResult,
-    output: &mut [u8],
-) -> Result<(), ProtocolError> {
+pub fn encode_wait_result(result: WaitResult, output: &mut [u8]) -> Result<(), ProtocolError> {
     if output.len() < WAIT_RESULT_LEN {
         return Err(ProtocolError::BufferTooSmall);
     }
@@ -638,10 +628,7 @@ pub fn decode_process_group_request(input: &[u8]) -> Result<(i64, i64), Protocol
     Ok((get_u64(input, 0) as i64, get_u64(input, 8) as i64))
 }
 
-pub fn encode_process_info(
-    info: ProcessInfo,
-    output: &mut [u8],
-) -> Result<(), ProtocolError> {
+pub fn encode_process_info(info: ProcessInfo, output: &mut [u8]) -> Result<(), ProtocolError> {
     if output.len() < PROCESS_INFO_LEN {
         return Err(ProtocolError::BufferTooSmall);
     }
@@ -683,9 +670,7 @@ pub fn encode_resource_limit_request(
     Ok(())
 }
 
-pub fn decode_resource_limit_request(
-    input: &[u8],
-) -> Result<ResourceLimitRequest, ProtocolError> {
+pub fn decode_resource_limit_request(input: &[u8]) -> Result<ResourceLimitRequest, ProtocolError> {
     if input.len() != RESOURCE_LIMIT_REQUEST_LEN {
         return Err(ProtocolError::InvalidLength);
     }
@@ -704,10 +689,7 @@ pub fn decode_resource_limit_request(
     })
 }
 
-pub fn encode_resource_limit(
-    limit: ResourceLimit,
-    output: &mut [u8],
-) -> Result<(), ProtocolError> {
+pub fn encode_resource_limit(limit: ResourceLimit, output: &mut [u8]) -> Result<(), ProtocolError> {
     if output.len() < RESOURCE_LIMIT_LEN {
         return Err(ProtocolError::BufferTooSmall);
     }
@@ -883,8 +865,7 @@ pub fn encode_rename_at(
     output[1] = request.new_base as u8;
     put_u32(output, 8, old_path.len() as u32);
     put_u32(output, 12, new_path.len() as u32);
-    output[RENAME_AT_HEADER_LEN..RENAME_AT_HEADER_LEN + old_path.len()]
-        .copy_from_slice(old_path);
+    output[RENAME_AT_HEADER_LEN..RENAME_AT_HEADER_LEN + old_path.len()].copy_from_slice(old_path);
     output[RENAME_AT_HEADER_LEN + old_path.len()..total].copy_from_slice(new_path);
     Ok(total)
 }
@@ -949,7 +930,8 @@ pub fn decode_truncate_at(input: &[u8]) -> Result<TruncateAtRequest<'_>, Protoco
     let base = OpenBase::from_raw(input[0]).ok_or(ProtocolError::InvalidLength)?;
     let length = get_u64(input, 4);
     let path_len = get_u32(input, 12) as usize;
-    if path_len == 0 || path_len > MAX_PATH_LEN || input.len() != TRUNCATE_AT_HEADER_LEN + path_len {
+    if path_len == 0 || path_len > MAX_PATH_LEN || input.len() != TRUNCATE_AT_HEADER_LEN + path_len
+    {
         return Err(ProtocolError::InvalidLength);
     }
     let path_bytes = &input[TRUNCATE_AT_HEADER_LEN..];
@@ -986,8 +968,7 @@ pub fn encode_symlink_at(
     output[0] = request.base as u8;
     put_u32(output, 4, target.len() as u32);
     put_u32(output, 8, link_path.len() as u32);
-    output[SYMLINK_AT_HEADER_LEN..SYMLINK_AT_HEADER_LEN + target.len()]
-        .copy_from_slice(target);
+    output[SYMLINK_AT_HEADER_LEN..SYMLINK_AT_HEADER_LEN + target.len()].copy_from_slice(target);
     output[SYMLINK_AT_HEADER_LEN + target.len()..total].copy_from_slice(link_path);
     Ok(total)
 }
