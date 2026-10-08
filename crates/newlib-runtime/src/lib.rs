@@ -5,7 +5,7 @@ use core::ffi::{c_char, c_int, c_void};
 use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut};
 use core::ptr;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use mochi_user_syscall as syscall;
 use mochios_capability_protocol::{
@@ -73,6 +73,7 @@ const EINVAL: c_int = 22;
 const EMFILE: c_int = 24;
 const ESPIPE: c_int = 29;
 const EPIPE: c_int = 32;
+const EDEADLK: c_int = 35;
 const ERANGE: c_int = 34;
 const ENAMETOOLONG: c_int = 36;
 const ENOSYS: c_int = 38;
@@ -80,6 +81,25 @@ const EOVERFLOW: c_int = 75;
 
 type InitFn = unsafe extern "C" fn();
 type CLong = i64;
+type Pthread = u32;
+type PthreadStart = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+
+const PTHREAD_CREATE_DETACHED: c_int = 0;
+const PTHREAD_CREATE_JOINABLE: c_int = 1;
+const PTHREAD_STACK_MIN: usize = 16 * 1024;
+const PTHREAD_DEFAULT_STACK_SIZE: usize = 1024 * 1024;
+const THREAD_FREE: u32 = 0;
+const THREAD_STARTING: u32 = 1;
+const THREAD_RUNNING: u32 = 2;
+const THREAD_EXITED: u32 = 3;
+const THREAD_REAPING: u32 = 4;
+const THREAD_JOINABLE: u32 = 0;
+const THREAD_JOIN_CLAIMED: u32 = 1;
+const THREAD_DETACHED: u32 = 2;
+const PTHREAD_CANCEL_ENABLE: u32 = 0;
+const PTHREAD_CANCEL_DISABLE: u32 = 1;
+const PTHREAD_CANCEL_DEFERRED: u32 = 0;
+const PTHREAD_CANCEL_ASYNCHRONOUS: u32 = 1;
 
 const CAPABILITY_SERVICE_NAME: &[u8] = b"capability.service";
 
@@ -114,6 +134,55 @@ impl LockOpaque {
 pub struct PosixSpawnAttr {
     sa_flags: i16,
     sa_pgroup: c_int,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PthreadAttr {
+    is_initialized: c_int,
+    stackaddr: *mut c_void,
+    stacksize: c_int,
+    contentionscope: c_int,
+    inheritsched: c_int,
+    schedpolicy: c_int,
+    schedparam_priority: c_int,
+    detachstate: c_int,
+}
+
+struct ThreadControl {
+    state: AtomicU32,
+    generation: AtomicU32,
+    native_id: AtomicU64,
+    start: AtomicUsize,
+    argument: AtomicUsize,
+    result: AtomicUsize,
+    stack_base: AtomicUsize,
+    stack_size: AtomicUsize,
+    owns_stack: AtomicU32,
+    joinability: AtomicU32,
+    cancel_state: AtomicU32,
+    cancel_type: AtomicU32,
+    cancel_pending: AtomicU32,
+}
+
+impl ThreadControl {
+    const fn new() -> Self {
+        Self {
+            state: AtomicU32::new(THREAD_FREE),
+            generation: AtomicU32::new(0),
+            native_id: AtomicU64::new(0),
+            start: AtomicUsize::new(0),
+            argument: AtomicUsize::new(0),
+            result: AtomicUsize::new(0),
+            stack_base: AtomicUsize::new(0),
+            stack_size: AtomicUsize::new(0),
+            owns_stack: AtomicU32::new(0),
+            joinability: AtomicU32::new(THREAD_JOINABLE),
+            cancel_state: AtomicU32::new(PTHREAD_CANCEL_ENABLE),
+            cancel_type: AtomicU32::new(PTHREAD_CANCEL_DEFERRED),
+            cancel_pending: AtomicU32::new(0),
+        }
+    }
 }
 
 #[repr(C)]
@@ -503,6 +572,8 @@ static FILE_ACTIONS_POOL: RuntimeMutex<[FileActionsSlot; MAX_SPAWN_FILE_ACTIONS]
 static FILE_ACTION_ENTRIES_POOL: RuntimeMutex<
     [FileActionEntrySlot; MAX_SPAWN_FILE_ACTION_ENTRIES],
 > = RuntimeMutex::new([FileActionEntrySlot::new(); MAX_SPAWN_FILE_ACTION_ENTRIES]);
+static THREADS: [ThreadControl; mochios_posix_client::thread::MAX_THREADS] =
+    [const { ThreadControl::new() }; mochios_posix_client::thread::MAX_THREADS];
 
 macro_rules! static_newlib_lock {
     ($name:ident) => {
@@ -707,6 +778,163 @@ fn native_mutex_release(state: &AtomicU32) {
     if previous == 2 {
         native_mutex_wake_one(state);
     }
+}
+
+fn thread_token_for(index: usize, control: &ThreadControl) -> Option<Pthread> {
+    mochios_posix_client::thread::ThreadToken::new(
+        index,
+        control.generation.load(Ordering::Acquire),
+    )
+    .map(mochios_posix_client::thread::ThreadToken::raw)
+}
+
+fn thread_control(token: Pthread) -> Option<&'static ThreadControl> {
+    let token = mochios_posix_client::thread::ThreadToken::from_raw(token)?;
+    let control = THREADS.get(token.slot())?;
+    if control.generation.load(Ordering::Acquire) != token.generation()
+        || matches!(
+            control.state.load(Ordering::Acquire),
+            THREAD_FREE | THREAD_REAPING
+        )
+    {
+        return None;
+    }
+    Some(control)
+}
+
+fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
+    for (index, control) in THREADS.iter().enumerate() {
+        if control
+            .state
+            .compare_exchange(
+                THREAD_FREE,
+                THREAD_STARTING,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            continue;
+        }
+        let generation = mochios_posix_client::thread::next_generation(
+            control.generation.load(Ordering::Relaxed),
+        );
+        control.generation.store(generation, Ordering::Release);
+        control.native_id.store(0, Ordering::Relaxed);
+        control.start.store(0, Ordering::Relaxed);
+        control.argument.store(0, Ordering::Relaxed);
+        control.result.store(0, Ordering::Relaxed);
+        control.stack_base.store(0, Ordering::Relaxed);
+        control.stack_size.store(0, Ordering::Relaxed);
+        control.owns_stack.store(0, Ordering::Relaxed);
+        control
+            .joinability
+            .store(THREAD_JOINABLE, Ordering::Relaxed);
+        control
+            .cancel_state
+            .store(PTHREAD_CANCEL_ENABLE, Ordering::Relaxed);
+        control
+            .cancel_type
+            .store(PTHREAD_CANCEL_DEFERRED, Ordering::Relaxed);
+        control.cancel_pending.store(0, Ordering::Relaxed);
+        let token = mochios_posix_client::thread::ThreadToken::new(index, generation)?;
+        return Some((token.raw(), control));
+    }
+    None
+}
+
+fn release_thread_control(control: &ThreadControl) {
+    let stack_base = control.stack_base.swap(0, Ordering::Relaxed);
+    let stack_size = control.stack_size.swap(0, Ordering::Relaxed);
+    let owns_stack = control.owns_stack.swap(0, Ordering::Relaxed) != 0;
+    if owns_stack && stack_base != 0 && stack_size != 0 {
+        let _ = syscall::raw_syscall2(
+            syscall::SyscallNumber::MemoryUnmap,
+            stack_base as u64,
+            stack_size as u64,
+        );
+    }
+    control.native_id.store(0, Ordering::Relaxed);
+    control.start.store(0, Ordering::Relaxed);
+    control.argument.store(0, Ordering::Relaxed);
+    control.result.store(0, Ordering::Relaxed);
+    control
+        .joinability
+        .store(THREAD_JOINABLE, Ordering::Relaxed);
+    control.cancel_pending.store(0, Ordering::Relaxed);
+    control.state.store(THREAD_FREE, Ordering::Release);
+    native_mutex_wake_all(&control.state);
+}
+
+fn reap_detached_threads() {
+    for control in &THREADS {
+        if control.joinability.load(Ordering::Acquire) == THREAD_DETACHED
+            && control
+                .state
+                .compare_exchange(
+                    THREAD_EXITED,
+                    THREAD_REAPING,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+        {
+            release_thread_control(control);
+        }
+    }
+}
+
+fn current_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
+    let native_id = native_thread_id().ok()?;
+    THREADS.iter().enumerate().find_map(|(index, control)| {
+        let state = control.state.load(Ordering::Acquire);
+        (state != THREAD_FREE
+            && state != THREAD_REAPING
+            && control.native_id.load(Ordering::Acquire) == native_id)
+            .then(|| thread_token_for(index, control).map(|token| (token, control)))
+            .flatten()
+    })
+}
+
+fn register_current_thread() -> Option<(Pthread, &'static ThreadControl)> {
+    if let Some(current) = current_thread_control() {
+        return Some(current);
+    }
+    reap_detached_threads();
+    let native_id = native_thread_id().ok()?;
+    let (token, control) = reserve_thread_control()?;
+    control.native_id.store(native_id, Ordering::Relaxed);
+    control.state.store(THREAD_RUNNING, Ordering::Release);
+    Some((token, control))
+}
+
+fn finish_thread(control: &ThreadControl, result: *mut c_void) -> ! {
+    control.result.store(result as usize, Ordering::Relaxed);
+    control.state.store(THREAD_EXITED, Ordering::Release);
+    native_mutex_wake_all(&control.state);
+    let _ = syscall::raw_syscall1(syscall::SyscallNumber::ThreadExit, 0);
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+unsafe extern "C" fn pthread_start_trampoline(argument: *mut c_void) -> ! {
+    let control = unsafe { &*argument.cast::<ThreadControl>() };
+    let native_id = native_thread_id().unwrap_or_else(|_| process_exit(127));
+    control.native_id.store(native_id, Ordering::Relaxed);
+    let _ = control.state.compare_exchange(
+        THREAD_STARTING,
+        THREAD_RUNNING,
+        Ordering::Release,
+        Ordering::Relaxed,
+    );
+    let start_address = control.start.load(Ordering::Acquire);
+    if start_address == 0 {
+        process_exit(127);
+    }
+    let start: PthreadStart = unsafe { core::mem::transmute(start_address) };
+    let result = unsafe { start(control.argument.load(Ordering::Relaxed) as *mut c_void) };
+    finish_thread(control, result)
 }
 
 fn set_errno(value: c_int) {
@@ -4174,6 +4402,424 @@ pub extern "C" fn _waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_
 #[unsafe(no_mangle)]
 pub extern "C" fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int {
     _waitpid(pid, status, options)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_create(
+    thread: *mut Pthread,
+    attr: *const PthreadAttr,
+    start: Option<PthreadStart>,
+    argument: *mut c_void,
+) -> c_int {
+    if thread.is_null() || start.is_none() {
+        return EINVAL;
+    }
+    reap_detached_threads();
+
+    let (stack_address, stack_size, owns_stack, detachstate) = if attr.is_null() {
+        (ptr::null_mut(), PTHREAD_DEFAULT_STACK_SIZE, true, PTHREAD_CREATE_JOINABLE)
+    } else {
+        let attr = unsafe { &*attr };
+        if attr.is_initialized == 0
+            || attr.stacksize < 0
+            || !matches!(
+                attr.detachstate,
+                PTHREAD_CREATE_DETACHED | PTHREAD_CREATE_JOINABLE
+            )
+        {
+            return EINVAL;
+        }
+        let size = attr.stacksize as usize;
+        if size < PTHREAD_STACK_MIN {
+            return EINVAL;
+        }
+        (
+            attr.stackaddr,
+            size,
+            attr.stackaddr.is_null(),
+            attr.detachstate,
+        )
+    };
+    let stack_size = if owns_stack {
+        match align_up(stack_size, PAGE_SIZE) {
+            Some(size) => size,
+            None => return EINVAL,
+        }
+    } else {
+        stack_size
+    };
+    let stack_base = if owns_stack {
+        match syscall_errno(syscall::raw_syscall6(
+            syscall::SyscallNumber::MemoryMap,
+            0,
+            stack_size as u64,
+            PROT_READ_WRITE,
+            MAP_PRIVATE_ANON,
+            0,
+            0,
+        )) {
+            Ok(address) => address as usize,
+            Err(error) => return error,
+        }
+    } else {
+        stack_address as usize
+    };
+    let Some((token, control)) = reserve_thread_control() else {
+        if owns_stack {
+            let _ = syscall::raw_syscall2(
+                syscall::SyscallNumber::MemoryUnmap,
+                stack_base as u64,
+                stack_size as u64,
+            );
+        }
+        return EAGAIN;
+    };
+    control
+        .start
+        .store(start.map(|function| function as usize).unwrap_or(0), Ordering::Relaxed);
+    control.argument.store(argument as usize, Ordering::Relaxed);
+    control.stack_base.store(stack_base, Ordering::Relaxed);
+    control.stack_size.store(stack_size, Ordering::Relaxed);
+    control
+        .owns_stack
+        .store(u32::from(owns_stack), Ordering::Relaxed);
+    control.joinability.store(
+        if detachstate == PTHREAD_CREATE_DETACHED {
+            THREAD_DETACHED
+        } else {
+            THREAD_JOINABLE
+        },
+        Ordering::Relaxed,
+    );
+
+    let stack_end = match stack_base.checked_add(stack_size) {
+        Some(end) => end,
+        None => {
+            control.state.store(THREAD_REAPING, Ordering::Relaxed);
+            release_thread_control(control);
+            return EINVAL;
+        }
+    };
+    let stack_pointer = (stack_end & !0xf).saturating_sub(8);
+    let context = syscall::ThreadCreateContext {
+        entry: pthread_start_trampoline as *const () as u64,
+        stack_pointer: stack_pointer as u64,
+        argument: control as *const ThreadControl as u64,
+        thread_local_base: 0,
+        flags: 0,
+        reserved: [0; 3],
+    };
+    let native_id = match syscall_errno(syscall::raw_syscall2(
+        syscall::SyscallNumber::ThreadCreate,
+        (&context as *const syscall::ThreadCreateContext) as u64,
+        core::mem::size_of::<syscall::ThreadCreateContext>() as u64,
+    )) {
+        Ok(native_id) => native_id,
+        Err(error) => {
+            control.state.store(THREAD_REAPING, Ordering::Relaxed);
+            release_thread_control(control);
+            return error;
+        }
+    };
+    let _ = control
+        .native_id
+        .compare_exchange(0, native_id, Ordering::Release, Ordering::Relaxed);
+    unsafe { thread.write(token) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_join(thread: Pthread, value: *mut *mut c_void) -> c_int {
+    let Some(control) = thread_control(thread) else {
+        return ESRCH;
+    };
+    if current_thread_control().is_some_and(|(current, _)| current == thread) {
+        return EDEADLK;
+    }
+    if control
+        .joinability
+        .compare_exchange(
+            THREAD_JOINABLE,
+            THREAD_JOIN_CLAIMED,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return EINVAL;
+    }
+    loop {
+        let state = control.state.load(Ordering::Acquire);
+        if state == THREAD_EXITED {
+            break;
+        }
+        if !matches!(state, THREAD_STARTING | THREAD_RUNNING) {
+            return ESRCH;
+        }
+        native_mutex_wait(&control.state, state);
+    }
+    if !value.is_null() {
+        unsafe { value.write(control.result.load(Ordering::Acquire) as *mut c_void) };
+    }
+    if control
+        .state
+        .compare_exchange(
+            THREAD_EXITED,
+            THREAD_REAPING,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return ESRCH;
+    }
+    release_thread_control(control);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_detach(thread: Pthread) -> c_int {
+    let Some(control) = thread_control(thread) else {
+        return ESRCH;
+    };
+    if control
+        .joinability
+        .compare_exchange(
+            THREAD_JOINABLE,
+            THREAD_DETACHED,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return EINVAL;
+    }
+    if control
+        .state
+        .compare_exchange(
+            THREAD_EXITED,
+            THREAD_REAPING,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        )
+        .is_ok()
+    {
+        release_thread_control(control);
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_exit(value: *mut c_void) -> ! {
+    let (_, control) = register_current_thread().unwrap_or_else(|| process_exit(127));
+    finish_thread(control, value)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_self() -> Pthread {
+    register_current_thread()
+        .map(|(thread, _)| thread)
+        .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_equal(left: Pthread, right: Pthread) -> c_int {
+    c_int::from(left == right)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_setcancelstate(state: c_int, old_state: *mut c_int) -> c_int {
+    if !matches!(
+        state as u32,
+        PTHREAD_CANCEL_ENABLE | PTHREAD_CANCEL_DISABLE
+    ) {
+        return EINVAL;
+    }
+    let (_, control) = match register_current_thread() {
+        Some(current) => current,
+        None => return EAGAIN,
+    };
+    let previous = control.cancel_state.swap(state as u32, Ordering::AcqRel);
+    if !old_state.is_null() {
+        unsafe { old_state.write(previous as c_int) };
+    }
+    if state as u32 == PTHREAD_CANCEL_ENABLE
+        && control.cancel_pending.load(Ordering::Acquire) != 0
+    {
+        finish_thread(control, usize::MAX as *mut c_void);
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_setcanceltype(cancel_type: c_int, old_type: *mut c_int) -> c_int {
+    if cancel_type as u32 == PTHREAD_CANCEL_ASYNCHRONOUS {
+        return ENOSYS;
+    }
+    if cancel_type as u32 != PTHREAD_CANCEL_DEFERRED {
+        return EINVAL;
+    }
+    let (_, control) = match register_current_thread() {
+        Some(current) => current,
+        None => return EAGAIN,
+    };
+    let previous = control
+        .cancel_type
+        .swap(PTHREAD_CANCEL_DEFERRED, Ordering::AcqRel);
+    if !old_type.is_null() {
+        unsafe { old_type.write(previous as c_int) };
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_cancel(thread: Pthread) -> c_int {
+    let Some(control) = thread_control(thread) else {
+        return ESRCH;
+    };
+    control.cancel_pending.store(1, Ordering::Release);
+    native_mutex_wake_all(&control.state);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_testcancel() {
+    let Some((_, control)) = current_thread_control() else {
+        return;
+    };
+    if control.cancel_state.load(Ordering::Acquire) == PTHREAD_CANCEL_ENABLE
+        && control.cancel_pending.load(Ordering::Acquire) != 0
+    {
+        finish_thread(control, usize::MAX as *mut c_void);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_init(attr: *mut PthreadAttr) -> c_int {
+    if attr.is_null() {
+        return EINVAL;
+    }
+    unsafe {
+        attr.write(PthreadAttr {
+            is_initialized: 1,
+            stackaddr: ptr::null_mut(),
+            stacksize: PTHREAD_DEFAULT_STACK_SIZE as c_int,
+            contentionscope: 0,
+            inheritsched: 1,
+            schedpolicy: 0,
+            schedparam_priority: 0,
+            detachstate: PTHREAD_CREATE_JOINABLE,
+        })
+    };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_destroy(attr: *mut PthreadAttr) -> c_int {
+    if attr.is_null() || unsafe { (*attr).is_initialized } == 0 {
+        return EINVAL;
+    }
+    unsafe { (*attr).is_initialized = 0 };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_setstacksize(
+    attr: *mut PthreadAttr,
+    stack_size: usize,
+) -> c_int {
+    if attr.is_null()
+        || unsafe { (*attr).is_initialized } == 0
+        || stack_size < PTHREAD_STACK_MIN
+        || stack_size > c_int::MAX as usize
+    {
+        return EINVAL;
+    }
+    unsafe { (*attr).stacksize = stack_size as c_int };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_getstacksize(
+    attr: *const PthreadAttr,
+    stack_size: *mut usize,
+) -> c_int {
+    if attr.is_null() || stack_size.is_null() || unsafe { (*attr).is_initialized } == 0 {
+        return EINVAL;
+    }
+    unsafe { stack_size.write((*attr).stacksize as usize) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_setstack(
+    attr: *mut PthreadAttr,
+    stack_address: *mut c_void,
+    stack_size: usize,
+) -> c_int {
+    if attr.is_null()
+        || stack_address.is_null()
+        || unsafe { (*attr).is_initialized } == 0
+        || stack_size < PTHREAD_STACK_MIN
+        || stack_size > c_int::MAX as usize
+    {
+        return EINVAL;
+    }
+    unsafe {
+        (*attr).stackaddr = stack_address;
+        (*attr).stacksize = stack_size as c_int;
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_getstack(
+    attr: *const PthreadAttr,
+    stack_address: *mut *mut c_void,
+    stack_size: *mut usize,
+) -> c_int {
+    if attr.is_null()
+        || stack_address.is_null()
+        || stack_size.is_null()
+        || unsafe { (*attr).is_initialized } == 0
+    {
+        return EINVAL;
+    }
+    unsafe {
+        stack_address.write((*attr).stackaddr);
+        stack_size.write((*attr).stacksize as usize);
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_setdetachstate(
+    attr: *mut PthreadAttr,
+    detachstate: c_int,
+) -> c_int {
+    if attr.is_null()
+        || unsafe { (*attr).is_initialized } == 0
+        || !matches!(
+            detachstate,
+            PTHREAD_CREATE_DETACHED | PTHREAD_CREATE_JOINABLE
+        )
+    {
+        return EINVAL;
+    }
+    unsafe { (*attr).detachstate = detachstate };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_getdetachstate(
+    attr: *const PthreadAttr,
+    detachstate: *mut c_int,
+) -> c_int {
+    if attr.is_null() || detachstate.is_null() || unsafe { (*attr).is_initialized } == 0 {
+        return EINVAL;
+    }
+    unsafe { detachstate.write((*attr).detachstate) };
+    0
 }
 
 #[unsafe(no_mangle)]
