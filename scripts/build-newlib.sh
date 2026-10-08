@@ -146,5 +146,7 @@ cp -a "$USER_ROOT/libc-port/include/." "$SDK/sysroot/include/"
 [[ -z "$(nm -u "$OUT_ROOT/hello/poll.elf")" ]] || { echo "unresolved symbols in poll.elf" >&2; exit 1; }
 "$SDK/bin/mochios-cc" -O2 "$USER_ROOT/libc-port/tests/nonblocking_pipe.c" -o "$OUT_ROOT/hello/nonblocking_pipe.elf"
 [[ -z "$(nm -u "$OUT_ROOT/hello/nonblocking_pipe.elf")" ]] || { echo "unresolved symbols in nonblocking_pipe.elf" >&2; exit 1; }
+"$SDK/bin/mochios-cc" -O2 "$USER_ROOT/libc-port/tests/termios.c" -o "$OUT_ROOT/hello/termios.elf"
+[[ -z "$(nm -u "$OUT_ROOT/hello/termios.elf")" ]] || { echo "unresolved symbols in termios.elf" >&2; exit 1; }
 readelf -h "$OUT_ROOT/hello/hello.elf"
 echo "[done] SDK: $SDK"

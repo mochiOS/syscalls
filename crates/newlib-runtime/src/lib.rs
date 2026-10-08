@@ -53,6 +53,9 @@ const SPAWN_FAIL_EXIT_STATUS: c_int = 127;
 const DIR_BUFFER_SIZE: usize = 4096;
 const DIRENT_NAME_MAX: usize = 256;
 const SIGNAL_UPCALL_STACK_SIZE: usize = 64 * 1024;
+const TCSANOW: c_int = 0;
+const TCSADRAIN: c_int = 1;
+const TCSAFLUSH: c_int = 2;
 
 const EPERM: c_int = 1;
 const ENOENT: c_int = 2;
@@ -71,6 +74,7 @@ const ENOTDIR: c_int = 20;
 const EISDIR: c_int = 21;
 const EINVAL: c_int = 22;
 const EMFILE: c_int = 24;
+const ENOTTY: c_int = 25;
 const ESPIPE: c_int = 29;
 const EPIPE: c_int = 32;
 const EDEADLK: c_int = 35;
@@ -120,6 +124,18 @@ pub struct Tms {
     tms_stime: i64,
     tms_cutime: i64,
     tms_cstime: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NewlibTermios {
+    c_iflag: u32,
+    c_oflag: u32,
+    c_cflag: u32,
+    c_lflag: u32,
+    c_cc: [u8; posix_protocol::TERMINAL_CONTROL_CHARACTERS],
+    c_ispeed: u32,
+    c_ospeed: u32,
 }
 
 #[repr(C)]
@@ -2695,6 +2711,75 @@ fn with_fd_entry(fd: c_int) -> Result<PosixFdEntry<FdObject>, c_int> {
     state().fds.get(fd).ok_or(EBADF)
 }
 
+fn terminal_attributes_from_newlib(termios: NewlibTermios) -> posix_protocol::TerminalAttributes {
+    posix_protocol::TerminalAttributes {
+        input_flags: termios.c_iflag,
+        output_flags: termios.c_oflag,
+        control_flags: termios.c_cflag,
+        local_flags: termios.c_lflag,
+        control_characters: termios.c_cc,
+        input_speed: termios.c_ispeed,
+        output_speed: termios.c_ospeed,
+    }
+}
+
+fn terminal_attributes_to_newlib(attributes: posix_protocol::TerminalAttributes) -> NewlibTermios {
+    NewlibTermios {
+        c_iflag: attributes.input_flags,
+        c_oflag: attributes.output_flags,
+        c_cflag: attributes.control_flags,
+        c_lflag: attributes.local_flags,
+        c_cc: attributes.control_characters,
+        c_ispeed: attributes.input_speed,
+        c_ospeed: attributes.output_speed,
+    }
+}
+
+fn terminal_control(
+    entry: FdEntry,
+    control_code: u64,
+    input: &[u8],
+    output: &mut [u8],
+) -> Result<usize, c_int> {
+    if entry.handle.kind != FdKind::ObjectPty {
+        return Err(ENOTTY);
+    }
+    let length = syscall_errno(syscall::raw_syscall6(
+        syscall::SyscallNumber::HandleControl,
+        entry.handle.lower_handle,
+        control_code,
+        input.as_ptr() as u64,
+        input.len() as u64,
+        output.as_mut_ptr() as u64,
+        output.len() as u64,
+    ))?;
+    usize::try_from(length).map_err(|_| EOVERFLOW)
+}
+
+fn set_terminal_attributes(
+    entry: FdEntry,
+    action: c_int,
+    termios: NewlibTermios,
+) -> Result<(), c_int> {
+    let control_code = match action {
+        TCSANOW => posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_NOW,
+        TCSADRAIN => posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_DRAIN,
+        TCSAFLUSH => posix_protocol::PTY_CONTROL_SET_ATTRIBUTES_FLUSH,
+        _ => return Err(EINVAL),
+    };
+    let mut encoded = [0; posix_protocol::TERMINAL_ATTRIBUTES_LEN];
+    posix_protocol::encode_terminal_attributes(
+        terminal_attributes_from_newlib(termios),
+        &mut encoded,
+    )
+    .map_err(|_| EINVAL)?;
+    let written = terminal_control(entry, control_code, &encoded, &mut [])?;
+    if written != 0 {
+        return Err(EIO);
+    }
+    Ok(())
+}
+
 fn allocate_object_fd(
     handle: u32,
     rights: u64,
@@ -3067,14 +3152,14 @@ pub extern "C" fn openpty(
     master: *mut c_int,
     slave: *mut c_int,
     name: *mut c_char,
-    termios: *const c_void,
+    termios: *const NewlibTermios,
     window_size: *const c_void,
 ) -> c_int {
     if master.is_null() || slave.is_null() {
         set_errno(EFAULT);
         return -1;
     }
-    if !name.is_null() || !termios.is_null() || !window_size.is_null() {
+    if !name.is_null() || !window_size.is_null() {
         set_errno(ENOTSUP);
         return -1;
     }
@@ -3117,6 +3202,16 @@ pub extern "C" fn openpty(
                     return Err(errno);
                 }
             };
+        if !termios.is_null() {
+            let configure = with_fd_entry(slave_fd).and_then(|entry| {
+                set_terminal_attributes(entry, TCSANOW, unsafe { termios.read() })
+            });
+            if let Err(errno) = configure {
+                let _ = _close(master_fd);
+                let _ = _close(slave_fd);
+                return Err(errno);
+            }
+        }
         unsafe {
             master.write(master_fd);
             slave.write(slave_fd);
@@ -4382,6 +4477,146 @@ pub extern "C" fn _isatty(fd: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn isatty(fd: c_int) -> c_int {
     _isatty(fd)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tcgetattr(fd: c_int, termios: *mut NewlibTermios) -> c_int {
+    if termios.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    let result = (|| {
+        let entry = with_fd_entry(fd)?;
+        let mut encoded = [0; posix_protocol::TERMINAL_ATTRIBUTES_LEN];
+        let length = terminal_control(
+            entry,
+            posix_protocol::PTY_CONTROL_GET_ATTRIBUTES,
+            &[],
+            &mut encoded,
+        )?;
+        if length != encoded.len() {
+            return Err(EIO);
+        }
+        let attributes = posix_protocol::decode_terminal_attributes(&encoded).map_err(|_| EIO)?;
+        unsafe { termios.write(terminal_attributes_to_newlib(attributes)) };
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tcsetattr(fd: c_int, action: c_int, termios: *const NewlibTermios) -> c_int {
+    if termios.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    let result = (|| {
+        let entry = with_fd_entry(fd)?;
+        set_terminal_attributes(entry, action, unsafe { termios.read() })?;
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cfgetispeed(termios: *const NewlibTermios) -> u32 {
+    if termios.is_null() {
+        return 0;
+    }
+    unsafe { (*termios).c_ispeed }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cfgetospeed(termios: *const NewlibTermios) -> u32 {
+    if termios.is_null() {
+        return 0;
+    }
+    unsafe { (*termios).c_ospeed }
+}
+
+fn valid_terminal_speed(speed: u32) -> bool {
+    matches!(
+        speed,
+        0 | 50
+            | 75
+            | 110
+            | 134
+            | 150
+            | 200
+            | 300
+            | 600
+            | 1_200
+            | 1_800
+            | 2_400
+            | 4_800
+            | 9_600
+            | 19_200
+            | 38_400
+            | 57_600
+            | 115_200
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cfsetispeed(termios: *mut NewlibTermios, speed: u32) -> c_int {
+    if termios.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    if !valid_terminal_speed(speed) {
+        set_errno(EINVAL);
+        return -1;
+    }
+    unsafe { (*termios).c_ispeed = speed };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cfsetospeed(termios: *mut NewlibTermios, speed: u32) -> c_int {
+    if termios.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    if !valid_terminal_speed(speed) {
+        set_errno(EINVAL);
+        return -1;
+    }
+    unsafe { (*termios).c_ospeed = speed };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cfsetspeed(termios: *mut NewlibTermios, speed: u32) -> c_int {
+    if cfsetispeed(termios, speed) != 0 {
+        return -1;
+    }
+    cfsetospeed(termios, speed)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cfmakeraw(termios: *mut NewlibTermios) {
+    if termios.is_null() {
+        return;
+    }
+    let termios = unsafe { &mut *termios };
+    termios.c_iflag &= !(posix_protocol::TERMINAL_IFLAG_IGNBRK
+        | posix_protocol::TERMINAL_IFLAG_BRKINT
+        | posix_protocol::TERMINAL_IFLAG_PARMRK
+        | posix_protocol::TERMINAL_IFLAG_ISTRIP
+        | posix_protocol::TERMINAL_IFLAG_INLCR
+        | posix_protocol::TERMINAL_IFLAG_IGNCR
+        | posix_protocol::TERMINAL_IFLAG_ICRNL
+        | posix_protocol::TERMINAL_IFLAG_IXON);
+    termios.c_oflag &= !posix_protocol::TERMINAL_OFLAG_OPOST;
+    termios.c_lflag &= !(posix_protocol::TERMINAL_LFLAG_ECHO
+        | posix_protocol::TERMINAL_LFLAG_ECHONL
+        | posix_protocol::TERMINAL_LFLAG_ICANON
+        | posix_protocol::TERMINAL_LFLAG_ISIG
+        | posix_protocol::TERMINAL_LFLAG_IEXTEN);
+    termios.c_cflag &= !((3 << 4) | (1 << 8));
+    termios.c_cflag |= posix_protocol::TERMINAL_CFLAG_CS8;
+    termios.c_cc[posix_protocol::TERMINAL_CC_VMIN] = 1;
+    termios.c_cc[posix_protocol::TERMINAL_CC_VTIME] = 0;
 }
 
 #[unsafe(no_mangle)]
