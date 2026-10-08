@@ -276,6 +276,21 @@ impl<T: Transport> Client<T> {
         self.set_credential_id(protocol::OP_SET_GID, gid)
     }
 
+    pub fn set_effective_uid(&self, uid: u32) -> Result<(), ClientError<T::Error>> {
+        self.set_credential_id(protocol::OP_SET_EFFECTIVE_UID, uid)
+    }
+
+    pub fn set_effective_gid(&self, gid: u32) -> Result<(), ClientError<T::Error>> {
+        self.set_credential_id(protocol::OP_SET_EFFECTIVE_GID, gid)
+    }
+
+    /// Atomically restores the effective UID and GID from the calling
+    /// process's real IDs, as required by `POSIX_SPAWN_RESETIDS`.
+    pub fn reset_effective_ids(&self) -> Result<(), ClientError<T::Error>> {
+        self.request(protocol::OP_RESET_EFFECTIVE_IDS, 0, &[], &mut [])
+            .map(|_| ())
+    }
+
     /// Returns the calling process's supplementary groups.
     pub fn get_groups(&self, output: &mut [u32]) -> Result<usize, ClientError<T::Error>> {
         let mut response = [0u8; protocol::GROUP_LIST_MAX_LEN];

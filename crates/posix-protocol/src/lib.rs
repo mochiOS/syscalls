@@ -161,6 +161,9 @@ pub const OP_GROUPS_GET: u16 = 38;
 pub const OP_GROUPS_SET: u16 = 39;
 pub const OP_LINK_AT: u16 = 40;
 pub const OP_CHROOT_AT: u16 = 41;
+pub const OP_SET_EFFECTIVE_UID: u16 = 42;
+pub const OP_SET_EFFECTIVE_GID: u16 = 43;
+pub const OP_RESET_EFFECTIVE_IDS: u16 = 44;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;

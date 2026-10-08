@@ -3540,6 +3540,23 @@ pub extern "C" fn setgid(gid: c_int) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn setegid(gid: c_int) -> c_int {
+    if gid < 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let result = posix_client()
+        .map_err(map_posix_client_error)
+        .and_then(|client| {
+            client
+                .set_effective_gid(gid as u32)
+                .map_err(map_posix_client_error)
+        })
+        .map(|_| 0);
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn setuid(uid: c_int) -> c_int {
     if uid < 0 {
         set_errno(EINVAL);
@@ -3548,6 +3565,23 @@ pub extern "C" fn setuid(uid: c_int) -> c_int {
     let result = posix_client()
         .map_err(map_posix_client_error)
         .and_then(|client| client.set_uid(uid as u32).map_err(map_posix_client_error))
+        .map(|_| 0);
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seteuid(uid: c_int) -> c_int {
+    if uid < 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let result = posix_client()
+        .map_err(map_posix_client_error)
+        .and_then(|client| {
+            client
+                .set_effective_uid(uid as u32)
+                .map_err(map_posix_client_error)
+        })
         .map(|_| 0);
     result_with_errno(result, -1)
 }
