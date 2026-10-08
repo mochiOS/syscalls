@@ -5,6 +5,7 @@ edition.workspace = true
 license = "Apache-2.0"
 
 [dependencies]
+mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 mochi-user-platform = { path = "../platform", optional = true, default-features = false }
 mochi-user-syscall = { path = "../syscall", optional = true }
 mochios-posix-protocol = { path = "../posix-protocol" }
