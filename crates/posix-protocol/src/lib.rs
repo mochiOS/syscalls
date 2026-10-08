@@ -203,6 +203,8 @@ pub const RESOURCE_LIMIT_LEN: usize = 16;
 pub const SIGNAL_SEND_REQUEST_LEN: usize = 16;
 pub const SIGNAL_MASK_LEN: usize = 8;
 pub const SIGNAL_NUMBER_LEN: usize = 4;
+pub const TERMINAL_CONTROL_CHARACTERS: usize = 32;
+pub const TERMINAL_ATTRIBUTES_LEN: usize = 56;
 pub const MAX_SUPPLEMENTARY_GROUPS: usize = 32;
 pub const GROUP_LIST_HEADER_LEN: usize = 4;
 pub const GROUP_LIST_MAX_LEN: usize =
@@ -272,6 +274,113 @@ pub const RLIMIT_COUNT: u32 = 10;
 pub const SIGNAL_MAX: u32 = 64;
 pub const SIGNAL_KILL: u32 = 9;
 pub const SIGNAL_STOP: u32 = 17;
+
+/// Provider control codes understood by POSIX pseudo-terminal objects.
+///
+/// These values belong to the user-space POSIX protocol. mnu forwards them as
+/// opaque integers and does not interpret terminal semantics.
+pub const PTY_CONTROL_GET_ATTRIBUTES: u64 = 0x5054_5900_0000_0001;
+pub const PTY_CONTROL_SET_ATTRIBUTES_NOW: u64 = 0x5054_5900_0000_0002;
+pub const PTY_CONTROL_SET_ATTRIBUTES_DRAIN: u64 = 0x5054_5900_0000_0003;
+pub const PTY_CONTROL_SET_ATTRIBUTES_FLUSH: u64 = 0x5054_5900_0000_0004;
+
+pub const TERMINAL_IFLAG_IGNBRK: u32 = 1 << 0;
+pub const TERMINAL_IFLAG_BRKINT: u32 = 1 << 1;
+pub const TERMINAL_IFLAG_IGNPAR: u32 = 1 << 2;
+pub const TERMINAL_IFLAG_PARMRK: u32 = 1 << 3;
+pub const TERMINAL_IFLAG_INPCK: u32 = 1 << 4;
+pub const TERMINAL_IFLAG_ISTRIP: u32 = 1 << 5;
+pub const TERMINAL_IFLAG_INLCR: u32 = 1 << 6;
+pub const TERMINAL_IFLAG_IGNCR: u32 = 1 << 7;
+pub const TERMINAL_IFLAG_ICRNL: u32 = 1 << 8;
+pub const TERMINAL_IFLAG_IXON: u32 = 1 << 10;
+pub const TERMINAL_IFLAG_IXOFF: u32 = 1 << 12;
+pub const TERMINAL_IFLAG_IUTF8: u32 = 1 << 14;
+
+pub const TERMINAL_OFLAG_OPOST: u32 = 1 << 0;
+pub const TERMINAL_OFLAG_ONLCR: u32 = 1 << 2;
+
+pub const TERMINAL_CFLAG_CS8: u32 = 3 << 4;
+pub const TERMINAL_CFLAG_CREAD: u32 = 1 << 7;
+pub const TERMINAL_CFLAG_HUPCL: u32 = 1 << 10;
+pub const TERMINAL_CFLAG_CLOCAL: u32 = 1 << 11;
+
+pub const TERMINAL_LFLAG_ISIG: u32 = 1 << 0;
+pub const TERMINAL_LFLAG_ICANON: u32 = 1 << 1;
+pub const TERMINAL_LFLAG_ECHO: u32 = 1 << 3;
+pub const TERMINAL_LFLAG_ECHOE: u32 = 1 << 4;
+pub const TERMINAL_LFLAG_ECHOK: u32 = 1 << 5;
+pub const TERMINAL_LFLAG_ECHONL: u32 = 1 << 6;
+pub const TERMINAL_LFLAG_NOFLSH: u32 = 1 << 7;
+pub const TERMINAL_LFLAG_TOSTOP: u32 = 1 << 8;
+pub const TERMINAL_LFLAG_IEXTEN: u32 = 1 << 15;
+
+pub const TERMINAL_CC_VINTR: usize = 0;
+pub const TERMINAL_CC_VQUIT: usize = 1;
+pub const TERMINAL_CC_VERASE: usize = 2;
+pub const TERMINAL_CC_VKILL: usize = 3;
+pub const TERMINAL_CC_VEOF: usize = 4;
+pub const TERMINAL_CC_VTIME: usize = 5;
+pub const TERMINAL_CC_VMIN: usize = 6;
+pub const TERMINAL_CC_VSTART: usize = 8;
+pub const TERMINAL_CC_VSTOP: usize = 9;
+pub const TERMINAL_CC_VSUSP: usize = 10;
+pub const TERMINAL_CC_VEOL: usize = 11;
+pub const TERMINAL_CC_VREPRINT: usize = 12;
+pub const TERMINAL_CC_VDISCARD: usize = 13;
+pub const TERMINAL_CC_VWERASE: usize = 14;
+pub const TERMINAL_CC_VLNEXT: usize = 15;
+pub const TERMINAL_CC_VEOL2: usize = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalAttributes {
+    pub input_flags: u32,
+    pub output_flags: u32,
+    pub control_flags: u32,
+    pub local_flags: u32,
+    pub control_characters: [u8; TERMINAL_CONTROL_CHARACTERS],
+    pub input_speed: u32,
+    pub output_speed: u32,
+}
+
+impl TerminalAttributes {
+    pub const fn sane() -> Self {
+        let mut control_characters = [0; TERMINAL_CONTROL_CHARACTERS];
+        control_characters[TERMINAL_CC_VINTR] = 3;
+        control_characters[TERMINAL_CC_VQUIT] = 28;
+        control_characters[TERMINAL_CC_VERASE] = 127;
+        control_characters[TERMINAL_CC_VKILL] = 21;
+        control_characters[TERMINAL_CC_VEOF] = 4;
+        control_characters[TERMINAL_CC_VMIN] = 1;
+        control_characters[TERMINAL_CC_VSTART] = 17;
+        control_characters[TERMINAL_CC_VSTOP] = 19;
+        control_characters[TERMINAL_CC_VSUSP] = 26;
+        control_characters[TERMINAL_CC_VREPRINT] = 18;
+        control_characters[TERMINAL_CC_VDISCARD] = 15;
+        control_characters[TERMINAL_CC_VWERASE] = 23;
+        control_characters[TERMINAL_CC_VLNEXT] = 22;
+        Self {
+            input_flags: TERMINAL_IFLAG_ICRNL | TERMINAL_IFLAG_IXON | TERMINAL_IFLAG_IUTF8,
+            output_flags: TERMINAL_OFLAG_OPOST | TERMINAL_OFLAG_ONLCR,
+            control_flags: TERMINAL_CFLAG_CS8 | TERMINAL_CFLAG_CREAD,
+            local_flags: TERMINAL_LFLAG_ISIG
+                | TERMINAL_LFLAG_ICANON
+                | TERMINAL_LFLAG_ECHO
+                | TERMINAL_LFLAG_ECHOE
+                | TERMINAL_LFLAG_ECHOK
+                | TERMINAL_LFLAG_IEXTEN,
+            control_characters,
+            input_speed: 38_400,
+            output_speed: 38_400,
+        }
+    }
+}
+
+impl Default for TerminalAttributes {
+    fn default() -> Self {
+        Self::sane()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SignalSendRequest {
@@ -739,6 +848,43 @@ pub fn decode_signal_number(input: &[u8]) -> Result<u32, ProtocolError> {
         return Err(ProtocolError::InvalidLength);
     }
     Ok(signal)
+}
+
+/// Serializes terminal attributes field by field so the provider protocol is
+/// independent of the C and Rust structure layouts used by either endpoint.
+pub fn encode_terminal_attributes(
+    attributes: TerminalAttributes,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < TERMINAL_ATTRIBUTES_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    output[..TERMINAL_ATTRIBUTES_LEN].fill(0);
+    put_u32(output, 0, attributes.input_flags);
+    put_u32(output, 4, attributes.output_flags);
+    put_u32(output, 8, attributes.control_flags);
+    put_u32(output, 12, attributes.local_flags);
+    output[16..16 + TERMINAL_CONTROL_CHARACTERS].copy_from_slice(&attributes.control_characters);
+    put_u32(output, 48, attributes.input_speed);
+    put_u32(output, 52, attributes.output_speed);
+    Ok(())
+}
+
+pub fn decode_terminal_attributes(input: &[u8]) -> Result<TerminalAttributes, ProtocolError> {
+    if input.len() != TERMINAL_ATTRIBUTES_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let mut control_characters = [0; TERMINAL_CONTROL_CHARACTERS];
+    control_characters.copy_from_slice(&input[16..16 + TERMINAL_CONTROL_CHARACTERS]);
+    Ok(TerminalAttributes {
+        input_flags: get_u32(input, 0),
+        output_flags: get_u32(input, 4),
+        control_flags: get_u32(input, 8),
+        local_flags: get_u32(input, 12),
+        control_characters,
+        input_speed: get_u32(input, 48),
+        output_speed: get_u32(input, 52),
+    })
 }
 
 pub fn encode_process_group_request(
