@@ -835,6 +835,17 @@ fn posix_client()
     POSIX_CLIENT.get_or_try_init(PosixClient::from_syscall_launch_context)
 }
 
+fn has_posix_environment() -> Result<bool, c_int> {
+    match syscall_errno(syscall::raw_syscall1(
+        syscall::SyscallNumber::LaunchHandleGet,
+        posix_protocol::CONTROL_HANDLE_KEY,
+    )) {
+        Ok(_) => Ok(true),
+        Err(EBADF) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 fn native_process_id() -> Result<u64, syscall::SysError> {
     let mut context = syscall::ThreadSecurityContext::default();
     syscall::call3(
@@ -1131,6 +1142,11 @@ fn register_initial_thread() -> Option<(Pthread, &'static ThreadControl)> {
 }
 
 fn setup_signal_delivery(control: &ThreadControl) -> Result<(), c_int> {
+    // Native bootstrap services run before a POSIX endpoint can be delegated.
+    // An inherited endpoint still requires successful registration below.
+    if !has_posix_environment()? {
+        return Ok(());
+    }
     let stack = syscall_errno(syscall::raw_syscall6(
         syscall::SyscallNumber::MemoryMap,
         0,
@@ -2986,11 +3002,17 @@ fn next_dirent(stream: &mut DirStream) -> Result<Option<NewlibDirent>, c_int> {
 pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
     let stack = unsafe { parse_stack(initial_sp) };
     unsafe { initialize_runtime(stack) };
-    if posix_client()
-        .and_then(|client| client.set_signal_child_options(0))
-        .is_err()
-    {
-        process_exit(127);
+    match has_posix_environment() {
+        Ok(false) => {}
+        Ok(true) => {
+            if posix_client()
+                .and_then(|client| client.set_signal_child_options(0))
+                .is_err()
+            {
+                process_exit(127);
+            }
+        }
+        Err(_) => process_exit(127),
     }
     let (_, initial_thread) = register_initial_thread().unwrap_or_else(|| process_exit(127));
     if setup_signal_delivery(initial_thread).is_err() {
