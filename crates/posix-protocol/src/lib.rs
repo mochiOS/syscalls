@@ -64,6 +64,19 @@ const fn valid_inherited_fd_kind(kind: u8) -> bool {
     )
 }
 
+pub const fn inherited_fd_kind_requires_handle(kind: u8) -> Option<bool> {
+    if !valid_inherited_fd_kind(kind) {
+        return None;
+    }
+    Some(matches!(
+        kind,
+        INHERITED_FD_KIND_FILE
+            | INHERITED_FD_KIND_DIRECTORY
+            | INHERITED_FD_KIND_STREAM_READ
+            | INHERITED_FD_KIND_STREAM_WRITE
+    ))
+}
+
 pub const fn encode_inherited_fd_metadata(metadata: InheritedFdMetadata) -> Option<u64> {
     if !valid_inherited_fd_kind(metadata.kind)
         || metadata.descriptor_flags & !INHERITED_FD_DESCRIPTOR_CLOEXEC != 0

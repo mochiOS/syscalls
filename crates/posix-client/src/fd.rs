@@ -42,6 +42,34 @@ pub enum FdError<E> {
     Handle(E),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LaunchFdDescription {
+    pub kind: u8,
+    pub open_flags: u32,
+    pub has_handle: bool,
+}
+
+pub trait LaunchContextOps<H> {
+    type Error;
+
+    fn get_value(&mut self, key: u64) -> Result<Option<u64>, Self::Error>;
+    fn get_handle(&mut self, key: u64) -> Result<Option<H>, Self::Error>;
+    fn get_handle_rights(&mut self, handle: H) -> Result<u64, Self::Error>;
+    fn set_value(&mut self, key: u64, value: u64) -> Result<(), Self::Error>;
+    fn remove_value(&mut self, key: u64) -> Result<(), Self::Error>;
+    fn set_handle(&mut self, key: u64, handle: H) -> Result<(), Self::Error>;
+    fn remove_handle(&mut self, key: u64) -> Result<(), Self::Error>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaunchFdError<E> {
+    Context(E),
+    InvalidDescriptor,
+    InvalidMetadata,
+    MissingHandle,
+    UnexpectedHandle,
+}
+
 #[derive(Clone, Debug)]
 pub struct FdTable<H> {
     entries: [Option<Entry<H>>; DEFAULT_FD_LIMIT],
@@ -269,6 +297,142 @@ impl<H: Copy> FdTable<H> {
         }
         Err(FdError::InvalidDescriptor)
     }
+}
+
+pub fn stage_launch_context<H, C, D>(
+    table: &FdTable<H>,
+    descriptor_limit: usize,
+    context: &mut C,
+    mut describe: D,
+) -> Result<(), LaunchFdError<C::Error>>
+where
+    H: Copy,
+    C: LaunchContextOps<H>,
+    D: FnMut(H) -> Option<LaunchFdDescription>,
+{
+    if descriptor_limit > DEFAULT_FD_LIMIT || descriptor_limit > i32::MAX as usize {
+        return Err(LaunchFdError::InvalidDescriptor);
+    }
+    for index in 0..descriptor_limit {
+        let fd = index as i32;
+        let handle_key =
+            mochios_posix_protocol::fd_handle_key(fd).ok_or(LaunchFdError::InvalidDescriptor)?;
+        let metadata_key =
+            mochios_posix_protocol::fd_metadata_key(fd).ok_or(LaunchFdError::InvalidDescriptor)?;
+        let Some(entry) = table
+            .get(fd)
+            .filter(|entry| entry.descriptor_flags & FD_CLOEXEC == 0)
+        else {
+            context
+                .remove_value(metadata_key)
+                .map_err(LaunchFdError::Context)?;
+            context
+                .remove_handle(handle_key)
+                .map_err(LaunchFdError::Context)?;
+            continue;
+        };
+        let description = describe(entry.handle).ok_or(LaunchFdError::InvalidMetadata)?;
+        let requires_handle =
+            mochios_posix_protocol::inherited_fd_kind_requires_handle(description.kind)
+                .ok_or(LaunchFdError::InvalidMetadata)?;
+        if requires_handle != description.has_handle {
+            return Err(LaunchFdError::InvalidMetadata);
+        }
+        let descriptor_flags =
+            u8::try_from(entry.descriptor_flags).map_err(|_| LaunchFdError::InvalidMetadata)?;
+        let metadata = mochios_posix_protocol::encode_inherited_fd_metadata(
+            mochios_posix_protocol::InheritedFdMetadata {
+                kind: description.kind,
+                open_flags: description.open_flags,
+                descriptor_flags,
+            },
+        )
+        .ok_or(LaunchFdError::InvalidMetadata)?;
+        if description.has_handle {
+            context
+                .set_handle(handle_key, entry.handle)
+                .map_err(LaunchFdError::Context)?;
+        } else {
+            context
+                .remove_handle(handle_key)
+                .map_err(LaunchFdError::Context)?;
+        }
+        context
+            .set_value(metadata_key, metadata)
+            .map_err(LaunchFdError::Context)?;
+    }
+    Ok(())
+}
+
+pub fn restore_launch_context<H, C, R, O>(
+    table: &mut FdTable<H>,
+    descriptor_limit: usize,
+    context: &mut C,
+    operations: &mut O,
+    mut restore: R,
+) -> Result<bool, LaunchFdError<C::Error>>
+where
+    H: Copy,
+    C: LaunchContextOps<H>,
+    O: HandleOps<H>,
+    R: FnMut(mochios_posix_protocol::InheritedFdMetadata, Option<(H, u64)>) -> Option<H>,
+{
+    if descriptor_limit > DEFAULT_FD_LIMIT || descriptor_limit > i32::MAX as usize {
+        return Err(LaunchFdError::InvalidDescriptor);
+    }
+    *table = FdTable::new();
+    let mut restored = false;
+    for index in 0..descriptor_limit {
+        let fd = index as i32;
+        let metadata_key =
+            mochios_posix_protocol::fd_metadata_key(fd).ok_or(LaunchFdError::InvalidDescriptor)?;
+        let Some(encoded) = context
+            .get_value(metadata_key)
+            .map_err(LaunchFdError::Context)?
+        else {
+            continue;
+        };
+        let metadata = mochios_posix_protocol::decode_inherited_fd_metadata(encoded)
+            .ok_or(LaunchFdError::InvalidMetadata)?;
+        if metadata.descriptor_flags & mochios_posix_protocol::INHERITED_FD_DESCRIPTOR_CLOEXEC != 0
+        {
+            return Err(LaunchFdError::InvalidMetadata);
+        }
+        let handle_key =
+            mochios_posix_protocol::fd_handle_key(fd).ok_or(LaunchFdError::InvalidDescriptor)?;
+        let handle = context
+            .get_handle(handle_key)
+            .map_err(LaunchFdError::Context)?;
+        let requires_handle =
+            mochios_posix_protocol::inherited_fd_kind_requires_handle(metadata.kind)
+                .ok_or(LaunchFdError::InvalidMetadata)?;
+        let attachment = match (requires_handle, handle) {
+            (true, Some(handle)) => {
+                let rights = context
+                    .get_handle_rights(handle)
+                    .map_err(LaunchFdError::Context)?;
+                Some((handle, rights))
+            }
+            (true, None) => return Err(LaunchFdError::MissingHandle),
+            (false, Some(_)) => return Err(LaunchFdError::UnexpectedHandle),
+            (false, None) => None,
+        };
+        let rights = attachment.map_or(0, |(_, rights)| rights);
+        let handle = restore(metadata, attachment).ok_or(LaunchFdError::InvalidMetadata)?;
+        table
+            .install_at(
+                fd,
+                Entry {
+                    handle,
+                    rights,
+                    descriptor_flags: u32::from(metadata.descriptor_flags),
+                },
+                operations,
+            )
+            .map_err(|_| LaunchFdError::InvalidDescriptor)?;
+        restored = true;
+    }
+    Ok(restored)
 }
 
 impl<H: Copy> Default for FdTable<H> {

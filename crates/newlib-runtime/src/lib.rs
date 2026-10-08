@@ -14,7 +14,10 @@ use mochios_capability_protocol::{
     CapabilityResourceDescriptor, MAX_CAPABILITY_NAME_LEN, MAX_REASON_LEN,
 };
 use mochios_filesystem_protocol as filesystem_protocol;
-use mochios_posix_client::fd::{Entry as PosixFdEntry, FdError, FdTable, HandleOps};
+use mochios_posix_client::fd::{
+    Entry as PosixFdEntry, FdError, FdTable, HandleOps, LaunchContextOps, LaunchFdDescription,
+    LaunchFdError, restore_launch_context, stage_launch_context,
+};
 use mochios_posix_client::{
     Client as PosixClient, ClientError as PosixClientError, StatAtBase, SyscallEndpointTransport,
 };
@@ -1902,120 +1905,126 @@ fn retry_open_with_prompt(path: *const c_char, flags: c_int, mode: c_int) -> Res
     }
 }
 
-fn launch_context_value(key: u64) -> Result<Option<u64>, c_int> {
-    let mut value = 0u64;
-    match syscall_errno(syscall::raw_syscall2(
-        syscall::SyscallNumber::LaunchValueGet,
-        key,
-        (&mut value as *mut u64) as u64,
-    )) {
-        Ok(_) => Ok(Some(value)),
-        Err(EBADF) => Ok(None),
-        Err(error) => Err(error),
+struct RuntimeLaunchContext;
+
+impl LaunchContextOps<FdObject> for RuntimeLaunchContext {
+    type Error = c_int;
+
+    fn get_value(&mut self, key: u64) -> Result<Option<u64>, Self::Error> {
+        let mut value = 0u64;
+        match syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::LaunchValueGet,
+            key,
+            (&mut value as *mut u64) as u64,
+        )) {
+            Ok(_) => Ok(Some(value)),
+            Err(EBADF) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn get_handle(&mut self, key: u64) -> Result<Option<FdObject>, Self::Error> {
+        match syscall_errno(syscall::raw_syscall1(
+            syscall::SyscallNumber::LaunchHandleGet,
+            key,
+        )) {
+            Ok(lower_handle) => Ok(Some(FdObject {
+                lower_handle,
+                kind: FdKind::Unused,
+                open_flags: 0,
+                close_owned: true,
+            })),
+            Err(EBADF) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn get_handle_rights(&mut self, handle: FdObject) -> Result<u64, Self::Error> {
+        syscall_errno(syscall::raw_syscall1(
+            syscall::SyscallNumber::HandleRightsGet,
+            handle.lower_handle,
+        ))
+    }
+
+    fn set_value(&mut self, key: u64, value: u64) -> Result<(), Self::Error> {
+        syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::ContextValueSet,
+            key,
+            value,
+        ))
+        .map(|_| ())
+    }
+
+    fn remove_value(&mut self, key: u64) -> Result<(), Self::Error> {
+        syscall_errno(syscall::raw_syscall1(
+            syscall::SyscallNumber::ContextValueRemove,
+            key,
+        ))
+        .map(|_| ())
+    }
+
+    fn set_handle(&mut self, key: u64, handle: FdObject) -> Result<(), Self::Error> {
+        syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::ContextHandleSet,
+            key,
+            handle.lower_handle,
+        ))
+        .map(|_| ())
+    }
+
+    fn remove_handle(&mut self, key: u64) -> Result<(), Self::Error> {
+        syscall_errno(syscall::raw_syscall1(
+            syscall::SyscallNumber::ContextHandleRemove,
+            key,
+        ))
+        .map(|_| ())
     }
 }
 
-fn launch_context_handle(key: u64) -> Result<u64, c_int> {
-    syscall_errno(syscall::raw_syscall1(
-        syscall::SyscallNumber::LaunchHandleGet,
-        key,
-    ))
+fn map_launch_fd_error(error: LaunchFdError<c_int>) -> c_int {
+    match error {
+        LaunchFdError::Context(errno) => errno,
+        LaunchFdError::InvalidDescriptor
+        | LaunchFdError::InvalidMetadata
+        | LaunchFdError::MissingHandle
+        | LaunchFdError::UnexpectedHandle => EIO,
+    }
 }
 
 fn restore_fd_state_from_launch_context(fds: &mut FdTable<FdObject>) -> Result<bool, c_int> {
-    *fds = FdTable::new();
+    let mut context = RuntimeLaunchContext;
     let mut operations = RuntimeFdOps;
-    let mut restored = false;
-    for fd in 0..MAX_FDS as c_int {
-        let metadata_key = posix_protocol::fd_metadata_key(fd).ok_or(EIO)?;
-        let Some(encoded) = launch_context_value(metadata_key)? else {
-            continue;
-        };
-        let metadata = posix_protocol::decode_inherited_fd_metadata(encoded).ok_or(EIO)?;
-        if metadata.descriptor_flags & posix_protocol::INHERITED_FD_DESCRIPTOR_CLOEXEC != 0 {
-            return Err(EIO);
-        }
-        let kind = fd_kind_from_inherited(metadata.kind).ok_or(EIO)?;
-        let (lower_handle, rights, close_owned) = match kind {
-            FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => (0, 0, false),
-            FdKind::ObjectFile
-            | FdKind::ObjectDirectory
-            | FdKind::ObjectStreamRead
-            | FdKind::ObjectStreamWrite => {
-                let handle_key = posix_protocol::fd_handle_key(fd).ok_or(EIO)?;
-                let handle = launch_context_handle(handle_key)?;
-                let rights = syscall_errno(syscall::raw_syscall1(
-                    syscall::SyscallNumber::HandleRightsGet,
-                    handle,
-                ))?;
-                (handle, rights, true)
-            }
-            FdKind::Unused => return Err(EIO),
-        };
-        let entry = PosixFdEntry {
-            handle: FdObject {
+    restore_launch_context(
+        fds,
+        MAX_FDS,
+        &mut context,
+        &mut operations,
+        |metadata, attachment| {
+            let kind = fd_kind_from_inherited(metadata.kind)?;
+            let (lower_handle, close_owned) = attachment
+                .map(|(object, _)| (object.lower_handle, true))
+                .unwrap_or((0, false));
+            Some(FdObject {
                 lower_handle,
                 kind,
                 open_flags: metadata.open_flags as c_int,
                 close_owned,
-            },
-            rights,
-            descriptor_flags: u32::from(metadata.descriptor_flags),
-        };
-        fds.install_at(fd, entry, &mut operations)
-            .map_err(|_| EIO)?;
-        restored = true;
-    }
-    Ok(restored)
+            })
+        },
+    )
+    .map_err(map_launch_fd_error)
 }
 
 fn stage_fd_launch_context(fds: &FdTable<FdObject>) -> Result<(), c_int> {
-    for fd in 0..MAX_FDS as c_int {
-        let handle_key = posix_protocol::fd_handle_key(fd).ok_or(EIO)?;
-        let metadata_key = posix_protocol::fd_metadata_key(fd).ok_or(EIO)?;
-        let entry = fds
-            .get(fd)
-            .filter(|entry| entry.descriptor_flags & FD_CLOEXEC as u32 == 0);
-        let Some(entry) = entry else {
-            syscall_errno(syscall::raw_syscall1(
-                syscall::SyscallNumber::ContextValueRemove,
-                metadata_key,
-            ))?;
-            syscall_errno(syscall::raw_syscall1(
-                syscall::SyscallNumber::ContextHandleRemove,
-                handle_key,
-            ))?;
-            continue;
-        };
-        let kind = inherited_fd_kind(entry.handle.kind).ok_or(EIO)?;
-        let descriptor_flags = u8::try_from(entry.descriptor_flags).map_err(|_| EIO)?;
-        let metadata = posix_protocol::encode_inherited_fd_metadata(
-            posix_protocol::InheritedFdMetadata {
-                kind,
-                open_flags: entry.handle.open_flags as u32,
-                descriptor_flags,
-            },
-        )
-        .ok_or(EIO)?;
-        if entry.handle.close_owned {
-            syscall_errno(syscall::raw_syscall2(
-                syscall::SyscallNumber::ContextHandleSet,
-                handle_key,
-                entry.handle.lower_handle,
-            ))?;
-        } else {
-            syscall_errno(syscall::raw_syscall1(
-                syscall::SyscallNumber::ContextHandleRemove,
-                handle_key,
-            ))?;
-        }
-        syscall_errno(syscall::raw_syscall2(
-            syscall::SyscallNumber::ContextValueSet,
-            metadata_key,
-            metadata,
-        ))?;
-    }
-    Ok(())
+    let mut context = RuntimeLaunchContext;
+    stage_launch_context(fds, MAX_FDS, &mut context, |object| {
+        Some(LaunchFdDescription {
+            kind: inherited_fd_kind(object.kind)?,
+            open_flags: object.open_flags as u32,
+            has_handle: object.close_owned,
+        })
+    })
+    .map_err(map_launch_fd_error)
 }
 
 extern "C" fn run_fini_array() {
