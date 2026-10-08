@@ -610,6 +610,7 @@ static THREADS: [ThreadControl; mochios_posix_client::thread::MAX_THREADS] =
     [const { ThreadControl::new() }; mochios_posix_client::thread::MAX_THREADS];
 static THREAD_KEYS: [ThreadKeyControl; mochios_posix_client::thread::MAX_THREAD_KEYS] =
     [const { ThreadKeyControl::new() }; mochios_posix_client::thread::MAX_THREAD_KEYS];
+static NANOSLEEP_WORD: AtomicU32 = AtomicU32::new(0);
 
 macro_rules! static_newlib_lock {
     ($name:ident) => {
@@ -4089,6 +4090,74 @@ pub extern "C" fn clock_gettime(clock_id: c_int, tp: *mut Timespec) -> c_int {
         Ok(0)
     });
     result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn sched_yield() -> c_int {
+    result_with_errno(
+        syscall_errno(syscall::raw_syscall0(syscall::SyscallNumber::ThreadYield)).map(|_| 0),
+        -1,
+    )
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Timespec) -> c_int {
+    if request.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    let request = unsafe { &*request };
+    if request.tv_sec < 0 || !(0..1_000_000_000).contains(&request.tv_nsec) {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let duration = match (request.tv_sec as u64)
+        .checked_mul(1_000_000_000)
+        .and_then(|seconds| seconds.checked_add(request.tv_nsec as u64))
+    {
+        Some(duration) => duration,
+        None => {
+            set_errno(EINVAL);
+            return -1;
+        }
+    };
+    if duration != 0 {
+        let deadline = match monotonic_nanoseconds().and_then(|now| {
+            now.checked_add(duration).ok_or(EOVERFLOW)
+        }) {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                set_errno(error);
+                return -1;
+            }
+        };
+        loop {
+            match mochios_posix_client::synchronization::wait_u32(&NANOSLEEP_WORD, 0, deadline) {
+                Ok(mochios_posix_client::synchronization::WaitStatus::DeadlineReached) => break,
+                Ok(_) => match monotonic_nanoseconds() {
+                    Ok(now) if now < deadline => continue,
+                    Ok(_) => break,
+                    Err(error) => {
+                        set_errno(error);
+                        return -1;
+                    }
+                },
+                Err(error) => {
+                    set_errno(map_kernel_errno(error.raw()));
+                    return -1;
+                }
+            }
+        }
+    }
+    if !remaining.is_null() {
+        unsafe {
+            remaining.write(Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            })
+        };
+    }
+    0
 }
 
 #[unsafe(no_mangle)]
