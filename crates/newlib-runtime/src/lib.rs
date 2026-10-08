@@ -2773,11 +2773,19 @@ fn set_terminal_attributes(
         &mut encoded,
     )
     .map_err(|_| EINVAL)?;
-    let written = terminal_control(entry, control_code, &encoded, &mut [])?;
-    if written != 0 {
-        return Err(EIO);
+    loop {
+        match terminal_control(entry, control_code, &encoded, &mut []) {
+            Ok(0) => return Ok(()),
+            Ok(_) => return Err(EIO),
+            Err(EAGAIN) if action == TCSADRAIN || action == TCSAFLUSH => {
+                let _ = wait_for_handle(
+                    entry,
+                    syscall::HANDLE_SIGNAL_IDLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
+                )?;
+            }
+            Err(errno) => return Err(errno),
+        }
     }
-    Ok(())
 }
 
 fn allocate_object_fd(
