@@ -309,6 +309,14 @@ pub mod device {
 pub mod thread {
     use super::syscall::{self, SysResult};
 
+    pub fn create(context: &syscall::ThreadCreateContext) -> SysResult<u64> {
+        syscall::call2(
+            syscall::SyscallNumber::ThreadCreate,
+            context as *const syscall::ThreadCreateContext as u64,
+            core::mem::size_of::<syscall::ThreadCreateContext>() as u64,
+        )
+    }
+
     pub fn yield_now() {
         super::runtime_support::yield_now();
     }

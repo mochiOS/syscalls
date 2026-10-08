@@ -20,7 +20,7 @@ pub use mnu_abi::{
     HANDLE_WAIT_INFINITE, HANDLE_WAIT_MANY_MAX_ITEMS, HANDLE_WAIT_POLL, IPC_MAX_OBJECT_HANDLES,
     IpcFileHandle, IpcFileHandles, IpcObjectHandle, IpcObjectHandles, PROCESS_STATE_EXITED,
     PROCESS_STATE_RUNNING, PROCESS_WAIT_INFINITE, PROCESS_WAIT_POLL, SUCCESS, SyscallNumber,
-    ThreadSecurityContext,
+    ThreadCreateContext, ThreadSecurityContext,
 };
 
 /// Requests an independent open-file description starting at offset zero when
