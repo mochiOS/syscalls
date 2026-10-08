@@ -3981,13 +3981,19 @@ pub extern "C" fn getsid(pid: c_int) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _kill(pid: c_int, sig: c_int) -> c_int {
+    if !(0..=posix_protocol::SIGNAL_MAX as c_int).contains(&sig) {
+        set_errno(EINVAL);
+        return -1;
+    }
     result_with_errno(
-        syscall_errno(syscall::raw_syscall2(
-            syscall::SyscallNumber::Kill,
-            pid as i64 as u64,
-            sig as i64 as u64,
-        ))
-        .map(|_| 0),
+        posix_client()
+            .map_err(map_posix_client_error)
+            .and_then(|client| {
+                client
+                    .send_signal(i64::from(pid), sig as u32)
+                    .map_err(map_posix_client_error)
+            })
+            .map(|_| 0),
         -1,
     )
 }

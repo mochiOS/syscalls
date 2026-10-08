@@ -221,6 +221,38 @@ impl<T: Transport> Client<T> {
             .map_err(ClientError::Protocol)
     }
 
+    pub fn send_signal(&self, selector: i64, signal: u32) -> Result<(), ClientError<T::Error>> {
+        let mut request = [0u8; protocol::SIGNAL_SEND_REQUEST_LEN];
+        protocol::encode_signal_send_request(
+            protocol::SignalSendRequest { selector, signal },
+            &mut request,
+        )
+        .map_err(ClientError::Protocol)?;
+        self.request(protocol::OP_SIGNAL_SEND, 0, &request, &mut [])
+            .map(|_| ())
+    }
+
+    pub fn pending_signals(&self) -> Result<u64, ClientError<T::Error>> {
+        let mut response = [0u8; protocol::SIGNAL_MASK_LEN];
+        let length = self.request(protocol::OP_SIGNAL_PENDING, 0, &[], &mut response)?;
+        protocol::decode_signal_mask(&response[..length]).map_err(ClientError::Protocol)
+    }
+
+    /// Atomically removes the lowest-numbered pending signal that is not in
+    /// `blocked`. Zero means that no signal is currently deliverable.
+    pub fn dequeue_signal(&self, blocked: u64) -> Result<u32, ClientError<T::Error>> {
+        let mut request = [0u8; protocol::SIGNAL_MASK_LEN];
+        protocol::encode_signal_mask(blocked, &mut request).map_err(ClientError::Protocol)?;
+        let mut response = [0u8; protocol::SIGNAL_NUMBER_LEN];
+        let length = self.request(
+            protocol::OP_SIGNAL_DEQUEUE,
+            0,
+            &request,
+            &mut response,
+        )?;
+        protocol::decode_signal_number(&response[..length]).map_err(ClientError::Protocol)
+    }
+
     /// Reads a resource limit and optionally replaces it atomically. A
     /// process ID of zero selects the calling process. The returned value is
     /// always the limit that was installed before this request.

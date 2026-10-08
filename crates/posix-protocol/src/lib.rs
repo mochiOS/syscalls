@@ -98,6 +98,9 @@ pub const OP_PROCESS_INFO: u16 = 30;
 pub const OP_SET_PROCESS_GROUP: u16 = 31;
 pub const OP_CREATE_SESSION: u16 = 32;
 pub const OP_RESOURCE_LIMIT: u16 = 33;
+pub const OP_SIGNAL_SEND: u16 = 34;
+pub const OP_SIGNAL_PENDING: u16 = 35;
+pub const OP_SIGNAL_DEQUEUE: u16 = 36;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -129,6 +132,9 @@ pub const PROCESS_GROUP_REQUEST_LEN: usize = 16;
 pub const PROCESS_INFO_LEN: usize = 32;
 pub const RESOURCE_LIMIT_REQUEST_LEN: usize = 32;
 pub const RESOURCE_LIMIT_LEN: usize = 16;
+pub const SIGNAL_SEND_REQUEST_LEN: usize = 16;
+pub const SIGNAL_MASK_LEN: usize = 8;
+pub const SIGNAL_NUMBER_LEN: usize = 4;
 pub const MAX_PATH_LEN: usize = 4096;
 pub const MAX_CONTROL_PAYLOAD_LEN: usize = RENAME_AT_HEADER_LEN + MAX_PATH_LEN * 2;
 pub const CONTROL_MESSAGE_LEN: usize = HEADER_LEN + MAX_CONTROL_PAYLOAD_LEN;
@@ -188,6 +194,16 @@ pub const RLIMIT_NOFILE: u32 = 7;
 pub const RLIMIT_MEMLOCK: u32 = 8;
 pub const RLIMIT_AS: u32 = 9;
 pub const RLIMIT_COUNT: u32 = 10;
+
+pub const SIGNAL_MAX: u32 = 64;
+pub const SIGNAL_KILL: u32 = 9;
+pub const SIGNAL_STOP: u32 = 19;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SignalSendRequest {
+    pub selector: i64,
+    pub signal: u32,
+}
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -533,6 +549,73 @@ pub fn decode_process_id_request(input: &[u8]) -> Result<i64, ProtocolError> {
         return Err(ProtocolError::InvalidLength);
     }
     Ok(get_u64(input, 0) as i64)
+}
+
+pub fn encode_signal_send_request(
+    request: SignalSendRequest,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < SIGNAL_SEND_REQUEST_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    if request.signal > SIGNAL_MAX {
+        return Err(ProtocolError::InvalidLength);
+    }
+    output[..SIGNAL_SEND_REQUEST_LEN].fill(0);
+    put_i64(output, 0, request.selector);
+    put_u32(output, 8, request.signal);
+    Ok(())
+}
+
+pub fn decode_signal_send_request(input: &[u8]) -> Result<SignalSendRequest, ProtocolError> {
+    if input.len() != SIGNAL_SEND_REQUEST_LEN || get_u32(input, 12) != 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let signal = get_u32(input, 8);
+    if signal > SIGNAL_MAX {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(SignalSendRequest {
+        selector: get_i64(input, 0),
+        signal,
+    })
+}
+
+pub fn encode_signal_mask(mask: u64, output: &mut [u8]) -> Result<(), ProtocolError> {
+    if output.len() < SIGNAL_MASK_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    put_u64(output, 0, mask);
+    Ok(())
+}
+
+pub fn decode_signal_mask(input: &[u8]) -> Result<u64, ProtocolError> {
+    if input.len() != SIGNAL_MASK_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(get_u64(input, 0))
+}
+
+pub fn encode_signal_number(signal: u32, output: &mut [u8]) -> Result<(), ProtocolError> {
+    if output.len() < SIGNAL_NUMBER_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    if signal > SIGNAL_MAX {
+        return Err(ProtocolError::InvalidLength);
+    }
+    put_u32(output, 0, signal);
+    Ok(())
+}
+
+pub fn decode_signal_number(input: &[u8]) -> Result<u32, ProtocolError> {
+    if input.len() != SIGNAL_NUMBER_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let signal = get_u32(input, 0);
+    if signal > SIGNAL_MAX {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(signal)
 }
 
 pub fn encode_process_group_request(
