@@ -30,6 +30,12 @@ pub struct ObjectHandleAttachment<H> {
     pub rights: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PtyPair<H> {
+    pub master: ObjectHandleAttachment<H>,
+    pub slave: ObjectHandleAttachment<H>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectHandles<H> {
     entries: [Option<ObjectHandleAttachment<H>>; MAX_OBJECT_HANDLES],
@@ -373,6 +379,18 @@ impl<T: Transport> Client<T> {
 }
 
 impl<T: ObjectTransport> Client<T> {
+    pub fn open_pty(&self) -> Result<PtyPair<T::Handle>, ClientError<T::Error>> {
+        let mut handles = ObjectHandles::new();
+        self.request_with_handles(protocol::OP_PTY_OPEN, 0, &[], &mut [], &mut handles)?;
+        if handles.len() != 2 {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(PtyPair {
+            master: handles.get(0).ok_or(ClientError::MismatchedResponse)?,
+            slave: handles.get(1).ok_or(ClientError::MismatchedResponse)?,
+        })
+    }
+
     pub fn register_signal_thread(
         &self,
         thread: ObjectHandleAttachment<T::Handle>,
