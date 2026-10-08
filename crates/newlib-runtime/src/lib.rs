@@ -60,6 +60,7 @@ const ENOENT: c_int = 2;
 const ESRCH: c_int = 3;
 const EINTR: c_int = 4;
 const EIO: c_int = 5;
+const E2BIG: c_int = 7;
 const EBADF: c_int = 9;
 const ECHILD: c_int = 10;
 const EAGAIN: c_int = 11;
@@ -78,6 +79,10 @@ const ERANGE: c_int = 34;
 const ENAMETOOLONG: c_int = 36;
 const ENOSYS: c_int = 38;
 const EOVERFLOW: c_int = 75;
+const MAX_EXEC_VECTOR_ENTRIES: usize = 256;
+const MAX_STARTUP_IMAGE_BYTES: usize = mnu_abi::process_image::HEADER_LEN
+    + mnu_abi::process_image::MAX_RELOCATIONS * mnu_abi::process_image::RELOCATION_LEN
+    + mnu_abi::process_image::MAX_STACK_BYTES;
 
 type InitFn = unsafe extern "C" fn();
 type CLong = i64;
@@ -2225,18 +2230,28 @@ fn apply_spawn_file_actions(
     Ok(())
 }
 
-fn execve_syscall_raw(
-    path: *const c_char,
-    argv: *const *const c_char,
-    envp: *const *const c_char,
-) -> Result<(), c_int> {
-    let _ = syscall_errno(syscall::raw_syscall3(
-        syscall::SyscallNumber::Execve,
-        path as u64,
-        argv as u64,
-        envp as u64,
-    ))?;
-    Ok(())
+unsafe fn read_exec_vector<'a>(
+    vector: *const *const c_char,
+    output: &mut [&'a [u8]],
+) -> Result<usize, c_int> {
+    if vector.is_null() {
+        return Ok(0);
+    }
+    for index in 0..output.len() {
+        let value = unsafe { vector.add(index).read() };
+        if value.is_null() {
+            return Ok(index);
+        }
+        output[index] = unsafe { c_bytes(value) };
+    }
+    Err(E2BIG)
+}
+
+fn close_object_handle(handle: u32) {
+    let _ = syscall_errno(syscall::raw_syscall1(
+        syscall::SyscallNumber::HandleClose,
+        u64::from(handle),
+    ));
 }
 
 fn authorize_exec_path(path: *const c_char) -> Result<(), c_int> {
@@ -2279,15 +2294,86 @@ fn authorize_exec_path(path: *const c_char) -> Result<(), c_int> {
     }
 }
 
+fn replace_process_image(
+    path: *const c_char,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+    fds: &FdTable<FdObject>,
+) -> Result<(), c_int> {
+    let path_bytes = unsafe { c_bytes(path) };
+    let path_text = core::str::from_utf8(path_bytes).map_err(|_| EINVAL)?;
+    let mut arguments = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
+    let mut environment = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
+    let mut argument_count = unsafe { read_exec_vector(argv, &mut arguments) }?;
+    let environment_count = unsafe { read_exec_vector(envp, &mut environment) }?;
+    if argument_count == 0 {
+        arguments[0] = path_bytes;
+        argument_count = 1;
+    }
+    let mut random = [0u8; 16];
+    let random_length = syscall_errno(syscall::raw_syscall2(
+        syscall::SyscallNumber::RandomFill,
+        random.as_mut_ptr() as u64,
+        random.len() as u64,
+    ))?;
+    if random_length != random.len() as u64 {
+        return Err(EIO);
+    }
+    let mut startup_image = [0u8; MAX_STARTUP_IMAGE_BYTES];
+    let startup_length = mochios_posix_client::process_image::encode_initial_stack(
+        &arguments[..argument_count],
+        &environment[..environment_count],
+        path_bytes,
+        random,
+        &mut startup_image,
+    )
+    .map_err(|error| match error {
+        mochios_posix_client::process_image::EncodeError::ImageTooLarge
+        | mochios_posix_client::process_image::EncodeError::EmptyArgumentVector => E2BIG,
+        mochios_posix_client::process_image::EncodeError::InvalidText => EINVAL,
+        mochios_posix_client::process_image::EncodeError::Codec(_) => EIO,
+    })?;
+
+    stage_fd_launch_context(fds)?;
+    authorize_exec_path(path)?;
+    let client = posix_client().map_err(map_posix_client_error)?;
+    let opened = client
+        .open_at(
+            if path_bytes.first() == Some(&b'/') {
+                OpenAtBase::ProcessRoot
+            } else {
+                OpenAtBase::ProcessCwd
+            },
+            posix_protocol::OPEN_READ,
+            0,
+            path_text,
+        )
+        .map_err(map_posix_client_error)?;
+    let required_rights = syscall::HANDLE_RIGHT_READ | syscall::HANDLE_RIGHT_SEEK;
+    if opened.rights & required_rights != required_rights {
+        close_object_handle(opened.handle);
+        return Err(EACCES);
+    }
+    let result = syscall_errno(syscall::raw_syscall5(
+        syscall::SyscallNumber::ProcessImageReplace,
+        u64::from(opened.handle),
+        path_bytes.as_ptr() as u64,
+        path_bytes.len() as u64,
+        startup_image.as_ptr() as u64,
+        startup_length as u64,
+    ))
+    .map(|_| ());
+    close_object_handle(opened.handle);
+    result
+}
+
 fn execve_with_launch_context(
     path: *const c_char,
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> Result<(), c_int> {
     let fds = clone_current_fd_table();
-    stage_fd_launch_context(&fds)?;
-    authorize_exec_path(path)?;
-    execve_syscall_raw(path, argv, envp)
+    replace_process_image(path, argv, envp, &fds)
 }
 
 #[inline(never)]
@@ -5679,11 +5765,13 @@ pub extern "C" fn _posix_spawn(
         if apply_spawn_file_actions(&mut desired_fds, snapshot.file_actions).is_err() {
             process_exit(SPAWN_FAIL_EXIT_STATUS);
         }
-        if stage_fd_launch_context(&desired_fds).is_err() {
-            process_exit(SPAWN_FAIL_EXIT_STATUS);
-        }
-        if authorize_exec_path(snapshot.path).is_err()
-            || execve_syscall_raw(snapshot.path, snapshot.argv, snapshot.envp).is_err()
+        if replace_process_image(
+            snapshot.path,
+            snapshot.argv,
+            snapshot.envp,
+            &desired_fds,
+        )
+        .is_err()
         {
             process_exit(SPAWN_FAIL_EXIT_STATUS);
         }

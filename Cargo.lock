@@ -604,6 +604,7 @@ version = "0.1.0"
 name = "mochios-posix-client"
 version = "0.1.0"
 dependencies = [
+ "mnu-abi",
  "mochi-user-platform",
  "mochi-user-syscall",
  "mochios-filesystem-protocol",
