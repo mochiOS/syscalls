@@ -820,6 +820,18 @@ pub mod handle {
         )
     }
 
+    /// Updates generic readiness signals for an object owned by the caller's
+    /// provider endpoint.
+    pub fn signal_provider_object(object_id: u64, set: u64, clear: u64) -> SysResult<()> {
+        syscall::call3(
+            syscall::SyscallNumber::ProviderObjectSignal,
+            object_id,
+            set,
+            clear,
+        )
+        .map(|_| ())
+    }
+
     pub fn read(handle: Handle, buffer: &mut [u8]) -> SysResult<usize> {
         let length = syscall::call3(
             syscall::SyscallNumber::HandleRead,
