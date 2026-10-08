@@ -74,7 +74,7 @@ if [[ -n "$SYSCALLS_SOURCE" ]]; then
     patch_args+=(--config "patch.\"https://github.com/mochiOS/syscalls\".mochios-capability-protocol.path='$SYSCALLS_SOURCE/crates/capability-protocol'")
 fi
 # Separate objects from older builds that embedded host paths.
-BUILD_DIR="$OUT_ROOT/build-newlib-multithread-remapped"
+BUILD_DIR="$OUT_ROOT/build-newlib-dynamic-reent"
 INSTALL_ROOT="$OUT_ROOT/toolchain"
 SYSROOT="${NEWLIB_SYSROOT:-$INSTALL_ROOT/x86_64-elf}"
 TARGET_DIR="$OUT_ROOT/cargo-target"
@@ -94,7 +94,7 @@ if [[ -n "$NEWLIB_SOURCE" ]]; then
         echo "newlib source changed; select a separate --output to preserve the existing build" >&2
         exit 2
     fi
-    target_cflags="-O2 -g0 -D__mochios__ -DHAVE_RENAME -ffile-prefix-map=$NEWLIB_SOURCE=/src/newlib -ffile-prefix-map=$OUT_ROOT=/build/newlib"
+    target_cflags="-O2 -g0 -D__mochios__ -DGETREENT_PROVIDED -DHAVE_RENAME -ffile-prefix-map=$NEWLIB_SOURCE=/src/newlib -ffile-prefix-map=$OUT_ROOT=/build/newlib"
     make -C "$BUILD_DIR" -j"$JOBS" CFLAGS_FOR_TARGET="$target_cflags" all-target-newlib
     make -C "$BUILD_DIR" CFLAGS_FOR_TARGET="$target_cflags" install-target-newlib
 else
@@ -110,6 +110,10 @@ cargo "${cargo_args[@]}" build -Z json-target-spec -Z build-std=core,alloc,compi
 x86_64-elf-gcc -c "$USER_ROOT/runtime/crt0.S" -o "$OUT_ROOT/hello/crt0.o"
 install -C -m 0644 "$OUT_ROOT/hello/crt0.o" "$SDK/lib/crt0.o"
 install -C -m 0644 "$TARGET_DIR/x86_64-unknown-mochios/release/libmochi_user_newlib_runtime.a" "$SDK/lib/libmochi_user_newlib_runtime.a"
+x86_64-elf-gcc --sysroot="$SYSROOT" -isystem "$SYSROOT/include" -D__mochios__ -ffreestanding \
+    -c "$USER_ROOT/runtime/newlib_reent.c" -o "$OUT_ROOT/hello/newlib_reent.o"
+x86_64-elf-ar r "$SDK/lib/libmochi_user_newlib_runtime.a" "$OUT_ROOT/hello/newlib_reent.o"
+x86_64-elf-ranlib "$SDK/lib/libmochi_user_newlib_runtime.a"
 install -C -m 0644 "$USER_ROOT/runtime/linker.ld" "$SDK/lib/linker.ld"
 install -C -m 0644 "$USER_ROOT/targets/x86_64-unknown-mochios.json" "$SDK/share/x86_64-unknown-mochios.json"
 install -C -m 0755 "$USER_ROOT/scripts/mochios-cc" "$SDK/bin/mochios-cc"

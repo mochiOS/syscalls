@@ -159,6 +159,8 @@ struct ThreadControl {
     stack_base: AtomicUsize,
     stack_size: AtomicUsize,
     owns_stack: AtomicU32,
+    reent: AtomicUsize,
+    reent_mapping_size: AtomicUsize,
     joinability: AtomicU32,
     cancel_state: AtomicU32,
     cancel_type: AtomicU32,
@@ -177,6 +179,8 @@ impl ThreadControl {
             stack_base: AtomicUsize::new(0),
             stack_size: AtomicUsize::new(0),
             owns_stack: AtomicU32::new(0),
+            reent: AtomicUsize::new(0),
+            reent_mapping_size: AtomicUsize::new(0),
             joinability: AtomicU32::new(THREAD_JOINABLE),
             cancel_state: AtomicU32::new(PTHREAD_CANCEL_ENABLE),
             cancel_type: AtomicU32::new(PTHREAD_CANCEL_DEFERRED),
@@ -666,6 +670,9 @@ unsafe extern "C" {
     fn exit(code: c_int) -> !;
     fn atexit(func: extern "C" fn()) -> c_int;
     fn __sinit(reent: *mut c_void);
+    fn __mochios_reent_size() -> usize;
+    fn __mochios_reent_initialize(storage: *mut c_void);
+    fn __mochios_reent_destroy(storage: *mut c_void);
     fn malloc(size: usize) -> *mut c_void;
     fn free(ptr: *mut c_void);
     fn memalign(alignment: usize, size: usize) -> *mut c_void;
@@ -827,6 +834,8 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
         control.stack_base.store(0, Ordering::Relaxed);
         control.stack_size.store(0, Ordering::Relaxed);
         control.owns_stack.store(0, Ordering::Relaxed);
+        control.reent.store(0, Ordering::Relaxed);
+        control.reent_mapping_size.store(0, Ordering::Relaxed);
         control
             .joinability
             .store(THREAD_JOINABLE, Ordering::Relaxed);
@@ -844,6 +853,16 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
 }
 
 fn release_thread_control(control: &ThreadControl) {
+    let reent = control.reent.swap(0, Ordering::Relaxed);
+    let reent_mapping_size = control.reent_mapping_size.swap(0, Ordering::Relaxed);
+    if reent != 0 && reent_mapping_size != 0 {
+        unsafe { __mochios_reent_destroy(reent as *mut c_void) };
+        let _ = syscall::raw_syscall2(
+            syscall::SyscallNumber::MemoryUnmap,
+            reent as u64,
+            reent_mapping_size as u64,
+        );
+    }
     let stack_base = control.stack_base.swap(0, Ordering::Relaxed);
     let stack_size = control.stack_size.swap(0, Ordering::Relaxed);
     let owns_stack = control.owns_stack.swap(0, Ordering::Relaxed) != 0;
@@ -864,6 +883,29 @@ fn release_thread_control(control: &ThreadControl) {
     control.cancel_pending.store(0, Ordering::Relaxed);
     control.state.store(THREAD_FREE, Ordering::Release);
     native_mutex_wake_all(&control.state);
+}
+
+fn allocate_thread_reent(control: &ThreadControl) -> Result<(), c_int> {
+    let size = unsafe { __mochios_reent_size() };
+    let mapping_size = align_up(size, PAGE_SIZE).ok_or(EOVERFLOW)?;
+    if size == 0 || mapping_size == 0 {
+        return Err(EINVAL);
+    }
+    let address = syscall_errno(syscall::raw_syscall6(
+        syscall::SyscallNumber::MemoryMap,
+        0,
+        mapping_size as u64,
+        PROT_READ_WRITE,
+        MAP_PRIVATE_ANON,
+        0,
+        0,
+    ))? as usize;
+    control
+        .reent_mapping_size
+        .store(mapping_size, Ordering::Relaxed);
+    control.reent.store(address, Ordering::Release);
+    unsafe { __mochios_reent_initialize(address as *mut c_void) };
+    Ok(())
 }
 
 fn reap_detached_threads() {
@@ -905,6 +947,25 @@ fn register_current_thread() -> Option<(Pthread, &'static ThreadControl)> {
     let (token, control) = reserve_thread_control()?;
     control.native_id.store(native_id, Ordering::Relaxed);
     control.state.store(THREAD_RUNNING, Ordering::Release);
+    if allocate_thread_reent(control).is_err() {
+        control.state.store(THREAD_REAPING, Ordering::Relaxed);
+        release_thread_control(control);
+        return None;
+    }
+    Some((token, control))
+}
+
+fn register_initial_thread() -> Option<(Pthread, &'static ThreadControl)> {
+    if let Some(current) = current_thread_control() {
+        return Some(current);
+    }
+    let native_id = native_thread_id().ok()?;
+    let (token, control) = reserve_thread_control()?;
+    control.native_id.store(native_id, Ordering::Relaxed);
+    control
+        .reent
+        .store(unsafe { _impure_ptr } as usize, Ordering::Relaxed);
+    control.state.store(THREAD_RUNNING, Ordering::Release);
     Some((token, control))
 }
 
@@ -935,6 +996,16 @@ unsafe extern "C" fn pthread_start_trampoline(argument: *mut c_void) -> ! {
     let start: PthreadStart = unsafe { core::mem::transmute(start_address) };
     let result = unsafe { start(control.argument.load(Ordering::Relaxed) as *mut c_void) };
     finish_thread(control, result)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn __getreent() -> *mut c_void {
+    let (_, control) = register_current_thread().unwrap_or_else(|| process_exit(127));
+    let reent = control.reent.load(Ordering::Acquire);
+    if reent == 0 {
+        process_exit(127);
+    }
+    reent as *mut c_void
 }
 
 fn set_errno(value: c_int) {
@@ -2211,6 +2282,9 @@ fn next_dirent(stream: &mut DirStream) -> Result<Option<NewlibDirent>, c_int> {
 pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
     let stack = unsafe { parse_stack(initial_sp) };
     unsafe { initialize_runtime(stack) };
+    if register_initial_thread().is_none() {
+        process_exit(127);
+    }
     unsafe { __sinit(_impure_ptr) };
     unsafe {
         call_init_array(
@@ -4483,6 +4557,11 @@ pub unsafe extern "C" fn pthread_create(
     control
         .owns_stack
         .store(u32::from(owns_stack), Ordering::Relaxed);
+    if let Err(error) = allocate_thread_reent(control) {
+        control.state.store(THREAD_REAPING, Ordering::Relaxed);
+        release_thread_control(control);
+        return error;
+    }
     control.joinability.store(
         if detachstate == PTHREAD_CREATE_DETACHED {
             THREAD_DETACHED
