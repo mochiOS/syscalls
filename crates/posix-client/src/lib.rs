@@ -11,6 +11,8 @@ use mochios_posix_protocol as protocol;
 pub mod fd;
 pub mod directory;
 pub mod random;
+#[cfg(feature = "syscall-endpoint")]
+pub mod synchronization;
 pub mod time;
 
 pub trait Transport {

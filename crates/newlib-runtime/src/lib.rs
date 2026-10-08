@@ -2228,6 +2228,59 @@ fn deadline_after_nanoseconds(duration: u64) -> Result<u64, c_int> {
         .ok_or(EOVERFLOW)
 }
 
+/// Private runtime bridge used by the mochiOS Rust standard library. The
+/// result is the native `AddressWaitResult`, or a negative native error.
+#[unsafe(no_mangle)]
+pub extern "C" fn __mochios_wait_on_address_u32(
+    address: *const core::sync::atomic::AtomicU32,
+    expected: u32,
+    timeout_nanoseconds: u64,
+) -> u64 {
+    if address.is_null() {
+        return syscall::EFAULT;
+    }
+    let deadline = if timeout_nanoseconds == u64::MAX {
+        syscall::ADDRESS_WAIT_INFINITE
+    } else {
+        match monotonic_nanoseconds() {
+            Ok(now) => now.saturating_add(timeout_nanoseconds),
+            Err(error) => return (-(i64::from(error))) as u64,
+        }
+    };
+    match mochios_posix_client::synchronization::wait_u32(
+        unsafe { &*address },
+        expected,
+        deadline,
+    ) {
+        Ok(mochios_posix_client::synchronization::WaitStatus::Awoken) => {
+            syscall::AddressWaitResult::Awoken as u64
+        }
+        Ok(mochios_posix_client::synchronization::WaitStatus::ValueChanged) => {
+            syscall::AddressWaitResult::ValueChanged as u64
+        }
+        Ok(mochios_posix_client::synchronization::WaitStatus::DeadlineReached) => {
+            syscall::AddressWaitResult::DeadlineReached as u64
+        }
+        Err(error) => error.raw() as u64,
+    }
+}
+
+/// Private runtime bridge used by the mochiOS Rust standard library. Returns
+/// the number of waiters woken, or a negative native error.
+#[unsafe(no_mangle)]
+pub extern "C" fn __mochios_wake_address_u32(
+    address: *const core::sync::atomic::AtomicU32,
+    maximum_count: usize,
+) -> u64 {
+    if address.is_null() {
+        return syscall::EFAULT;
+    }
+    match mochios_posix_client::synchronization::wake_u32(unsafe { &*address }, maximum_count) {
+        Ok(count) => count as u64,
+        Err(error) => error.raw() as u64,
+    }
+}
+
 fn select_deadline(timeout: *const Timeval) -> Result<u64, c_int> {
     if timeout.is_null() {
         return Ok(syscall::HANDLE_WAIT_INFINITE);
