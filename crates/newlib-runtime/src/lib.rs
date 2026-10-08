@@ -143,9 +143,33 @@ impl LockOpaque {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SchedParam {
+    sched_priority: c_int,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct PosixSpawnAttr {
     sa_flags: i16,
     sa_pgroup: c_int,
+    sa_schedparam: SchedParam,
+    sa_schedpolicy: c_int,
+    sa_sigdefault: u64,
+    sa_sigmask: u64,
+}
+
+impl PosixSpawnAttr {
+    const fn new() -> Self {
+        Self {
+            sa_flags: 0,
+            sa_pgroup: 0,
+            sa_schedparam: SchedParam { sched_priority: 0 },
+            sa_schedpolicy: 0,
+            sa_sigdefault: 0,
+            sa_sigmask: 0,
+        }
+    }
 }
 
 #[repr(C)]
@@ -337,8 +361,6 @@ const FAE_DUP2: c_int = 1;
 const FAE_CLOSE: c_int = 2;
 const FAE_CHDIR: c_int = 3;
 const FAE_FCHDIR: c_int = 4;
-const POSIX_SPAWN_SETPGROUP: i16 = 0x01;
-const POSIX_SPAWN_SETSIGDEF: i16 = 0x04;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -2118,6 +2140,19 @@ unsafe fn initialize_runtime(stack: StackView) {
     let _ = unsafe { atexit(run_fini_array) };
 }
 
+unsafe fn spawn_attributes_handle(
+    attributes: *const *mut PosixSpawnAttr,
+) -> Result<*mut PosixSpawnAttr, c_int> {
+    if attributes.is_null() {
+        return Err(EINVAL);
+    }
+    let value = unsafe { attributes.read() };
+    if value.is_null() {
+        return Err(EINVAL);
+    }
+    Ok(value)
+}
+
 unsafe fn init_file_actions_list(value: *mut PosixSpawnFileActions) {
     // Safety: caller passes a pointer to a live pool slot owned by this runtime.
     unsafe {
@@ -2540,16 +2575,64 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>), c_int> {
     result.map(|process_id| (process_id, inherited_fds))
 }
 
-fn unsupported_spawn_attr(attr: *const c_void) -> Result<(), c_int> {
+fn read_spawn_attributes(attr: *const c_void) -> Result<Option<PosixSpawnAttr>, c_int> {
     if attr.is_null() {
-        return Ok(());
+        return Ok(None);
     }
-    let attr = attr.cast::<PosixSpawnAttr>();
-    // Safety: attr points to the caller's posix_spawnattr object.
-    let flags = unsafe { (*attr).sa_flags };
-    let supported = POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETPGROUP;
-    if flags & !supported != 0 {
-        return Err(ENOSYS);
+    // Safety: attr points to the caller's opaque posix_spawnattr_t handle.
+    let handle = unsafe { attr.cast::<*mut PosixSpawnAttr>().read() };
+    if handle.is_null() {
+        return Err(EINVAL);
+    }
+    // Safety: the handle was returned by posix_spawnattr_init and remains
+    // owned by the caller for the duration of this call.
+    let attributes = unsafe { handle.read() };
+    if attributes.sa_flags & mochios_posix_client::spawn::SET_PROCESS_GROUP != 0
+        && attributes.sa_pgroup < 0
+    {
+        return Err(EINVAL);
+    }
+    match mochios_posix_client::spawn::classify_attribute_flags(attributes.sa_flags) {
+        mochios_posix_client::spawn::AttributeFlags::Supported => Ok(Some(attributes)),
+        mochios_posix_client::spawn::AttributeFlags::RequiresScheduler => Err(ENOSYS),
+        mochios_posix_client::spawn::AttributeFlags::Invalid => Err(EINVAL),
+    }
+}
+
+fn apply_spawn_attributes(attributes: Option<PosixSpawnAttr>) -> Result<(), c_int> {
+    let Some(attributes) = attributes else {
+        return Ok(());
+    };
+    let flags = attributes.sa_flags;
+    if flags & mochios_posix_client::spawn::SET_PROCESS_GROUP != 0 {
+        posix_client()
+            .map_err(map_posix_client_error)?
+            .set_process_group(0, i64::from(attributes.sa_pgroup))
+            .map_err(map_posix_client_error)?;
+    }
+    if flags & mochios_posix_client::spawn::RESET_IDS != 0 {
+        posix_client()
+            .map_err(map_posix_client_error)?
+            .reset_effective_ids()
+            .map_err(map_posix_client_error)?;
+    }
+    if flags & mochios_posix_client::spawn::SET_SIGNAL_MASK != 0 {
+        let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+        control.signal_mask.store(
+            mochios_posix_client::signal::sanitize_mask(attributes.sa_sigmask),
+            Ordering::Release,
+        );
+    }
+    if flags & mochios_posix_client::spawn::SET_SIGNAL_DEFAULTS != 0 {
+        let mut actions = SIGNAL_ACTIONS.lock();
+        for signal in 1..=posix_protocol::SIGNAL_MAX {
+            let bit = mochios_posix_client::signal::signal_bit(signal).unwrap_or(0);
+            if attributes.sa_sigdefault & bit != 0
+                && mochios_posix_client::signal::can_change_disposition(signal)
+            {
+                actions[signal as usize - 1] = SignalAction::default_action();
+            }
+        }
     }
     Ok(())
 }
@@ -5819,63 +5902,217 @@ pub unsafe extern "C" fn pthread_attr_getdetachstate(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn posix_spawnattr_init(attr: *mut PosixSpawnAttr) -> c_int {
+pub extern "C" fn posix_spawnattr_init(attr: *mut *mut PosixSpawnAttr) -> c_int {
     if attr.is_null() {
         return EINVAL;
     }
+    let value = unsafe { malloc(core::mem::size_of::<PosixSpawnAttr>()) }.cast::<PosixSpawnAttr>();
+    if value.is_null() {
+        return ENOMEM;
+    }
     unsafe {
-        (*attr).sa_flags = 0;
-        (*attr).sa_pgroup = 0;
+        value.write(PosixSpawnAttr::new());
+        attr.write(value);
     }
     0
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn posix_spawnattr_destroy(attr: *mut PosixSpawnAttr) -> c_int {
-    if attr.is_null() {
-        return EINVAL;
+pub extern "C" fn posix_spawnattr_destroy(attr: *mut *mut PosixSpawnAttr) -> c_int {
+    let value = match unsafe { spawn_attributes_handle(attr.cast_const()) } {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    unsafe {
+        free(value.cast());
+        attr.write(ptr::null_mut());
     }
     0
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn posix_spawnattr_setflags(attr: *mut PosixSpawnAttr, flags: i16) -> c_int {
-    if attr.is_null() {
+pub extern "C" fn posix_spawnattr_getflags(
+    attr: *const *mut PosixSpawnAttr,
+    flags: *mut i16,
+) -> c_int {
+    if flags.is_null() {
         return EINVAL;
     }
-    let supported = POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETPGROUP;
-    if flags & !supported != 0 {
-        return ENOSYS;
-    }
-    unsafe {
-        (*attr).sa_flags = flags;
-    }
+    let value = match unsafe { spawn_attributes_handle(attr) } {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    unsafe { flags.write((*value).sa_flags) };
     0
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn posix_spawnattr_setpgroup(attr: *mut PosixSpawnAttr, pgroup: c_int) -> c_int {
-    if attr.is_null() {
+pub extern "C" fn posix_spawnattr_setflags(attr: *mut *mut PosixSpawnAttr, flags: i16) -> c_int {
+    if matches!(
+        mochios_posix_client::spawn::classify_attribute_flags(flags),
+        mochios_posix_client::spawn::AttributeFlags::Invalid
+    ) {
         return EINVAL;
     }
-    unsafe {
-        (*attr).sa_pgroup = pgroup;
-        (*attr).sa_flags |= POSIX_SPAWN_SETPGROUP;
+    let value = match unsafe { spawn_attributes_handle(attr.cast_const()) } {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    unsafe { (*value).sa_flags = flags };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_getpgroup(
+    attr: *const *mut PosixSpawnAttr,
+    pgroup: *mut c_int,
+) -> c_int {
+    if pgroup.is_null() {
+        return EINVAL;
     }
+    let value = match unsafe { spawn_attributes_handle(attr) } {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    unsafe { pgroup.write((*value).sa_pgroup) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_setpgroup(
+    attr: *mut *mut PosixSpawnAttr,
+    pgroup: c_int,
+) -> c_int {
+    let value = match unsafe { spawn_attributes_handle(attr.cast_const()) } {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    unsafe { (*value).sa_pgroup = pgroup };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_getschedparam(
+    attr: *const *mut PosixSpawnAttr,
+    schedparam: *mut SchedParam,
+) -> c_int {
+    if schedparam.is_null() {
+        return EINVAL;
+    }
+    let value = match unsafe { spawn_attributes_handle(attr) } {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    unsafe { schedparam.write((*value).sa_schedparam) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_setschedparam(
+    attr: *mut *mut PosixSpawnAttr,
+    schedparam: *const SchedParam,
+) -> c_int {
+    if schedparam.is_null() {
+        return EINVAL;
+    }
+    let value = match unsafe { spawn_attributes_handle(attr.cast_const()) } {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    unsafe { (*value).sa_schedparam = schedparam.read() };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_getschedpolicy(
+    attr: *const *mut PosixSpawnAttr,
+    policy: *mut c_int,
+) -> c_int {
+    if policy.is_null() {
+        return EINVAL;
+    }
+    let value = match unsafe { spawn_attributes_handle(attr) } {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    unsafe { policy.write((*value).sa_schedpolicy) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_setschedpolicy(
+    attr: *mut *mut PosixSpawnAttr,
+    policy: c_int,
+) -> c_int {
+    let value = match unsafe { spawn_attributes_handle(attr.cast_const()) } {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    unsafe { (*value).sa_schedpolicy = policy };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_getsigdefault(
+    attr: *const *mut PosixSpawnAttr,
+    sigdefault: *mut u64,
+) -> c_int {
+    if sigdefault.is_null() {
+        return EINVAL;
+    }
+    let value = match unsafe { spawn_attributes_handle(attr) } {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    unsafe { sigdefault.write((*value).sa_sigdefault) };
     0
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn posix_spawnattr_setsigdefault(
-    attr: *mut PosixSpawnAttr,
-    _sigdefault: *const c_void,
+    attr: *mut *mut PosixSpawnAttr,
+    sigdefault: *const u64,
 ) -> c_int {
-    if attr.is_null() {
+    if sigdefault.is_null() {
         return EINVAL;
     }
-    unsafe {
-        (*attr).sa_flags |= POSIX_SPAWN_SETSIGDEF;
+    let value = match unsafe { spawn_attributes_handle(attr.cast_const()) } {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    unsafe { (*value).sa_sigdefault = sigdefault.read() };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_getsigmask(
+    attr: *const *mut PosixSpawnAttr,
+    sigmask: *mut u64,
+) -> c_int {
+    if sigmask.is_null() {
+        return EINVAL;
     }
+    let value = match unsafe { spawn_attributes_handle(attr) } {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    unsafe { sigmask.write((*value).sa_sigmask) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_setsigmask(
+    attr: *mut *mut PosixSpawnAttr,
+    sigmask: *const u64,
+) -> c_int {
+    if sigmask.is_null() {
+        return EINVAL;
+    }
+    let value = match unsafe { spawn_attributes_handle(attr.cast_const()) } {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    unsafe { (*value).sa_sigmask = sigmask.read() };
     0
 }
 
@@ -6116,9 +6353,10 @@ pub extern "C" fn _posix_spawn(
     if pid.is_null() || path.is_null() {
         return EINVAL;
     }
-    if let Err(errno_value) = unsupported_spawn_attr(attrp) {
-        return errno_value;
-    }
+    let attributes = match read_spawn_attributes(attrp) {
+        Ok(attributes) => attributes,
+        Err(errno_value) => return errno_value,
+    };
 
     let snapshot = SpawnSnapshot {
         path,
@@ -6133,6 +6371,9 @@ pub extern "C" fn _posix_spawn(
     };
 
     if child_pid == 0 {
+        if apply_spawn_attributes(attributes).is_err() {
+            process_exit(SPAWN_FAIL_EXIT_STATUS);
+        }
         if apply_spawn_file_actions(&mut desired_fds, snapshot.file_actions).is_err() {
             process_exit(SPAWN_FAIL_EXIT_STATUS);
         }

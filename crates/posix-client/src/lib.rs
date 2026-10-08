@@ -10,6 +10,7 @@ pub mod fd;
 pub mod process_image;
 pub mod random;
 pub mod signal;
+pub mod spawn;
 #[cfg(feature = "syscall-endpoint")]
 pub mod synchronization;
 pub mod thread;
