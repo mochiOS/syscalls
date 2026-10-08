@@ -78,6 +78,7 @@ const ERANGE: c_int = 34;
 const ENAMETOOLONG: c_int = 36;
 const ENOSYS: c_int = 38;
 const EOVERFLOW: c_int = 75;
+const ENOTSUP: c_int = 95;
 const MAX_EXEC_VECTOR_ENTRIES: usize = 256;
 const MAX_STARTUP_IMAGE_BYTES: usize = mnu_abi::process_image::HEADER_LEN
     + mnu_abi::process_image::MAX_RELOCATIONS * mnu_abi::process_image::RELOCATION_LEN
@@ -321,6 +322,7 @@ enum FdKind {
     ObjectDirectory = 6,
     ObjectStreamRead = 7,
     ObjectStreamWrite = 8,
+    ObjectPty = 9,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -415,6 +417,7 @@ fn inherited_fd_kind(kind: FdKind) -> Option<u8> {
         FdKind::ObjectDirectory => Some(posix_protocol::INHERITED_FD_KIND_DIRECTORY),
         FdKind::ObjectStreamRead => Some(posix_protocol::INHERITED_FD_KIND_STREAM_READ),
         FdKind::ObjectStreamWrite => Some(posix_protocol::INHERITED_FD_KIND_STREAM_WRITE),
+        FdKind::ObjectPty => Some(posix_protocol::INHERITED_FD_KIND_PTY),
     }
 }
 
@@ -427,6 +430,7 @@ fn fd_kind_from_inherited(kind: u8) -> Option<FdKind> {
         posix_protocol::INHERITED_FD_KIND_DIRECTORY => Some(FdKind::ObjectDirectory),
         posix_protocol::INHERITED_FD_KIND_STREAM_READ => Some(FdKind::ObjectStreamRead),
         posix_protocol::INHERITED_FD_KIND_STREAM_WRITE => Some(FdKind::ObjectStreamWrite),
+        posix_protocol::INHERITED_FD_KIND_PTY => Some(FdKind::ObjectPty),
         _ => None,
     }
 }
@@ -1278,11 +1282,11 @@ fn truncate_u16(value: u64) -> u16 {
     core::cmp::min(value, u16::MAX as u64) as u16
 }
 
-fn stream_stat() -> NewlibStat {
+fn special_stat(file_type: u32) -> NewlibStat {
     NewlibStat {
         st_dev: 0,
         st_ino: 0,
-        st_mode: 0o010000 | 0o600,
+        st_mode: file_type | 0o600,
         st_nlink: 1,
         st_uid: 0,
         st_gid: 0,
@@ -1304,6 +1308,14 @@ fn stream_stat() -> NewlibStat {
         st_blocks: 0,
         st_spare4: [0; 2],
     }
+}
+
+fn stream_stat() -> NewlibStat {
+    special_stat(0o010000)
+}
+
+fn pty_stat() -> NewlibStat {
+    special_stat(0o020000)
 }
 
 fn translate_posix_stat(status: &PosixFileStatus) -> NewlibStat {
@@ -2709,6 +2721,30 @@ fn allocate_fd_entry(
         .map_err(|_| EMFILE)
 }
 
+fn handle_is_nonblocking(entry: FdEntry) -> Result<bool, c_int> {
+    let options = syscall_errno(syscall::raw_syscall1(
+        syscall::SyscallNumber::HandleOptionsGet,
+        entry.handle.lower_handle,
+    ))?;
+    Ok(options & syscall::HANDLE_OPTION_NONBLOCKING != 0)
+}
+
+fn wait_for_handle(entry: FdEntry, interests: u64) -> Result<u64, c_int> {
+    let mut item = syscall::HandleWaitItem {
+        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+        reserved: 0,
+        interests,
+        observed: 0,
+    };
+    syscall_errno(syscall::raw_syscall3(
+        syscall::SyscallNumber::HandleWaitMany,
+        (&mut item as *mut syscall::HandleWaitItem) as u64,
+        1,
+        syscall::HANDLE_WAIT_INFINITE,
+    ))?;
+    Ok(item.observed)
+}
+
 fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result<isize, c_int> {
     if length == 0 {
         return Ok(0);
@@ -2725,6 +2761,23 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
             buffer as u64,
             length as u64,
         ))?,
+        FdKind::ObjectPty => loop {
+            match syscall_errno(syscall::raw_syscall3(
+                syscall::SyscallNumber::HandleWrite,
+                entry.handle.lower_handle,
+                buffer as u64,
+                length as u64,
+            )) {
+                Ok(written) => break written,
+                Err(EAGAIN) if !handle_is_nonblocking(entry)? => {
+                    let _ = wait_for_handle(
+                        entry,
+                        syscall::HANDLE_SIGNAL_WRITABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
+                    )?;
+                }
+                Err(errno) => return Err(errno),
+            }
+        },
         FdKind::ObjectStreamRead => return Err(EBADF),
         FdKind::ObjectDirectory => return Err(EISDIR),
         _ => return Err(EBADF),
@@ -2744,6 +2797,23 @@ fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<is
             buffer as u64,
             length as u64,
         ))?,
+        FdKind::ObjectPty => loop {
+            match syscall_errno(syscall::raw_syscall3(
+                syscall::SyscallNumber::HandleRead,
+                entry.handle.lower_handle,
+                buffer as u64,
+                length as u64,
+            )) {
+                Ok(read) => break read,
+                Err(EAGAIN) if !handle_is_nonblocking(entry)? => {
+                    let _ = wait_for_handle(
+                        entry,
+                        syscall::HANDLE_SIGNAL_READABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
+                    )?;
+                }
+                Err(errno) => return Err(errno),
+            }
+        },
         FdKind::ObjectStreamWrite => return Err(EBADF),
         FdKind::ObjectDirectory => return Err(EISDIR),
         _ => return Err(EBADF),
@@ -2993,6 +3063,70 @@ pub extern "C" fn close(fd: c_int) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn openpty(
+    master: *mut c_int,
+    slave: *mut c_int,
+    name: *mut c_char,
+    termios: *const c_void,
+    window_size: *const c_void,
+) -> c_int {
+    if master.is_null() || slave.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    if !name.is_null() || !termios.is_null() || !window_size.is_null() {
+        set_errno(ENOTSUP);
+        return -1;
+    }
+    let result = (|| {
+        let pair = posix_client()
+            .and_then(|client| client.open_pty())
+            .map_err(map_posix_client_error)?;
+        let required_rights = syscall::HANDLE_RIGHT_READ
+            | syscall::HANDLE_RIGHT_WRITE
+            | syscall::HANDLE_RIGHT_WAIT
+            | syscall::HANDLE_RIGHT_CONTROL
+            | syscall::HANDLE_RIGHT_DUPLICATE
+            | syscall::HANDLE_RIGHT_TRANSFER;
+        if pair.master.rights & required_rights != required_rights
+            || pair.slave.rights & required_rights != required_rights
+        {
+            close_object_handle(pair.master.handle);
+            close_object_handle(pair.slave.handle);
+            return Err(EACCES);
+        }
+        let master_fd = match allocate_object_fd(
+            pair.master.handle,
+            pair.master.rights,
+            FdKind::ObjectPty,
+            2,
+        ) {
+            Ok(fd) => fd,
+            Err(errno) => {
+                close_object_handle(pair.master.handle);
+                close_object_handle(pair.slave.handle);
+                return Err(errno);
+            }
+        };
+        let slave_fd =
+            match allocate_object_fd(pair.slave.handle, pair.slave.rights, FdKind::ObjectPty, 2) {
+                Ok(fd) => fd,
+                Err(errno) => {
+                    let _ = _close(master_fd);
+                    close_object_handle(pair.slave.handle);
+                    return Err(errno);
+                }
+            };
+        unsafe {
+            master.write(master_fd);
+            slave.write(slave_fd);
+        }
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn _pipe2(fds: *mut c_int, flags: c_int) -> c_int {
     if fds.is_null() {
         set_errno(EFAULT);
@@ -3141,7 +3275,7 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
             F_GETFL
                 if matches!(
                     entry.handle.kind,
-                    FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite
+                    FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite | FdKind::ObjectPty
                 ) =>
             {
                 let options = syscall_errno(syscall::raw_syscall1(
@@ -3176,7 +3310,7 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
                 }
                 if matches!(
                     entry.handle.kind,
-                    FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite
+                    FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite | FdKind::ObjectPty
                 ) {
                     if arg & !(O_NONBLOCK | 0x3) != 0 {
                         return Err(EINVAL);
@@ -3379,6 +3513,23 @@ pub extern "C" fn select(
                         ready_read |= requested_read & mask;
                     }
                 }
+                FdKind::ObjectPty => {
+                    let mut interests = syscall::HANDLE_SIGNAL_PEER_CLOSED;
+                    if requested_read & mask != 0 {
+                        interests |= syscall::HANDLE_SIGNAL_READABLE;
+                    }
+                    if requested_write & mask != 0 {
+                        interests |= syscall::HANDLE_SIGNAL_WRITABLE;
+                    }
+                    items[item_count] = syscall::HandleWaitItem {
+                        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+                        reserved: 0,
+                        interests,
+                        observed: 0,
+                    };
+                    item_fds[item_count] = fd;
+                    item_count += 1;
+                }
                 FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite => {
                     ready_read |= requested_read & mask;
                     ready_write |= requested_write & mask;
@@ -3486,15 +3637,19 @@ pub extern "C" fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: c_int) -> c_int 
                 continue;
             };
             match entry.handle.kind {
-                FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite => {
+                FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite | FdKind::ObjectPty => {
                     let mut interests = syscall::HANDLE_SIGNAL_PEER_CLOSED;
-                    if entry.handle.kind == FdKind::ObjectStreamRead
-                        && pollfds[index].events & READ_EVENTS != 0
+                    if matches!(
+                        entry.handle.kind,
+                        FdKind::ObjectStreamRead | FdKind::ObjectPty
+                    ) && pollfds[index].events & READ_EVENTS != 0
                     {
                         interests |= syscall::HANDLE_SIGNAL_READABLE;
                     }
-                    if entry.handle.kind == FdKind::ObjectStreamWrite
-                        && pollfds[index].events & WRITE_EVENTS != 0
+                    if matches!(
+                        entry.handle.kind,
+                        FdKind::ObjectStreamWrite | FdKind::ObjectPty
+                    ) && pollfds[index].events & WRITE_EVENTS != 0
                     {
                         interests |= syscall::HANDLE_SIGNAL_WRITABLE;
                     }
@@ -3546,6 +3701,13 @@ pub extern "C" fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: c_int) -> c_int 
                         pollfds[poll_index].revents |= pollfds[poll_index].events & READ_EVENTS;
                     }
                     FdKind::ObjectStreamWrite => pollfds[poll_index].revents |= POLLERR,
+                    FdKind::ObjectPty => {
+                        pollfds[poll_index].revents |= POLLHUP;
+                        pollfds[poll_index].revents |= pollfds[poll_index].events & READ_EVENTS;
+                        if pollfds[poll_index].events & WRITE_EVENTS != 0 {
+                            pollfds[poll_index].revents |= POLLERR;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -4142,6 +4304,10 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
             unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), stream_stat()) };
             return Ok(0);
         }
+        if entry.handle.kind == FdKind::ObjectPty {
+            unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), pty_stat()) };
+            return Ok(0);
+        }
         Err(EBADF)
     })();
     result_with_errno(result, -1)
@@ -4202,7 +4368,7 @@ pub extern "C" fn _isatty(fd: c_int) -> c_int {
         Ok(
             if matches!(
                 entry.handle.kind,
-                FdKind::Stdin | FdKind::Stdout | FdKind::Stderr
+                FdKind::Stdin | FdKind::Stdout | FdKind::Stderr | FdKind::ObjectPty
             ) {
                 1
             } else {
