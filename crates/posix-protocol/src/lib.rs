@@ -97,6 +97,7 @@ pub const OP_WAIT_CHILD: u16 = 29;
 pub const OP_PROCESS_INFO: u16 = 30;
 pub const OP_SET_PROCESS_GROUP: u16 = 31;
 pub const OP_CREATE_SESSION: u16 = 32;
+pub const OP_RESOURCE_LIMIT: u16 = 33;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -126,6 +127,8 @@ pub const WAIT_RESULT_LEN: usize = 16;
 pub const PROCESS_ID_REQUEST_LEN: usize = 8;
 pub const PROCESS_GROUP_REQUEST_LEN: usize = 16;
 pub const PROCESS_INFO_LEN: usize = 32;
+pub const RESOURCE_LIMIT_REQUEST_LEN: usize = 32;
+pub const RESOURCE_LIMIT_LEN: usize = 16;
 pub const MAX_PATH_LEN: usize = 4096;
 pub const MAX_CONTROL_PAYLOAD_LEN: usize = RENAME_AT_HEADER_LEN + MAX_PATH_LEN * 2;
 pub const CONTROL_MESSAGE_LEN: usize = HEADER_LEN + MAX_CONTROL_PAYLOAD_LEN;
@@ -169,6 +172,22 @@ pub const UNLINK_FLAGS_ALL: u32 = UNLINK_REMOVE_DIRECTORY;
 
 pub const WAIT_NOHANG: u32 = 1 << 0;
 pub const WAIT_OPTIONS_ALL: u32 = WAIT_NOHANG;
+
+pub const RESOURCE_LIMIT_SET: u32 = 1 << 0;
+pub const RESOURCE_LIMIT_FLAGS_ALL: u32 = RESOURCE_LIMIT_SET;
+pub const RLIM_INFINITY: u64 = u64::MAX;
+
+pub const RLIMIT_CPU: u32 = 0;
+pub const RLIMIT_FSIZE: u32 = 1;
+pub const RLIMIT_DATA: u32 = 2;
+pub const RLIMIT_STACK: u32 = 3;
+pub const RLIMIT_CORE: u32 = 4;
+pub const RLIMIT_RSS: u32 = 5;
+pub const RLIMIT_NPROC: u32 = 6;
+pub const RLIMIT_NOFILE: u32 = 7;
+pub const RLIMIT_MEMLOCK: u32 = 8;
+pub const RLIMIT_AS: u32 = 9;
+pub const RLIMIT_COUNT: u32 = 10;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -294,6 +313,33 @@ pub struct ProcessInfo {
     pub parent_id: u64,
     pub process_group_id: u64,
     pub session_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResourceLimit {
+    pub soft: u64,
+    pub hard: u64,
+}
+
+impl ResourceLimit {
+    pub const INFINITY: Self = Self {
+        soft: RLIM_INFINITY,
+        hard: RLIM_INFINITY,
+    };
+}
+
+impl Default for ResourceLimit {
+    fn default() -> Self {
+        Self::INFINITY
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResourceLimitRequest {
+    pub process_id: i64,
+    pub resource: u32,
+    pub flags: u32,
+    pub limit: ResourceLimit,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -532,6 +578,68 @@ pub fn decode_process_info(input: &[u8]) -> Result<ProcessInfo, ProtocolError> {
         parent_id: get_u64(input, 8),
         process_group_id: get_u64(input, 16),
         session_id: get_u64(input, 24),
+    })
+}
+
+pub fn encode_resource_limit_request(
+    request: ResourceLimitRequest,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < RESOURCE_LIMIT_REQUEST_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    if request.flags & !RESOURCE_LIMIT_FLAGS_ALL != 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    output[..RESOURCE_LIMIT_REQUEST_LEN].fill(0);
+    put_u64(output, 0, request.process_id as u64);
+    put_u32(output, 8, request.resource);
+    put_u32(output, 12, request.flags);
+    put_u64(output, 16, request.limit.soft);
+    put_u64(output, 24, request.limit.hard);
+    Ok(())
+}
+
+pub fn decode_resource_limit_request(
+    input: &[u8],
+) -> Result<ResourceLimitRequest, ProtocolError> {
+    if input.len() != RESOURCE_LIMIT_REQUEST_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let flags = get_u32(input, 12);
+    if flags & !RESOURCE_LIMIT_FLAGS_ALL != 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(ResourceLimitRequest {
+        process_id: get_u64(input, 0) as i64,
+        resource: get_u32(input, 8),
+        flags,
+        limit: ResourceLimit {
+            soft: get_u64(input, 16),
+            hard: get_u64(input, 24),
+        },
+    })
+}
+
+pub fn encode_resource_limit(
+    limit: ResourceLimit,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < RESOURCE_LIMIT_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    put_u64(output, 0, limit.soft);
+    put_u64(output, 8, limit.hard);
+    Ok(())
+}
+
+pub fn decode_resource_limit(input: &[u8]) -> Result<ResourceLimit, ProtocolError> {
+    if input.len() != RESOURCE_LIMIT_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(ResourceLimit {
+        soft: get_u64(input, 0),
+        hard: get_u64(input, 8),
     })
 }
 

@@ -218,6 +218,40 @@ impl<T: Transport> Client<T> {
             .map_err(ClientError::Protocol)
     }
 
+    /// Reads a resource limit and optionally replaces it atomically. A
+    /// process ID of zero selects the calling process. The returned value is
+    /// always the limit that was installed before this request.
+    pub fn resource_limit(
+        &self,
+        process_id: i64,
+        resource: u32,
+        replacement: Option<protocol::ResourceLimit>,
+    ) -> Result<protocol::ResourceLimit, ClientError<T::Error>> {
+        let mut request = [0u8; protocol::RESOURCE_LIMIT_REQUEST_LEN];
+        protocol::encode_resource_limit_request(
+            protocol::ResourceLimitRequest {
+                process_id,
+                resource,
+                flags: if replacement.is_some() {
+                    protocol::RESOURCE_LIMIT_SET
+                } else {
+                    0
+                },
+                limit: replacement.unwrap_or_default(),
+            },
+            &mut request,
+        )
+        .map_err(ClientError::Protocol)?;
+        let mut response = [0u8; protocol::RESOURCE_LIMIT_LEN];
+        let length = self.request(
+            protocol::OP_RESOURCE_LIMIT,
+            0,
+            &request,
+            &mut response,
+        )?;
+        protocol::decode_resource_limit(&response[..length]).map_err(ClientError::Protocol)
+    }
+
     /// Updates the process umask and returns its previous value, matching the
     /// atomic state transition required by POSIX `umask()`.
     pub fn set_umask(&self, mask: u32) -> Result<u32, ClientError<T::Error>> {
