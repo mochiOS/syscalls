@@ -50,8 +50,6 @@ const F_SETFL: c_int = 4;
 const SEEK_CUR: c_int = 1;
 const WNOHANG: c_int = 1;
 const SPAWN_FAIL_EXIT_STATUS: c_int = 127;
-const MAX_SPAWN_FILE_ACTIONS: usize = 8;
-const MAX_SPAWN_FILE_ACTION_ENTRIES: usize = 32;
 const DIR_BUFFER_SIZE: usize = 4096;
 const DIRENT_NAME_MAX: usize = 256;
 const SIGNAL_UPCALL_STACK_SIZE: usize = 64 * 1024;
@@ -304,56 +302,6 @@ struct PosixSpawnFileActionsEntry {
     fae_action: c_int,
     fae_fildes: c_int,
     fae_data: PosixSpawnFileActionData,
-}
-
-#[derive(Clone, Copy)]
-struct FileActionsSlot {
-    in_use: bool,
-    value: PosixSpawnFileActions,
-}
-
-// Safety: pointers in a live slot refer to memory in this process. Pool
-// allocation and reclamation are serialized by `FILE_ACTIONS_POOL`.
-unsafe impl Send for FileActionsSlot {}
-
-impl FileActionsSlot {
-    const fn new() -> Self {
-        Self {
-            in_use: false,
-            value: PosixSpawnFileActions {
-                fa_list: StailqHead {
-                    stqh_first: ptr::null_mut(),
-                    stqh_last: ptr::null_mut(),
-                },
-            },
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct FileActionEntrySlot {
-    in_use: bool,
-    value: PosixSpawnFileActionsEntry,
-}
-
-// Safety: pointers in a live slot refer to memory in this process. Pool
-// allocation and reclamation are serialized by `FILE_ACTION_ENTRIES_POOL`.
-unsafe impl Send for FileActionEntrySlot {}
-
-impl FileActionEntrySlot {
-    const fn new() -> Self {
-        Self {
-            in_use: false,
-            value: PosixSpawnFileActionsEntry {
-                fae_list: StailqEntry {
-                    stqe_next: ptr::null_mut(),
-                },
-                fae_action: 0,
-                fae_fildes: 0,
-                fae_data: PosixSpawnFileActionData { dirfd: 0 },
-            },
-        }
-    }
 }
 
 const FAE_OPEN: c_int = 0;
@@ -722,11 +670,6 @@ static STATE: RuntimeMutex<RuntimeState> = RuntimeMutex::new(RuntimeState::new()
 static SIGNAL_ACTIONS: RuntimeMutex<[SignalAction; posix_protocol::SIGNAL_MAX as usize]> =
     RuntimeMutex::new([SignalAction::default_action(); posix_protocol::SIGNAL_MAX as usize]);
 static POSIX_CLIENT: RuntimeOnce<PosixClient<SyscallEndpointTransport>> = RuntimeOnce::new();
-static FILE_ACTIONS_POOL: RuntimeMutex<[FileActionsSlot; MAX_SPAWN_FILE_ACTIONS]> =
-    RuntimeMutex::new([FileActionsSlot::new(); MAX_SPAWN_FILE_ACTIONS]);
-static FILE_ACTION_ENTRIES_POOL: RuntimeMutex<
-    [FileActionEntrySlot; MAX_SPAWN_FILE_ACTION_ENTRIES],
-> = RuntimeMutex::new([FileActionEntrySlot::new(); MAX_SPAWN_FILE_ACTION_ENTRIES]);
 static THREADS: [ThreadControl; mochios_posix_client::thread::MAX_THREADS] =
     [const { ThreadControl::new() }; mochios_posix_client::thread::MAX_THREADS];
 static THREAD_KEYS: [ThreadKeyControl; mochios_posix_client::thread::MAX_THREAD_KEYS] =
@@ -2162,55 +2105,40 @@ unsafe fn init_file_actions_list(value: *mut PosixSpawnFileActions) {
 }
 
 unsafe fn allocate_file_actions_object() -> Result<*mut PosixSpawnFileActions, c_int> {
-    let mut pool = FILE_ACTIONS_POOL.lock();
-    for slot in pool.iter_mut() {
-        if !slot.in_use {
-            slot.in_use = true;
-            let value = ptr::addr_of_mut!(slot.value);
-            unsafe { init_file_actions_list(value) };
-            return Ok(value);
-        }
+    let value = unsafe { malloc(core::mem::size_of::<PosixSpawnFileActions>()) }
+        .cast::<PosixSpawnFileActions>();
+    if value.is_null() {
+        return Err(ENOMEM);
     }
-    Err(ENOMEM)
+    unsafe { init_file_actions_list(value) };
+    Ok(value)
 }
 
 unsafe fn release_file_actions_object(target: *mut PosixSpawnFileActions) {
-    let mut pool = FILE_ACTIONS_POOL.lock();
-    for slot in pool.iter_mut() {
-        let slot_ptr = ptr::addr_of_mut!(slot.value);
-        if slot_ptr == target {
-            slot.in_use = false;
-            unsafe { init_file_actions_list(slot_ptr) };
-            return;
-        }
-    }
+    unsafe { free(target.cast()) };
 }
 
 unsafe fn allocate_file_action_entry() -> Result<*mut PosixSpawnFileActionsEntry, c_int> {
-    let mut pool = FILE_ACTION_ENTRIES_POOL.lock();
-    for slot in pool.iter_mut() {
-        if !slot.in_use {
-            slot.in_use = true;
-            slot.value.fae_list.stqe_next = ptr::null_mut();
-            return Ok(ptr::addr_of_mut!(slot.value));
-        }
+    let value = unsafe { malloc(core::mem::size_of::<PosixSpawnFileActionsEntry>()) }
+        .cast::<PosixSpawnFileActionsEntry>();
+    if value.is_null() {
+        return Err(ENOMEM);
     }
-    Err(ENOMEM)
+    unsafe {
+        value.write(PosixSpawnFileActionsEntry {
+            fae_list: StailqEntry {
+                stqe_next: ptr::null_mut(),
+            },
+            fae_action: 0,
+            fae_fildes: 0,
+            fae_data: PosixSpawnFileActionData { dirfd: 0 },
+        });
+    }
+    Ok(value)
 }
 
 unsafe fn release_file_action_entry(target: *mut PosixSpawnFileActionsEntry) {
-    let mut pool = FILE_ACTION_ENTRIES_POOL.lock();
-    for slot in pool.iter_mut() {
-        let slot_ptr = ptr::addr_of_mut!(slot.value);
-        if slot_ptr == target {
-            slot.in_use = false;
-            slot.value.fae_list.stqe_next = ptr::null_mut();
-            slot.value.fae_action = 0;
-            slot.value.fae_fildes = 0;
-            slot.value.fae_data.dirfd = 0;
-            return;
-        }
-    }
+    unsafe { free(target.cast()) };
 }
 
 unsafe fn append_file_action(
@@ -6161,7 +6089,6 @@ pub extern "C" fn posix_spawn_file_actions_destroy(
         current = next;
     }
     unsafe {
-        init_file_actions_list(actions_ptr);
         release_file_actions_object(actions_ptr);
         *actions = ptr::null_mut();
     }
