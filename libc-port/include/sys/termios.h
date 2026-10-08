@@ -75,6 +75,10 @@ struct termios {
 #define TCSADRAIN 1
 #define TCSAFLUSH 2
 
+#define TCIFLUSH  0
+#define TCOFLUSH  1
+#define TCIOFLUSH 2
+
 #define B0       0U
 #define B50      50U
 #define B75      75U
@@ -98,6 +102,8 @@ __BEGIN_DECLS
 
 int tcgetattr(int, struct termios *);
 int tcsetattr(int, int, const struct termios *);
+int tcdrain(int);
+int tcflush(int, int);
 speed_t cfgetispeed(const struct termios *);
 speed_t cfgetospeed(const struct termios *);
 int cfsetispeed(struct termios *, speed_t);

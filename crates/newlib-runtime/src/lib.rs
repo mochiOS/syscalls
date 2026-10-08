@@ -56,6 +56,9 @@ const SIGNAL_UPCALL_STACK_SIZE: usize = 64 * 1024;
 const TCSANOW: c_int = 0;
 const TCSADRAIN: c_int = 1;
 const TCSAFLUSH: c_int = 2;
+const TCIFLUSH: c_int = 0;
+const TCOFLUSH: c_int = 1;
+const TCIOFLUSH: c_int = 2;
 
 const EPERM: c_int = 1;
 const ENOENT: c_int = 2;
@@ -4522,6 +4525,50 @@ pub extern "C" fn tcsetattr(fd: c_int, action: c_int, termios: *const NewlibTerm
         let entry = with_fd_entry(fd)?;
         set_terminal_attributes(entry, action, unsafe { termios.read() })?;
         Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tcdrain(fd: c_int) -> c_int {
+    let result = (|| {
+        let entry = with_fd_entry(fd)?;
+        loop {
+            match terminal_control(entry, posix_protocol::PTY_CONTROL_DRAIN, &[], &mut []) {
+                Ok(0) => return Ok(0),
+                Ok(_) => return Err(EIO),
+                Err(EAGAIN) => {
+                    let _ = wait_for_handle(
+                        entry,
+                        syscall::HANDLE_SIGNAL_IDLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
+                    )?;
+                }
+                Err(errno) => return Err(errno),
+            }
+        }
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tcflush(fd: c_int, queue_selector: c_int) -> c_int {
+    let flags = match queue_selector {
+        TCIFLUSH => posix_protocol::TERMINAL_FLUSH_INPUT,
+        TCOFLUSH => posix_protocol::TERMINAL_FLUSH_OUTPUT,
+        TCIOFLUSH => posix_protocol::TERMINAL_FLUSH_ALL,
+        _ => {
+            set_errno(EINVAL);
+            return -1;
+        }
+    };
+    let result = (|| {
+        let entry = with_fd_entry(fd)?;
+        let mut encoded = [0; posix_protocol::TERMINAL_FLUSH_LEN];
+        posix_protocol::encode_terminal_flush(flags, &mut encoded).map_err(|_| EINVAL)?;
+        match terminal_control(entry, posix_protocol::PTY_CONTROL_FLUSH, &encoded, &mut [])? {
+            0 => Ok(0),
+            _ => Err(EIO),
+        }
     })();
     result_with_errno(result, -1)
 }

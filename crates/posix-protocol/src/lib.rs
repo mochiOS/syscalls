@@ -205,6 +205,7 @@ pub const SIGNAL_MASK_LEN: usize = 8;
 pub const SIGNAL_NUMBER_LEN: usize = 4;
 pub const TERMINAL_CONTROL_CHARACTERS: usize = 32;
 pub const TERMINAL_ATTRIBUTES_LEN: usize = 56;
+pub const TERMINAL_FLUSH_LEN: usize = 4;
 pub const MAX_SUPPLEMENTARY_GROUPS: usize = 32;
 pub const GROUP_LIST_HEADER_LEN: usize = 4;
 pub const GROUP_LIST_MAX_LEN: usize =
@@ -283,6 +284,12 @@ pub const PTY_CONTROL_GET_ATTRIBUTES: u64 = 0x5054_5900_0000_0001;
 pub const PTY_CONTROL_SET_ATTRIBUTES_NOW: u64 = 0x5054_5900_0000_0002;
 pub const PTY_CONTROL_SET_ATTRIBUTES_DRAIN: u64 = 0x5054_5900_0000_0003;
 pub const PTY_CONTROL_SET_ATTRIBUTES_FLUSH: u64 = 0x5054_5900_0000_0004;
+pub const PTY_CONTROL_DRAIN: u64 = 0x5054_5900_0000_0005;
+pub const PTY_CONTROL_FLUSH: u64 = 0x5054_5900_0000_0006;
+
+pub const TERMINAL_FLUSH_INPUT: u32 = 1 << 0;
+pub const TERMINAL_FLUSH_OUTPUT: u32 = 1 << 1;
+pub const TERMINAL_FLUSH_ALL: u32 = TERMINAL_FLUSH_INPUT | TERMINAL_FLUSH_OUTPUT;
 
 pub const TERMINAL_IFLAG_IGNBRK: u32 = 1 << 0;
 pub const TERMINAL_IFLAG_BRKINT: u32 = 1 << 1;
@@ -883,6 +890,25 @@ pub fn decode_terminal_attributes(input: &[u8]) -> Result<TerminalAttributes, Pr
         input_speed: get_u32(input, 48),
         output_speed: get_u32(input, 52),
     })
+}
+
+pub fn encode_terminal_flush(flags: u32, output: &mut [u8]) -> Result<(), ProtocolError> {
+    if output.len() < TERMINAL_FLUSH_LEN || flags == 0 || flags & !TERMINAL_FLUSH_ALL != 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    put_u32(output, 0, flags);
+    Ok(())
+}
+
+pub fn decode_terminal_flush(input: &[u8]) -> Result<u32, ProtocolError> {
+    if input.len() != TERMINAL_FLUSH_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let flags = get_u32(input, 0);
+    if flags == 0 || flags & !TERMINAL_FLUSH_ALL != 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(flags)
 }
 
 pub fn encode_process_group_request(

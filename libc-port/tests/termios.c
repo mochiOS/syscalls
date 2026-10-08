@@ -16,5 +16,7 @@ int main(void) {
     (void)cfgetospeed(&attributes);
     (void)tcgetattr(-1, &attributes);
     (void)tcsetattr(-1, TCSANOW, &attributes);
+    (void)tcdrain(-1);
+    (void)tcflush(-1, TCIOFLUSH);
     return openpty(0, 0, 0, &attributes, 0) == 0;
 }
