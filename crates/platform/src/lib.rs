@@ -450,6 +450,12 @@ pub mod process {
         .map(|_| ())
     }
 
+    /// Suspends the current native process until an authorized process-handle
+    /// holder resumes it. Policy layers assign their own meaning to this state.
+    pub fn suspend_current() -> SysResult<()> {
+        syscall::call0(syscall::SyscallNumber::ProcessSuspendCurrent).map(|_| ())
+    }
+
     pub fn terminate_handle(handle: u32, exit_code: u64) -> SysResult<()> {
         syscall::call2(
             syscall::SyscallNumber::ProcessHandleTerminate,
