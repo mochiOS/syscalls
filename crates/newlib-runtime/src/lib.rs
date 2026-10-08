@@ -46,9 +46,6 @@ const F_SETFL: c_int = 4;
 const SEEK_CUR: c_int = 1;
 const WNOHANG: c_int = 1;
 const SPAWN_FAIL_EXIT_STATUS: c_int = 127;
-const FD_STATE_ENV_PREFIX: &[u8] = b"MOCHIOS_FDSTATE=";
-const MAX_FD_STATE_LEN: usize = 4096;
-const MAX_ENV_POINTERS: usize = 128;
 const MAX_SPAWN_FILE_ACTIONS: usize = 8;
 const MAX_SPAWN_FILE_ACTION_ENTRIES: usize = 32;
 const DIR_BUFFER_SIZE: usize = 4096;
@@ -426,6 +423,32 @@ fn object_entry(
         } else {
             0
         },
+    }
+}
+
+fn inherited_fd_kind(kind: FdKind) -> Option<u8> {
+    match kind {
+        FdKind::Unused => None,
+        FdKind::Stdin => Some(posix_protocol::INHERITED_FD_KIND_STDIN),
+        FdKind::Stdout => Some(posix_protocol::INHERITED_FD_KIND_STDOUT),
+        FdKind::Stderr => Some(posix_protocol::INHERITED_FD_KIND_STDERR),
+        FdKind::ObjectFile => Some(posix_protocol::INHERITED_FD_KIND_FILE),
+        FdKind::ObjectDirectory => Some(posix_protocol::INHERITED_FD_KIND_DIRECTORY),
+        FdKind::ObjectStreamRead => Some(posix_protocol::INHERITED_FD_KIND_STREAM_READ),
+        FdKind::ObjectStreamWrite => Some(posix_protocol::INHERITED_FD_KIND_STREAM_WRITE),
+    }
+}
+
+fn fd_kind_from_inherited(kind: u8) -> Option<FdKind> {
+    match kind {
+        posix_protocol::INHERITED_FD_KIND_STDIN => Some(FdKind::Stdin),
+        posix_protocol::INHERITED_FD_KIND_STDOUT => Some(FdKind::Stdout),
+        posix_protocol::INHERITED_FD_KIND_STDERR => Some(FdKind::Stderr),
+        posix_protocol::INHERITED_FD_KIND_FILE => Some(FdKind::ObjectFile),
+        posix_protocol::INHERITED_FD_KIND_DIRECTORY => Some(FdKind::ObjectDirectory),
+        posix_protocol::INHERITED_FD_KIND_STREAM_READ => Some(FdKind::ObjectStreamRead),
+        posix_protocol::INHERITED_FD_KIND_STREAM_WRITE => Some(FdKind::ObjectStreamWrite),
+        _ => None,
     }
 }
 
@@ -1879,141 +1902,120 @@ fn retry_open_with_prompt(path: *const c_char, flags: c_int, mode: c_int) -> Res
     }
 }
 
-fn find_fd_state_env(envp: *mut *mut c_char) -> Option<&'static [u8]> {
-    if envp.is_null() {
-        return None;
-    }
-    let mut cursor = envp;
-    loop {
-        // Safety: envp is the kernel-provided environment vector for the current process.
-        let entry = unsafe { cursor.read() };
-        if entry.is_null() {
-            return None;
-        }
-        let bytes = unsafe { c_bytes(entry.cast_const()) };
-        if let Some(rest) = bytes.strip_prefix(FD_STATE_ENV_PREFIX) {
-            return Some(rest);
-        }
-        // Safety: cursor is advanced within the NUL-terminated envp vector.
-        cursor = unsafe { cursor.add(1) };
+fn launch_context_value(key: u64) -> Result<Option<u64>, c_int> {
+    let mut value = 0u64;
+    match syscall_errno(syscall::raw_syscall2(
+        syscall::SyscallNumber::LaunchValueGet,
+        key,
+        (&mut value as *mut u64) as u64,
+    )) {
+        Ok(_) => Ok(Some(value)),
+        Err(EBADF) => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
-fn restore_fd_state_from_env(envp: *mut *mut c_char, fds: &mut FdTable<FdObject>) -> bool {
-    let Some(raw) = find_fd_state_env(envp) else {
-        return false;
-    };
+fn launch_context_handle(key: u64) -> Result<u64, c_int> {
+    syscall_errno(syscall::raw_syscall1(
+        syscall::SyscallNumber::LaunchHandleGet,
+        key,
+    ))
+}
+
+fn restore_fd_state_from_launch_context(fds: &mut FdTable<FdObject>) -> Result<bool, c_int> {
     *fds = FdTable::new();
     let mut operations = RuntimeFdOps;
-    for record in raw.split(|byte| *byte == b';') {
-        if record.is_empty() {
+    let mut restored = false;
+    for fd in 0..MAX_FDS as c_int {
+        let metadata_key = posix_protocol::fd_metadata_key(fd).ok_or(EIO)?;
+        let Some(encoded) = launch_context_value(metadata_key)? else {
             continue;
+        };
+        let metadata = posix_protocol::decode_inherited_fd_metadata(encoded).ok_or(EIO)?;
+        if metadata.descriptor_flags & posix_protocol::INHERITED_FD_DESCRIPTOR_CLOEXEC != 0 {
+            return Err(EIO);
         }
-        let mut fields = record.split(|byte| *byte == b',');
-        let Some(fd) = fields.next().and_then(parse_decimal) else {
-            return false;
+        let kind = fd_kind_from_inherited(metadata.kind).ok_or(EIO)?;
+        let (lower_handle, rights, close_owned) = match kind {
+            FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => (0, 0, false),
+            FdKind::ObjectFile
+            | FdKind::ObjectDirectory
+            | FdKind::ObjectStreamRead
+            | FdKind::ObjectStreamWrite => {
+                let handle_key = posix_protocol::fd_handle_key(fd).ok_or(EIO)?;
+                let handle = launch_context_handle(handle_key)?;
+                let rights = syscall_errno(syscall::raw_syscall1(
+                    syscall::SyscallNumber::HandleRightsGet,
+                    handle,
+                ))?;
+                (handle, rights, true)
+            }
+            FdKind::Unused => return Err(EIO),
         };
-        let Some(kind_code) = fields.next().and_then(parse_decimal) else {
-            return false;
-        };
-        let Some(lower_handle) = fields.next().and_then(parse_decimal) else {
-            return false;
-        };
-        let Some(open_flags) = fields.next().and_then(parse_decimal) else {
-            return false;
-        };
-        let Some(position) = fields.next().and_then(parse_decimal) else {
-            return false;
-        };
-        let Some(close_owned) = fields.next().and_then(parse_decimal) else {
-            return false;
-        };
-        let fd_flags = fields.next().and_then(parse_decimal).unwrap_or(0);
-        let rights = fields.next().and_then(parse_decimal).unwrap_or(0);
-        if fd >= MAX_FDS {
-            return false;
-        }
-        let kind = match kind_code {
-            1 => FdKind::Stdin,
-            2 => FdKind::Stdout,
-            3 => FdKind::Stderr,
-            5 => FdKind::ObjectFile,
-            6 => FdKind::ObjectDirectory,
-            7 => FdKind::ObjectStreamRead,
-            8 => FdKind::ObjectStreamWrite,
-            _ => return false,
-        };
-        let _ = position;
         let entry = PosixFdEntry {
             handle: FdObject {
-                lower_handle: lower_handle as u64,
+                lower_handle,
                 kind,
-                open_flags: open_flags as c_int,
-                close_owned: close_owned != 0,
+                open_flags: metadata.open_flags as c_int,
+                close_owned,
             },
-            rights: rights as u64,
-            descriptor_flags: fd_flags as u32,
+            rights,
+            descriptor_flags: u32::from(metadata.descriptor_flags),
         };
-        if fds.install_at(fd as c_int, entry, &mut operations).is_err() {
-            return false;
+        fds.install_at(fd, entry, &mut operations)
+            .map_err(|_| EIO)?;
+        restored = true;
+    }
+    Ok(restored)
+}
+
+fn stage_fd_launch_context(fds: &FdTable<FdObject>) -> Result<(), c_int> {
+    for fd in 0..MAX_FDS as c_int {
+        let handle_key = posix_protocol::fd_handle_key(fd).ok_or(EIO)?;
+        let metadata_key = posix_protocol::fd_metadata_key(fd).ok_or(EIO)?;
+        let entry = fds
+            .get(fd)
+            .filter(|entry| entry.descriptor_flags & FD_CLOEXEC as u32 == 0);
+        let Some(entry) = entry else {
+            syscall_errno(syscall::raw_syscall1(
+                syscall::SyscallNumber::ContextValueRemove,
+                metadata_key,
+            ))?;
+            syscall_errno(syscall::raw_syscall1(
+                syscall::SyscallNumber::ContextHandleRemove,
+                handle_key,
+            ))?;
+            continue;
+        };
+        let kind = inherited_fd_kind(entry.handle.kind).ok_or(EIO)?;
+        let descriptor_flags = u8::try_from(entry.descriptor_flags).map_err(|_| EIO)?;
+        let metadata = posix_protocol::encode_inherited_fd_metadata(
+            posix_protocol::InheritedFdMetadata {
+                kind,
+                open_flags: entry.handle.open_flags as u32,
+                descriptor_flags,
+            },
+        )
+        .ok_or(EIO)?;
+        if entry.handle.close_owned {
+            syscall_errno(syscall::raw_syscall2(
+                syscall::SyscallNumber::ContextHandleSet,
+                handle_key,
+                entry.handle.lower_handle,
+            ))?;
+        } else {
+            syscall_errno(syscall::raw_syscall1(
+                syscall::SyscallNumber::ContextHandleRemove,
+                handle_key,
+            ))?;
         }
+        syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::ContextValueSet,
+            metadata_key,
+            metadata,
+        ))?;
     }
-    true
-}
-
-fn push_byte(out: &mut [u8], length: &mut usize, value: u8) -> Result<(), c_int> {
-    if *length >= out.len() {
-        return Err(ENOMEM);
-    }
-    out[*length] = value;
-    *length += 1;
     Ok(())
-}
-
-fn serialize_fd_state(
-    fds: &FdTable<FdObject>,
-    encoded: &mut [u8; MAX_FD_STATE_LEN],
-) -> Result<usize, c_int> {
-    let mut length = 0usize;
-    if FD_STATE_ENV_PREFIX.len() > encoded.len() {
-        return Err(ENOMEM);
-    }
-    encoded[..FD_STATE_ENV_PREFIX.len()].copy_from_slice(FD_STATE_ENV_PREFIX);
-    length += FD_STATE_ENV_PREFIX.len();
-    for (fd, entry) in fds.inherited() {
-        let kind_code = match entry.handle.kind {
-            FdKind::Unused => continue,
-            FdKind::Stdin => 1usize,
-            FdKind::Stdout => 2usize,
-            FdKind::Stderr => 3usize,
-            FdKind::ObjectFile => 5usize,
-            FdKind::ObjectDirectory => 6usize,
-            FdKind::ObjectStreamRead => 7usize,
-            FdKind::ObjectStreamWrite => 8usize,
-        };
-        push_decimal(fd as usize, encoded, &mut length)?;
-        push_byte(encoded, &mut length, b',')?;
-        push_decimal(kind_code, encoded, &mut length)?;
-        push_byte(encoded, &mut length, b',')?;
-        push_decimal(entry.handle.lower_handle as usize, encoded, &mut length)?;
-        push_byte(encoded, &mut length, b',')?;
-        push_decimal(
-            entry.handle.open_flags.max(0) as usize,
-            encoded,
-            &mut length,
-        )?;
-        push_byte(encoded, &mut length, b',')?;
-        push_decimal(0, encoded, &mut length)?;
-        push_byte(encoded, &mut length, b',')?;
-        push_decimal(entry.handle.close_owned as usize, encoded, &mut length)?;
-        push_byte(encoded, &mut length, b',')?;
-        push_decimal(entry.descriptor_flags as usize, encoded, &mut length)?;
-        push_byte(encoded, &mut length, b',')?;
-        push_decimal(entry.rights as usize, encoded, &mut length)?;
-        push_byte(encoded, &mut length, b';')?;
-    }
-    push_byte(encoded, &mut length, 0)?;
-    Ok(length)
 }
 
 extern "C" fn run_fini_array() {
@@ -2034,17 +2036,21 @@ unsafe fn initialize_runtime(stack: StackView) {
     state.initialized = true;
     state.argv = stack.argv;
     state.envp = stack.envp;
-    if !restore_fd_state_from_env(stack.envp, &mut state.fds) {
-        let mut operations = RuntimeFdOps;
-        let _ = state
-            .fds
-            .install_at(0, FdObject::stdio(FdKind::Stdin), &mut operations);
-        let _ = state
-            .fds
-            .install_at(1, FdObject::stdio(FdKind::Stdout), &mut operations);
-        let _ = state
-            .fds
-            .install_at(2, FdObject::stdio(FdKind::Stderr), &mut operations);
+    match restore_fd_state_from_launch_context(&mut state.fds) {
+        Ok(true) => {}
+        Ok(false) => {
+            let mut operations = RuntimeFdOps;
+            let _ = state
+                .fds
+                .install_at(0, FdObject::stdio(FdKind::Stdin), &mut operations);
+            let _ = state
+                .fds
+                .install_at(1, FdObject::stdio(FdKind::Stdout), &mut operations);
+            let _ = state
+                .fds
+                .install_at(2, FdObject::stdio(FdKind::Stderr), &mut operations);
+        }
+        Err(_) => process_exit(127),
     }
 
     let stack_limit = align_down(stack.stack_top, PAGE_SIZE).saturating_sub(PAGE_SIZE);
@@ -2210,48 +2216,6 @@ fn apply_spawn_file_actions(
     Ok(())
 }
 
-fn collect_envp_with_fd_state(
-    envp: *const *const c_char,
-    fd_state: *const c_char,
-    out: &mut [*const c_char; MAX_ENV_POINTERS],
-) -> Result<(), c_int> {
-    let source_envp = if envp.is_null() {
-        // Safety: environ is initialized from the process startup stack before main().
-        unsafe { environ as *const *const c_char }
-    } else {
-        envp
-    };
-    let mut length = 0usize;
-    if !source_envp.is_null() {
-        let mut cursor = source_envp;
-        loop {
-            // Safety: source_envp is a NUL-terminated environment pointer array.
-            let entry = unsafe { cursor.read() };
-            if entry.is_null() {
-                break;
-            }
-            let keep = unsafe { c_bytes(entry) }
-                .strip_prefix(FD_STATE_ENV_PREFIX)
-                .is_none();
-            if keep {
-                if length + 2 > out.len() {
-                    return Err(ENOMEM);
-                }
-                out[length] = entry;
-                length += 1;
-            }
-            // Safety: cursor advances within the envp array.
-            cursor = unsafe { cursor.add(1) };
-        }
-    }
-    if length + 2 > out.len() {
-        return Err(ENOMEM);
-    }
-    out[length] = fd_state;
-    out[length + 1] = ptr::null();
-    Ok(())
-}
-
 fn execve_syscall_raw(
     path: *const c_char,
     argv: *const *const c_char,
@@ -2306,22 +2270,15 @@ fn authorize_exec_path(path: *const c_char) -> Result<(), c_int> {
     }
 }
 
-fn execve_with_fd_state(
+fn execve_with_launch_context(
     path: *const c_char,
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> Result<(), c_int> {
-    let mut fd_state = [0u8; MAX_FD_STATE_LEN];
     let fds = clone_current_fd_table();
-    let fd_state_len = serialize_fd_state(&fds, &mut fd_state)?;
-    let mut env_ptrs = [ptr::null(); MAX_ENV_POINTERS];
-    collect_envp_with_fd_state(
-        envp,
-        fd_state[..fd_state_len].as_ptr().cast::<c_char>(),
-        &mut env_ptrs,
-    )?;
+    stage_fd_launch_context(&fds)?;
     authorize_exec_path(path)?;
-    execve_syscall_raw(path, argv, env_ptrs.as_ptr())
+    execve_syscall_raw(path, argv, envp)
 }
 
 #[inline(never)]
@@ -4916,7 +4873,7 @@ pub extern "C" fn _execve(
         set_errno(EFAULT);
         return -1;
     }
-    let result = execve_with_fd_state(path, argv, envp);
+    let result = execve_with_launch_context(path, argv, envp);
     result_with_errno(result.map(|()| 0), -1)
 }
 
@@ -4940,10 +4897,10 @@ pub extern "C" fn execvp(file: *const c_char, argv: *const *mut c_char) -> c_int
     let envp = unsafe { environ as *const *const c_char };
     let name = unsafe { c_bytes(file) };
     if name.iter().any(|byte| *byte == b'/') {
-        return result_with_errno(execve_with_fd_state(file, argv, envp).map(|()| 0), -1);
+        return result_with_errno(execve_with_launch_context(file, argv, envp).map(|()| 0), -1);
     }
 
-    let direct = execve_with_fd_state(file, argv, envp);
+    let direct = execve_with_launch_context(file, argv, envp);
     if !matches!(direct, Err(errno) if errno == ENOENT) {
         return result_with_errno(direct.map(|()| 0), -1);
     }
@@ -4962,7 +4919,7 @@ pub extern "C" fn execvp(file: *const c_char, argv: *const *mut c_char) -> c_int
     path[BIN_PREFIX.len()..BIN_PREFIX.len() + name.len()].copy_from_slice(name);
 
     result_with_errno(
-        execve_with_fd_state(path.as_ptr().cast::<c_char>(), argv, envp).map(|()| 0),
+        execve_with_launch_context(path.as_ptr().cast::<c_char>(), argv, envp).map(|()| 0),
         -1,
     )
 }
@@ -5713,23 +5670,11 @@ pub extern "C" fn _posix_spawn(
         if apply_spawn_file_actions(&mut desired_fds, snapshot.file_actions).is_err() {
             process_exit(SPAWN_FAIL_EXIT_STATUS);
         }
-        let mut fd_state = [0u8; MAX_FD_STATE_LEN];
-        let fd_state_len = match serialize_fd_state(&desired_fds, &mut fd_state) {
-            Ok(value) => value,
-            Err(_) => process_exit(SPAWN_FAIL_EXIT_STATUS),
-        };
-        let mut env_ptrs = [ptr::null(); MAX_ENV_POINTERS];
-        if collect_envp_with_fd_state(
-            snapshot.envp,
-            fd_state[..fd_state_len].as_ptr().cast::<c_char>(),
-            &mut env_ptrs,
-        )
-        .is_err()
-        {
+        if stage_fd_launch_context(&desired_fds).is_err() {
             process_exit(SPAWN_FAIL_EXIT_STATUS);
         }
         if authorize_exec_path(snapshot.path).is_err()
-            || execve_syscall_raw(snapshot.path, snapshot.argv, env_ptrs.as_ptr()).is_err()
+            || execve_syscall_raw(snapshot.path, snapshot.argv, snapshot.envp).is_err()
         {
             process_exit(SPAWN_FAIL_EXIT_STATUS);
         }
