@@ -74,7 +74,7 @@ if [[ -n "$SYSCALLS_SOURCE" ]]; then
     patch_args+=(--config "patch.\"https://github.com/mochiOS/syscalls\".mochios-capability-protocol.path='$SYSCALLS_SOURCE/crates/capability-protocol'")
 fi
 # Separate objects from older builds that embedded host paths.
-BUILD_DIR="$OUT_ROOT/build-newlib-remapped"
+BUILD_DIR="$OUT_ROOT/build-newlib-multithread-remapped"
 INSTALL_ROOT="$OUT_ROOT/toolchain"
 SYSROOT="${NEWLIB_SYSROOT:-$INSTALL_ROOT/x86_64-elf}"
 TARGET_DIR="$OUT_ROOT/cargo-target"
@@ -89,7 +89,7 @@ if [[ -n "$NEWLIB_SOURCE" ]]; then
              --disable-binutils --disable-gas --disable-gdb --disable-gprof \
              --disable-libgloss --disable-multilib --disable-nls --disable-shared \
              --disable-sim --disable-werror --disable-newlib-supplied-syscalls \
-             --enable-newlib-multithread=no --enable-newlib-retargetable-locking)
+             --enable-newlib-multithread=yes --enable-newlib-retargetable-locking)
     elif ! grep -Fqx "srcdir = $NEWLIB_SOURCE" "$BUILD_DIR/Makefile"; then
         echo "newlib source changed; select a separate --output to preserve the existing build" >&2
         exit 2

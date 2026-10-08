@@ -3,6 +3,7 @@
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use mochi_user_syscall as syscall;
 use mochios_capability_protocol::{
@@ -90,7 +91,21 @@ pub struct Tms {
 
 #[repr(C)]
 pub struct LockOpaque {
-    _private: u8,
+    state: AtomicU32,
+    owner: AtomicU64,
+    depth: AtomicU32,
+    dynamic: bool,
+}
+
+impl LockOpaque {
+    const fn new(dynamic: bool) -> Self {
+        Self {
+            state: AtomicU32::new(0),
+            owner: AtomicU64::new(0),
+            depth: AtomicU32::new(0),
+            dynamic,
+        }
+    }
 }
 
 #[repr(C)]
@@ -393,7 +408,6 @@ unsafe impl<T> Sync for SingleThreadCell<T> {}
 static STATE: SingleThreadCell<RuntimeState> = SingleThreadCell::new(RuntimeState::new());
 static POSIX_CLIENT: SingleThreadCell<Option<PosixClient<SyscallEndpointTransport>>> =
     SingleThreadCell::new(None);
-static DUMMY_LOCK: LockOpaque = LockOpaque { _private: 0 };
 static FILE_ACTIONS_POOL: SingleThreadCell<[FileActionsSlot; MAX_SPAWN_FILE_ACTIONS]> =
     SingleThreadCell::new([FileActionsSlot::new(); MAX_SPAWN_FILE_ACTIONS]);
 static FILE_ACTION_ENTRIES_POOL: SingleThreadCell<
@@ -401,6 +415,22 @@ static FILE_ACTION_ENTRIES_POOL: SingleThreadCell<
 > = SingleThreadCell::new([FileActionEntrySlot::new(); MAX_SPAWN_FILE_ACTION_ENTRIES]);
 static SPAWN_SNAPSHOT: SingleThreadCell<SpawnSnapshot> =
     SingleThreadCell::new(SpawnSnapshot::empty());
+
+macro_rules! static_newlib_lock {
+    ($name:ident) => {
+        #[unsafe(no_mangle)]
+        pub static $name: LockOpaque = LockOpaque::new(false);
+    };
+}
+
+static_newlib_lock!(__lock___sfp_recursive_mutex);
+static_newlib_lock!(__lock___atexit_recursive_mutex);
+static_newlib_lock!(__lock___at_quick_exit_mutex);
+static_newlib_lock!(__lock___malloc_recursive_mutex);
+static_newlib_lock!(__lock___env_recursive_mutex);
+static_newlib_lock!(__lock___tz_mutex);
+static_newlib_lock!(__lock___dd_hash_mutex);
+static_newlib_lock!(__lock___arc4random_mutex);
 
 #[unsafe(no_mangle)]
 pub static mut __env: *mut *mut c_char = ptr::null_mut();
@@ -542,6 +572,17 @@ fn native_process_id() -> Result<u64, syscall::SysError> {
         core::mem::size_of::<syscall::ThreadSecurityContext>() as u64,
     )?;
     Ok(context.process_id)
+}
+
+fn native_thread_id() -> Result<u64, syscall::SysError> {
+    let mut context = syscall::ThreadSecurityContext::default();
+    syscall::call3(
+        syscall::SyscallNumber::GetThreadSecurityContext,
+        0,
+        (&mut context as *mut syscall::ThreadSecurityContext) as u64,
+        core::mem::size_of::<syscall::ThreadSecurityContext>() as u64,
+    )?;
+    Ok(context.thread_id)
 }
 
 fn set_errno(value: c_int) {
@@ -4284,11 +4325,15 @@ pub extern "C" fn posix_spawnp(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __retarget_lock_init(lock: *mut *mut LockOpaque) {
-    unsafe {
-        if !lock.is_null() {
-            *lock = core::ptr::addr_of!(DUMMY_LOCK) as *mut LockOpaque;
-        }
+    if lock.is_null() {
+        return;
     }
+    let allocation = unsafe { malloc(core::mem::size_of::<LockOpaque>()) }.cast::<LockOpaque>();
+    if allocation.is_null() {
+        process_exit(127);
+    }
+    unsafe { allocation.write(LockOpaque::new(true)) };
+    unsafe { lock.write(allocation) };
 }
 
 #[unsafe(no_mangle)]
@@ -4297,29 +4342,135 @@ pub extern "C" fn __retarget_lock_init_recursive(lock: *mut *mut LockOpaque) {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __retarget_lock_acquire(_lock: *mut LockOpaque) {}
+pub extern "C" fn __retarget_lock_acquire(lock: *mut LockOpaque) {
+    let Some(lock) = (unsafe { lock.as_ref() }) else {
+        process_exit(127);
+    };
+    if lock
+        .state
+        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        return;
+    }
+    loop {
+        if lock.state.swap(2, Ordering::Acquire) == 0 {
+            return;
+        }
+        if mochios_posix_client::synchronization::wait_u32(
+            &lock.state,
+            2,
+            syscall::ADDRESS_WAIT_INFINITE,
+        )
+        .is_err()
+        {
+            process_exit(127);
+        }
+    }
+}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __retarget_lock_acquire_recursive(_lock: *mut LockOpaque) {}
+pub extern "C" fn __retarget_lock_acquire_recursive(lock: *mut LockOpaque) {
+    let Some(lock_ref) = (unsafe { lock.as_ref() }) else {
+        process_exit(127);
+    };
+    let thread_id = native_thread_id().unwrap_or_else(|_| process_exit(127));
+    if lock_ref.owner.load(Ordering::Acquire) == thread_id {
+        if lock_ref.depth.fetch_add(1, Ordering::Relaxed) == u32::MAX {
+            process_exit(127);
+        }
+        return;
+    }
+    __retarget_lock_acquire(lock);
+    lock_ref.depth.store(1, Ordering::Relaxed);
+    lock_ref.owner.store(thread_id, Ordering::Release);
+}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __retarget_lock_try_acquire(_lock: *mut LockOpaque) -> c_int {
+pub extern "C" fn __retarget_lock_try_acquire(lock: *mut LockOpaque) -> c_int {
+    let Some(lock) = (unsafe { lock.as_ref() }) else {
+        return 0;
+    };
+    c_int::from(
+        lock.state
+            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok(),
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn __retarget_lock_try_acquire_recursive(lock: *mut LockOpaque) -> c_int {
+    let Some(lock_ref) = (unsafe { lock.as_ref() }) else {
+        return 0;
+    };
+    let thread_id = native_thread_id().unwrap_or_else(|_| process_exit(127));
+    if lock_ref.owner.load(Ordering::Acquire) == thread_id {
+        if lock_ref.depth.fetch_add(1, Ordering::Relaxed) == u32::MAX {
+            process_exit(127);
+        }
+        return 1;
+    }
+    if __retarget_lock_try_acquire(lock) == 0 {
+        return 0;
+    }
+    lock_ref.depth.store(1, Ordering::Relaxed);
+    lock_ref.owner.store(thread_id, Ordering::Release);
     1
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __retarget_lock_try_acquire_recursive(_lock: *mut LockOpaque) -> c_int {
-    1
+pub extern "C" fn __retarget_lock_release(lock: *mut LockOpaque) {
+    let Some(lock) = (unsafe { lock.as_ref() }) else {
+        process_exit(127);
+    };
+    let previous = lock.state.swap(0, Ordering::Release);
+    if previous == 0 {
+        process_exit(127);
+    }
+    if previous == 2
+        && mochios_posix_client::synchronization::wake_u32(&lock.state, 1).is_err()
+    {
+        process_exit(127);
+    }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __retarget_lock_release(_lock: *mut LockOpaque) {}
+pub extern "C" fn __retarget_lock_release_recursive(lock: *mut LockOpaque) {
+    let Some(lock_ref) = (unsafe { lock.as_ref() }) else {
+        process_exit(127);
+    };
+    let thread_id = native_thread_id().unwrap_or_else(|_| process_exit(127));
+    if lock_ref.owner.load(Ordering::Acquire) != thread_id {
+        process_exit(127);
+    }
+    let depth = lock_ref.depth.load(Ordering::Relaxed);
+    if depth == 0 {
+        process_exit(127);
+    }
+    if depth > 1 {
+        lock_ref.depth.store(depth - 1, Ordering::Relaxed);
+        return;
+    }
+    lock_ref.owner.store(0, Ordering::Release);
+    lock_ref.depth.store(0, Ordering::Relaxed);
+    __retarget_lock_release(lock);
+}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __retarget_lock_release_recursive(_lock: *mut LockOpaque) {}
+pub extern "C" fn __retarget_lock_close(lock: *mut LockOpaque) {
+    let Some(lock_ref) = (unsafe { lock.as_ref() }) else {
+        return;
+    };
+    if !lock_ref.dynamic {
+        return;
+    }
+    if lock_ref.state.load(Ordering::Acquire) != 0 {
+        process_exit(127);
+    }
+    unsafe { free(lock.cast()) };
+}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn __retarget_lock_close(_lock: *mut LockOpaque) {}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn __retarget_lock_close_recursive(_lock: *mut LockOpaque) {}
+pub extern "C" fn __retarget_lock_close_recursive(lock: *mut LockOpaque) {
+    __retarget_lock_close(lock);
+}
