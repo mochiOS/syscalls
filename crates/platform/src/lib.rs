@@ -321,8 +321,8 @@ pub mod thread {
         super::runtime_support::yield_now();
     }
 
-    pub fn exit() -> ! {
-        let _ = syscall::raw_syscall0(syscall::SyscallNumber::ThreadExit);
+    pub fn exit(code: u64) -> ! {
+        let _ = syscall::raw_syscall1(syscall::SyscallNumber::ThreadExit, code);
         loop {
             core::hint::spin_loop();
         }
