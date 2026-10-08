@@ -852,6 +852,25 @@ pub mod handle {
         usize::try_from(length).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
     }
 
+    /// Sends an opaque bounded control request to an object provider.
+    pub fn control(
+        handle: Handle,
+        control_code: u64,
+        input: &[u8],
+        output: &mut [u8],
+    ) -> SysResult<usize> {
+        let length = syscall::call6(
+            syscall::SyscallNumber::HandleControl,
+            handle as u64,
+            control_code,
+            input.as_ptr() as u64,
+            input.len() as u64,
+            output.as_mut_ptr() as u64,
+            output.len() as u64,
+        )?;
+        usize::try_from(length).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+    }
+
     /// Moves the shared cursor of an I/O object using a native seek basis.
     /// Compatibility layers must translate POSIX `SEEK_*` values before
     /// calling this function.
