@@ -3865,6 +3865,11 @@ pub extern "C" fn setpgid(pid: c_int, pgid: c_int) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn setpgrp() -> c_int {
+    setpgid(0, 0)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn setsid() -> c_int {
     let result = posix_client()
         .map_err(map_posix_client_error)
@@ -4487,6 +4492,11 @@ pub extern "C" fn getpgid(pid: c_int) -> c_int {
             .and_then(|info| c_int::try_from(info.process_group_id).map_err(|_| EOVERFLOW)),
         -1,
     )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn getpgrp() -> c_int {
+    getpgid(0)
 }
 
 #[unsafe(no_mangle)]
