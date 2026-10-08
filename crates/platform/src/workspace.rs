@@ -107,27 +107,27 @@ fn call<'a>(opcode: u16, payload: &[u8], reply: &'a mut [u8]) -> SysResult<proto
     Ok(message)
 }
 
-fn call_with_handle<'a>(
+fn call_with_object_handle<'a>(
     opcode: u16,
     payload: &[u8],
     reply: &'a mut [u8],
-    fd: i32,
+    handle: crate::handle::Handle,
+    rights: u64,
 ) -> SysResult<protocol::Message<'a>> {
     let id = request_id();
     let mut request = vec![0u8; protocol::HEADER_LEN + payload.len()];
     let length = protocol::encode(opcode, id, 0, payload, &mut request).map_err(|_| invalid())?;
-    let mut handles = crate::ipc::IpcFileHandles::default();
+    let mut handles = crate::ipc::IpcObjectHandles::default();
     handles.count = 1;
-    handles.handles[0] = crate::ipc::IpcFileHandle {
-        fd,
-        rights: mnu_abi::FILE_HANDLE_RIGHT_READ
-            | mnu_abi::FILE_HANDLE_RIGHT_SEEK
-            | mnu_abi::FILE_HANDLE_RIGHT_STAT
-            | mnu_abi::FILE_HANDLE_RIGHT_TRANSFER
-            | mochi_user_syscall::IPC_FILE_HANDLE_FLAG_FRESH_OFFSET,
+    handles.handles[0] = crate::ipc::IpcObjectHandle {
+        handle,
+        reserved: 0,
+        rights,
     };
-    let received = (crate::ipc::call_handles(service()?, &request[..length], reply, &handles)?
-        & 0xffff_ffff) as usize;
+    let endpoint = u32::try_from(service()?).map_err(|_| invalid())?;
+    let received =
+        (crate::ipc::call_object_handles(endpoint, &request[..length], reply, &mut handles)?
+            & 0xffff_ffff) as usize;
     let message =
         protocol::decode(reply.get(..received).ok_or_else(invalid)?).map_err(|_| invalid())?;
     if message.request_id != id {
@@ -591,29 +591,17 @@ pub fn association_handlers(
     Ok(handlers)
 }
 
-pub fn open_document(path: &str, content_type: &str, roles: u16) -> SysResult<u64> {
-    open_document_with(path, content_type, "", roles)
-}
-
-pub fn open_document_with(
+pub fn open_document_object_with(
     path: &str,
     content_type: &str,
     bundle_id: &str,
     roles: u16,
+    handle: crate::handle::Handle,
+    rights: u64,
 ) -> SysResult<u64> {
-    let fd = crate::file::open_path(path, 0)? as i32;
-    let result = open_document_handle_with(path, content_type, bundle_id, roles, fd);
-    let _ = crate::file::close(fd as u64);
-    result
-}
-
-pub fn open_document_handle_with(
-    path: &str,
-    content_type: &str,
-    bundle_id: &str,
-    roles: u16,
-    fd: i32,
-) -> SysResult<u64> {
+    let required_rights = crate::handle::HANDLE_RIGHT_READ
+        | crate::handle::HANDLE_RIGHT_SEEK
+        | crate::handle::HANDLE_RIGHT_TRANSFER;
     if path.is_empty()
         || path.len() > protocol::MAX_PATH_LEN
         || content_type.is_empty()
@@ -621,6 +609,8 @@ pub fn open_document_handle_with(
         || bundle_id.len() > protocol::MAX_BUNDLE_ID_LEN
         || roles == 0
         || roles & !protocol::ASSOCIATION_ROLE_ALL != 0
+        || handle == 0
+        || rights & required_rights != required_rights
     {
         return Err(invalid());
     }
@@ -633,11 +623,12 @@ pub fn open_document_handle_with(
     payload.extend_from_slice(content_type.as_bytes());
     payload.extend_from_slice(bundle_id.as_bytes());
     let mut reply = [0u8; protocol::HEADER_LEN + 24];
-    let (_, process_id) = status(call_with_handle(
+    let (_, process_id) = status(call_with_object_handle(
         protocol::OP_DOCUMENT_OPEN,
         &payload,
         &mut reply,
-        fd,
+        handle,
+        required_rights,
     )?)?;
     Ok(process_id)
 }
