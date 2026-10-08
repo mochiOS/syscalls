@@ -3602,9 +3602,18 @@ pub extern "C" fn setsid() -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn chroot(_path: *const c_char) -> c_int {
-    set_errno(ENOSYS);
-    -1
+pub extern "C" fn chroot(path: *const c_char) -> c_int {
+    if path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    let result = (|| {
+        let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+        let base = rename_posix_base(-2, path)?;
+        let client = posix_client().map_err(map_posix_client_error)?;
+        client.chroot_at(base, path).map_err(map_posix_client_error)
+    })();
+    result_with_errno(result.map(|_| 0), -1)
 }
 
 #[unsafe(no_mangle)]

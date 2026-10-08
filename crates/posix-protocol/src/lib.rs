@@ -160,6 +160,7 @@ pub const OP_SIGNAL_THREAD_REGISTER: u16 = 37;
 pub const OP_GROUPS_GET: u16 = 38;
 pub const OP_GROUPS_SET: u16 = 39;
 pub const OP_LINK_AT: u16 = 40;
+pub const OP_CHROOT_AT: u16 = 41;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;

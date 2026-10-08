@@ -150,6 +150,9 @@ pub const OPEN_AT_NOFOLLOW: u32 = 1 << 7;
 pub const OPEN_AT_BASE_ATTACHED: u32 = 1 << 8;
 pub const OPEN_AT_ROOT_ATTACHED: u32 = 1 << 9;
 pub const OPEN_AT_NONBLOCK: u32 = 1 << 10;
+/// Opens a directory for pathname traversal after checking search permission.
+/// This is an internal filesystem-service operation, not a POSIX `open` flag.
+pub const OPEN_AT_SEARCH: u32 = 1 << 11;
 pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
     | OPEN_AT_WRITE
     | OPEN_AT_CREATE
@@ -160,7 +163,8 @@ pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
     | OPEN_AT_NOFOLLOW
     | OPEN_AT_BASE_ATTACHED
     | OPEN_AT_ROOT_ATTACHED
-    | OPEN_AT_NONBLOCK;
+    | OPEN_AT_NONBLOCK
+    | OPEN_AT_SEARCH;
 
 pub const STAT_AT_NOFOLLOW: u32 = 1 << 0;
 pub const STAT_AT_BASE_ATTACHED: u32 = 1 << 1;
