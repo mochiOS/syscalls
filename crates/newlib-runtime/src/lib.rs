@@ -2452,7 +2452,7 @@ fn execve_with_launch_context(
 }
 
 #[inline(never)]
-fn clone_registered_process() -> Result<(u64, FdTable<FdObject>), c_int> {
+fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c_int> {
     // Finish endpoint initialization before cloning. Copying the once-cell in
     // its `initializing` state would leave the child waiting for a thread that
     // does not exist in the cloned process.
@@ -2465,7 +2465,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>), c_int> {
     let handle = syscall_errno(syscall::raw_syscall0(syscall::SyscallNumber::ProcessClone))?;
     drop(state);
     if handle == 0 {
-        return Ok((0, inherited_fds));
+        return Ok((0, inherited_fds, None));
     }
     let handle = match u32::try_from(handle) {
         Ok(handle) => handle,
@@ -2499,8 +2499,75 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>), c_int> {
             SPAWN_FAIL_EXIT_STATUS as u64,
         );
     }
-    let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, u64::from(handle));
-    result.map(|process_id| (process_id, inherited_fds))
+    match result {
+        Ok(process_id) => Ok((process_id, inherited_fds, Some(handle))),
+        Err(error) => {
+            close_object_handle(handle);
+            Err(error)
+        }
+    }
+}
+
+fn create_spawn_status_stream() -> Result<syscall::StreamPair, c_int> {
+    let mut pair = syscall::StreamPair::default();
+    syscall_errno(syscall::raw_syscall1(
+        syscall::SyscallNumber::StreamPairCreate,
+        (&mut pair as *mut syscall::StreamPair) as u64,
+    ))?;
+    Ok(pair)
+}
+
+fn report_spawn_error(handle: u32, errno_value: c_int) -> ! {
+    let packet = errno_value.to_ne_bytes();
+    let mut written = 0usize;
+    while written < packet.len() {
+        let result = syscall_errno(syscall::raw_syscall3(
+            syscall::SyscallNumber::HandleWrite,
+            u64::from(handle),
+            packet[written..].as_ptr() as u64,
+            (packet.len() - written) as u64,
+        ));
+        match result.and_then(|length| usize::try_from(length).map_err(|_| EIO)) {
+            Ok(0) | Err(_) => break,
+            Ok(length) => written += length,
+        }
+    }
+    close_object_handle(handle);
+    process_exit(SPAWN_FAIL_EXIT_STATUS)
+}
+
+fn read_spawn_status(handle: u32) -> Result<mochios_posix_client::spawn::ExecStatus, c_int> {
+    let mut packet = [0u8; mochios_posix_client::spawn::EXEC_ERROR_PACKET_LEN];
+    let mut length = 0usize;
+    loop {
+        let read = syscall_errno(syscall::raw_syscall3(
+            syscall::SyscallNumber::HandleRead,
+            u64::from(handle),
+            packet[length..].as_mut_ptr() as u64,
+            (packet.len() - length) as u64,
+        ))
+        .and_then(|read| usize::try_from(read).map_err(|_| EIO))?;
+        let end_of_stream = read == 0;
+        length += read;
+        match mochios_posix_client::spawn::decode_exec_status(&packet[..length], end_of_stream) {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {}
+            Err(_) => return Err(EIO),
+        }
+    }
+}
+
+fn finish_failed_spawn(process_id: u64, process_handle: u32) {
+    let mut status = syscall::ProcessStatus::default();
+    let _ = syscall_errno(syscall::raw_syscall3(
+        syscall::SyscallNumber::ProcessHandleWait,
+        u64::from(process_handle),
+        syscall::PROCESS_WAIT_INFINITE,
+        (&mut status as *mut syscall::ProcessStatus) as u64,
+    ));
+    if let Ok(client) = posix_client() {
+        let _ = client.wait_child(process_id as i64, 0);
+    }
 }
 
 fn read_spawn_attributes(attr: *const c_void) -> Result<Option<PosixSpawnAttr>, c_int> {
@@ -2980,7 +3047,12 @@ pub extern "C" fn pipe(fds: *mut c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn fork() -> c_int {
     result_with_errno(
-        clone_registered_process().and_then(|(pid, _)| c_int::try_from(pid).map_err(|_| EOVERFLOW)),
+        clone_registered_process().and_then(|(pid, _, process_handle)| {
+            if let Some(process_handle) = process_handle {
+                close_object_handle(process_handle);
+            }
+            c_int::try_from(pid).map_err(|_| EOVERFLOW)
+        }),
         -1,
     )
 }
@@ -6292,34 +6364,64 @@ pub extern "C" fn _posix_spawn(
         envp,
     };
 
-    let (child_pid, mut desired_fds) = match clone_registered_process() {
-        Ok(value) => value,
+    let status_stream = match create_spawn_status_stream() {
+        Ok(pair) => pair,
         Err(errno_value) => return errno_value,
     };
 
+    let (child_pid, mut desired_fds, process_handle) = match clone_registered_process() {
+        Ok(value) => value,
+        Err(errno_value) => {
+            close_object_handle(status_stream.read);
+            close_object_handle(status_stream.write);
+            return errno_value;
+        }
+    };
+
     if child_pid == 0 {
-        if apply_spawn_attributes(attributes).is_err() {
-            process_exit(SPAWN_FAIL_EXIT_STATUS);
+        close_object_handle(status_stream.read);
+        if let Err(errno_value) = apply_spawn_attributes(attributes) {
+            report_spawn_error(status_stream.write, errno_value);
         }
-        if apply_spawn_file_actions(&mut desired_fds, snapshot.file_actions).is_err() {
-            process_exit(SPAWN_FAIL_EXIT_STATUS);
-        }
-        if replace_process_image(
-            snapshot.path,
-            snapshot.argv,
-            snapshot.envp,
-            &desired_fds,
-        )
-        .is_err()
+        if let Err(errno_value) = apply_spawn_file_actions(&mut desired_fds, snapshot.file_actions)
         {
-            process_exit(SPAWN_FAIL_EXIT_STATUS);
+            report_spawn_error(status_stream.write, errno_value);
         }
-        process_exit(SPAWN_FAIL_EXIT_STATUS);
+        if let Err(errno_value) =
+            replace_process_image(snapshot.path, snapshot.argv, snapshot.envp, &desired_fds)
+        {
+            report_spawn_error(status_stream.write, errno_value);
+        }
+        report_spawn_error(status_stream.write, EIO);
     }
 
-    // Safety: pid points to writable storage supplied by the caller.
-    unsafe { *pid = child_pid as c_int };
-    0
+    close_object_handle(status_stream.write);
+    let process_handle = process_handle.expect("parent clone result must include process handle");
+    let status = read_spawn_status(status_stream.read);
+    close_object_handle(status_stream.read);
+    match status {
+        Ok(mochios_posix_client::spawn::ExecStatus::Succeeded) => {
+            close_object_handle(process_handle);
+            // Safety: pid points to writable storage supplied by the caller.
+            unsafe { *pid = child_pid as c_int };
+            0
+        }
+        Ok(mochios_posix_client::spawn::ExecStatus::Failed(errno_value)) => {
+            finish_failed_spawn(child_pid, process_handle);
+            close_object_handle(process_handle);
+            errno_value
+        }
+        Err(errno_value) => {
+            let _ = syscall::raw_syscall2(
+                syscall::SyscallNumber::ProcessHandleTerminate,
+                u64::from(process_handle),
+                SPAWN_FAIL_EXIT_STATUS as u64,
+            );
+            finish_failed_spawn(child_pid, process_handle);
+            close_object_handle(process_handle);
+            errno_value
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
