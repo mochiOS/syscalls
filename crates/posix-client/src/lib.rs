@@ -262,6 +262,17 @@ impl<T: Transport> Client<T> {
         protocol::decode_signal_mask(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    pub fn set_signal_child_options(
+        &self,
+        options: u32,
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut request = [0u8; protocol::SIGNAL_CHILD_OPTIONS_LEN];
+        protocol::encode_signal_child_options(options, &mut request)
+            .map_err(ClientError::Protocol)?;
+        self.request(protocol::OP_SIGNAL_CHILD_OPTIONS, 0, &request, &mut [])
+            .map(|_| ())
+    }
+
     /// Atomically removes the lowest-numbered pending signal that is not in
     /// `blocked`. Zero means that no signal is currently deliverable.
     pub fn dequeue_signal(&self, blocked: u64) -> Result<u32, ClientError<T::Error>> {

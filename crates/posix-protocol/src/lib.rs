@@ -175,6 +175,7 @@ pub const OP_TERMINAL_SET_FOREGROUND: u16 = 49;
 pub const OP_PROCESS_STOPPED: u16 = 50;
 pub const OP_SIGNAL_DELIVERY_COMPLETE: u16 = 51;
 pub const OP_PROCESS_SIGNALED: u16 = 52;
+pub const OP_SIGNAL_CHILD_OPTIONS: u16 = 53;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -211,6 +212,7 @@ pub const RESOURCE_LIMIT_LEN: usize = 16;
 pub const SIGNAL_SEND_REQUEST_LEN: usize = 16;
 pub const SIGNAL_MASK_LEN: usize = 8;
 pub const SIGNAL_DELIVERY_LEN: usize = 16;
+pub const SIGNAL_CHILD_OPTIONS_LEN: usize = 4;
 pub const TERMINAL_CONTROL_CHARACTERS: usize = 32;
 pub const TERMINAL_ATTRIBUTES_LEN: usize = 56;
 pub const TERMINAL_FLUSH_LEN: usize = 4;
@@ -284,6 +286,8 @@ pub const RLIMIT_AS: u32 = 9;
 pub const RLIMIT_COUNT: u32 = 10;
 
 pub const SIGNAL_MAX: u32 = 64;
+pub const SIGNAL_CHILD_OPTION_NOCLDSTOP: u32 = 1 << 0;
+pub const SIGNAL_CHILD_OPTIONS_ALL: u32 = SIGNAL_CHILD_OPTION_NOCLDSTOP;
 pub const SIGNAL_HUP: u32 = 1;
 pub const SIGNAL_INT: u32 = 2;
 pub const SIGNAL_QUIT: u32 = 3;
@@ -859,6 +863,28 @@ pub fn decode_signal_mask(input: &[u8]) -> Result<u64, ProtocolError> {
         return Err(ProtocolError::InvalidLength);
     }
     Ok(get_u64(input, 0))
+}
+
+pub fn encode_signal_child_options(
+    options: u32,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < SIGNAL_CHILD_OPTIONS_LEN || options & !SIGNAL_CHILD_OPTIONS_ALL != 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    put_u32(output, 0, options);
+    Ok(())
+}
+
+pub fn decode_signal_child_options(input: &[u8]) -> Result<u32, ProtocolError> {
+    if input.len() != SIGNAL_CHILD_OPTIONS_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let options = get_u32(input, 0);
+    if options & !SIGNAL_CHILD_OPTIONS_ALL != 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(options)
 }
 
 pub fn encode_signal_delivery(

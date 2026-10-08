@@ -51,6 +51,7 @@ const SEEK_CUR: c_int = 1;
 const WNOHANG: c_int = 1;
 const WUNTRACED: c_int = 2;
 const WCONTINUED: c_int = 8;
+const SA_NOCLDSTOP: c_int = 1;
 const SPAWN_FAIL_EXIT_STATUS: c_int = 127;
 const DIR_BUFFER_SIZE: usize = 4096;
 const DIRENT_NAME_MAX: usize = 256;
@@ -692,6 +693,7 @@ impl<T> RuntimeOnce<T> {
 unsafe impl<T: Send + Sync> Sync for RuntimeOnce<T> {}
 
 static STATE: RuntimeMutex<RuntimeState> = RuntimeMutex::new(RuntimeState::new());
+static SIGNAL_ACTION_UPDATE: RuntimeMutex<()> = RuntimeMutex::new(());
 static SIGNAL_ACTIONS: RuntimeMutex<[SignalAction; posix_protocol::SIGNAL_MAX as usize]> =
     RuntimeMutex::new([SignalAction::default_action(); posix_protocol::SIGNAL_MAX as usize]);
 static POSIX_CLIENT: RuntimeOnce<PosixClient<SyscallEndpointTransport>> = RuntimeOnce::new();
@@ -2984,6 +2986,12 @@ fn next_dirent(stream: &mut DirStream) -> Result<Option<NewlibDirent>, c_int> {
 pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
     let stack = unsafe { parse_stack(initial_sp) };
     unsafe { initialize_runtime(stack) };
+    if posix_client()
+        .and_then(|client| client.set_signal_child_options(0))
+        .is_err()
+    {
+        process_exit(127);
+    }
     let (_, initial_thread) = register_initial_thread().unwrap_or_else(|| process_exit(127));
     if setup_signal_delivery(initial_thread).is_err() {
         process_exit(127);
@@ -5082,13 +5090,47 @@ pub unsafe extern "C" fn sigaction(
         return -1;
     }
     let index = signal as usize - 1;
-    let mut actions = SIGNAL_ACTIONS.lock();
-    if !old_action.is_null() {
-        unsafe { old_action.write(actions[index]) };
+    if action.is_null() {
+        if !old_action.is_null() {
+            unsafe { old_action.write(SIGNAL_ACTIONS.lock()[index]) };
+        }
+        return 0;
     }
-    if !action.is_null() {
-        let mut replacement = unsafe { action.read() };
-        replacement.sa_mask = mochios_posix_client::signal::sanitize_mask(replacement.sa_mask);
+    let mut replacement = unsafe { action.read() };
+    if replacement.sa_flags & !SA_NOCLDSTOP != 0
+        || (replacement.sa_flags & SA_NOCLDSTOP != 0
+            && signal != posix_protocol::SIGNAL_CHLD as c_int)
+    {
+        set_errno(EINVAL);
+        return -1;
+    }
+    replacement.sa_mask = mochios_posix_client::signal::sanitize_mask(replacement.sa_mask);
+
+    let _update = SIGNAL_ACTION_UPDATE.lock();
+    let previous = SIGNAL_ACTIONS.lock()[index];
+    if signal == posix_protocol::SIGNAL_CHLD as c_int {
+        let options = if replacement.sa_flags & SA_NOCLDSTOP != 0 {
+            posix_protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP
+        } else {
+            0
+        };
+        if let Err(error) = posix_client()
+            .map_err(map_posix_client_error)
+            .and_then(|client| {
+                client
+                    .set_signal_child_options(options)
+                    .map_err(map_posix_client_error)
+            })
+        {
+            set_errno(error);
+            return -1;
+        }
+    }
+    if !old_action.is_null() {
+        unsafe { old_action.write(previous) };
+    }
+    {
+        let mut actions = SIGNAL_ACTIONS.lock();
         actions[index] = replacement;
     }
     0
