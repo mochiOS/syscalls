@@ -11,7 +11,7 @@ use mochi_user_syscall as syscall;
 use mochios_capability_protocol::{
     AUTHORIZE_EXEC_OPCODE, CAPABILITY_PERSISTENT_QUERY_OPCODE, CAPABILITY_PROMPT_OPCODE,
     CapabilityClass, CapabilityDecision, CapabilityExecutableIdentity, CapabilityPromptRequest,
-    CapabilityResourceDescriptor, MAX_CAPABILITY_NAME_LEN, MAX_REASON_LEN,
+    CapabilityResourceDescriptor, MAX_CAPABILITY_NAME_LEN, MAX_EXECUTABLE_PATH_LEN, MAX_REASON_LEN,
 };
 use mochios_filesystem_protocol as filesystem_protocol;
 use mochios_posix_client::fd::{
@@ -773,6 +773,7 @@ unsafe extern "C" {
     fn malloc(size: usize) -> *mut c_void;
     fn free(ptr: *mut c_void);
     fn memalign(alignment: usize, size: usize) -> *mut c_void;
+    fn getenv(name: *const c_char) -> *mut c_char;
 }
 
 #[panic_handler]
@@ -2329,12 +2330,46 @@ fn close_object_handle(handle: u32) {
     ));
 }
 
-fn authorize_exec_path(path: *const c_char) -> Result<(), c_int> {
-    let path_bytes = unsafe { c_bytes(path) };
-    if path_bytes.is_empty() || path_bytes[0] != b'/' {
+fn absolute_exec_identity(
+    path: &[u8],
+    output: &mut [u8; MAX_EXECUTABLE_PATH_LEN],
+) -> Result<usize, c_int> {
+    if path.is_empty() {
         return Err(ENOENT);
     }
-    if path_bytes.len() > 255 {
+    if path[0] == b'/' {
+        if path.len() >= output.len() {
+            return Err(ENAMETOOLONG);
+        }
+        output[..path.len()].copy_from_slice(path);
+        return Ok(path.len());
+    }
+    let client = posix_client().map_err(map_posix_client_error)?;
+    let mut cwd = [0u8; posix_protocol::MAX_PATH_LEN];
+    let cwd_length = client.getcwd(&mut cwd).map_err(map_posix_client_error)?;
+    let separator = usize::from(cwd_length != 1);
+    let length = cwd_length
+        .checked_add(separator)
+        .and_then(|length| length.checked_add(path.len()))
+        .ok_or(ENAMETOOLONG)?;
+    if length >= output.len() {
+        return Err(ENAMETOOLONG);
+    }
+    output[..cwd_length].copy_from_slice(&cwd[..cwd_length]);
+    let mut written = cwd_length;
+    if separator != 0 {
+        output[written] = b'/';
+        written += 1;
+    }
+    output[written..length].copy_from_slice(path);
+    Ok(length)
+}
+
+fn authorize_exec_path(path_bytes: &[u8]) -> Result<(), c_int> {
+    if path_bytes.is_empty() || path_bytes[0] != b'/' {
+        return Err(EINVAL);
+    }
+    if path_bytes.len() >= MAX_EXECUTABLE_PATH_LEN {
         return Err(ENAMETOOLONG);
     }
     let endpoint = syscall_errno(syscall::raw_syscall2(
@@ -2345,7 +2380,7 @@ fn authorize_exec_path(path: *const c_char) -> Result<(), c_int> {
     if endpoint == 0 {
         return Err(ENOENT);
     }
-    let mut request = [0u8; 260];
+    let mut request = [0u8; core::mem::size_of::<u32>() + MAX_EXECUTABLE_PATH_LEN];
     request[..4].copy_from_slice(&AUTHORIZE_EXEC_OPCODE.to_le_bytes());
     request[4..4 + path_bytes.len()].copy_from_slice(path_bytes);
     let request_len = 4 + path_bytes.len();
@@ -2377,6 +2412,9 @@ fn replace_process_image(
 ) -> Result<(), c_int> {
     let path_bytes = unsafe { c_bytes(path) };
     let path_text = core::str::from_utf8(path_bytes).map_err(|_| EINVAL)?;
+    let mut identity = [0u8; MAX_EXECUTABLE_PATH_LEN];
+    let identity_length = absolute_exec_identity(path_bytes, &mut identity)?;
+    let identity = &identity[..identity_length];
     let mut arguments = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
     let mut environment = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
     let mut argument_count = unsafe { read_exec_vector(argv, &mut arguments) }?;
@@ -2409,8 +2447,6 @@ fn replace_process_image(
         mochios_posix_client::process_image::EncodeError::Codec(_) => EIO,
     })?;
 
-    stage_fd_launch_context(fds)?;
-    authorize_exec_path(path)?;
     let client = posix_client().map_err(map_posix_client_error)?;
     let opened = client
         .open_at(
@@ -2429,11 +2465,19 @@ fn replace_process_image(
         close_object_handle(opened.handle);
         return Err(EACCES);
     }
+    if let Err(error) = authorize_exec_path(identity) {
+        close_object_handle(opened.handle);
+        return Err(error);
+    }
+    if let Err(error) = stage_fd_launch_context(fds) {
+        close_object_handle(opened.handle);
+        return Err(error);
+    }
     let result = syscall_errno(syscall::raw_syscall5(
         syscall::SyscallNumber::ProcessImageReplace,
         u64::from(opened.handle),
-        path_bytes.as_ptr() as u64,
-        path_bytes.len() as u64,
+        identity.as_ptr() as u64,
+        identity.len() as u64,
         startup_image.as_ptr() as u64,
         startup_length as u64,
     ))
@@ -5311,6 +5355,36 @@ pub extern "C" fn execve(
     _execve(path, argv, envp)
 }
 
+fn search_executable_path<T>(
+    file: &[u8],
+    mut execute: impl FnMut(*const c_char) -> Result<T, c_int>,
+) -> Result<T, c_int> {
+    const DEFAULT_PATH: &[u8] = b"/bin:/usr/bin";
+    const PATH_NAME: &[u8] = b"PATH\0";
+
+    if file.is_empty() {
+        return Err(ENOENT);
+    }
+    let path_pointer = unsafe { getenv(PATH_NAME.as_ptr().cast::<c_char>()) };
+    let path = if path_pointer.is_null() {
+        DEFAULT_PATH
+    } else {
+        unsafe { c_bytes(path_pointer.cast_const()) }
+    };
+    let mut candidate = [0u8; posix_protocol::MAX_PATH_LEN + 1];
+    mochios_posix_client::spawn::search_path(path, file, &mut candidate, |candidate| {
+        execute(candidate.as_ptr().cast::<c_char>())
+    })
+    .map_err(|error| match error {
+        mochios_posix_client::spawn::PathSearchFailure::Candidate(error) => match error {
+            mochios_posix_client::spawn::PathCandidateError::EmptyFile => ENOENT,
+            mochios_posix_client::spawn::PathCandidateError::ContainsNul => EINVAL,
+            mochios_posix_client::spawn::PathCandidateError::TooLong => ENAMETOOLONG,
+        },
+        mochios_posix_client::spawn::PathSearchFailure::Errno(errno) => errno,
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn execvp(file: *const c_char, argv: *const *mut c_char) -> c_int {
     if file.is_null() {
@@ -5324,27 +5398,10 @@ pub extern "C" fn execvp(file: *const c_char, argv: *const *mut c_char) -> c_int
     if name.iter().any(|byte| *byte == b'/') {
         return result_with_errno(execve_with_launch_context(file, argv, envp).map(|()| 0), -1);
     }
-
-    let direct = execve_with_launch_context(file, argv, envp);
-    if !matches!(direct, Err(errno) if errno == ENOENT) {
-        return result_with_errno(direct.map(|()| 0), -1);
-    }
-
-    const BIN_PREFIX: &[u8] = b"/bin/";
-    let total_len = BIN_PREFIX
-        .len()
-        .saturating_add(name.len())
-        .saturating_add(1);
-    if total_len > 256 {
-        set_errno(ENAMETOOLONG);
-        return -1;
-    }
-    let mut path = [0u8; 256];
-    path[..BIN_PREFIX.len()].copy_from_slice(BIN_PREFIX);
-    path[BIN_PREFIX.len()..BIN_PREFIX.len() + name.len()].copy_from_slice(name);
-
     result_with_errno(
-        execve_with_launch_context(path.as_ptr().cast::<c_char>(), argv, envp).map(|()| 0),
+        search_executable_path(name, |candidate| {
+            execve_with_launch_context(candidate, argv, envp).map(|()| 0)
+        }),
         -1,
     )
 }
@@ -6449,10 +6506,18 @@ pub extern "C" fn _posix_spawnp(
         return EFAULT;
     }
     let file_bytes = unsafe { c_bytes(file) };
-    if !file_bytes.contains(&b'/') {
-        return ENOSYS;
+    if file_bytes.contains(&b'/') {
+        return _posix_spawn(pid, file, file_actions, attrp, argv, envp);
     }
-    _posix_spawn(pid, file, file_actions, attrp, argv, envp)
+    match search_executable_path(file_bytes, |candidate| {
+        match _posix_spawn(pid, candidate, file_actions, attrp, argv, envp) {
+            0 => Ok(()),
+            errno_value => Err(errno_value),
+        }
+    }) {
+        Ok(()) => 0,
+        Err(errno_value) => errno_value,
+    }
 }
 
 #[unsafe(no_mangle)]
