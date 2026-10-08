@@ -274,6 +274,13 @@ struct NewlibTimespec {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct NewlibRlimit {
+    rlim_cur: u64,
+    rlim_max: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct NewlibStat {
     st_dev: u16,
     st_ino: u16,
@@ -3194,6 +3201,95 @@ pub extern "C" fn sysconf(name: c_int) -> CLong {
         SC_GETPW_R_SIZE_MAX | SC_HOST_NAME_MAX => 256,
         _ => {
             set_errno(EINVAL);
+            -1
+        }
+    }
+}
+
+fn resource_limit_impl(
+    process_id: c_int,
+    resource: c_int,
+    replacement: Option<NewlibRlimit>,
+) -> Result<NewlibRlimit, c_int> {
+    if resource < 0 {
+        return Err(EINVAL);
+    }
+    posix_client()
+        .map_err(map_posix_client_error)?
+        .resource_limit(
+            process_id as i64,
+            resource as u32,
+            replacement.map(|limit| posix_protocol::ResourceLimit {
+                soft: limit.rlim_cur,
+                hard: limit.rlim_max,
+            }),
+        )
+        .map(|limit| NewlibRlimit {
+            rlim_cur: limit.soft,
+            rlim_max: limit.hard,
+        })
+        .map_err(map_posix_client_error)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getrlimit(resource: c_int, limit: *mut NewlibRlimit) -> c_int {
+    if limit.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    match resource_limit_impl(0, resource, None) {
+        Ok(value) => {
+            // Safety: the caller supplied a non-null writable C output pointer.
+            unsafe { ptr::write(limit, value) };
+            0
+        }
+        Err(error) => {
+            set_errno(error);
+            -1
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setrlimit(
+    resource: c_int,
+    limit: *const NewlibRlimit,
+) -> c_int {
+    if limit.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    // Safety: the caller supplied a non-null readable C input pointer.
+    let replacement = unsafe { ptr::read(limit) };
+    result_with_errno(
+        resource_limit_impl(0, resource, Some(replacement)).map(|_| 0),
+        -1,
+    )
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn prlimit(
+    process_id: c_int,
+    resource: c_int,
+    new_limit: *const NewlibRlimit,
+    old_limit: *mut NewlibRlimit,
+) -> c_int {
+    let replacement = if new_limit.is_null() {
+        None
+    } else {
+        // Safety: the caller supplied a non-null readable C input pointer.
+        Some(unsafe { ptr::read(new_limit) })
+    };
+    match resource_limit_impl(process_id, resource, replacement) {
+        Ok(previous) => {
+            if !old_limit.is_null() {
+                // Safety: the caller supplied a non-null writable C output pointer.
+                unsafe { ptr::write(old_limit, previous) };
+            }
+            0
+        }
+        Err(error) => {
+            set_errno(error);
             -1
         }
     }
