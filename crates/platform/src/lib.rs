@@ -28,22 +28,19 @@ use runtime as runtime_support;
 mod runtime_support {
     use super::syscall;
 
-    pub fn write_all(fd: u64, mut bytes: &[u8]) -> syscall::SysResult<()> {
-        while !bytes.is_empty() {
-            let wrote = syscall::call3(
-                syscall::SyscallNumber::Write,
-                fd,
+    pub fn write_all(fd: u64, bytes: &[u8]) -> syscall::SysResult<()> {
+        if fd != 1 && fd != 2 {
+            return Err(syscall::SysError::from_raw(syscall::EBADF as i64));
+        }
+        if !bytes.is_empty() {
+            let wrote = syscall::call2(
+                syscall::SyscallNumber::DebugWrite,
                 bytes.as_ptr() as u64,
                 bytes.len() as u64,
             )?;
-            if wrote == 0 {
-                return Err(syscall::SysError::from_raw(syscall::EPIPE as i64));
-            }
-            let consumed = wrote as usize;
-            if consumed > bytes.len() {
+            if wrote != bytes.len() as u64 {
                 return Err(syscall::SysError::from_raw(syscall::EIO as i64));
             }
-            bytes = &bytes[consumed..];
         }
         Ok(())
     }

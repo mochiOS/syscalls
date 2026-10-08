@@ -2427,36 +2427,44 @@ fn allocate_fd_entry(
 }
 
 fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result<isize, c_int> {
-    let number = match entry.kind {
-        FdKind::Stdout | FdKind::Stderr => syscall::SyscallNumber::Write,
-        FdKind::ObjectFile | FdKind::ObjectStreamWrite => syscall::SyscallNumber::HandleWrite,
+    if length == 0 {
+        return Ok(0);
+    }
+    let written = match entry.kind {
+        FdKind::Stdout | FdKind::Stderr => syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::DebugWrite,
+            buffer as u64,
+            length as u64,
+        ))?,
+        FdKind::ObjectFile | FdKind::ObjectStreamWrite => syscall_errno(syscall::raw_syscall3(
+            syscall::SyscallNumber::HandleWrite,
+            entry.lower_handle,
+            buffer as u64,
+            length as u64,
+        ))?,
         FdKind::ObjectStreamRead => return Err(EBADF),
         FdKind::ObjectDirectory => return Err(EISDIR),
         _ => return Err(EBADF),
     };
-    let written = syscall_errno(syscall::raw_syscall3(
-        number,
-        entry.lower_handle,
-        buffer as u64,
-        length as u64,
-    ))?;
     Ok(written as isize)
 }
 
 fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<isize, c_int> {
-    let number = match entry.kind {
-        FdKind::Stdin => syscall::SyscallNumber::Read,
-        FdKind::ObjectFile | FdKind::ObjectStreamRead => syscall::SyscallNumber::HandleRead,
+    if length == 0 {
+        return Ok(0);
+    }
+    let read = match entry.kind {
+        FdKind::Stdin => return Err(EBADF),
+        FdKind::ObjectFile | FdKind::ObjectStreamRead => syscall_errno(syscall::raw_syscall3(
+            syscall::SyscallNumber::HandleRead,
+            entry.lower_handle,
+            buffer as u64,
+            length as u64,
+        ))?,
         FdKind::ObjectStreamWrite => return Err(EBADF),
         FdKind::ObjectDirectory => return Err(EISDIR),
         _ => return Err(EBADF),
     };
-    let read = syscall_errno(syscall::raw_syscall3(
-        number,
-        entry.lower_handle,
-        buffer as u64,
-        length as u64,
-    ))?;
     Ok(read as isize)
 }
 
