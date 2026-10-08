@@ -114,11 +114,15 @@ cargo "${cargo_args[@]}" build -Z json-target-spec -Z build-std=core,alloc,compi
     --target-dir "$TARGET_DIR" "${patch_args[@]}"
 x86_64-elf-gcc -c "$USER_ROOT/runtime/crt0.S" -o "$OUT_ROOT/hello/crt0.o"
 install -C -m 0644 "$OUT_ROOT/hello/crt0.o" "$SDK/lib/crt0.o"
-install -C -m 0644 "$TARGET_DIR/x86_64-unknown-mochios/release/libmochi_user_newlib_runtime.a" "$SDK/lib/libmochi_user_newlib_runtime.a"
+# Compose the complete archive outside the SDK. Publishing unchanged bytes
+# must not trigger every Rust std consumer to relink again.
+RUNTIME_ARCHIVE="$OUT_ROOT/hello/libmochi_user_newlib_runtime.a"
+install -C -m 0644 "$TARGET_DIR/x86_64-unknown-mochios/release/libmochi_user_newlib_runtime.a" "$RUNTIME_ARCHIVE"
 x86_64-elf-gcc --sysroot="$SYSROOT" -isystem "$SYSROOT/include" -D__mochios__ -ffreestanding \
     -c "$USER_ROOT/runtime/newlib_reent.c" -o "$OUT_ROOT/hello/newlib_reent.o"
-x86_64-elf-ar r "$SDK/lib/libmochi_user_newlib_runtime.a" "$OUT_ROOT/hello/newlib_reent.o"
-x86_64-elf-ranlib "$SDK/lib/libmochi_user_newlib_runtime.a"
+x86_64-elf-ar r "$RUNTIME_ARCHIVE" "$OUT_ROOT/hello/newlib_reent.o"
+x86_64-elf-ranlib "$RUNTIME_ARCHIVE"
+install -C -m 0644 "$RUNTIME_ARCHIVE" "$SDK/lib/libmochi_user_newlib_runtime.a"
 install -C -m 0644 "$USER_ROOT/runtime/linker.ld" "$SDK/lib/linker.ld"
 install -C -m 0644 "$USER_ROOT/targets/x86_64-unknown-mochios.json" "$SDK/share/x86_64-unknown-mochios.json"
 install -C -m 0755 "$USER_ROOT/scripts/mochios-cc" "$SDK/bin/mochios-cc"
