@@ -2759,6 +2759,20 @@ fn terminal_control(
     usize::try_from(length).map_err(|_| EOVERFLOW)
 }
 
+fn terminal_attachment(fd: c_int) -> Result<ObjectHandleAttachment<u32>, c_int> {
+    let entry = with_fd_entry(fd)?;
+    if entry.handle.kind != FdKind::ObjectPty {
+        return Err(ENOTTY);
+    }
+    if entry.rights & syscall::HANDLE_RIGHT_TRANSFER == 0 {
+        return Err(EACCES);
+    }
+    Ok(ObjectHandleAttachment {
+        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+        rights: syscall::HANDLE_RIGHT_TRANSFER,
+    })
+}
+
 fn set_terminal_attributes(
     entry: FdEntry,
     action: c_int,
@@ -4569,6 +4583,63 @@ pub extern "C" fn tcflush(fd: c_int, queue_selector: c_int) -> c_int {
             0 => Ok(0),
             _ => Err(EIO),
         }
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tcgetpgrp(fd: c_int) -> c_int {
+    let result = (|| {
+        let terminal = terminal_attachment(fd)?;
+        let group = posix_client()
+            .map_err(map_posix_client_error)?
+            .terminal_foreground_process_group(terminal)
+            .map_err(map_posix_client_error)?;
+        c_int::try_from(group).map_err(|_| EOVERFLOW)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tcsetpgrp(fd: c_int, process_group: c_int) -> c_int {
+    if process_group <= 0 {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let result = (|| {
+        let terminal = terminal_attachment(fd)?;
+        posix_client()
+            .map_err(map_posix_client_error)?
+            .set_terminal_foreground_process_group(terminal, process_group as u64)
+            .map_err(map_posix_client_error)?;
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn login_tty(fd: c_int) -> c_int {
+    let result = (|| {
+        let terminal = terminal_attachment(fd)?;
+        posix_client()
+            .map_err(map_posix_client_error)?
+            .create_session()
+            .map_err(map_posix_client_error)?;
+        let client = posix_client().map_err(map_posix_client_error)?;
+        client
+            .acquire_controlling_terminal(terminal)
+            .map_err(map_posix_client_error)?;
+        for target in 0..=2 {
+            if fd != target && dup2(fd, target) < 0 {
+                let errno = unsafe { *__errno() };
+                let _ = client.release_controlling_terminal(terminal);
+                return Err(errno);
+            }
+        }
+        if fd > 2 && close(fd) < 0 {
+            return Err(unsafe { *__errno() });
+        }
+        Ok(0)
     })();
     result_with_errno(result, -1)
 }

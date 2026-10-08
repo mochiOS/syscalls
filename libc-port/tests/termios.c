@@ -18,5 +18,8 @@ int main(void) {
     (void)tcsetattr(-1, TCSANOW, &attributes);
     (void)tcdrain(-1);
     (void)tcflush(-1, TCIOFLUSH);
+    (void)tcgetpgrp(-1);
+    (void)tcsetpgrp(-1, 1);
+    (void)login_tty(-1);
     return openpty(0, 0, 0, &attributes, 0) == 0;
 }

@@ -2,6 +2,7 @@
 #define _SYS_TERMIOS_H_
 
 #include <sys/cdefs.h>
+#include <sys/types.h>
 
 typedef unsigned char cc_t;
 typedef unsigned int speed_t;
@@ -104,6 +105,8 @@ int tcgetattr(int, struct termios *);
 int tcsetattr(int, int, const struct termios *);
 int tcdrain(int);
 int tcflush(int, int);
+pid_t tcgetpgrp(int);
+int tcsetpgrp(int, pid_t);
 speed_t cfgetispeed(const struct termios *);
 speed_t cfgetospeed(const struct termios *);
 int cfsetispeed(struct termios *, speed_t);

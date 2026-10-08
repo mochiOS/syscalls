@@ -171,7 +171,7 @@ impl<T: Transport> Client<T> {
     ) -> Result<protocol::WaitResult, ClientError<T::Error>> {
         let mut request = [0u8; protocol::WAIT_REQUEST_LEN];
         protocol::encode_wait_request(protocol::WaitRequest { selector, options }, &mut request)
-        .map_err(ClientError::Protocol)?;
+            .map_err(ClientError::Protocol)?;
         let mut response = [0u8; protocol::WAIT_RESULT_LEN];
         let length = self.request(protocol::OP_WAIT_CHILD, 0, &request, &mut response)?;
         protocol::decode_wait_result(&response[..length]).map_err(ClientError::Protocol)
@@ -391,6 +391,80 @@ impl<T: ObjectTransport> Client<T> {
         })
     }
 
+    pub fn acquire_controlling_terminal(
+        &self,
+        terminal: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.terminal_request(protocol::OP_TERMINAL_ACQUIRE, &[], terminal, &mut [])
+            .map(|_| ())
+    }
+
+    pub fn release_controlling_terminal(
+        &self,
+        terminal: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.terminal_request(protocol::OP_TERMINAL_RELEASE, &[], terminal, &mut [])
+            .map(|_| ())
+    }
+
+    pub fn terminal_foreground_process_group(
+        &self,
+        terminal: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<u64, ClientError<T::Error>> {
+        let mut response = [0u8; protocol::PROCESS_ID_REQUEST_LEN];
+        let length = self.terminal_request(
+            protocol::OP_TERMINAL_GET_FOREGROUND,
+            &[],
+            terminal,
+            &mut response,
+        )?;
+        let group = protocol::decode_process_id_request(&response[..length])
+            .map_err(ClientError::Protocol)?;
+        u64::try_from(group)
+            .ok()
+            .filter(|group| *group != 0)
+            .ok_or(ClientError::MismatchedResponse)
+    }
+
+    pub fn set_terminal_foreground_process_group(
+        &self,
+        terminal: ObjectHandleAttachment<T::Handle>,
+        process_group: u64,
+    ) -> Result<(), ClientError<T::Error>> {
+        let process_group = i64::try_from(process_group)
+            .ok()
+            .filter(|group| *group != 0)
+            .ok_or(ClientError::RequestTooLarge)?;
+        let mut payload = [0u8; protocol::PROCESS_ID_REQUEST_LEN];
+        protocol::encode_process_id_request(process_group, &mut payload)
+            .map_err(ClientError::Protocol)?;
+        self.terminal_request(
+            protocol::OP_TERMINAL_SET_FOREGROUND,
+            &payload,
+            terminal,
+            &mut [],
+        )
+        .map(|_| ())
+    }
+
+    fn terminal_request(
+        &self,
+        opcode: u16,
+        payload: &[u8],
+        terminal: ObjectHandleAttachment<T::Handle>,
+        response: &mut [u8],
+    ) -> Result<usize, ClientError<T::Error>> {
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(terminal)
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        let length = self.request_with_handles(opcode, 0, payload, response, &mut handles)?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(length)
+    }
+
     pub fn register_signal_thread(
         &self,
         thread: ObjectHandleAttachment<T::Handle>,
@@ -485,7 +559,7 @@ impl<T: ObjectTransport> Client<T> {
         let mut payload = [0u8; protocol::STAT_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
         let payload_len =
             protocol::encode_stat_at(protocol::StatAtRequest { base, flags, path }, &mut payload)
-        .map_err(ClientError::Protocol)?;
+                .map_err(ClientError::Protocol)?;
         let mut handles = ObjectHandles::new();
         if let Some(directory) = directory {
             handles

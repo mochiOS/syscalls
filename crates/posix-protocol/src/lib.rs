@@ -168,6 +168,10 @@ pub const OP_SET_EFFECTIVE_UID: u16 = 42;
 pub const OP_SET_EFFECTIVE_GID: u16 = 43;
 pub const OP_RESET_EFFECTIVE_IDS: u16 = 44;
 pub const OP_PTY_OPEN: u16 = 45;
+pub const OP_TERMINAL_ACQUIRE: u16 = 46;
+pub const OP_TERMINAL_RELEASE: u16 = 47;
+pub const OP_TERMINAL_GET_FOREGROUND: u16 = 48;
+pub const OP_TERMINAL_SET_FOREGROUND: u16 = 49;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -176,6 +180,7 @@ pub const STATUS_ENOENT: i32 = -2;
 pub const STATUS_ESRCH: i32 = -3;
 pub const STATUS_ECHILD: i32 = -10;
 pub const STATUS_EAGAIN: i32 = -11;
+pub const STATUS_ENOTTY: i32 = -25;
 pub const STATUS_ENOSYS: i32 = -38;
 
 pub const SESSION_INFO_LEN: usize = 20;
