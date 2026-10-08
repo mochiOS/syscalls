@@ -2,6 +2,8 @@
 
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_void};
+use core::mem::MaybeUninit;
+use core::ops::{Deref, DerefMut};
 use core::ptr;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -171,6 +173,10 @@ struct FileActionsSlot {
     value: PosixSpawnFileActions,
 }
 
+// Safety: pointers in a live slot refer to memory in this process. Pool
+// allocation and reclamation are serialized by `FILE_ACTIONS_POOL`.
+unsafe impl Send for FileActionsSlot {}
+
 impl FileActionsSlot {
     const fn new() -> Self {
         Self {
@@ -190,6 +196,10 @@ struct FileActionEntrySlot {
     in_use: bool,
     value: PosixSpawnFileActionsEntry,
 }
+
+// Safety: pointers in a live slot refer to memory in this process. Pool
+// allocation and reclamation are serialized by `FILE_ACTION_ENTRIES_POOL`.
+unsafe impl Send for FileActionEntrySlot {}
 
 impl FileActionEntrySlot {
     const fn new() -> Self {
@@ -374,6 +384,10 @@ struct RuntimeState {
     heap: HeapState,
 }
 
+// Safety: raw argv/envp pointers refer to process-wide address-space data.
+// Mutable runtime fields are only accessed while `STATE` is locked.
+unsafe impl Send for RuntimeState {}
+
 impl RuntimeState {
     const fn new() -> Self {
         Self {
@@ -386,35 +400,109 @@ impl RuntimeState {
     }
 }
 
-struct SingleThreadCell<T> {
-    inner: UnsafeCell<T>,
+struct RuntimeMutex<T> {
+    state: AtomicU32,
+    value: UnsafeCell<T>,
 }
 
-impl<T> SingleThreadCell<T> {
+impl<T> RuntimeMutex<T> {
     const fn new(value: T) -> Self {
         Self {
-            inner: UnsafeCell::new(value),
+            state: AtomicU32::new(0),
+            value: UnsafeCell::new(value),
         }
     }
 
-    unsafe fn get(&self) -> *mut T {
-        self.inner.get()
+    fn lock(&self) -> RuntimeMutexGuard<'_, T> {
+        native_mutex_acquire(&self.state);
+        RuntimeMutexGuard { mutex: self }
     }
 }
 
-// Safety: the runtime is intentionally single-threaded for this bootstrap port.
-unsafe impl<T> Sync for SingleThreadCell<T> {}
+// Safety: access to `value` is serialized by the native address-wait mutex.
+unsafe impl<T: Send> Sync for RuntimeMutex<T> {}
 
-static STATE: SingleThreadCell<RuntimeState> = SingleThreadCell::new(RuntimeState::new());
-static POSIX_CLIENT: SingleThreadCell<Option<PosixClient<SyscallEndpointTransport>>> =
-    SingleThreadCell::new(None);
-static FILE_ACTIONS_POOL: SingleThreadCell<[FileActionsSlot; MAX_SPAWN_FILE_ACTIONS]> =
-    SingleThreadCell::new([FileActionsSlot::new(); MAX_SPAWN_FILE_ACTIONS]);
-static FILE_ACTION_ENTRIES_POOL: SingleThreadCell<
+struct RuntimeMutexGuard<'a, T> {
+    mutex: &'a RuntimeMutex<T>,
+}
+
+impl<T> Deref for RuntimeMutexGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &*self.mutex.value.get() }
+    }
+}
+
+impl<T> DerefMut for RuntimeMutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *self.mutex.value.get() }
+    }
+}
+
+impl<T> Drop for RuntimeMutexGuard<'_, T> {
+    fn drop(&mut self) {
+        native_mutex_release(&self.mutex.state);
+    }
+}
+
+struct RuntimeOnce<T> {
+    state: AtomicU32,
+    value: UnsafeCell<MaybeUninit<T>>,
+}
+
+impl<T> RuntimeOnce<T> {
+    const fn new() -> Self {
+        Self {
+            state: AtomicU32::new(0),
+            value: UnsafeCell::new(MaybeUninit::uninit()),
+        }
+    }
+
+    fn get_or_try_init<E>(&self, initialize: impl FnOnce() -> Result<T, E>) -> Result<&T, E> {
+        if self.state.load(Ordering::Acquire) == 2 {
+            return Ok(unsafe { (&*self.value.get()).assume_init_ref() });
+        }
+        if self
+            .state
+            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            match initialize() {
+                Ok(value) => {
+                    unsafe { (*self.value.get()).write(value) };
+                    self.state.store(2, Ordering::Release);
+                    native_mutex_wake_all(&self.state);
+                    return Ok(unsafe { (&*self.value.get()).assume_init_ref() });
+                }
+                Err(error) => {
+                    self.state.store(0, Ordering::Release);
+                    native_mutex_wake_all(&self.state);
+                    return Err(error);
+                }
+            }
+        }
+        loop {
+            match self.state.load(Ordering::Acquire) {
+                2 => return Ok(unsafe { (&*self.value.get()).assume_init_ref() }),
+                0 => return self.get_or_try_init(initialize),
+                1 => native_mutex_wait(&self.state, 1),
+                _ => process_exit(127),
+            }
+        }
+    }
+}
+
+// Safety: initialization is serialized and the value is immutable afterward.
+unsafe impl<T: Send + Sync> Sync for RuntimeOnce<T> {}
+
+static STATE: RuntimeMutex<RuntimeState> = RuntimeMutex::new(RuntimeState::new());
+static POSIX_CLIENT: RuntimeOnce<PosixClient<SyscallEndpointTransport>> = RuntimeOnce::new();
+static FILE_ACTIONS_POOL: RuntimeMutex<[FileActionsSlot; MAX_SPAWN_FILE_ACTIONS]> =
+    RuntimeMutex::new([FileActionsSlot::new(); MAX_SPAWN_FILE_ACTIONS]);
+static FILE_ACTION_ENTRIES_POOL: RuntimeMutex<
     [FileActionEntrySlot; MAX_SPAWN_FILE_ACTION_ENTRIES],
-> = SingleThreadCell::new([FileActionEntrySlot::new(); MAX_SPAWN_FILE_ACTION_ENTRIES]);
-static SPAWN_SNAPSHOT: SingleThreadCell<SpawnSnapshot> =
-    SingleThreadCell::new(SpawnSnapshot::empty());
+> = RuntimeMutex::new([FileActionEntrySlot::new(); MAX_SPAWN_FILE_ACTION_ENTRIES]);
 
 macro_rules! static_newlib_lock {
     ($name:ident) => {
@@ -492,17 +580,6 @@ struct SpawnSnapshot {
     envp: *const *const c_char,
 }
 
-impl SpawnSnapshot {
-    const fn empty() -> Self {
-        Self {
-            path: ptr::null(),
-            file_actions: ptr::null(),
-            argv: ptr::null(),
-            envp: ptr::null(),
-        }
-    }
-}
-
 unsafe extern "C" {
     static __preinit_array_start: InitFn;
     static __preinit_array_end: InitFn;
@@ -546,21 +623,13 @@ fn align_down(value: usize, align: usize) -> usize {
     value & !(align - 1)
 }
 
-unsafe fn state_mut() -> &'static mut RuntimeState {
-    // Safety: all accesses are serialized by the single-thread bootstrap model.
-    unsafe { &mut *STATE.get() }
+fn state() -> RuntimeMutexGuard<'static, RuntimeState> {
+    STATE.lock()
 }
 
 fn posix_client(
 ) -> Result<&'static PosixClient<SyscallEndpointTransport>, PosixClientError<syscall::SysError>> {
-    // Safety: the bootstrap runtime currently serializes all libc entry points.
-    // The client itself only needs shared access after its one-time initialization.
-    let slot = unsafe { POSIX_CLIENT.get() };
-    if unsafe { (*slot).is_none() } {
-        let client = PosixClient::from_syscall_launch_context()?;
-        unsafe { slot.write(Some(client)) };
-    }
-    Ok(unsafe { (*slot).as_ref().expect("POSIX client initialized") })
+    POSIX_CLIENT.get_or_try_init(PosixClient::from_syscall_launch_context)
 }
 
 fn native_process_id() -> Result<u64, syscall::SysError> {
@@ -583,6 +652,61 @@ fn native_thread_id() -> Result<u64, syscall::SysError> {
         core::mem::size_of::<syscall::ThreadSecurityContext>() as u64,
     )?;
     Ok(context.thread_id)
+}
+
+fn native_mutex_wait(state: &AtomicU32, expected: u32) {
+    if mochios_posix_client::synchronization::wait_u32(
+        state,
+        expected,
+        syscall::ADDRESS_WAIT_INFINITE,
+    )
+    .is_err()
+    {
+        process_exit(127);
+    }
+}
+
+fn native_mutex_wake_one(state: &AtomicU32) {
+    if mochios_posix_client::synchronization::wake_u32(state, 1).is_err() {
+        process_exit(127);
+    }
+}
+
+fn native_mutex_wake_all(state: &AtomicU32) {
+    if mochios_posix_client::synchronization::wake_u32(state, usize::MAX).is_err() {
+        process_exit(127);
+    }
+}
+
+fn native_mutex_acquire(state: &AtomicU32) {
+    if state
+        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
+        return;
+    }
+    loop {
+        if state.swap(2, Ordering::Acquire) == 0 {
+            return;
+        }
+        native_mutex_wait(state, 2);
+    }
+}
+
+fn native_mutex_try_acquire(state: &AtomicU32) -> bool {
+    state
+        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+}
+
+fn native_mutex_release(state: &AtomicU32) {
+    let previous = state.swap(0, Ordering::Release);
+    if previous == 0 {
+        process_exit(127);
+    }
+    if previous == 2 {
+        native_mutex_wake_one(state);
+    }
 }
 
 fn set_errno(value: c_int) {
@@ -1325,7 +1449,7 @@ extern "C" fn run_fini_array() {
 }
 
 unsafe fn initialize_runtime(stack: StackView) {
-    let state = unsafe { state_mut() };
+    let mut state = state();
     if state.initialized {
         return;
     }
@@ -1350,6 +1474,7 @@ unsafe fn initialize_runtime(stack: StackView) {
         maximum_end: stack_limit,
         page_size: PAGE_SIZE,
     };
+    drop(state);
 
     unsafe {
         environ = stack.envp;
@@ -1368,8 +1493,7 @@ unsafe fn init_file_actions_list(value: *mut PosixSpawnFileActions) {
 }
 
 unsafe fn allocate_file_actions_object() -> Result<*mut PosixSpawnFileActions, c_int> {
-    // Safety: bootstrap runtime is single-threaded, so pool mutation is serialized.
-    let pool = unsafe { &mut *FILE_ACTIONS_POOL.get() };
+    let mut pool = FILE_ACTIONS_POOL.lock();
     for slot in pool.iter_mut() {
         if !slot.in_use {
             slot.in_use = true;
@@ -1382,8 +1506,7 @@ unsafe fn allocate_file_actions_object() -> Result<*mut PosixSpawnFileActions, c
 }
 
 unsafe fn release_file_actions_object(target: *mut PosixSpawnFileActions) {
-    // Safety: bootstrap runtime is single-threaded, so pool mutation is serialized.
-    let pool = unsafe { &mut *FILE_ACTIONS_POOL.get() };
+    let mut pool = FILE_ACTIONS_POOL.lock();
     for slot in pool.iter_mut() {
         let slot_ptr = ptr::addr_of_mut!(slot.value);
         if slot_ptr == target {
@@ -1395,8 +1518,7 @@ unsafe fn release_file_actions_object(target: *mut PosixSpawnFileActions) {
 }
 
 unsafe fn allocate_file_action_entry() -> Result<*mut PosixSpawnFileActionsEntry, c_int> {
-    // Safety: bootstrap runtime is single-threaded, so pool mutation is serialized.
-    let pool = unsafe { &mut *FILE_ACTION_ENTRIES_POOL.get() };
+    let mut pool = FILE_ACTION_ENTRIES_POOL.lock();
     for slot in pool.iter_mut() {
         if !slot.in_use {
             slot.in_use = true;
@@ -1408,8 +1530,7 @@ unsafe fn allocate_file_action_entry() -> Result<*mut PosixSpawnFileActionsEntry
 }
 
 unsafe fn release_file_action_entry(target: *mut PosixSpawnFileActionsEntry) {
-    // Safety: bootstrap runtime is single-threaded, so pool mutation is serialized.
-    let pool = unsafe { &mut *FILE_ACTION_ENTRIES_POOL.get() };
+    let mut pool = FILE_ACTION_ENTRIES_POOL.lock();
     for slot in pool.iter_mut() {
         let slot_ptr = ptr::addr_of_mut!(slot.value);
         if slot_ptr == target {
@@ -1436,8 +1557,7 @@ unsafe fn append_file_action(
 }
 
 fn clone_current_fd_table() -> [FdEntry; MAX_FDS] {
-    // Safety: bootstrap runtime is single-threaded, so copying the table is race-free.
-    unsafe { state_mut().fds }
+    state().fds
 }
 
 fn close_fd_entry(fds: &mut [FdEntry; MAX_FDS], fd: c_int) -> Result<(), c_int> {
@@ -1506,7 +1626,7 @@ fn duplicate_fd_entry(
 }
 
 fn duplicate_live_fd(old_fd: c_int, new_fd: c_int) -> Result<c_int, c_int> {
-    let state = unsafe { state_mut() };
+    let mut state = state();
     duplicate_fd_entry(&mut state.fds, old_fd, new_fd)?;
     Ok(new_fd)
 }
@@ -1647,8 +1767,8 @@ fn execve_with_fd_state(
     envp: *const *const c_char,
 ) -> Result<(), c_int> {
     let mut fd_state = [0u8; MAX_FD_STATE_LEN];
-    let state = unsafe { state_mut() };
-    let fd_state_len = serialize_fd_state(&state.fds, &mut fd_state)?;
+    let fds = clone_current_fd_table();
+    let fd_state_len = serialize_fd_state(&fds, &mut fd_state)?;
     let mut env_ptrs = [ptr::null(); MAX_ENV_POINTERS];
     collect_envp_with_fd_state(
         envp,
@@ -1660,10 +1780,20 @@ fn execve_with_fd_state(
 }
 
 #[inline(never)]
-fn clone_registered_process() -> Result<u64, c_int> {
+fn clone_registered_process() -> Result<(u64, [FdEntry; MAX_FDS]), c_int> {
+    // Finish endpoint initialization before cloning. Copying the once-cell in
+    // its `initializing` state would leave the child waiting for a thread that
+    // does not exist in the cloned process.
+    let client = posix_client().map_err(map_posix_client_error)?;
+    // Keep the FD table stable across the address-space clone. Both parent and
+    // child drop their private copy of this guard immediately after the native
+    // clone returns, so the child never inherits a permanently locked STATE.
+    let state = state();
+    let inherited_fds = state.fds;
     let handle = syscall_errno(syscall::raw_syscall0(syscall::SyscallNumber::ProcessClone))?;
+    drop(state);
     if handle == 0 {
-        return Ok(0);
+        return Ok((0, inherited_fds));
     }
     let handle = match u32::try_from(handle) {
         Ok(handle) => handle,
@@ -1678,7 +1808,6 @@ fn clone_registered_process() -> Result<u64, c_int> {
         ))?;
         let process_id = status.process_id;
         c_int::try_from(process_id).map_err(|_| EOVERFLOW)?;
-        let client = posix_client().map_err(map_posix_client_error)?;
         client
             .register_child(ObjectHandleAttachment {
                 handle,
@@ -1702,7 +1831,7 @@ fn clone_registered_process() -> Result<u64, c_int> {
         syscall::SyscallNumber::HandleClose,
         u64::from(handle),
     );
-    result
+    result.map(|process_id| (process_id, inherited_fds))
 }
 
 fn unsupported_spawn_attr(attr: *const c_void) -> Result<(), c_int> {
@@ -1723,7 +1852,7 @@ fn with_fd_entry(fd: c_int) -> Result<FdEntry, c_int> {
     if fd < 0 || fd as usize >= MAX_FDS {
         return Err(EBADF);
     }
-    let entry = unsafe { state_mut().fds[fd as usize] };
+    let entry = state().fds[fd as usize];
     if !entry.in_use {
         return Err(EBADF);
     }
@@ -1745,7 +1874,7 @@ fn allocate_fd_entry(
     kind: FdKind,
     flags: c_int,
 ) -> Result<c_int, c_int> {
-    let state = unsafe { state_mut() };
+    let mut state = state();
     for index in 3..MAX_FDS {
         if !state.fds[index].in_use {
             state.fds[index] = FdEntry {
@@ -2028,16 +2157,8 @@ pub extern "C" fn open(path: *const c_char, flags: c_int, mode: c_int) -> c_int 
 #[unsafe(no_mangle)]
 pub extern "C" fn _close(fd: c_int) -> c_int {
     let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        if entry.close_owned {
-            let _ = syscall_errno(syscall::raw_syscall1(
-                syscall::SyscallNumber::HandleClose,
-                entry.lower_handle,
-            ))?;
-        }
-        unsafe {
-            state_mut().fds[fd as usize] = FdEntry::unused();
-        }
+        let mut state = state();
+        close_fd_entry(&mut state.fds, fd)?;
         Ok(0)
     })();
     result_with_errno(result, -1)
@@ -2155,7 +2276,8 @@ pub extern "C" fn pipe(fds: *mut c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn fork() -> c_int {
     result_with_errno(
-        clone_registered_process().and_then(|pid| c_int::try_from(pid).map_err(|_| EOVERFLOW)),
+        clone_registered_process()
+            .and_then(|(pid, _)| c_int::try_from(pid).map_err(|_| EOVERFLOW)),
         -1,
     )
 }
@@ -2168,13 +2290,18 @@ pub extern "C" fn dup2(old_fd: c_int, new_fd: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
     let result = (|| {
-        let entry = with_fd_entry(fd)?;
+        if fd < 0 || fd as usize >= MAX_FDS {
+            return Err(EBADF);
+        }
+        let mut state = state();
+        let entry = state.fds[fd as usize];
+        if !entry.in_use {
+            return Err(EBADF);
+        }
         match cmd {
             F_GETFD => Ok(entry.fd_flags),
             F_SETFD => {
-                unsafe {
-                    state_mut().fds[fd as usize].fd_flags = arg & FD_CLOEXEC;
-                }
+                state.fds[fd as usize].fd_flags = arg & FD_CLOEXEC;
                 Ok(0)
             }
             F_GETFL if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) => {
@@ -2232,9 +2359,7 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
                     ))?;
                     return Ok(0);
                 }
-                unsafe {
-                    state_mut().fds[fd as usize].open_flags = arg;
-                }
+                state.fds[fd as usize].open_flags = arg;
                 Ok(0)
             }
             _ => Err(EINVAL),
@@ -3166,7 +3291,7 @@ pub extern "C" fn isatty(fd: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
     let result = (|| {
-        let state = unsafe { state_mut() };
+        let mut state = state();
         let heap = &mut state.heap;
         if !heap.initialized {
             return Err(ENOMEM);
@@ -4229,26 +4354,19 @@ pub extern "C" fn _posix_spawn(
         return errno_value;
     }
 
-    unsafe {
-        ptr::write(
-            SPAWN_SNAPSHOT.get(),
-            SpawnSnapshot {
-                path,
-                file_actions,
-                argv,
-                envp,
-            },
-        );
-    }
+    let snapshot = SpawnSnapshot {
+        path,
+        file_actions,
+        argv,
+        envp,
+    };
 
-    let child_pid = match clone_registered_process() {
+    let (child_pid, mut desired_fds) = match clone_registered_process() {
         Ok(value) => value,
         Err(errno_value) => return errno_value,
     };
 
     if child_pid == 0 {
-        let snapshot = unsafe { ptr::read_volatile(SPAWN_SNAPSHOT.get()) };
-        let mut desired_fds = clone_current_fd_table();
         if apply_spawn_file_actions(&mut desired_fds, snapshot.file_actions).is_err() {
             process_exit(SPAWN_FAIL_EXIT_STATUS);
         }
@@ -4346,27 +4464,7 @@ pub extern "C" fn __retarget_lock_acquire(lock: *mut LockOpaque) {
     let Some(lock) = (unsafe { lock.as_ref() }) else {
         process_exit(127);
     };
-    if lock
-        .state
-        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
-        .is_ok()
-    {
-        return;
-    }
-    loop {
-        if lock.state.swap(2, Ordering::Acquire) == 0 {
-            return;
-        }
-        if mochios_posix_client::synchronization::wait_u32(
-            &lock.state,
-            2,
-            syscall::ADDRESS_WAIT_INFINITE,
-        )
-        .is_err()
-        {
-            process_exit(127);
-        }
-    }
+    native_mutex_acquire(&lock.state);
 }
 
 #[unsafe(no_mangle)]
@@ -4391,11 +4489,7 @@ pub extern "C" fn __retarget_lock_try_acquire(lock: *mut LockOpaque) -> c_int {
     let Some(lock) = (unsafe { lock.as_ref() }) else {
         return 0;
     };
-    c_int::from(
-        lock.state
-            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok(),
-    )
+    c_int::from(native_mutex_try_acquire(&lock.state))
 }
 
 #[unsafe(no_mangle)]
@@ -4423,15 +4517,7 @@ pub extern "C" fn __retarget_lock_release(lock: *mut LockOpaque) {
     let Some(lock) = (unsafe { lock.as_ref() }) else {
         process_exit(127);
     };
-    let previous = lock.state.swap(0, Ordering::Release);
-    if previous == 0 {
-        process_exit(127);
-    }
-    if previous == 2
-        && mochios_posix_client::synchronization::wake_u32(&lock.state, 1).is_err()
-    {
-        process_exit(127);
-    }
+    native_mutex_release(&lock.state);
 }
 
 #[unsafe(no_mangle)]
