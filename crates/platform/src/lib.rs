@@ -800,15 +800,31 @@ pub mod handle {
         )?)
     }
 
-    /// Binds an already-owned handle to an opaque key in this process's
-    /// context. The binding neither duplicates the handle nor changes rights.
-    pub fn bind_context(key: u64, handle: Handle) -> SysResult<()> {
+    /// Associates an already-owned handle with an opaque process-context key.
+    /// This replaces any previous association without changing handle rights.
+    pub fn set_context_handle(key: u64, handle: Handle) -> SysResult<()> {
         syscall::call2(
-            syscall::SyscallNumber::ContextHandleBind,
+            syscall::SyscallNumber::ContextHandleSet,
             key,
             handle as u64,
         )
         .map(|_| ())
+    }
+
+    pub fn remove_context_handle(key: u64) -> SysResult<()> {
+        syscall::call1(syscall::SyscallNumber::ContextHandleRemove, key).map(|_| ())
+    }
+
+    pub fn set_context_value(key: u64, value: u64) -> SysResult<()> {
+        syscall::call2(syscall::SyscallNumber::ContextValueSet, key, value).map(|_| ())
+    }
+
+    pub fn remove_context_value(key: u64) -> SysResult<()> {
+        syscall::call1(syscall::SyscallNumber::ContextValueRemove, key).map(|_| ())
+    }
+
+    pub fn rights(handle: Handle) -> SysResult<u64> {
+        syscall::call1(syscall::SyscallNumber::HandleRightsGet, handle as u64)
     }
 
     /// Retrieves an opaque value inherited through the process LaunchContext.
