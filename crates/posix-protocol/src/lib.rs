@@ -360,15 +360,13 @@ impl TerminalAttributes {
         control_characters[TERMINAL_CC_VWERASE] = 23;
         control_characters[TERMINAL_CC_VLNEXT] = 22;
         Self {
-            input_flags: TERMINAL_IFLAG_ICRNL | TERMINAL_IFLAG_IXON | TERMINAL_IFLAG_IUTF8,
+            input_flags: TERMINAL_IFLAG_ICRNL,
             output_flags: TERMINAL_OFLAG_OPOST | TERMINAL_OFLAG_ONLCR,
             control_flags: TERMINAL_CFLAG_CS8 | TERMINAL_CFLAG_CREAD,
-            local_flags: TERMINAL_LFLAG_ISIG
-                | TERMINAL_LFLAG_ICANON
+            local_flags: TERMINAL_LFLAG_ICANON
                 | TERMINAL_LFLAG_ECHO
                 | TERMINAL_LFLAG_ECHOE
-                | TERMINAL_LFLAG_ECHOK
-                | TERMINAL_LFLAG_IEXTEN,
+                | TERMINAL_LFLAG_ECHOK,
             control_characters,
             input_speed: 38_400,
             output_speed: 38_400,
