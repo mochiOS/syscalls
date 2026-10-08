@@ -359,6 +359,10 @@ pub mod process {
         thread_security_context(0)
     }
 
+    pub fn current_thread_id() -> SysResult<u64> {
+        current_security_context().map(|context| context.thread_id)
+    }
+
     pub fn open_handle_for_endpoint(endpoint: u64, rights: u64) -> SysResult<u32> {
         syscall::call2(syscall::SyscallNumber::ProcessHandleOpen, endpoint, rights)
             .and_then(|handle| {
