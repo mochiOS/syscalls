@@ -1326,6 +1326,11 @@ pub mod memory {
         syscall::call2(syscall::SyscallNumber::MemoryUnmap, addr, len)
     }
 
+    /// Changes permissions using mnu-native `MEMORY_ACCESS_*` flags.
+    pub fn protect(addr: u64, len: u64, access: u64) -> SysResult<u64> {
+        syscall::call3(syscall::SyscallNumber::MemoryProtect, addr, len, access)
+    }
+
     pub fn map_physical_range(virt: u64, phys: u64, len: u64) -> SysResult<u64> {
         syscall::call3(syscall::SyscallNumber::MapPhysicalRange, virt, phys, len)
     }

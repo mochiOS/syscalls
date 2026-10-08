@@ -7,6 +7,7 @@ use mochios_posix_protocol as protocol;
 pub mod directory;
 #[cfg(feature = "fd-table")]
 pub mod fd;
+pub mod memory;
 pub mod process_image;
 pub mod random;
 pub mod signal;
