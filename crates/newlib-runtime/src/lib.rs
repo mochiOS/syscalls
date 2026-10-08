@@ -32,6 +32,7 @@ const MAP_PRIVATE_ANON: u64 = 0x22;
 const MAP_FAILED: *mut c_void = (-1isize) as *mut c_void;
 const AT_FDCWD: i64 = -100;
 const AT_SYMLINK_NOFOLLOW: u64 = 2;
+const AT_SYMLINK_FOLLOW: c_int = 0x0400;
 const SC_OPEN_MAX: c_int = 4;
 const SC_PAGESIZE: c_int = 8;
 const SC_NPROCESSORS_CONF: c_int = 9;
@@ -4668,13 +4669,55 @@ pub extern "C" fn _link(old_path: *const c_char, new_path: *const c_char) -> c_i
         set_errno(EFAULT);
         return -1;
     }
-    set_errno(ENOSYS);
-    -1
+    result_with_errno(link_posix_at(-2, old_path, -2, new_path, 0).map(|_| 0), -1)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn link(old_path: *const c_char, new_path: *const c_char) -> c_int {
     _link(old_path, new_path)
+}
+
+fn link_posix_at(
+    old_dirfd: c_int,
+    old_path: *const c_char,
+    new_dirfd: c_int,
+    new_path: *const c_char,
+    flags: c_int,
+) -> Result<(), c_int> {
+    if flags & !AT_SYMLINK_FOLLOW != 0 {
+        return Err(EINVAL);
+    }
+    let old_path = core::str::from_utf8(unsafe { c_bytes(old_path) }).map_err(|_| EINVAL)?;
+    let new_path = core::str::from_utf8(unsafe { c_bytes(new_path) }).map_err(|_| EINVAL)?;
+    let old_base = rename_posix_base(old_dirfd, old_path)?;
+    let new_base = rename_posix_base(new_dirfd, new_path)?;
+    let protocol_flags = if flags & AT_SYMLINK_FOLLOW != 0 {
+        posix_protocol::LINK_FOLLOW_SOURCE
+    } else {
+        0
+    };
+    let client = posix_client().map_err(map_posix_client_error)?;
+    client
+        .link_at(old_base, old_path, new_base, new_path, protocol_flags)
+        .map_err(map_posix_client_error)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn linkat(
+    old_dirfd: c_int,
+    old_path: *const c_char,
+    new_dirfd: c_int,
+    new_path: *const c_char,
+    flags: c_int,
+) -> c_int {
+    if old_path.is_null() || new_path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    result_with_errno(
+        link_posix_at(old_dirfd, old_path, new_dirfd, new_path, flags).map(|_| 0),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]

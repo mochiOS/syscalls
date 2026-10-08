@@ -159,6 +159,7 @@ pub const OP_SIGNAL_DEQUEUE: u16 = 36;
 pub const OP_SIGNAL_THREAD_REGISTER: u16 = 37;
 pub const OP_GROUPS_GET: u16 = 38;
 pub const OP_GROUPS_SET: u16 = 39;
+pub const OP_LINK_AT: u16 = 40;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -179,6 +180,7 @@ pub const OPEN_AT_HEADER_LEN: usize = 16;
 pub const STAT_AT_HEADER_LEN: usize = 12;
 pub const ACCESS_AT_HEADER_LEN: usize = 16;
 pub const RENAME_AT_HEADER_LEN: usize = 16;
+pub const LINK_AT_HEADER_LEN: usize = 16;
 pub const TRUNCATE_AT_HEADER_LEN: usize = 16;
 pub const SYMLINK_AT_HEADER_LEN: usize = 16;
 pub const CHOWN_AT_HEADER_LEN: usize = 20;
@@ -205,6 +207,8 @@ pub const STAT_NOFOLLOW: u32 = 1 << 0;
 pub const STAT_FLAGS_ALL: u32 = STAT_NOFOLLOW;
 pub const CHOWN_NOFOLLOW: u32 = 1 << 0;
 pub const CHOWN_FLAGS_ALL: u32 = CHOWN_NOFOLLOW;
+pub const LINK_FOLLOW_SOURCE: u32 = 1 << 0;
+pub const LINK_FLAGS_ALL: u32 = LINK_FOLLOW_SOURCE;
 
 pub const ACCESS_READ: u32 = 1 << 2;
 pub const ACCESS_WRITE: u32 = 1 << 1;
@@ -313,6 +317,15 @@ pub struct AccessAtRequest<'a> {
 pub struct RenameAtRequest<'a> {
     pub old_base: OpenBase,
     pub new_base: OpenBase,
+    pub old_path: &'a str,
+    pub new_path: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkAtRequest<'a> {
+    pub old_base: OpenBase,
+    pub new_base: OpenBase,
+    pub flags: u32,
     pub old_path: &'a str,
     pub new_path: &'a str,
 }
@@ -1010,6 +1023,72 @@ pub fn decode_rename_at(input: &[u8]) -> Result<RenameAtRequest<'_>, ProtocolErr
         new_base,
         old_path,
         new_path,
+    })
+}
+
+pub fn encode_link_at(
+    request: LinkAtRequest<'_>,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    let old_path = request.old_path.as_bytes();
+    let new_path = request.new_path.as_bytes();
+    if old_path.is_empty()
+        || new_path.is_empty()
+        || old_path.len() > MAX_PATH_LEN
+        || new_path.len() > MAX_PATH_LEN
+        || old_path.contains(&0)
+        || new_path.contains(&0)
+        || request.flags & !LINK_FLAGS_ALL != 0
+    {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let total = LINK_AT_HEADER_LEN
+        .checked_add(old_path.len())
+        .and_then(|length| length.checked_add(new_path.len()))
+        .ok_or(ProtocolError::InvalidLength)?;
+    if output.len() < total {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    output[..LINK_AT_HEADER_LEN].fill(0);
+    output[0] = request.old_base as u8;
+    output[1] = request.new_base as u8;
+    put_u32(output, 4, request.flags);
+    put_u32(output, 8, old_path.len() as u32);
+    put_u32(output, 12, new_path.len() as u32);
+    output[LINK_AT_HEADER_LEN..LINK_AT_HEADER_LEN + old_path.len()].copy_from_slice(old_path);
+    output[LINK_AT_HEADER_LEN + old_path.len()..total].copy_from_slice(new_path);
+    Ok(total)
+}
+
+pub fn decode_link_at(input: &[u8]) -> Result<LinkAtRequest<'_>, ProtocolError> {
+    if input.len() < LINK_AT_HEADER_LEN || input[2..4] != [0; 2] {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let old_base = OpenBase::from_raw(input[0]).ok_or(ProtocolError::InvalidLength)?;
+    let new_base = OpenBase::from_raw(input[1]).ok_or(ProtocolError::InvalidLength)?;
+    let flags = get_u32(input, 4);
+    let old_len = get_u32(input, 8) as usize;
+    let new_len = get_u32(input, 12) as usize;
+    if flags & !LINK_FLAGS_ALL != 0
+        || old_len == 0
+        || new_len == 0
+        || old_len > MAX_PATH_LEN
+        || new_len > MAX_PATH_LEN
+        || input.len() != LINK_AT_HEADER_LEN + old_len + new_len
+    {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let old_bytes = &input[LINK_AT_HEADER_LEN..LINK_AT_HEADER_LEN + old_len];
+    let new_bytes = &input[LINK_AT_HEADER_LEN + old_len..];
+    if old_bytes.contains(&0) || new_bytes.contains(&0) {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(LinkAtRequest {
+        old_base,
+        new_base,
+        flags,
+        old_path: core::str::from_utf8(old_bytes).map_err(|_| ProtocolError::InvalidLength)?,
+        new_path: core::str::from_utf8(new_bytes).map_err(|_| ProtocolError::InvalidLength)?,
     })
 }
 

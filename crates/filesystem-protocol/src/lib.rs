@@ -75,6 +75,8 @@ pub const OP_CHOWN_AT: u16 = 34;
 pub const OP_CHMOD_HANDLE: u16 = 35;
 /// Changes ownership on one attached provider-owned open object.
 pub const OP_CHOWN_HANDLE: u16 = 36;
+/// Atomically creates a hard link between two Handle-anchored paths.
+pub const OP_LINK_AT: u16 = 37;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const OPEN_STATUS_APPEND: u32 = 1 << 0;
@@ -98,6 +100,15 @@ pub const RENAME_AT_ROOT_ATTACHED: u32 = 1 << 2;
 pub const RENAME_AT_FLAGS_ALL: u32 = RENAME_AT_OLD_BASE_ATTACHED
     | RENAME_AT_NEW_BASE_ATTACHED
     | RENAME_AT_ROOT_ATTACHED;
+
+pub const LINK_AT_FOLLOW_SOURCE: u32 = 1 << 0;
+pub const LINK_AT_OLD_BASE_ATTACHED: u32 = 1 << 1;
+pub const LINK_AT_NEW_BASE_ATTACHED: u32 = 1 << 2;
+pub const LINK_AT_ROOT_ATTACHED: u32 = 1 << 3;
+pub const LINK_AT_FLAGS_ALL: u32 = LINK_AT_FOLLOW_SOURCE
+    | LINK_AT_OLD_BASE_ATTACHED
+    | LINK_AT_NEW_BASE_ATTACHED
+    | LINK_AT_ROOT_ATTACHED;
 
 pub const TRUNCATE_AT_BASE_ATTACHED: u32 = 1 << 0;
 pub const TRUNCATE_AT_ROOT_ATTACHED: u32 = 1 << 1;
