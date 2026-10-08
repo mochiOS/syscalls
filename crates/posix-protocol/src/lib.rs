@@ -283,8 +283,9 @@ pub const SIGNAL_INT: u32 = 2;
 pub const SIGNAL_QUIT: u32 = 3;
 pub const SIGNAL_KILL: u32 = 9;
 pub const SIGNAL_STOP: u32 = 17;
-pub const SIGNAL_CONT: u32 = 18;
-pub const SIGNAL_TSTP: u32 = 20;
+pub const SIGNAL_TSTP: u32 = 18;
+pub const SIGNAL_CONT: u32 = 19;
+pub const SIGNAL_CHLD: u32 = 20;
 pub const SIGNAL_TTIN: u32 = 21;
 pub const SIGNAL_TTOU: u32 = 22;
 
