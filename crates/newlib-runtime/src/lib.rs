@@ -14,6 +14,7 @@ use mochios_capability_protocol::{
     CapabilityResourceDescriptor, MAX_CAPABILITY_NAME_LEN, MAX_REASON_LEN,
 };
 use mochios_filesystem_protocol as filesystem_protocol;
+use mochios_posix_client::fd::{Entry as PosixFdEntry, FdError, FdTable, HandleOps};
 use mochios_posix_client::{
     Client as PosixClient, ClientError as PosixClientError, StatAtBase, SyscallEndpointTransport,
 };
@@ -346,44 +347,85 @@ enum FdKind {
     ObjectStreamWrite = 8,
 }
 
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct FdEntry {
-    in_use: bool,
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FdObject {
     lower_handle: u64,
-    rights: u64,
     kind: FdKind,
     open_flags: c_int,
-    fd_flags: c_int,
-    position: u64,
     close_owned: bool,
 }
 
-impl FdEntry {
-    const fn unused() -> Self {
-        Self {
-            in_use: false,
-            lower_handle: 0,
+type FdEntry = PosixFdEntry<FdObject>;
+
+impl FdObject {
+    const fn stdio(kind: FdKind) -> PosixFdEntry<Self> {
+        PosixFdEntry {
+            handle: Self {
+                lower_handle: 0,
+                kind,
+                open_flags: 0,
+                close_owned: false,
+            },
             rights: 0,
-            kind: FdKind::Unused,
-            open_flags: 0,
-            fd_flags: 0,
-            position: 0,
-            close_owned: false,
+            descriptor_flags: 0,
         }
     }
+}
 
-    const fn stdio(fd: u64, kind: FdKind) -> Self {
-        Self {
-            in_use: true,
-            lower_handle: fd,
-            rights: 0,
-            kind,
-            open_flags: 0,
-            fd_flags: 0,
-            position: 0,
-            close_owned: false,
+struct RuntimeFdOps;
+
+impl HandleOps<FdObject> for RuntimeFdOps {
+    type Error = c_int;
+
+    fn clone_handle(&mut self, object: FdObject, rights: u64) -> Result<FdObject, Self::Error> {
+        if !object.close_owned {
+            return Ok(object);
         }
+        let lower_handle = syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::HandleDuplicate,
+            object.lower_handle,
+            rights,
+        ))?;
+        Ok(FdObject {
+            lower_handle,
+            close_owned: true,
+            ..object
+        })
+    }
+
+    fn close_handle(&mut self, object: FdObject) {
+        if object.close_owned {
+            let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, object.lower_handle);
+        }
+    }
+}
+
+fn map_fd_error(error: FdError<c_int>) -> c_int {
+    match error {
+        FdError::BadDescriptor | FdError::InvalidDescriptor => EBADF,
+        FdError::Handle(errno) => errno,
+    }
+}
+
+fn object_entry(
+    lower_handle: u64,
+    rights: u64,
+    kind: FdKind,
+    flags: c_int,
+) -> PosixFdEntry<FdObject> {
+    PosixFdEntry {
+        handle: FdObject {
+            lower_handle,
+            kind,
+            open_flags: flags,
+            close_owned: true,
+        },
+        rights,
+        descriptor_flags: if flags & O_CLOEXEC != 0 {
+            FD_CLOEXEC as u32
+        } else {
+            0
+        },
     }
 }
 
@@ -488,7 +530,7 @@ struct RuntimeState {
     initialized: bool,
     argv: *mut *mut c_char,
     envp: *mut *mut c_char,
-    fds: [FdEntry; MAX_FDS],
+    fds: FdTable<FdObject>,
     heap: HeapState,
 }
 
@@ -502,7 +544,7 @@ impl RuntimeState {
             initialized: false,
             argv: ptr::null_mut(),
             envp: ptr::null_mut(),
-            fds: [FdEntry::unused(); MAX_FDS],
+            fds: FdTable::new(),
             heap: HeapState::new(),
         }
     }
@@ -1718,7 +1760,7 @@ fn posix_open_options(flags: c_int) -> Result<u32, c_int> {
         | O_NONBLOCK
         | O_CLOEXEC
         | O_NOFOLLOW
-            | O_DIRECTORY;
+        | O_DIRECTORY;
     if flags & !SUPPORTED != 0 {
         return Err(EINVAL);
     }
@@ -1857,11 +1899,12 @@ fn find_fd_state_env(envp: *mut *mut c_char) -> Option<&'static [u8]> {
     }
 }
 
-fn restore_fd_state_from_env(envp: *mut *mut c_char, fds: &mut [FdEntry; MAX_FDS]) -> bool {
+fn restore_fd_state_from_env(envp: *mut *mut c_char, fds: &mut FdTable<FdObject>) -> bool {
     let Some(raw) = find_fd_state_env(envp) else {
         return false;
     };
-    *fds = [FdEntry::unused(); MAX_FDS];
+    *fds = FdTable::new();
+    let mut operations = RuntimeFdOps;
     for record in raw.split(|byte| *byte == b';') {
         if record.is_empty() {
             continue;
@@ -1900,16 +1943,20 @@ fn restore_fd_state_from_env(envp: *mut *mut c_char, fds: &mut [FdEntry; MAX_FDS
             8 => FdKind::ObjectStreamWrite,
             _ => return false,
         };
-        fds[fd] = FdEntry {
-            in_use: true,
-            lower_handle: lower_handle as u64,
+        let _ = position;
+        let entry = PosixFdEntry {
+            handle: FdObject {
+                lower_handle: lower_handle as u64,
+                kind,
+                open_flags: open_flags as c_int,
+                close_owned: close_owned != 0,
+            },
             rights: rights as u64,
-            kind,
-            open_flags: open_flags as c_int,
-            fd_flags: fd_flags as c_int,
-            position: position as u64,
-            close_owned: close_owned != 0,
+            descriptor_flags: fd_flags as u32,
         };
+        if fds.install_at(fd as c_int, entry, &mut operations).is_err() {
+            return false;
+        }
     }
     true
 }
@@ -1924,7 +1971,7 @@ fn push_byte(out: &mut [u8], length: &mut usize, value: u8) -> Result<(), c_int>
 }
 
 fn serialize_fd_state(
-    fds: &[FdEntry; MAX_FDS],
+    fds: &FdTable<FdObject>,
     encoded: &mut [u8; MAX_FD_STATE_LEN],
 ) -> Result<usize, c_int> {
     let mut length = 0usize;
@@ -1933,14 +1980,8 @@ fn serialize_fd_state(
     }
     encoded[..FD_STATE_ENV_PREFIX.len()].copy_from_slice(FD_STATE_ENV_PREFIX);
     length += FD_STATE_ENV_PREFIX.len();
-    for (fd, entry) in fds.iter().enumerate() {
-        if !entry.in_use {
-            continue;
-        }
-        if entry.fd_flags & FD_CLOEXEC != 0 {
-            continue;
-        }
-        let kind_code = match entry.kind {
+    for (fd, entry) in fds.inherited() {
+        let kind_code = match entry.handle.kind {
             FdKind::Unused => continue,
             FdKind::Stdin => 1usize,
             FdKind::Stdout => 2usize,
@@ -1950,19 +1991,23 @@ fn serialize_fd_state(
             FdKind::ObjectStreamRead => 7usize,
             FdKind::ObjectStreamWrite => 8usize,
         };
-        push_decimal(fd, encoded, &mut length)?;
+        push_decimal(fd as usize, encoded, &mut length)?;
         push_byte(encoded, &mut length, b',')?;
         push_decimal(kind_code, encoded, &mut length)?;
         push_byte(encoded, &mut length, b',')?;
-        push_decimal(entry.lower_handle as usize, encoded, &mut length)?;
+        push_decimal(entry.handle.lower_handle as usize, encoded, &mut length)?;
         push_byte(encoded, &mut length, b',')?;
-        push_decimal(entry.open_flags.max(0) as usize, encoded, &mut length)?;
+        push_decimal(
+            entry.handle.open_flags.max(0) as usize,
+            encoded,
+            &mut length,
+        )?;
         push_byte(encoded, &mut length, b',')?;
-        push_decimal(entry.position as usize, encoded, &mut length)?;
+        push_decimal(0, encoded, &mut length)?;
         push_byte(encoded, &mut length, b',')?;
-        push_decimal(entry.close_owned as usize, encoded, &mut length)?;
+        push_decimal(entry.handle.close_owned as usize, encoded, &mut length)?;
         push_byte(encoded, &mut length, b',')?;
-        push_decimal(entry.fd_flags.max(0) as usize, encoded, &mut length)?;
+        push_decimal(entry.descriptor_flags as usize, encoded, &mut length)?;
         push_byte(encoded, &mut length, b',')?;
         push_decimal(entry.rights as usize, encoded, &mut length)?;
         push_byte(encoded, &mut length, b';')?;
@@ -1990,9 +2035,16 @@ unsafe fn initialize_runtime(stack: StackView) {
     state.argv = stack.argv;
     state.envp = stack.envp;
     if !restore_fd_state_from_env(stack.envp, &mut state.fds) {
-        state.fds[0] = FdEntry::stdio(0, FdKind::Stdin);
-        state.fds[1] = FdEntry::stdio(1, FdKind::Stdout);
-        state.fds[2] = FdEntry::stdio(2, FdKind::Stderr);
+        let mut operations = RuntimeFdOps;
+        let _ = state
+            .fds
+            .install_at(0, FdObject::stdio(FdKind::Stdin), &mut operations);
+        let _ = state
+            .fds
+            .install_at(1, FdObject::stdio(FdKind::Stdout), &mut operations);
+        let _ = state
+            .fds
+            .install_at(2, FdObject::stdio(FdKind::Stderr), &mut operations);
     }
 
     let stack_limit = align_down(stack.stack_top, PAGE_SIZE).saturating_sub(PAGE_SIZE);
@@ -2088,72 +2140,33 @@ unsafe fn append_file_action(
     }
 }
 
-fn clone_current_fd_table() -> [FdEntry; MAX_FDS] {
-    state().fds
+fn clone_current_fd_table() -> FdTable<FdObject> {
+    state().fds.clone()
 }
 
-fn close_fd_entry(fds: &mut [FdEntry; MAX_FDS], fd: c_int) -> Result<(), c_int> {
-    if fd < 0 || fd as usize >= MAX_FDS || !fds[fd as usize].in_use {
-        return Err(EBADF);
-    }
-    let entry = fds[fd as usize];
-    if entry.close_owned {
+fn close_fd_entry(fds: &mut FdTable<FdObject>, fd: c_int) -> Result<(), c_int> {
+    let entry = fds.get(fd).ok_or(EBADF)?;
+    if entry.handle.close_owned {
         syscall_errno(syscall::raw_syscall1(
             syscall::SyscallNumber::HandleClose,
-            entry.lower_handle,
+            entry.handle.lower_handle,
         ))?;
     }
-    fds[fd as usize] = FdEntry::unused();
+    fds.take(fd).map_err(|_| EBADF)?;
     Ok(())
 }
 
 fn duplicate_fd_entry(
-    fds: &mut [FdEntry; MAX_FDS],
+    fds: &mut FdTable<FdObject>,
     old_fd: c_int,
     new_fd: c_int,
 ) -> Result<(), c_int> {
     if old_fd < 0 || new_fd < 0 || old_fd as usize >= MAX_FDS || new_fd as usize >= MAX_FDS {
         return Err(EBADF);
     }
-    let old_entry = fds[old_fd as usize];
-    if !old_entry.in_use {
-        return Err(EBADF);
-    }
-    if old_fd == new_fd {
-        return Ok(());
-    }
-
-    let (lower, close_owned) = match old_entry.kind {
-        FdKind::ObjectFile
-        | FdKind::ObjectDirectory
-        | FdKind::ObjectStreamRead
-        | FdKind::ObjectStreamWrite => (
-            syscall_errno(syscall::raw_syscall2(
-                syscall::SyscallNumber::HandleDuplicate,
-                old_entry.lower_handle,
-                old_entry.rights,
-            ))?,
-            true,
-        ),
-        FdKind::Stdin | FdKind::Stdout | FdKind::Stderr => (old_entry.lower_handle, false),
-        FdKind::Unused => return Err(EBADF),
-    };
-    if fds[new_fd as usize].in_use {
-        if let Err(error) = close_fd_entry(fds, new_fd) {
-            if close_owned {
-                let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, lower);
-            }
-            return Err(error);
-        }
-    }
-    let mut new_entry = old_entry;
-    new_entry.lower_handle = lower;
-    new_entry.fd_flags &= !FD_CLOEXEC;
-    new_entry.close_owned = close_owned;
-    fds[new_fd as usize] = FdEntry {
-        lower_handle: lower,
-        ..new_entry
-    };
+    let mut operations = RuntimeFdOps;
+    fds.duplicate_to(old_fd, new_fd, &mut operations)
+        .map_err(map_fd_error)?;
     Ok(())
 }
 
@@ -2164,7 +2177,7 @@ fn duplicate_live_fd(old_fd: c_int, new_fd: c_int) -> Result<c_int, c_int> {
 }
 
 fn apply_spawn_file_actions(
-    fds: &mut [FdEntry; MAX_FDS],
+    fds: &mut FdTable<FdObject>,
     actions: *const c_void,
 ) -> Result<(), c_int> {
     if actions.is_null() {
@@ -2312,7 +2325,7 @@ fn execve_with_fd_state(
 }
 
 #[inline(never)]
-fn clone_registered_process() -> Result<(u64, [FdEntry; MAX_FDS]), c_int> {
+fn clone_registered_process() -> Result<(u64, FdTable<FdObject>), c_int> {
     // Finish endpoint initialization before cloning. Copying the once-cell in
     // its `initializing` state would leave the child waiting for a thread that
     // does not exist in the cloned process.
@@ -2321,7 +2334,7 @@ fn clone_registered_process() -> Result<(u64, [FdEntry; MAX_FDS]), c_int> {
     // child drop their private copy of this guard immediately after the native
     // clone returns, so the child never inherits a permanently locked STATE.
     let state = state();
-    let inherited_fds = state.fds;
+    let inherited_fds = state.fds.clone();
     let handle = syscall_errno(syscall::raw_syscall0(syscall::SyscallNumber::ProcessClone))?;
     drop(state);
     if handle == 0 {
@@ -2377,15 +2390,11 @@ fn unsupported_spawn_attr(attr: *const c_void) -> Result<(), c_int> {
     Ok(())
 }
 
-fn with_fd_entry(fd: c_int) -> Result<FdEntry, c_int> {
+fn with_fd_entry(fd: c_int) -> Result<PosixFdEntry<FdObject>, c_int> {
     if fd < 0 || fd as usize >= MAX_FDS {
         return Err(EBADF);
     }
-    let entry = state().fds[fd as usize];
-    if !entry.in_use {
-        return Err(EBADF);
-    }
-    Ok(entry)
+    state().fds.get(fd).ok_or(EBADF)
 }
 
 fn allocate_object_fd(
@@ -2404,33 +2413,21 @@ fn allocate_fd_entry(
     flags: c_int,
 ) -> Result<c_int, c_int> {
     let mut state = state();
-    for index in 3..MAX_FDS {
-        if !state.fds[index].in_use {
-            state.fds[index] = FdEntry {
-                in_use: true,
-                lower_handle,
-                rights,
-                kind,
-                open_flags: flags,
-                fd_flags: if flags & O_CLOEXEC != 0 {
-                    FD_CLOEXEC
-                } else {
-                    0
-                },
-                position: 0,
-                close_owned: true,
-            };
-            return Ok(index as c_int);
-        }
-    }
-    Err(EMFILE)
+    state
+        .fds
+        .install_from(
+            3,
+            MAX_FDS as c_int,
+            object_entry(lower_handle, rights, kind, flags),
+        )
+        .map_err(|_| EMFILE)
 }
 
 fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result<isize, c_int> {
     if length == 0 {
         return Ok(0);
     }
-    let written = match entry.kind {
+    let written = match entry.handle.kind {
         FdKind::Stdout | FdKind::Stderr => syscall_errno(syscall::raw_syscall2(
             syscall::SyscallNumber::DebugWrite,
             buffer as u64,
@@ -2438,7 +2435,7 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
         ))?,
         FdKind::ObjectFile | FdKind::ObjectStreamWrite => syscall_errno(syscall::raw_syscall3(
             syscall::SyscallNumber::HandleWrite,
-            entry.lower_handle,
+            entry.handle.lower_handle,
             buffer as u64,
             length as u64,
         ))?,
@@ -2453,11 +2450,11 @@ fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<is
     if length == 0 {
         return Ok(0);
     }
-    let read = match entry.kind {
+    let read = match entry.handle.kind {
         FdKind::Stdin => return Err(EBADF),
         FdKind::ObjectFile | FdKind::ObjectStreamRead => syscall_errno(syscall::raw_syscall3(
             syscall::SyscallNumber::HandleRead,
-            entry.lower_handle,
+            entry.handle.lower_handle,
             buffer as u64,
             length as u64,
         ))?,
@@ -2470,12 +2467,12 @@ fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<is
 
 fn refill_dir_stream(stream: &mut DirStream) -> Result<bool, c_int> {
     let entry = with_fd_entry(stream.fd)?;
-    if entry.kind != FdKind::ObjectDirectory {
+    if entry.handle.kind != FdKind::ObjectDirectory {
         return Err(EBADF);
     }
     let read = syscall_errno(syscall::raw_syscall3(
         syscall::SyscallNumber::HandleRead,
-        entry.lower_handle,
+        entry.handle.lower_handle,
         stream.buffer.as_mut_ptr() as u64,
         stream.buffer.len() as u64,
     ))?;
@@ -2490,7 +2487,6 @@ fn next_dirent(stream: &mut DirStream) -> Result<Option<NewlibDirent>, c_int> {
             return Ok(None);
         }
 
-        let entry = with_fd_entry(stream.fd)?;
         let offset = stream.buffer_offset;
         let record = &stream.buffer[offset..stream.buffer_len];
         let (header, name, consumed) =
@@ -2757,31 +2753,31 @@ pub extern "C" fn _pipe2(fds: *mut c_int, flags: c_int) -> c_int {
         }
         let read_fd =
             match allocate_object_fd(pair.read, read_rights, FdKind::ObjectStreamRead, flags) {
-            Ok(fd) => fd,
-            Err(errno) => {
-                let _ = syscall_errno(syscall::raw_syscall1(
-                    syscall::SyscallNumber::HandleClose,
-                    u64::from(pair.read),
-                ));
-                let _ = syscall_errno(syscall::raw_syscall1(
-                    syscall::SyscallNumber::HandleClose,
-                    u64::from(pair.write),
-                ));
-                return Err(errno);
-            }
-        };
+                Ok(fd) => fd,
+                Err(errno) => {
+                    let _ = syscall_errno(syscall::raw_syscall1(
+                        syscall::SyscallNumber::HandleClose,
+                        u64::from(pair.read),
+                    ));
+                    let _ = syscall_errno(syscall::raw_syscall1(
+                        syscall::SyscallNumber::HandleClose,
+                        u64::from(pair.write),
+                    ));
+                    return Err(errno);
+                }
+            };
         let write_fd =
             match allocate_object_fd(pair.write, write_rights, FdKind::ObjectStreamWrite, flags) {
-            Ok(fd) => fd,
-            Err(errno) => {
-                let _ = _close(read_fd);
-                let _ = syscall_errno(syscall::raw_syscall1(
-                    syscall::SyscallNumber::HandleClose,
-                    u64::from(pair.write),
-                ));
-                return Err(errno);
-            }
-        };
+                Ok(fd) => fd,
+                Err(errno) => {
+                    let _ = _close(read_fd);
+                    let _ = syscall_errno(syscall::raw_syscall1(
+                        syscall::SyscallNumber::HandleClose,
+                        u64::from(pair.write),
+                    ));
+                    return Err(errno);
+                }
+            };
         unsafe {
             fds.write(read_fd);
             fds.add(1).write(write_fd);
@@ -2826,51 +2822,60 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
             return Err(EBADF);
         }
         let mut state = state();
-        let entry = state.fds[fd as usize];
-        if !entry.in_use {
-            return Err(EBADF);
-        }
+        let entry = state.fds.get(fd).ok_or(EBADF)?;
         match cmd {
-            F_GETFD => Ok(entry.fd_flags),
+            F_GETFD => Ok(entry.descriptor_flags as c_int),
             F_SETFD => {
-                state.fds[fd as usize].fd_flags = arg & FD_CLOEXEC;
+                state
+                    .fds
+                    .set_descriptor_flags(fd, (arg & FD_CLOEXEC) as u32)
+                    .map_err(|_| EBADF)?;
                 Ok(0)
-            }
-            F_GETFL if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) => {
-                let client = posix_client().map_err(map_posix_client_error)?;
-                let flags = client
-                    .get_status_flags(ObjectHandleAttachment {
-                        handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
-                        rights: entry.rights,
-                    })
-                    .map_err(map_posix_client_error)?;
-                Ok((entry.open_flags & 0x3) | newlib_mutable_status_flags(flags))
             }
             F_GETFL
                 if matches!(
-                    entry.kind,
+                    entry.handle.kind,
+                    FdKind::ObjectFile | FdKind::ObjectDirectory
+                ) =>
+            {
+                let client = posix_client().map_err(map_posix_client_error)?;
+                let flags = client
+                    .get_status_flags(ObjectHandleAttachment {
+                        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+                        rights: entry.rights,
+                    })
+                    .map_err(map_posix_client_error)?;
+                Ok((entry.handle.open_flags & 0x3) | newlib_mutable_status_flags(flags))
+            }
+            F_GETFL
+                if matches!(
+                    entry.handle.kind,
                     FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite
                 ) =>
             {
                 let options = syscall_errno(syscall::raw_syscall1(
                     syscall::SyscallNumber::HandleOptionsGet,
-                    entry.lower_handle,
+                    entry.handle.lower_handle,
                 ))?;
                 let nonblocking = if options & syscall::HANDLE_OPTION_NONBLOCKING != 0 {
                     O_NONBLOCK
                 } else {
                     0
                 };
-                Ok((entry.open_flags & 0x3) | nonblocking)
+                Ok((entry.handle.open_flags & 0x3) | nonblocking)
             }
-            F_GETFL => Ok(entry.open_flags),
+            F_GETFL => Ok(entry.handle.open_flags),
             F_SETFL => {
-                if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
+                if matches!(
+                    entry.handle.kind,
+                    FdKind::ObjectFile | FdKind::ObjectDirectory
+                ) {
                     let client = posix_client().map_err(map_posix_client_error)?;
                     client
                         .set_status_flags(
                             ObjectHandleAttachment {
-                                handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                                handle: u32::try_from(entry.handle.lower_handle)
+                                    .map_err(|_| EBADF)?,
                                 rights: entry.rights,
                             },
                             posix_mutable_status_flags(arg),
@@ -2879,7 +2884,7 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
                     return Ok(0);
                 }
                 if matches!(
-                    entry.kind,
+                    entry.handle.kind,
                     FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite
                 ) {
                     if arg & !(O_NONBLOCK | 0x3) != 0 {
@@ -2892,12 +2897,12 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
                     };
                     let _ = syscall_errno(syscall::raw_syscall2(
                         syscall::SyscallNumber::HandleOptionsSet,
-                        entry.lower_handle,
+                        entry.handle.lower_handle,
                         options,
                     ))?;
                     return Ok(0);
                 }
-                state.fds[fd as usize].open_flags = arg;
+                state.fds.get_mut(fd).ok_or(EBADF)?.handle.open_flags = arg;
                 Ok(0)
             }
             _ => Err(EINVAL),
@@ -3054,10 +3059,10 @@ pub extern "C" fn select(
                 continue;
             }
             let entry = with_fd_entry(fd as c_int)?;
-            match entry.kind {
+            match entry.handle.kind {
                 FdKind::ObjectStreamRead if requested_read & mask != 0 => {
                     items[item_count] = syscall::HandleWaitItem {
-                        handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
                         reserved: 0,
                         interests: syscall::HANDLE_SIGNAL_READABLE
                             | syscall::HANDLE_SIGNAL_PEER_CLOSED,
@@ -3071,7 +3076,7 @@ pub extern "C" fn select(
                 }
                 FdKind::ObjectStreamWrite if requested_write & mask != 0 => {
                     items[item_count] = syscall::HandleWaitItem {
-                        handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
                         reserved: 0,
                         interests: syscall::HANDLE_SIGNAL_WRITABLE
                             | syscall::HANDLE_SIGNAL_PEER_CLOSED,
@@ -3189,27 +3194,27 @@ pub extern "C" fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: c_int) -> c_int 
                 immediately_ready = true;
                 continue;
             };
-            match entry.kind {
+            match entry.handle.kind {
                 FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite => {
                     let mut interests = syscall::HANDLE_SIGNAL_PEER_CLOSED;
-                    if entry.kind == FdKind::ObjectStreamRead
+                    if entry.handle.kind == FdKind::ObjectStreamRead
                         && pollfds[index].events & READ_EVENTS != 0
                     {
                         interests |= syscall::HANDLE_SIGNAL_READABLE;
                     }
-                    if entry.kind == FdKind::ObjectStreamWrite
+                    if entry.handle.kind == FdKind::ObjectStreamWrite
                         && pollfds[index].events & WRITE_EVENTS != 0
                     {
                         interests |= syscall::HANDLE_SIGNAL_WRITABLE;
                     }
                     items[item_count] = syscall::HandleWaitItem {
-                        handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
                         reserved: 0,
                         interests,
                         observed: 0,
                     };
                     item_pollfds[item_count] = index;
-                    item_kinds[item_count] = entry.kind;
+                    item_kinds[item_count] = entry.handle.kind;
                     item_count += 1;
                 }
                 _ => {
@@ -3376,14 +3381,17 @@ pub extern "C" fn fchmodat(dirfd: c_int, path: *const c_char, mode: u32, flags: 
 pub extern "C" fn fchmod(fd: c_int, mode: u32) -> c_int {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if !matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
+        if !matches!(
+            entry.handle.kind,
+            FdKind::ObjectFile | FdKind::ObjectDirectory
+        ) {
             return Err(EBADF);
         }
         let client = posix_client().map_err(map_posix_client_error)?;
         client
             .fchmod(
                 ObjectHandleAttachment {
-                    handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                    handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
                     rights: entry.rights,
                 },
                 mode,
@@ -3454,14 +3462,17 @@ pub extern "C" fn fchownat(
 pub extern "C" fn fchown(fd: c_int, uid: u32, gid: u32) -> c_int {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if !matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
+        if !matches!(
+            entry.handle.kind,
+            FdKind::ObjectFile | FdKind::ObjectDirectory
+        ) {
             return Err(EBADF);
         }
         let client = posix_client().map_err(map_posix_client_error)?;
         client
             .fchown(
                 ObjectHandleAttachment {
-                    handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                    handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
                     rights: entry.rights,
                 },
                 uid,
@@ -3607,7 +3618,7 @@ pub extern "C" fn readdir(dirp: *mut c_void) -> *mut NewlibDirent {
 pub extern "C" fn _lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if entry.kind != FdKind::ObjectFile {
+        if entry.handle.kind != FdKind::ObjectFile {
             return Err(ESPIPE);
         }
         let basis = match whence {
@@ -3618,7 +3629,7 @@ pub extern "C" fn _lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
         };
         let next = syscall_errno(syscall::raw_syscall3(
             syscall::SyscallNumber::HandleSeek,
-            entry.lower_handle,
+            entry.handle.lower_handle,
             offset as u64,
             basis,
         ))?;
@@ -3639,13 +3650,16 @@ pub extern "C" fn _fsync(fd: c_int) -> c_int {
 
 fn sync_file_descriptor(fd: c_int) -> Result<c_int, c_int> {
     let entry = with_fd_entry(fd)?;
-    if !matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
+    if !matches!(
+        entry.handle.kind,
+        FdKind::ObjectFile | FdKind::ObjectDirectory
+    ) {
         return Err(EBADF);
     }
     let client = posix_client().map_err(map_posix_client_error)?;
     client
         .fsync(ObjectHandleAttachment {
-            handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+            handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
             rights: entry.rights,
         })
         .map_err(map_posix_client_error)?;
@@ -3670,14 +3684,14 @@ pub extern "C" fn _ftruncate(fd: c_int, length: i64) -> c_int {
     }
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if entry.kind != FdKind::ObjectFile {
+        if entry.handle.kind != FdKind::ObjectFile {
             return Err(EBADF);
         }
         let client = posix_client().map_err(map_posix_client_error)?;
         client
             .ftruncate(
                 ObjectHandleAttachment {
-                    handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                    handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
                     rights: entry.rights,
                 },
                 length as u64,
@@ -3724,8 +3738,11 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
     }
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if matches!(entry.kind, FdKind::ObjectFile | FdKind::ObjectDirectory) {
-            let handle = u32::try_from(entry.lower_handle).map_err(|_| EBADF)?;
+        if matches!(
+            entry.handle.kind,
+            FdKind::ObjectFile | FdKind::ObjectDirectory
+        ) {
+            let handle = u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?;
             let client = posix_client().map_err(map_posix_client_error)?;
             let status = client
                 .fstat(ObjectHandleAttachment {
@@ -3737,7 +3754,7 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
             return Ok(0);
         }
         if matches!(
-            entry.kind,
+            entry.handle.kind,
             FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite
         ) {
             unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), stream_stat()) };
@@ -3801,7 +3818,10 @@ pub extern "C" fn _isatty(fd: c_int) -> c_int {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
         Ok(
-            if matches!(entry.kind, FdKind::Stdin | FdKind::Stdout | FdKind::Stderr) {
+            if matches!(
+                entry.handle.kind,
+                FdKind::Stdin | FdKind::Stdout | FdKind::Stderr
+            ) {
                 1
             } else {
                 0
@@ -4520,11 +4540,11 @@ fn unlink_posix_at(dirfd: c_int, path: *const c_char, flags: c_int) -> Result<()
         StatAtBase::ProcessCwd
     } else {
         let entry = with_fd_entry(dirfd)?;
-        if entry.kind != FdKind::ObjectDirectory {
+        if entry.handle.kind != FdKind::ObjectDirectory {
             return Err(ENOTDIR);
         }
         StatAtBase::Directory(ObjectHandleAttachment {
-            handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+            handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
             rights: entry.rights,
         })
     };
@@ -4693,11 +4713,11 @@ pub extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: c_int) -> c_i
             OpenAtBase::ProcessCwd
         } else {
             let entry = with_fd_entry(dirfd)?;
-            if entry.kind != FdKind::ObjectDirectory {
+            if entry.handle.kind != FdKind::ObjectDirectory {
                 return Err(ENOTDIR);
             }
             OpenAtBase::Directory(ObjectHandleAttachment {
-                handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+                handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
                 rights: entry.rights,
             })
         };
@@ -4743,11 +4763,11 @@ fn rename_posix_base(dirfd: c_int, path: &str) -> Result<StatAtBase<u32>, c_int>
         return Ok(StatAtBase::ProcessCwd);
     }
     let entry = with_fd_entry(dirfd)?;
-    if entry.kind != FdKind::ObjectDirectory {
+    if entry.handle.kind != FdKind::ObjectDirectory {
         return Err(ENOTDIR);
     }
     Ok(StatAtBase::Directory(ObjectHandleAttachment {
-        handle: u32::try_from(entry.lower_handle).map_err(|_| EBADF)?,
+        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
         rights: entry.rights,
     }))
 }

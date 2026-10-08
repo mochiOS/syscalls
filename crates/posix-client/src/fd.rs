@@ -1,6 +1,5 @@
-use alloc::vec::Vec;
-
 pub const FD_CLOEXEC: u32 = 1;
+pub const DEFAULT_FD_LIMIT: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry<H> {
@@ -33,12 +32,7 @@ pub trait FileOps<H> {
 
     fn read(&mut self, handle: H, buffer: &mut [u8]) -> Result<usize, Self::Error>;
     fn write(&mut self, handle: H, buffer: &[u8]) -> Result<usize, Self::Error>;
-    fn seek(
-        &mut self,
-        handle: H,
-        offset: i64,
-        basis: SeekBasis,
-    ) -> Result<u64, Self::Error>;
+    fn seek(&mut self, handle: H, offset: i64, basis: SeekBasis) -> Result<u64, Self::Error>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,21 +42,26 @@ pub enum FdError<E> {
     Handle(E),
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct FdTable<H> {
-    entries: Vec<Option<Entry<H>>>,
+    entries: [Option<Entry<H>>; DEFAULT_FD_LIMIT],
 }
 
 impl<H: Copy> FdTable<H> {
     pub const fn new() -> Self {
         Self {
-            entries: Vec::new(),
+            entries: [const { None }; DEFAULT_FD_LIMIT],
         }
     }
 
     pub fn get(&self, fd: i32) -> Option<Entry<H>> {
         let index = usize::try_from(fd).ok()?;
         self.entries.get(index).copied().flatten()
+    }
+
+    pub fn get_mut(&mut self, fd: i32) -> Option<&mut Entry<H>> {
+        let index = usize::try_from(fd).ok()?;
+        self.entries.get_mut(index)?.as_mut()
     }
 
     pub fn install(&mut self, entry: Entry<H>) -> Result<i32, FdError<core::convert::Infallible>> {
@@ -75,10 +74,29 @@ impl<H: Copy> FdTable<H> {
             *slot = Some(entry);
             return i32::try_from(index).map_err(|_| FdError::InvalidDescriptor);
         }
-        let index = self.entries.len();
-        let fd = i32::try_from(index).map_err(|_| FdError::InvalidDescriptor)?;
-        self.entries.push(Some(entry));
-        Ok(fd)
+        Err(FdError::InvalidDescriptor)
+    }
+
+    /// Installs a descriptor in the first free slot within `[minimum, limit)`.
+    ///
+    /// Resource-limit policy remains in the caller; this table only enforces
+    /// the supplied process-local descriptor range.
+    pub fn install_from(
+        &mut self,
+        minimum: i32,
+        limit: i32,
+        entry: Entry<H>,
+    ) -> Result<i32, FdError<core::convert::Infallible>> {
+        let minimum = usize::try_from(minimum).map_err(|_| FdError::InvalidDescriptor)?;
+        let limit = usize::try_from(limit).map_err(|_| FdError::InvalidDescriptor)?;
+        if minimum >= limit || limit > DEFAULT_FD_LIMIT || limit > i32::MAX as usize {
+            return Err(FdError::InvalidDescriptor);
+        }
+        if let Some(index) = (minimum..limit).find(|index| self.entries[*index].is_none()) {
+            self.entries[index] = Some(entry);
+            return Ok(index as i32);
+        }
+        Err(FdError::InvalidDescriptor)
     }
 
     pub fn install_at<O: HandleOps<H>>(
@@ -88,8 +106,8 @@ impl<H: Copy> FdTable<H> {
         operations: &mut O,
     ) -> Result<(), FdError<O::Error>> {
         let index = usize::try_from(fd).map_err(|_| FdError::InvalidDescriptor)?;
-        if index >= self.entries.len() {
-            self.entries.resize(index + 1, None);
+        if index >= DEFAULT_FD_LIMIT {
+            return Err(FdError::InvalidDescriptor);
         }
         if let Some(replaced) = self.entries[index].replace(entry) {
             operations.close_handle(replaced.handle);
@@ -106,6 +124,14 @@ impl<H: Copy> FdTable<H> {
             .ok_or(FdError::BadDescriptor)?;
         entry.descriptor_flags = flags;
         Ok(())
+    }
+
+    pub fn take(&mut self, fd: i32) -> Result<Entry<H>, FdError<()>> {
+        let index = usize::try_from(fd).map_err(|_| FdError::BadDescriptor)?;
+        self.entries
+            .get_mut(index)
+            .and_then(Option::take)
+            .ok_or(FdError::BadDescriptor)
     }
 
     pub fn close<O: HandleOps<H>>(
@@ -194,8 +220,8 @@ impl<H: Copy> FdTable<H> {
             .clone_handle(source.handle, source.rights)
             .map_err(FdError::Handle)?;
         let target_index = target_fd as usize;
-        if target_index >= self.entries.len() {
-            self.entries.resize(target_index + 1, None);
+        if target_index >= DEFAULT_FD_LIMIT {
+            return Err(FdError::InvalidDescriptor);
         }
         if let Some(replaced) = self.entries[target_index].replace(Entry {
             handle,
@@ -220,12 +246,15 @@ impl<H: Copy> FdTable<H> {
     }
 
     pub fn inherited(&self) -> impl Iterator<Item = (i32, Entry<H>)> + '_ {
-        self.entries.iter().enumerate().filter_map(|(index, entry)| {
-            let entry = (*entry)?;
-            (entry.descriptor_flags & FD_CLOEXEC == 0)
-                .then(|| i32::try_from(index).ok().map(|fd| (fd, entry)))
-                .flatten()
-        })
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let entry = (*entry)?;
+                (entry.descriptor_flags & FD_CLOEXEC == 0)
+                    .then(|| i32::try_from(index).ok().map(|fd| (fd, entry)))
+                    .flatten()
+            })
     }
 
     fn install_typed<E>(&mut self, entry: Entry<H>) -> Result<i32, FdError<E>> {
@@ -238,9 +267,12 @@ impl<H: Copy> FdTable<H> {
             *slot = Some(entry);
             return i32::try_from(index).map_err(|_| FdError::InvalidDescriptor);
         }
-        let index = self.entries.len();
-        let fd = i32::try_from(index).map_err(|_| FdError::InvalidDescriptor)?;
-        self.entries.push(Some(entry));
-        Ok(fd)
+        Err(FdError::InvalidDescriptor)
+    }
+}
+
+impl<H: Copy> Default for FdTable<H> {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -1,8 +1,5 @@
 #![no_std]
 
-#[cfg(feature = "fd-table")]
-extern crate alloc;
-
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use mochios_posix_protocol as protocol;
@@ -437,7 +434,7 @@ impl<T: ObjectTransport> Client<T> {
         let mut payload = [0u8; protocol::STAT_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
         let payload_len =
             protocol::encode_stat_at(protocol::StatAtRequest { base, flags, path }, &mut payload)
-                .map_err(ClientError::Protocol)?;
+        .map_err(ClientError::Protocol)?;
         let mut handles = ObjectHandles::new();
         if let Some(directory) = directory {
             handles
@@ -672,7 +669,7 @@ impl<T: ObjectTransport> Client<T> {
         let mut payload = [0u8; protocol::STAT_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
         let payload_len =
             protocol::encode_stat_at(protocol::StatAtRequest { base, flags, path }, &mut payload)
-        .map_err(ClientError::Protocol)?;
+                .map_err(ClientError::Protocol)?;
         let mut handles = ObjectHandles::new();
         if let Some(directory) = directory {
             handles
