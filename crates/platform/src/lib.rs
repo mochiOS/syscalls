@@ -1119,6 +1119,52 @@ pub mod time {
     }
 }
 
+pub mod synchronization {
+    use super::syscall::{self, SysResult};
+    pub use mnu_abi::AddressWaitResult;
+
+    /// Waits while the value at `address` equals `expected`.
+    ///
+    /// `value_size` must be 1, 2, 4, or 8 and `address` must be naturally
+    /// aligned. The deadline is an absolute native monotonic-clock value.
+    ///
+    /// # Safety
+    ///
+    /// The caller must keep `address` mapped and valid for atomic access for
+    /// the duration of this call.
+    pub unsafe fn wait_on_address(
+        address: *const u8,
+        expected: u64,
+        value_size: usize,
+        deadline_nanoseconds: u64,
+    ) -> SysResult<AddressWaitResult> {
+        let raw = syscall::call4(
+            syscall::SyscallNumber::WaitOnAddress,
+            address as u64,
+            expected,
+            value_size as u64,
+            deadline_nanoseconds,
+        )?;
+        AddressWaitResult::from_raw(raw)
+            .ok_or_else(|| syscall::SysError::from_raw(syscall::EIO as i64))
+    }
+
+    /// Wakes up to `maximum_count` waiters for `address`.
+    ///
+    /// # Safety
+    ///
+    /// `address` must refer to mapped memory that identifies the same atomic
+    /// object supplied to `wait_on_address`.
+    pub unsafe fn wake_address(address: *const u8, maximum_count: usize) -> SysResult<usize> {
+        let count = syscall::call2(
+            syscall::SyscallNumber::WakeAddress,
+            address as u64,
+            maximum_count as u64,
+        )?;
+        usize::try_from(count).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+    }
+}
+
 pub mod random {
     use super::syscall::{self, SysResult};
 
