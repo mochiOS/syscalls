@@ -533,6 +533,17 @@ fn posix_client(
     Ok(unsafe { (*slot).as_ref().expect("POSIX client initialized") })
 }
 
+fn native_process_id() -> Result<u64, syscall::SysError> {
+    let mut context = syscall::ThreadSecurityContext::default();
+    syscall::call3(
+        syscall::SyscallNumber::GetThreadSecurityContext,
+        0,
+        (&mut context as *mut syscall::ThreadSecurityContext) as u64,
+        core::mem::size_of::<syscall::ThreadSecurityContext>() as u64,
+    )?;
+    Ok(context.process_id)
+}
+
 fn set_errno(value: c_int) {
     unsafe {
         *__errno() = value;
@@ -810,7 +821,7 @@ fn request_capability_from_shell(
     let class = capability_class_from_string(capability);
     let mut request = CapabilityPromptRequest {
         opcode: CAPABILITY_PROMPT_OPCODE,
-        process_id: syscall::call0(syscall::SyscallNumber::GetPid).unwrap_or(0),
+        process_id: native_process_id().unwrap_or(0),
         executable: CapabilityExecutableIdentity::default(),
         capability_class: class,
         capability_len: 0,
@@ -898,7 +909,7 @@ fn fill_capability_request(
     let class = capability_class_from_string(capability);
     let mut request = CapabilityPromptRequest {
         opcode,
-        process_id: syscall::call0(syscall::SyscallNumber::GetPid).unwrap_or(0),
+        process_id: native_process_id().unwrap_or(0),
         executable: CapabilityExecutableIdentity::default(),
         capability_class: class,
         capability_len: 0,
