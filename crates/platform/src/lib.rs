@@ -321,6 +321,13 @@ pub mod thread {
         super::runtime_support::yield_now();
     }
 
+    pub fn exit() -> ! {
+        let _ = syscall::raw_syscall0(syscall::SyscallNumber::ThreadExit);
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
     pub fn sleep_milliseconds(milliseconds: u64) -> SysResult<()> {
         syscall::call1(syscall::SyscallNumber::Sleep, milliseconds).map(|_| ())
     }
