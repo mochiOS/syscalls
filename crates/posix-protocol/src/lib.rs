@@ -17,9 +17,25 @@ pub const MAX_MESSAGE_LEN: usize = 64 * 1024;
 pub const CONTROL_HANDLE_KEY: u64 = u64::from_le_bytes(*b"POSXCTRL");
 
 const FD_HANDLE_KEY_PREFIX: u64 = 0x504f_5348_0000_0000;
-const FD_FLAGS_KEY_PREFIX: u64 = 0x504f_5346_0000_0000;
-const FD_RIGHTS_KEY_PREFIX: u64 = 0x504f_5352_0000_0000;
+const FD_METADATA_KEY_PREFIX: u64 = 0x504f_5346_0000_0000;
 const FD_KEY_INDEX_MASK: u64 = u32::MAX as u64;
+const FD_METADATA_TAG: u16 = 0x5046;
+
+pub const INHERITED_FD_KIND_STDIN: u8 = 1;
+pub const INHERITED_FD_KIND_STDOUT: u8 = 2;
+pub const INHERITED_FD_KIND_STDERR: u8 = 3;
+pub const INHERITED_FD_KIND_FILE: u8 = 5;
+pub const INHERITED_FD_KIND_DIRECTORY: u8 = 6;
+pub const INHERITED_FD_KIND_STREAM_READ: u8 = 7;
+pub const INHERITED_FD_KIND_STREAM_WRITE: u8 = 8;
+pub const INHERITED_FD_DESCRIPTOR_CLOEXEC: u8 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InheritedFdMetadata {
+    pub kind: u8,
+    pub open_flags: u32,
+    pub descriptor_flags: u8,
+}
 
 pub const fn fd_handle_key(fd: i32) -> Option<u64> {
     if fd < 0 {
@@ -28,34 +44,60 @@ pub const fn fd_handle_key(fd: i32) -> Option<u64> {
     Some(FD_HANDLE_KEY_PREFIX | fd as u32 as u64)
 }
 
-pub const fn fd_flags_key(fd: i32) -> Option<u64> {
+pub const fn fd_metadata_key(fd: i32) -> Option<u64> {
     if fd < 0 {
         return None;
     }
-    Some(FD_FLAGS_KEY_PREFIX | fd as u32 as u64)
+    Some(FD_METADATA_KEY_PREFIX | fd as u32 as u64)
 }
 
-pub const fn fd_rights_key(fd: i32) -> Option<u64> {
-    if fd < 0 {
+const fn valid_inherited_fd_kind(kind: u8) -> bool {
+    matches!(
+        kind,
+        INHERITED_FD_KIND_STDIN
+            | INHERITED_FD_KIND_STDOUT
+            | INHERITED_FD_KIND_STDERR
+            | INHERITED_FD_KIND_FILE
+            | INHERITED_FD_KIND_DIRECTORY
+            | INHERITED_FD_KIND_STREAM_READ
+            | INHERITED_FD_KIND_STREAM_WRITE
+    )
+}
+
+pub const fn encode_inherited_fd_metadata(metadata: InheritedFdMetadata) -> Option<u64> {
+    if !valid_inherited_fd_kind(metadata.kind)
+        || metadata.descriptor_flags & !INHERITED_FD_DESCRIPTOR_CLOEXEC != 0
+    {
         return None;
     }
-    Some(FD_RIGHTS_KEY_PREFIX | fd as u32 as u64)
+    Some(
+        metadata.open_flags as u64
+            | ((metadata.descriptor_flags as u64) << 32)
+            | ((metadata.kind as u64) << 40)
+            | ((FD_METADATA_TAG as u64) << 48),
+    )
 }
 
-pub const fn encode_fd_flags(open_flags: u32, descriptor_flags: u32) -> u64 {
-    open_flags as u64 | ((descriptor_flags as u64) << 32)
-}
-
-pub const fn decode_fd_flags(value: u64) -> (u32, u32) {
-    (value as u32, (value >> 32) as u32)
+pub const fn decode_inherited_fd_metadata(value: u64) -> Option<InheritedFdMetadata> {
+    if (value >> 48) as u16 != FD_METADATA_TAG {
+        return None;
+    }
+    let metadata = InheritedFdMetadata {
+        kind: (value >> 40) as u8,
+        open_flags: value as u32,
+        descriptor_flags: (value >> 32) as u8,
+    };
+    if !valid_inherited_fd_kind(metadata.kind)
+        || metadata.descriptor_flags & !INHERITED_FD_DESCRIPTOR_CLOEXEC != 0
+    {
+        return None;
+    }
+    Some(metadata)
 }
 
 pub const fn inherited_fd_from_key(key: u64) -> Option<i32> {
     let prefix = key & !FD_KEY_INDEX_MASK;
-    if prefix != FD_HANDLE_KEY_PREFIX
-        && prefix != FD_FLAGS_KEY_PREFIX
-        && prefix != FD_RIGHTS_KEY_PREFIX
-    {
+    if prefix != FD_HANDLE_KEY_PREFIX && prefix != FD_METADATA_KEY_PREFIX {
         return None;
     }
     let index = (key & FD_KEY_INDEX_MASK) as u32;
