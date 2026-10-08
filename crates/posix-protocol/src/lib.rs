@@ -157,6 +157,8 @@ pub const OP_SIGNAL_SEND: u16 = 34;
 pub const OP_SIGNAL_PENDING: u16 = 35;
 pub const OP_SIGNAL_DEQUEUE: u16 = 36;
 pub const OP_SIGNAL_THREAD_REGISTER: u16 = 37;
+pub const OP_GROUPS_GET: u16 = 38;
+pub const OP_GROUPS_SET: u16 = 39;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -191,6 +193,10 @@ pub const RESOURCE_LIMIT_LEN: usize = 16;
 pub const SIGNAL_SEND_REQUEST_LEN: usize = 16;
 pub const SIGNAL_MASK_LEN: usize = 8;
 pub const SIGNAL_NUMBER_LEN: usize = 4;
+pub const MAX_SUPPLEMENTARY_GROUPS: usize = 32;
+pub const GROUP_LIST_HEADER_LEN: usize = 4;
+pub const GROUP_LIST_MAX_LEN: usize =
+    GROUP_LIST_HEADER_LEN + MAX_SUPPLEMENTARY_GROUPS * core::mem::size_of::<u32>();
 pub const MAX_PATH_LEN: usize = 4096;
 pub const MAX_CONTROL_PAYLOAD_LEN: usize = RENAME_AT_HEADER_LEN + MAX_PATH_LEN * 2;
 pub const CONTROL_MESSAGE_LEN: usize = HEADER_LEN + MAX_CONTROL_PAYLOAD_LEN;
@@ -539,6 +545,57 @@ pub fn decode_credential_id(input: &[u8]) -> Result<u32, ProtocolError> {
         return Err(ProtocolError::InvalidLength);
     }
     Ok(get_u32(input, 0))
+}
+
+/// Encodes a supplementary-group list without exposing target ABI layout.
+pub fn encode_group_list(groups: &[u32], output: &mut [u8]) -> Result<usize, ProtocolError> {
+    if groups.len() > MAX_SUPPLEMENTARY_GROUPS {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let length = GROUP_LIST_HEADER_LEN
+        .checked_add(
+            groups
+                .len()
+                .checked_mul(core::mem::size_of::<u32>())
+                .ok_or(ProtocolError::InvalidLength)?,
+        )
+        .ok_or(ProtocolError::InvalidLength)?;
+    if output.len() < length {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    put_u32(output, 0, groups.len() as u32);
+    for (index, group) in groups.iter().copied().enumerate() {
+        put_u32(output, GROUP_LIST_HEADER_LEN + index * 4, group);
+    }
+    Ok(length)
+}
+
+/// Decodes a strictly-sized supplementary-group list into caller storage.
+pub fn decode_group_list(input: &[u8], output: &mut [u32]) -> Result<usize, ProtocolError> {
+    if input.len() < GROUP_LIST_HEADER_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let count = get_u32(input, 0) as usize;
+    if count > MAX_SUPPLEMENTARY_GROUPS {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let expected = GROUP_LIST_HEADER_LEN
+        .checked_add(
+            count
+                .checked_mul(core::mem::size_of::<u32>())
+                .ok_or(ProtocolError::InvalidLength)?,
+        )
+        .ok_or(ProtocolError::InvalidLength)?;
+    if input.len() != expected {
+        return Err(ProtocolError::InvalidLength);
+    }
+    if output.len() < count {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    for (index, group) in output.iter_mut().take(count).enumerate() {
+        *group = get_u32(input, GROUP_LIST_HEADER_LEN + index * 4);
+    }
+    Ok(count)
 }
 
 pub fn encode_wait_request(request: WaitRequest, output: &mut [u8]) -> Result<(), ProtocolError> {

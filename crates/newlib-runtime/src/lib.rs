@@ -3324,8 +3324,51 @@ pub extern "C" fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: c_int) -> c_int 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn setgroups(_ngroups: c_int, _grouplist: *const c_int) -> c_int {
-    0
+pub extern "C" fn getgroups(gidsetsize: c_int, grouplist: *mut u32) -> c_int {
+    let result = (|| -> Result<c_int, c_int> {
+        let capacity = usize::try_from(gidsetsize).map_err(|_| EINVAL)?;
+        if capacity != 0 && grouplist.is_null() {
+            return Err(EFAULT);
+        }
+        let mut groups = [0u32; posix_protocol::MAX_SUPPLEMENTARY_GROUPS];
+        let count = posix_client()
+            .and_then(|client| client.get_groups(&mut groups))
+            .map_err(map_posix_client_error)?;
+        if capacity == 0 {
+            return c_int::try_from(count).map_err(|_| EOVERFLOW);
+        }
+        if capacity < count {
+            return Err(EINVAL);
+        }
+        for (index, group) in groups.iter().copied().take(count).enumerate() {
+            unsafe { grouplist.add(index).write(group) };
+        }
+        c_int::try_from(count).map_err(|_| EOVERFLOW)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn setgroups(ngroups: c_int, grouplist: *const u32) -> c_int {
+    let result = (|| -> Result<c_int, c_int> {
+        let count = usize::try_from(ngroups).map_err(|_| EINVAL)?;
+        if count > posix_protocol::MAX_SUPPLEMENTARY_GROUPS {
+            return Err(EINVAL);
+        }
+        if count != 0 && grouplist.is_null() {
+            return Err(EFAULT);
+        }
+        let groups = if count == 0 {
+            &[]
+        } else {
+            unsafe { core::slice::from_raw_parts(grouplist, count) }
+        };
+        posix_client()
+            .and_then(|client| client.set_groups(groups))
+            .map_err(map_posix_client_error)?;
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]

@@ -276,6 +276,22 @@ impl<T: Transport> Client<T> {
         self.set_credential_id(protocol::OP_SET_GID, gid)
     }
 
+    /// Returns the calling process's supplementary groups.
+    pub fn get_groups(&self, output: &mut [u32]) -> Result<usize, ClientError<T::Error>> {
+        let mut response = [0u8; protocol::GROUP_LIST_MAX_LEN];
+        let length = self.request(protocol::OP_GROUPS_GET, 0, &[], &mut response)?;
+        protocol::decode_group_list(&response[..length], output).map_err(ClientError::Protocol)
+    }
+
+    /// Replaces the calling process's supplementary groups atomically.
+    pub fn set_groups(&self, groups: &[u32]) -> Result<(), ClientError<T::Error>> {
+        let mut request = [0u8; protocol::GROUP_LIST_MAX_LEN];
+        let length =
+            protocol::encode_group_list(groups, &mut request).map_err(ClientError::Protocol)?;
+        self.request(protocol::OP_GROUPS_SET, 0, &request[..length], &mut [])
+            .map(|_| ())
+    }
+
     fn set_credential_id(&self, opcode: u16, id: u32) -> Result<(), ClientError<T::Error>> {
         let mut request = [0u8; protocol::CREDENTIAL_ID_PAYLOAD_LEN];
         protocol::encode_credential_id(id, &mut request).map_err(ClientError::Protocol)?;
