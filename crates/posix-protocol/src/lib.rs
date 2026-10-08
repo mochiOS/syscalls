@@ -172,6 +172,7 @@ pub const OP_TERMINAL_ACQUIRE: u16 = 46;
 pub const OP_TERMINAL_RELEASE: u16 = 47;
 pub const OP_TERMINAL_GET_FOREGROUND: u16 = 48;
 pub const OP_TERMINAL_SET_FOREGROUND: u16 = 49;
+pub const OP_PROCESS_STOPPED: u16 = 50;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -207,7 +208,7 @@ pub const RESOURCE_LIMIT_REQUEST_LEN: usize = 32;
 pub const RESOURCE_LIMIT_LEN: usize = 16;
 pub const SIGNAL_SEND_REQUEST_LEN: usize = 16;
 pub const SIGNAL_MASK_LEN: usize = 8;
-pub const SIGNAL_NUMBER_LEN: usize = 4;
+pub const SIGNAL_DELIVERY_LEN: usize = 16;
 pub const TERMINAL_CONTROL_CHARACTERS: usize = 32;
 pub const TERMINAL_ATTRIBUTES_LEN: usize = 56;
 pub const TERMINAL_FLUSH_LEN: usize = 4;
@@ -259,7 +260,10 @@ pub const UNLINK_REMOVE_DIRECTORY: u32 = 1 << 0;
 pub const UNLINK_FLAGS_ALL: u32 = UNLINK_REMOVE_DIRECTORY;
 
 pub const WAIT_NOHANG: u32 = 1 << 0;
-pub const WAIT_OPTIONS_ALL: u32 = WAIT_NOHANG;
+pub const WAIT_UNTRACED: u32 = 1 << 1;
+pub const WAIT_CONTINUED: u32 = 1 << 3;
+pub const WAIT_OPTIONS_ALL: u32 = WAIT_NOHANG | WAIT_UNTRACED | WAIT_CONTINUED;
+pub const WAIT_STATUS_CONTINUED: u32 = 0xffff;
 
 pub const RESOURCE_LIMIT_SET: u32 = 1 << 0;
 pub const RESOURCE_LIMIT_FLAGS_ALL: u32 = RESOURCE_LIMIT_SET;
@@ -534,6 +538,12 @@ pub struct WaitRequest {
 pub struct WaitResult {
     pub process_id: u64,
     pub status: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SignalDelivery {
+    pub signal: u32,
+    pub token: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -849,26 +859,34 @@ pub fn decode_signal_mask(input: &[u8]) -> Result<u64, ProtocolError> {
     Ok(get_u64(input, 0))
 }
 
-pub fn encode_signal_number(signal: u32, output: &mut [u8]) -> Result<(), ProtocolError> {
-    if output.len() < SIGNAL_NUMBER_LEN {
+pub fn encode_signal_delivery(
+    delivery: SignalDelivery,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < SIGNAL_DELIVERY_LEN {
         return Err(ProtocolError::BufferTooSmall);
     }
-    if signal > SIGNAL_MAX {
+    if delivery.signal > SIGNAL_MAX || (delivery.signal == 0 && delivery.token != 0) {
         return Err(ProtocolError::InvalidLength);
     }
-    put_u32(output, 0, signal);
+    output[..SIGNAL_DELIVERY_LEN].fill(0);
+    put_u32(output, 0, delivery.signal);
+    put_u64(output, 8, delivery.token);
     Ok(())
 }
 
-pub fn decode_signal_number(input: &[u8]) -> Result<u32, ProtocolError> {
-    if input.len() != SIGNAL_NUMBER_LEN {
+pub fn decode_signal_delivery(input: &[u8]) -> Result<SignalDelivery, ProtocolError> {
+    if input.len() != SIGNAL_DELIVERY_LEN || get_u32(input, 4) != 0 {
         return Err(ProtocolError::InvalidLength);
     }
-    let signal = get_u32(input, 0);
-    if signal > SIGNAL_MAX {
+    let delivery = SignalDelivery {
+        signal: get_u32(input, 0),
+        token: get_u64(input, 8),
+    };
+    if delivery.signal > SIGNAL_MAX || (delivery.signal == 0 && delivery.token != 0) {
         return Err(ProtocolError::InvalidLength);
     }
-    Ok(signal)
+    Ok(delivery)
 }
 
 /// Serializes terminal attributes field by field so the provider protocol is

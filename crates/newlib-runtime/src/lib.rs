@@ -49,6 +49,8 @@ const F_GETFL: c_int = 3;
 const F_SETFL: c_int = 4;
 const SEEK_CUR: c_int = 1;
 const WNOHANG: c_int = 1;
+const WUNTRACED: c_int = 2;
+const WCONTINUED: c_int = 8;
 const SPAWN_FAIL_EXIT_STATUS: c_int = 127;
 const DIR_BUFFER_SIZE: usize = 4096;
 const DIRENT_NAME_MAX: usize = 256;
@@ -5210,7 +5212,8 @@ fn dispatch_signal(signal: c_int) -> c_int {
     }
 }
 
-fn apply_default_signal_action(signal: u32) -> Result<(), c_int> {
+fn apply_default_signal_action(delivery: posix_protocol::SignalDelivery) -> Result<(), c_int> {
+    let signal = delivery.signal;
     match signal {
         posix_protocol::SIGNAL_URG
         | posix_protocol::SIGNAL_CONT
@@ -5219,10 +5222,15 @@ fn apply_default_signal_action(signal: u32) -> Result<(), c_int> {
         posix_protocol::SIGNAL_STOP
         | posix_protocol::SIGNAL_TSTP
         | posix_protocol::SIGNAL_TTIN
-        | posix_protocol::SIGNAL_TTOU => syscall_errno(syscall::raw_syscall0(
-            syscall::SyscallNumber::ProcessSuspendCurrent,
-        ))
-        .map(|_| ()),
+        | posix_protocol::SIGNAL_TTOU => {
+            match posix_client()
+                .map_err(map_posix_client_error)?
+                .report_process_stopped(delivery)
+            {
+                Ok(()) | Err(PosixClientError::Remote(posix_protocol::STATUS_EAGAIN)) => Ok(()),
+                Err(error) => Err(map_posix_client_error(error)),
+            }
+        }
         _ => process_exit(128 + signal as c_int),
     }
 }
@@ -5231,16 +5239,17 @@ fn drain_pending_signals() -> Result<(), c_int> {
     let (_, control) = register_current_thread().ok_or(EAGAIN)?;
     loop {
         let blocked = control.signal_mask.load(Ordering::Acquire);
-        let signal = posix_client()
+        let delivery = posix_client()
             .map_err(map_posix_client_error)?
-            .dequeue_signal(blocked)
+            .dequeue_signal_delivery(blocked)
             .map_err(map_posix_client_error)?;
+        let signal = delivery.signal;
         if signal == 0 {
             return Ok(());
         }
         match dispatch_signal(signal as c_int) {
             0 | 3 => {}
-            1 => apply_default_signal_action(signal)?,
+            1 => apply_default_signal_action(delivery)?,
             _ => return Err(EINVAL),
         }
     }
@@ -5952,7 +5961,7 @@ pub extern "C" fn execvp(file: *const c_char, argv: *const *mut c_char) -> c_int
 #[unsafe(no_mangle)]
 pub extern "C" fn _waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int {
     let result = (|| {
-        if options & !WNOHANG != 0 {
+        if options & !(WNOHANG | WUNTRACED | WCONTINUED) != 0 {
             return Err(EINVAL);
         }
         let client = posix_client().map_err(map_posix_client_error)?;

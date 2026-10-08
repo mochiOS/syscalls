@@ -177,6 +177,18 @@ impl<T: Transport> Client<T> {
         protocol::decode_wait_result(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    /// Reports a default job-control stop for the authenticated calling
+    /// process. The request intentionally carries no process identifier.
+    pub fn report_process_stopped(
+        &self,
+        delivery: protocol::SignalDelivery,
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut request = [0u8; protocol::SIGNAL_DELIVERY_LEN];
+        protocol::encode_signal_delivery(delivery, &mut request).map_err(ClientError::Protocol)?;
+        self.request(protocol::OP_PROCESS_STOPPED, 0, &request, &mut [])
+            .map(|_| ())
+    }
+
     pub fn process_info(
         &self,
         process_id: i64,
@@ -229,11 +241,19 @@ impl<T: Transport> Client<T> {
     /// Atomically removes the lowest-numbered pending signal that is not in
     /// `blocked`. Zero means that no signal is currently deliverable.
     pub fn dequeue_signal(&self, blocked: u64) -> Result<u32, ClientError<T::Error>> {
+        self.dequeue_signal_delivery(blocked)
+            .map(|delivery| delivery.signal)
+    }
+
+    pub fn dequeue_signal_delivery(
+        &self,
+        blocked: u64,
+    ) -> Result<protocol::SignalDelivery, ClientError<T::Error>> {
         let mut request = [0u8; protocol::SIGNAL_MASK_LEN];
         protocol::encode_signal_mask(blocked, &mut request).map_err(ClientError::Protocol)?;
-        let mut response = [0u8; protocol::SIGNAL_NUMBER_LEN];
+        let mut response = [0u8; protocol::SIGNAL_DELIVERY_LEN];
         let length = self.request(protocol::OP_SIGNAL_DEQUEUE, 0, &request, &mut response)?;
-        protocol::decode_signal_number(&response[..length]).map_err(ClientError::Protocol)
+        protocol::decode_signal_delivery(&response[..length]).map_err(ClientError::Protocol)
     }
 
     /// Reads a resource limit and optionally replaces it atomically. A
