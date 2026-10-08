@@ -183,10 +183,34 @@ impl<T: Transport> Client<T> {
         &self,
         delivery: protocol::SignalDelivery,
     ) -> Result<(), ClientError<T::Error>> {
+        self.signal_delivery_request(protocol::OP_PROCESS_STOPPED, delivery)
+    }
+
+    /// Completes a signal delivery which did not change process lifecycle.
+    pub fn complete_signal_delivery(
+        &self,
+        delivery: protocol::SignalDelivery,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.signal_delivery_request(protocol::OP_SIGNAL_DELIVERY_COMPLETE, delivery)
+    }
+
+    /// Applies the default terminating action to the authenticated calling
+    /// process. The request contains no process identifier.
+    pub fn report_process_signaled(
+        &self,
+        delivery: protocol::SignalDelivery,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.signal_delivery_request(protocol::OP_PROCESS_SIGNALED, delivery)
+    }
+
+    fn signal_delivery_request(
+        &self,
+        opcode: u16,
+        delivery: protocol::SignalDelivery,
+    ) -> Result<(), ClientError<T::Error>> {
         let mut request = [0u8; protocol::SIGNAL_DELIVERY_LEN];
         protocol::encode_signal_delivery(delivery, &mut request).map_err(ClientError::Protocol)?;
-        self.request(protocol::OP_PROCESS_STOPPED, 0, &request, &mut [])
-            .map(|_| ())
+        self.request(opcode, 0, &request, &mut []).map(|_| ())
     }
 
     pub fn process_info(
@@ -241,8 +265,11 @@ impl<T: Transport> Client<T> {
     /// Atomically removes the lowest-numbered pending signal that is not in
     /// `blocked`. Zero means that no signal is currently deliverable.
     pub fn dequeue_signal(&self, blocked: u64) -> Result<u32, ClientError<T::Error>> {
-        self.dequeue_signal_delivery(blocked)
-            .map(|delivery| delivery.signal)
+        let delivery = self.dequeue_signal_delivery(blocked)?;
+        if delivery.signal != 0 {
+            self.complete_signal_delivery(delivery)?;
+        }
+        Ok(delivery.signal)
     }
 
     pub fn dequeue_signal_delivery(

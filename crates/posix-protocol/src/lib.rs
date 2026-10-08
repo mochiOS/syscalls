@@ -173,6 +173,8 @@ pub const OP_TERMINAL_RELEASE: u16 = 47;
 pub const OP_TERMINAL_GET_FOREGROUND: u16 = 48;
 pub const OP_TERMINAL_SET_FOREGROUND: u16 = 49;
 pub const OP_PROCESS_STOPPED: u16 = 50;
+pub const OP_SIGNAL_DELIVERY_COMPLETE: u16 = 51;
+pub const OP_PROCESS_SIGNALED: u16 = 52;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;

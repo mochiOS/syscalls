@@ -5218,7 +5218,10 @@ fn apply_default_signal_action(delivery: posix_protocol::SignalDelivery) -> Resu
         posix_protocol::SIGNAL_URG
         | posix_protocol::SIGNAL_CONT
         | posix_protocol::SIGNAL_CHLD
-        | posix_protocol::SIGNAL_WINCH => Ok(()),
+        | posix_protocol::SIGNAL_WINCH => posix_client()
+            .map_err(map_posix_client_error)?
+            .complete_signal_delivery(delivery)
+            .map_err(map_posix_client_error),
         posix_protocol::SIGNAL_STOP
         | posix_protocol::SIGNAL_TSTP
         | posix_protocol::SIGNAL_TTIN
@@ -5231,7 +5234,16 @@ fn apply_default_signal_action(delivery: posix_protocol::SignalDelivery) -> Resu
                 Err(error) => Err(map_posix_client_error(error)),
             }
         }
-        _ => process_exit(128 + signal as c_int),
+        _ => {
+            match posix_client()
+                .map_err(map_posix_client_error)?
+                .report_process_signaled(delivery)
+            {
+                Ok(()) => process_exit(128 + signal as c_int),
+                Err(PosixClientError::Remote(posix_protocol::STATUS_EAGAIN)) => Ok(()),
+                Err(error) => Err(map_posix_client_error(error)),
+            }
+        }
     }
 }
 
@@ -5248,9 +5260,17 @@ fn drain_pending_signals() -> Result<(), c_int> {
             return Ok(());
         }
         match dispatch_signal(signal as c_int) {
-            0 | 3 => {}
+            0 | 3 => posix_client()
+                .map_err(map_posix_client_error)?
+                .complete_signal_delivery(delivery)
+                .map_err(map_posix_client_error)?,
             1 => apply_default_signal_action(delivery)?,
-            _ => return Err(EINVAL),
+            _ => {
+                let _ = posix_client()
+                    .map_err(map_posix_client_error)?
+                    .complete_signal_delivery(delivery);
+                return Err(EINVAL);
+            }
         }
     }
 }
