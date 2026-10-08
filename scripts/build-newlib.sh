@@ -94,7 +94,12 @@ if [[ -n "$NEWLIB_SOURCE" ]]; then
         echo "newlib source changed; select a separate --output to preserve the existing build" >&2
         exit 2
     fi
-    target_cflags="-O2 -g0 -D__mochios__ -DGETREENT_PROVIDED -DHAVE_RENAME -ffile-prefix-map=$NEWLIB_SOURCE=/src/newlib -ffile-prefix-map=$OUT_ROOT=/build/newlib"
+    target_cflags="-O2 -g0 -D__mochios__ -DGETREENT_PROVIDED -DSIGNAL_PROVIDED -DHAVE_RENAME -ffile-prefix-map=$NEWLIB_SOURCE=/src/newlib -ffile-prefix-map=$OUT_ROOT=/build/newlib"
+    flags_stamp="$BUILD_DIR/.mochios-target-cflags"
+    if [[ ! -f "$flags_stamp" ]] || [[ "$(<"$flags_stamp")" != "$target_cflags" ]]; then
+        make -C "$BUILD_DIR" clean-target-newlib
+        printf '%s\n' "$target_cflags" >"$flags_stamp"
+    fi
     make -C "$BUILD_DIR" -j"$JOBS" CFLAGS_FOR_TARGET="$target_cflags" all-target-newlib
     make -C "$BUILD_DIR" CFLAGS_FOR_TARGET="$target_cflags" install-target-newlib
 else

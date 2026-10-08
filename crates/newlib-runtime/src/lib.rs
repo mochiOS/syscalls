@@ -171,6 +171,7 @@ struct ThreadControl {
     cancel_state: AtomicU32,
     cancel_type: AtomicU32,
     cancel_pending: AtomicU32,
+    signal_mask: AtomicU64,
     specific_values: [AtomicUsize; mochios_posix_client::thread::MAX_THREAD_KEYS],
     specific_generations: [AtomicU32; mochios_posix_client::thread::MAX_THREAD_KEYS],
     specific_destructors_running: AtomicU32,
@@ -194,6 +195,7 @@ impl ThreadControl {
             cancel_state: AtomicU32::new(PTHREAD_CANCEL_ENABLE),
             cancel_type: AtomicU32::new(PTHREAD_CANCEL_DEFERRED),
             cancel_pending: AtomicU32::new(0),
+            signal_mask: AtomicU64::new(0),
             specific_values: [const { AtomicUsize::new(0) };
                 mochios_posix_client::thread::MAX_THREAD_KEYS],
             specific_generations: [const { AtomicU32::new(0) };
@@ -508,6 +510,24 @@ struct RuntimeMutex<T> {
     value: UnsafeCell<T>,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SignalAction {
+    sa_flags: c_int,
+    sa_mask: u64,
+    handler: usize,
+}
+
+impl SignalAction {
+    const fn default_action() -> Self {
+        Self {
+            sa_flags: 0,
+            sa_mask: 0,
+            handler: 0,
+        }
+    }
+}
+
 impl<T> RuntimeMutex<T> {
     const fn new(value: T) -> Self {
         Self {
@@ -600,6 +620,8 @@ impl<T> RuntimeOnce<T> {
 unsafe impl<T: Send + Sync> Sync for RuntimeOnce<T> {}
 
 static STATE: RuntimeMutex<RuntimeState> = RuntimeMutex::new(RuntimeState::new());
+static SIGNAL_ACTIONS: RuntimeMutex<[SignalAction; posix_protocol::SIGNAL_MAX as usize]> =
+    RuntimeMutex::new([SignalAction::default_action(); posix_protocol::SIGNAL_MAX as usize]);
 static POSIX_CLIENT: RuntimeOnce<PosixClient<SyscallEndpointTransport>> = RuntimeOnce::new();
 static FILE_ACTIONS_POOL: RuntimeMutex<[FileActionsSlot; MAX_SPAWN_FILE_ACTIONS]> =
     RuntimeMutex::new([FileActionsSlot::new(); MAX_SPAWN_FILE_ACTIONS]);
@@ -879,6 +901,7 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
             .cancel_type
             .store(PTHREAD_CANCEL_DEFERRED, Ordering::Relaxed);
         control.cancel_pending.store(0, Ordering::Relaxed);
+        control.signal_mask.store(0, Ordering::Relaxed);
         for value in &control.specific_values {
             value.store(0, Ordering::Relaxed);
         }
@@ -923,6 +946,7 @@ fn release_thread_control(control: &ThreadControl) {
         .joinability
         .store(THREAD_JOINABLE, Ordering::Relaxed);
     control.cancel_pending.store(0, Ordering::Relaxed);
+    control.signal_mask.store(0, Ordering::Relaxed);
     for value in &control.specific_values {
         value.store(0, Ordering::Relaxed);
     }
@@ -4004,6 +4028,176 @@ pub extern "C" fn kill(pid: c_int, sig: c_int) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigaction(
+    signal: c_int,
+    action: *const SignalAction,
+    old_action: *mut SignalAction,
+) -> c_int {
+    if signal <= 0 || signal > posix_protocol::SIGNAL_MAX as c_int {
+        set_errno(EINVAL);
+        return -1;
+    }
+    if !action.is_null()
+        && !mochios_posix_client::signal::can_change_disposition(signal as u32)
+    {
+        set_errno(EINVAL);
+        return -1;
+    }
+    let index = signal as usize - 1;
+    let mut actions = SIGNAL_ACTIONS.lock();
+    if !old_action.is_null() {
+        unsafe { old_action.write(actions[index]) };
+    }
+    if !action.is_null() {
+        let mut replacement = unsafe { action.read() };
+        replacement.sa_mask = mochios_posix_client::signal::sanitize_mask(replacement.sa_mask);
+        actions[index] = replacement;
+    }
+    0
+}
+
+fn update_current_signal_mask(
+    how: c_int,
+    set: *const u64,
+    old_set: *mut u64,
+) -> Result<(), c_int> {
+    let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+    let previous = control.signal_mask.load(Ordering::Acquire);
+    if !old_set.is_null() {
+        unsafe { old_set.write(previous) };
+    }
+    if set.is_null() {
+        return Ok(());
+    }
+    let requested = unsafe { set.read() };
+    let updated = mochios_posix_client::signal::update_mask(previous, how, requested)
+        .ok_or(EINVAL)?;
+    control.signal_mask.store(updated, Ordering::Release);
+    Ok(())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigprocmask(
+    how: c_int,
+    set: *const u64,
+    old_set: *mut u64,
+) -> c_int {
+    result_with_errno(update_current_signal_mask(how, set, old_set).map(|_| 0), -1)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_sigmask(
+    how: c_int,
+    set: *const u64,
+    old_set: *mut u64,
+) -> c_int {
+    match update_current_signal_mask(how, set, old_set) {
+        Ok(()) => 0,
+        Err(error) => error,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigpending(set: *mut u64) -> c_int {
+    if set.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    let (_, control) = match register_current_thread() {
+        Some(current) => current,
+        None => {
+            set_errno(EAGAIN);
+            return -1;
+        }
+    };
+    result_with_errno(
+        posix_client()
+            .map_err(map_posix_client_error)
+            .and_then(|client| client.pending_signals().map_err(map_posix_client_error))
+            .map(|pending| {
+                unsafe { set.write(pending & control.signal_mask.load(Ordering::Acquire)) };
+                0
+            }),
+        -1,
+    )
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _signal_r(
+    _reent: *mut c_void,
+    signal: c_int,
+    handler: usize,
+) -> usize {
+    let replacement = SignalAction {
+        sa_flags: 0,
+        sa_mask: 0,
+        handler,
+    };
+    let mut previous = SignalAction::default_action();
+    if unsafe { sigaction(signal, &replacement, &mut previous) } == 0 {
+        previous.handler
+    } else {
+        usize::MAX
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn signal(signal: c_int, handler: usize) -> usize {
+    unsafe { _signal_r(ptr::null_mut(), signal, handler) }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _init_signal_r(_reent: *mut c_void) -> c_int {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _init_signal() -> c_int {
+    0
+}
+
+fn dispatch_signal(signal: c_int) -> c_int {
+    if signal <= 0 || signal > posix_protocol::SIGNAL_MAX as c_int {
+        return -1;
+    }
+    let action = SIGNAL_ACTIONS.lock()[signal as usize - 1];
+    match action.handler {
+        0 => 1,
+        usize::MAX => 2,
+        1 => 3,
+        handler => {
+            let (_, control) = match register_current_thread() {
+                Some(current) => current,
+                None => return -1,
+            };
+            let previous = control.signal_mask.load(Ordering::Acquire);
+            let current_signal =
+                mochios_posix_client::signal::signal_bit(signal as u32).unwrap_or(0);
+            control.signal_mask.store(
+                mochios_posix_client::signal::sanitize_mask(
+                    previous | action.sa_mask | current_signal,
+                ),
+                Ordering::Release,
+            );
+            let function: unsafe extern "C" fn(c_int) = unsafe { core::mem::transmute(handler) };
+            unsafe { function(signal) };
+            control.signal_mask.store(previous, Ordering::Release);
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn __sigtramp_r(_reent: *mut c_void, signal: c_int) -> c_int {
+    dispatch_signal(signal)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn __sigtramp(signal: c_int) -> c_int {
+    dispatch_signal(signal)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn _times(buf: *mut Tms) -> i64 {
     if !buf.is_null() {
         unsafe {
@@ -4666,6 +4860,10 @@ pub unsafe extern "C" fn pthread_create(
         return EINVAL;
     }
     reap_detached_threads();
+    let inherited_signal_mask = match register_current_thread() {
+        Some((_, control)) => control.signal_mask.load(Ordering::Acquire),
+        None => return EAGAIN,
+    };
 
     let (stack_address, stack_size, owns_stack, detachstate) = if attr.is_null() {
         (ptr::null_mut(), PTHREAD_DEFAULT_STACK_SIZE, true, PTHREAD_CREATE_JOINABLE)
@@ -4734,6 +4932,9 @@ pub unsafe extern "C" fn pthread_create(
     control
         .owns_stack
         .store(u32::from(owns_stack), Ordering::Relaxed);
+    control
+        .signal_mask
+        .store(inherited_signal_mask, Ordering::Relaxed);
     if let Err(error) = allocate_thread_reent(control) {
         control.state.store(THREAD_REAPING, Ordering::Relaxed);
         release_thread_control(control);

@@ -13,6 +13,7 @@ pub mod directory;
 pub mod random;
 #[cfg(feature = "syscall-endpoint")]
 pub mod synchronization;
+pub mod signal;
 pub mod thread;
 pub mod time;
 

@@ -197,7 +197,7 @@ pub const RLIMIT_COUNT: u32 = 10;
 
 pub const SIGNAL_MAX: u32 = 64;
 pub const SIGNAL_KILL: u32 = 9;
-pub const SIGNAL_STOP: u32 = 19;
+pub const SIGNAL_STOP: u32 = 17;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SignalSendRequest {
