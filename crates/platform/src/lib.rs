@@ -774,6 +774,17 @@ pub mod handle {
         syscall::call1(syscall::SyscallNumber::HandleRightsGet, handle as u64)
     }
 
+    /// Returns whether two process-local handles refer to the same kernel
+    /// object without exposing a reusable global object identifier.
+    pub fn same_object(left: Handle, right: Handle) -> SysResult<bool> {
+        syscall::call2(
+            syscall::SyscallNumber::HandleSameObject,
+            left as u64,
+            right as u64,
+        )
+        .map(|same| same != 0)
+    }
+
     /// Retrieves an opaque value inherited through the process LaunchContext.
     pub fn inherited_value(key: u64) -> SysResult<u64> {
         let mut value = 0u64;
