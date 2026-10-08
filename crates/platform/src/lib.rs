@@ -424,6 +424,17 @@ pub mod process {
         )
     }
 
+    pub fn open_handle_for_process_id(process_id: u64, rights: u64) -> SysResult<u32> {
+        syscall::call2(
+            syscall::SyscallNumber::ProcessHandleOpenById,
+            process_id,
+            rights,
+        )
+        .and_then(|handle| {
+            u32::try_from(handle).map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))
+        })
+    }
+
     /// Clones the current address space and process-local native handles. The
     /// parent receives a handle for the child and the child receives zero.
     pub fn clone_process() -> SysResult<u32> {
@@ -505,10 +516,6 @@ pub mod process {
             status_ptr,
             options,
         )
-    }
-
-    pub fn kill(pid: u64, signal: u64) -> SysResult<u64> {
-        syscall::call2(syscall::SyscallNumber::Kill, pid, signal)
     }
 
     pub fn list(max_records: usize) -> SysResult<Vec<Record>> {
