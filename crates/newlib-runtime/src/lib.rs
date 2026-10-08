@@ -82,7 +82,9 @@ const EOVERFLOW: c_int = 75;
 type InitFn = unsafe extern "C" fn();
 type CLong = i64;
 type Pthread = u32;
+type PthreadKey = u32;
 type PthreadStart = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+type PthreadKeyDestructor = unsafe extern "C" fn(*mut c_void);
 
 const PTHREAD_CREATE_DETACHED: c_int = 0;
 const PTHREAD_CREATE_JOINABLE: c_int = 1;
@@ -100,6 +102,10 @@ const PTHREAD_CANCEL_ENABLE: u32 = 0;
 const PTHREAD_CANCEL_DISABLE: u32 = 1;
 const PTHREAD_CANCEL_DEFERRED: u32 = 0;
 const PTHREAD_CANCEL_ASYNCHRONOUS: u32 = 1;
+const PTHREAD_DESTRUCTOR_ITERATIONS: usize = 4;
+const THREAD_KEY_FREE: u32 = 0;
+const THREAD_KEY_INITIALIZING: u32 = 1;
+const THREAD_KEY_ALLOCATED: u32 = 2;
 
 const CAPABILITY_SERVICE_NAME: &[u8] = b"capability.service";
 
@@ -165,6 +171,9 @@ struct ThreadControl {
     cancel_state: AtomicU32,
     cancel_type: AtomicU32,
     cancel_pending: AtomicU32,
+    specific_values: [AtomicUsize; mochios_posix_client::thread::MAX_THREAD_KEYS],
+    specific_generations: [AtomicU32; mochios_posix_client::thread::MAX_THREAD_KEYS],
+    specific_destructors_running: AtomicU32,
 }
 
 impl ThreadControl {
@@ -185,6 +194,27 @@ impl ThreadControl {
             cancel_state: AtomicU32::new(PTHREAD_CANCEL_ENABLE),
             cancel_type: AtomicU32::new(PTHREAD_CANCEL_DEFERRED),
             cancel_pending: AtomicU32::new(0),
+            specific_values: [const { AtomicUsize::new(0) };
+                mochios_posix_client::thread::MAX_THREAD_KEYS],
+            specific_generations: [const { AtomicU32::new(0) };
+                mochios_posix_client::thread::MAX_THREAD_KEYS],
+            specific_destructors_running: AtomicU32::new(0),
+        }
+    }
+}
+
+struct ThreadKeyControl {
+    allocated: AtomicU32,
+    generation: AtomicU32,
+    destructor: AtomicUsize,
+}
+
+impl ThreadKeyControl {
+    const fn new() -> Self {
+        Self {
+            allocated: AtomicU32::new(0),
+            generation: AtomicU32::new(0),
+            destructor: AtomicUsize::new(0),
         }
     }
 }
@@ -578,6 +608,8 @@ static FILE_ACTION_ENTRIES_POOL: RuntimeMutex<
 > = RuntimeMutex::new([FileActionEntrySlot::new(); MAX_SPAWN_FILE_ACTION_ENTRIES]);
 static THREADS: [ThreadControl; mochios_posix_client::thread::MAX_THREADS] =
     [const { ThreadControl::new() }; mochios_posix_client::thread::MAX_THREADS];
+static THREAD_KEYS: [ThreadKeyControl; mochios_posix_client::thread::MAX_THREAD_KEYS] =
+    [const { ThreadKeyControl::new() }; mochios_posix_client::thread::MAX_THREAD_KEYS];
 
 macro_rules! static_newlib_lock {
     ($name:ident) => {
@@ -846,6 +878,15 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
             .cancel_type
             .store(PTHREAD_CANCEL_DEFERRED, Ordering::Relaxed);
         control.cancel_pending.store(0, Ordering::Relaxed);
+        for value in &control.specific_values {
+            value.store(0, Ordering::Relaxed);
+        }
+        for generation in &control.specific_generations {
+            generation.store(0, Ordering::Relaxed);
+        }
+        control
+            .specific_destructors_running
+            .store(0, Ordering::Relaxed);
         let token = mochios_posix_client::thread::ThreadToken::new(index, generation)?;
         return Some((token.raw(), control));
     }
@@ -881,6 +922,15 @@ fn release_thread_control(control: &ThreadControl) {
         .joinability
         .store(THREAD_JOINABLE, Ordering::Relaxed);
     control.cancel_pending.store(0, Ordering::Relaxed);
+    for value in &control.specific_values {
+        value.store(0, Ordering::Relaxed);
+    }
+    for generation in &control.specific_generations {
+        generation.store(0, Ordering::Relaxed);
+    }
+    control
+        .specific_destructors_running
+        .store(0, Ordering::Relaxed);
     control.state.store(THREAD_FREE, Ordering::Release);
     native_mutex_wake_all(&control.state);
 }
@@ -969,7 +1019,59 @@ fn register_initial_thread() -> Option<(Pthread, &'static ThreadControl)> {
     Some((token, control))
 }
 
+fn thread_key_control(
+    key: PthreadKey,
+) -> Option<(
+    mochios_posix_client::thread::ThreadKeyToken,
+    &'static ThreadKeyControl,
+)> {
+    let token = mochios_posix_client::thread::ThreadKeyToken::from_raw(key)?;
+    let control = THREAD_KEYS.get(token.slot())?;
+    if control.allocated.load(Ordering::Acquire) != THREAD_KEY_ALLOCATED
+        || control.generation.load(Ordering::Acquire) != token.generation()
+    {
+        return None;
+    }
+    Some((token, control))
+}
+
+fn run_thread_specific_destructors(control: &ThreadControl) {
+    if control
+        .specific_destructors_running
+        .swap(1, Ordering::AcqRel)
+        != 0
+    {
+        return;
+    }
+    for _ in 0..PTHREAD_DESTRUCTOR_ITERATIONS {
+        let mut called_destructor = false;
+        for (slot, key_control) in THREAD_KEYS.iter().enumerate() {
+            if key_control.allocated.load(Ordering::Acquire) != THREAD_KEY_ALLOCATED {
+                continue;
+            }
+            let generation = key_control.generation.load(Ordering::Acquire);
+            if control.specific_generations[slot].load(Ordering::Acquire) != generation {
+                continue;
+            }
+            let value = control.specific_values[slot].swap(0, Ordering::AcqRel);
+            if value == 0 {
+                continue;
+            }
+            let destructor = key_control.destructor.load(Ordering::Acquire);
+            if destructor != 0 {
+                called_destructor = true;
+                let destructor: PthreadKeyDestructor = unsafe { core::mem::transmute(destructor) };
+                unsafe { destructor(value as *mut c_void) };
+            }
+        }
+        if !called_destructor {
+            break;
+        }
+    }
+}
+
 fn finish_thread(control: &ThreadControl, result: *mut c_void) -> ! {
+    run_thread_specific_destructors(control);
     control.result.store(result as usize, Ordering::Relaxed);
     control.state.store(THREAD_EXITED, Ordering::Release);
     native_mutex_wake_all(&control.state);
@@ -4704,6 +4806,99 @@ pub extern "C" fn pthread_self() -> Pthread {
 #[unsafe(no_mangle)]
 pub extern "C" fn pthread_equal(left: Pthread, right: Pthread) -> c_int {
     c_int::from(left == right)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_key_create(
+    key: *mut PthreadKey,
+    destructor: Option<PthreadKeyDestructor>,
+) -> c_int {
+    if key.is_null() {
+        return EINVAL;
+    }
+    for (slot, control) in THREAD_KEYS.iter().enumerate() {
+        if control
+            .allocated
+            .compare_exchange(
+                THREAD_KEY_FREE,
+                THREAD_KEY_INITIALIZING,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            continue;
+        }
+        let generation = mochios_posix_client::thread::next_generation(
+            control.generation.load(Ordering::Relaxed),
+        );
+        control.destructor.store(
+            destructor.map_or(0, |function| function as usize),
+            Ordering::Relaxed,
+        );
+        control.generation.store(generation, Ordering::Release);
+        let Some(token) = mochios_posix_client::thread::ThreadKeyToken::new(slot, generation)
+        else {
+            control.destructor.store(0, Ordering::Relaxed);
+            control.allocated.store(THREAD_KEY_FREE, Ordering::Release);
+            return EAGAIN;
+        };
+        control
+            .allocated
+            .store(THREAD_KEY_ALLOCATED, Ordering::Release);
+        unsafe { key.write(token.raw()) };
+        return 0;
+    }
+    EAGAIN
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_key_delete(key: PthreadKey) -> c_int {
+    let Some((_, control)) = thread_key_control(key) else {
+        return EINVAL;
+    };
+    if control
+        .allocated
+        .compare_exchange(
+            THREAD_KEY_ALLOCATED,
+            THREAD_KEY_FREE,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return EINVAL;
+    }
+    control.destructor.store(0, Ordering::Release);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_setspecific(key: PthreadKey, value: *const c_void) -> c_int {
+    let Some((token, _)) = thread_key_control(key) else {
+        return EINVAL;
+    };
+    let (_, thread) = match register_current_thread() {
+        Some(current) => current,
+        None => return EAGAIN,
+    };
+    thread.specific_values[token.slot()].store(value as usize, Ordering::Relaxed);
+    thread.specific_generations[token.slot()].store(token.generation(), Ordering::Release);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_getspecific(key: PthreadKey) -> *mut c_void {
+    let Some((token, _)) = thread_key_control(key) else {
+        return ptr::null_mut();
+    };
+    let Some((_, thread)) = current_thread_control() else {
+        return ptr::null_mut();
+    };
+    if thread.specific_generations[token.slot()].load(Ordering::Acquire) != token.generation() {
+        return ptr::null_mut();
+    }
+    thread.specific_values[token.slot()].load(Ordering::Acquire) as *mut c_void
 }
 
 #[unsafe(no_mangle)]
