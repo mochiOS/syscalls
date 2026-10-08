@@ -282,12 +282,14 @@ pub const SIGNAL_HUP: u32 = 1;
 pub const SIGNAL_INT: u32 = 2;
 pub const SIGNAL_QUIT: u32 = 3;
 pub const SIGNAL_KILL: u32 = 9;
+pub const SIGNAL_URG: u32 = 16;
 pub const SIGNAL_STOP: u32 = 17;
 pub const SIGNAL_TSTP: u32 = 18;
 pub const SIGNAL_CONT: u32 = 19;
 pub const SIGNAL_CHLD: u32 = 20;
 pub const SIGNAL_TTIN: u32 = 21;
 pub const SIGNAL_TTOU: u32 = 22;
+pub const SIGNAL_WINCH: u32 = 28;
 
 /// Provider control codes understood by POSIX pseudo-terminal objects.
 ///

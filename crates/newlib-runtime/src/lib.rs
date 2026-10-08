@@ -2558,7 +2558,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         client
             .register_child(ObjectHandleAttachment {
                 handle,
-                rights: syscall::HANDLE_RIGHT_WAIT,
+                rights: syscall::HANDLE_RIGHT_WAIT | syscall::HANDLE_RIGHT_SIGNAL,
             })
             .map_err(map_posix_client_error)?;
         syscall_errno(syscall::raw_syscall1(
@@ -5210,13 +5210,19 @@ fn dispatch_signal(signal: c_int) -> c_int {
     }
 }
 
-fn apply_default_signal_action(signal: u32) {
+fn apply_default_signal_action(signal: u32) -> Result<(), c_int> {
     match signal {
-        16 | 19 | 20 | 28 => {}
-        17 | 18 | 21 | 22 => {
-            // Native process suspension is a separate generic mechanism. The
-            // pending delivery path remains independent of POSIX numbering.
-        }
+        posix_protocol::SIGNAL_URG
+        | posix_protocol::SIGNAL_CONT
+        | posix_protocol::SIGNAL_CHLD
+        | posix_protocol::SIGNAL_WINCH => Ok(()),
+        posix_protocol::SIGNAL_STOP
+        | posix_protocol::SIGNAL_TSTP
+        | posix_protocol::SIGNAL_TTIN
+        | posix_protocol::SIGNAL_TTOU => syscall_errno(syscall::raw_syscall0(
+            syscall::SyscallNumber::ProcessSuspendCurrent,
+        ))
+        .map(|_| ()),
         _ => process_exit(128 + signal as c_int),
     }
 }
@@ -5234,7 +5240,7 @@ fn drain_pending_signals() -> Result<(), c_int> {
         }
         match dispatch_signal(signal as c_int) {
             0 | 3 => {}
-            1 => apply_default_signal_action(signal),
+            1 => apply_default_signal_action(signal)?,
             _ => return Err(EINVAL),
         }
     }
