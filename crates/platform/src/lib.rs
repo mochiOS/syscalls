@@ -373,6 +373,8 @@ pub mod process {
     use alloc::vec;
     use alloc::vec::Vec;
 
+    pub use mnu_abi::{PROCESS_STATE_EXITED, PROCESS_STATE_RUNNING};
+
     pub const RECORD_SIZE: usize = 112;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -504,15 +506,6 @@ pub mod process {
 
     pub fn exit(code: u64) -> ! {
         super::runtime_support::process_exit(code)
-    }
-
-    pub fn wait(pid: i64, status_ptr: u64, options: u64) -> SysResult<u64> {
-        syscall::call3(
-            syscall::SyscallNumber::ProcessWait,
-            pid as u64,
-            status_ptr,
-            options,
-        )
     }
 
     pub fn list(max_records: usize) -> SysResult<Vec<Record>> {
