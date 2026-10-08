@@ -1460,7 +1460,7 @@ pub mod performance {
 }
 
 pub mod file {
-    use super::syscall::{self, SysError, SysResult};
+    use super::syscall::{self, SysResult};
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
 
