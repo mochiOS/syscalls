@@ -5,6 +5,10 @@ pub const VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 64;
 pub const MAX_MESSAGE_LEN: usize = 256 * 1024;
 pub const MAX_PATH_LEN: usize = 4096;
+pub const MAX_SUPPLEMENTARY_GROUPS: usize = 32;
+pub const CREDENTIALS_HEADER_LEN: usize = 12;
+pub const CREDENTIALS_MAX_LEN: usize =
+    CREDENTIALS_HEADER_LEN + MAX_SUPPLEMENTARY_GROUPS * core::mem::size_of::<u32>();
 
 /// Opaque LaunchContext key used to pass the filesystem control endpoint to
 /// another user-space service. mnu does not interpret this value.
@@ -223,6 +227,96 @@ pub struct DirEntryHeader {
 pub struct NodeMetadata {
     pub uid: u32,
     pub gid: u32,
+}
+
+/// Architecture-independent credentials authenticated by a user-space policy
+/// service before an atomic filesystem operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Credentials {
+    pub effective_uid: u32,
+    pub effective_gid: u32,
+    supplementary_group_count: u32,
+    supplementary_groups: [u32; MAX_SUPPLEMENTARY_GROUPS],
+}
+
+impl Credentials {
+    pub const fn supplementary_groups(&self) -> &[u32] {
+        self.supplementary_groups
+            .split_at(self.supplementary_group_count as usize)
+            .0
+    }
+}
+
+/// Prefixes an operation payload with explicitly serialized credentials.
+pub fn encode_credentials_payload(
+    effective_uid: u32,
+    effective_gid: u32,
+    supplementary_groups: &[u32],
+    payload: &[u8],
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    if supplementary_groups.len() > MAX_SUPPLEMENTARY_GROUPS {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let credentials_len = CREDENTIALS_HEADER_LEN
+        .checked_add(
+            supplementary_groups
+                .len()
+                .checked_mul(core::mem::size_of::<u32>())
+                .ok_or(ProtocolError::InvalidLength)?,
+        )
+        .ok_or(ProtocolError::InvalidLength)?;
+    let total = credentials_len
+        .checked_add(payload.len())
+        .ok_or(ProtocolError::InvalidLength)?;
+    if total > MAX_MESSAGE_LEN - HEADER_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    if output.len() < total {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    put_u32(output, 0, effective_uid);
+    put_u32(output, 4, effective_gid);
+    put_u32(output, 8, supplementary_groups.len() as u32);
+    for (index, group) in supplementary_groups.iter().copied().enumerate() {
+        put_u32(output, CREDENTIALS_HEADER_LEN + index * 4, group);
+    }
+    output[credentials_len..total].copy_from_slice(payload);
+    Ok(total)
+}
+
+/// Decodes credentials and returns the remaining operation-specific payload.
+pub fn decode_credentials_payload(input: &[u8]) -> Result<(Credentials, &[u8]), ProtocolError> {
+    if input.len() < CREDENTIALS_HEADER_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let count = get_u32(input, 8) as usize;
+    if count > MAX_SUPPLEMENTARY_GROUPS {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let credentials_len = CREDENTIALS_HEADER_LEN
+        .checked_add(
+            count
+                .checked_mul(core::mem::size_of::<u32>())
+                .ok_or(ProtocolError::InvalidLength)?,
+        )
+        .ok_or(ProtocolError::InvalidLength)?;
+    if input.len() < credentials_len {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let mut supplementary_groups = [0u32; MAX_SUPPLEMENTARY_GROUPS];
+    for (index, group) in supplementary_groups.iter_mut().take(count).enumerate() {
+        *group = get_u32(input, CREDENTIALS_HEADER_LEN + index * 4);
+    }
+    Ok((
+        Credentials {
+            effective_uid: get_u32(input, 0),
+            effective_gid: get_u32(input, 4),
+            supplementary_group_count: count as u32,
+            supplementary_groups,
+        },
+        &input[credentials_len..],
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
