@@ -278,8 +278,15 @@ pub const RLIMIT_AS: u32 = 9;
 pub const RLIMIT_COUNT: u32 = 10;
 
 pub const SIGNAL_MAX: u32 = 64;
+pub const SIGNAL_HUP: u32 = 1;
+pub const SIGNAL_INT: u32 = 2;
+pub const SIGNAL_QUIT: u32 = 3;
 pub const SIGNAL_KILL: u32 = 9;
 pub const SIGNAL_STOP: u32 = 17;
+pub const SIGNAL_CONT: u32 = 18;
+pub const SIGNAL_TSTP: u32 = 20;
+pub const SIGNAL_TTIN: u32 = 21;
+pub const SIGNAL_TTOU: u32 = 22;
 
 /// Provider control codes understood by POSIX pseudo-terminal objects.
 ///
@@ -375,7 +382,8 @@ impl TerminalAttributes {
             input_flags: TERMINAL_IFLAG_ICRNL,
             output_flags: TERMINAL_OFLAG_OPOST | TERMINAL_OFLAG_ONLCR,
             control_flags: TERMINAL_CFLAG_CS8 | TERMINAL_CFLAG_CREAD,
-            local_flags: TERMINAL_LFLAG_ICANON
+            local_flags: TERMINAL_LFLAG_ISIG
+                | TERMINAL_LFLAG_ICANON
                 | TERMINAL_LFLAG_ECHO
                 | TERMINAL_LFLAG_ECHOE
                 | TERMINAL_LFLAG_ECHOK,
