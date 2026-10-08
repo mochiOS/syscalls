@@ -317,6 +317,34 @@ pub mod thread {
         )
     }
 
+    pub fn install_upcall(config: &syscall::ThreadUpcallConfig) -> SysResult<()> {
+        syscall::call2(
+            syscall::SyscallNumber::ThreadUpcallInstall,
+            config as *const syscall::ThreadUpcallConfig as u64,
+            core::mem::size_of::<syscall::ThreadUpcallConfig>() as u64,
+        )
+        .map(|_| ())
+    }
+
+    pub fn create_interrupt_handle() -> SysResult<u32> {
+        syscall::call0(syscall::SyscallNumber::ThreadHandleCreate).and_then(|handle| {
+            u32::try_from(handle).map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))
+        })
+    }
+
+    pub fn interrupt(handle: u32, payload: u64) -> SysResult<()> {
+        syscall::call2(
+            syscall::SyscallNumber::ThreadInterrupt,
+            u64::from(handle),
+            payload,
+        )
+        .map(|_| ())
+    }
+
+    pub fn return_from_upcall(token: u64) -> SysResult<()> {
+        syscall::call1(syscall::SyscallNumber::ThreadUpcallReturn, token).map(|_| ())
+    }
+
     pub fn yield_now() {
         super::runtime_support::yield_now();
     }
