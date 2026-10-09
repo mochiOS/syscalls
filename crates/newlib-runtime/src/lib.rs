@@ -4917,11 +4917,17 @@ pub extern "C" fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c_int {
         if addr.is_null() || len == 0 || (addr as usize) & (PAGE_SIZE - 1) != 0 {
             return Err(EINVAL);
         }
+        let policy = mochios_posix_client::memory::sync_policy(flags).ok_or(EINVAL)?;
+        // The native operation is currently blocking writeback. Do not report
+        // asynchronous completion or invalidation until those operations exist.
+        if policy.asynchronous || policy.invalidate {
+            return Err(ENOSYS);
+        }
         let _ = syscall_errno(syscall::raw_syscall3(
             syscall::SyscallNumber::MemorySync,
             addr as u64,
             len as u64,
-            flags as u64,
+            0,
         ))?;
         Ok(0)
     })();
