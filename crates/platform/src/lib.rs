@@ -1293,6 +1293,10 @@ pub mod memory {
         syscall::call2(syscall::SyscallNumber::MemoryObjectCreate, len, 0)
     }
 
+    pub fn object_length(handle: u64) -> SysResult<u64> {
+        syscall::call1(syscall::SyscallNumber::MemoryObjectLength, handle)
+    }
+
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     pub struct FramebufferInfo {
