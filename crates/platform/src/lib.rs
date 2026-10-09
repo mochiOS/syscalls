@@ -1288,6 +1288,11 @@ pub mod memory {
     use super::syscall::{self, SysResult};
     use crate::DmaAllocation;
 
+    /// Creates page-aligned, zero-filled backing transferable through IPC.
+    pub fn create_object(len: u64) -> SysResult<u64> {
+        syscall::call2(syscall::SyscallNumber::MemoryObjectCreate, len, 0)
+    }
+
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     pub struct FramebufferInfo {
