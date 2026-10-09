@@ -4905,13 +4905,15 @@ pub extern "C" fn mmap(
 #[unsafe(no_mangle)]
 pub extern "C" fn munmap(addr: *mut c_void, len: usize) -> c_int {
     let result = (|| {
-        if addr.is_null() || len == 0 || (addr as usize) & (PAGE_SIZE - 1) != 0 {
+        if addr.is_null() {
             return Err(EINVAL);
         }
+        let native_len = mochios_posix_client::memory::unmap_span(addr as u64, len as u64)
+            .ok_or(EINVAL)?;
         let _ = syscall_errno(syscall::raw_syscall2(
             syscall::SyscallNumber::MemoryUnmap,
             addr as u64,
-            len as u64,
+            native_len,
         ))?;
         Ok(0)
     })();

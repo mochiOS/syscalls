@@ -89,3 +89,19 @@ pub const fn native_map(flags: i32) -> Option<NativeMap> {
         anonymous: flags & MAP_ANONYMOUS != 0,
     })
 }
+
+/// Validate POSIX unmap alignment and normalize its byte length before entering
+/// the native VM ABI. The kernel retains ownership and address-space checks.
+pub const fn unmap_span(address: u64, length: u64) -> Option<u64> {
+    if address & 4095 != 0 || length == 0 {
+        return None;
+    }
+    let rounded = match length.checked_add(4095) {
+        Some(length) => length & !4095,
+        None => return None,
+    };
+    match address.checked_add(rounded) {
+        Some(_) => Some(rounded),
+        None => None,
+    }
+}
