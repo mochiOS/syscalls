@@ -1,4 +1,4 @@
-use crate::syscall::{EINVAL, EIO, ENOMEM, ERANGE, SysError};
+use crate::syscall::{EINVAL, ENOMEM, ERANGE, SysError};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -40,34 +40,8 @@ pub trait MpkgReader {
     fn read_exact_at(&mut self, offset: u64, output: &mut [u8]) -> Result<(), SysError>;
 }
 
-struct LegacyFileReader {
-    fd: u64,
-}
-
-impl MpkgReader for LegacyFileReader {
-    fn len(&mut self) -> Result<u64, SysError> {
-        super::file::seek(self.fd, 0, 2)
-    }
-
-    fn read_exact_at(&mut self, offset: u64, output: &mut [u8]) -> Result<(), SysError> {
-        super::file::seek(
-            self.fd,
-            i64::try_from(offset).map_err(|_| package_error(ERANGE))?,
-            0,
-        )?;
-        read_exact(self.fd, output)
-    }
-}
-
 fn package_error(errno: u64) -> SysError {
     SysError::from_raw(errno as i64)
-}
-
-pub fn index_mpkg(path: &str) -> Result<MpkgIndex, SysError> {
-    let fd = super::file::open_path(path, 0)?;
-    let result = index_mpkg_reader(&mut LegacyFileReader { fd });
-    let _ = super::file::close(fd);
-    result
 }
 
 pub fn index_mpkg_reader(reader: &mut impl MpkgReader) -> Result<MpkgIndex, SysError> {
@@ -182,13 +156,6 @@ pub fn index_mpkg_reader(reader: &mut impl MpkgReader) -> Result<MpkgIndex, SysE
     })
 }
 
-pub fn read_mpkg_range(path: &str, offset: u64, size: u64) -> Result<Vec<u8>, SysError> {
-    let fd = super::file::open_path(path, 0)?;
-    let result = read_mpkg_range_reader(&mut LegacyFileReader { fd }, offset, size);
-    let _ = super::file::close(fd);
-    result
-}
-
 pub fn read_mpkg_range_reader(
     reader: &mut impl MpkgReader,
     offset: u64,
@@ -206,22 +173,6 @@ pub fn read_mpkg_range_reader(
     bytes.resize(size, 0);
     reader.read_exact_at(offset, &mut bytes)?;
     Ok(bytes)
-}
-
-fn read_exact(fd: u64, output: &mut [u8]) -> Result<(), SysError> {
-    let mut offset = 0usize;
-    while offset < output.len() {
-        let read = super::file::read(
-            fd,
-            output[offset..].as_mut_ptr() as u64,
-            (output.len() - offset) as u64,
-        )? as usize;
-        if read == 0 {
-            return Err(package_error(EIO));
-        }
-        offset += read;
-    }
-    Ok(())
 }
 
 fn range_is_zero(
