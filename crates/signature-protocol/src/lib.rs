@@ -3,6 +3,8 @@
 use core::fmt;
 
 pub const MAGIC: u32 = 0x4749_534d;
+/// Bootstrap control message carrying one attenuated POSIX endpoint Handle.
+pub const INSTALL_POSIX_ENDPOINT_OPCODE: u32 = 0x4d53_5850;
 pub const VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 24;
 pub const BEGIN_LEN: usize = HEADER_LEN + 40;
