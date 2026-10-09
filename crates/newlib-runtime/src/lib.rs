@@ -2875,6 +2875,11 @@ fn wait_for_handle(entry: FdEntry, interests: u64) -> Result<u64, c_int> {
 }
 
 fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result<isize, c_int> {
+    if entry.handle.kind == FdKind::ObjectFile
+        && !mochios_posix_client::fd::access_allows_write(entry.handle.open_flags as u32)
+    {
+        return Err(EBADF);
+    }
     if length == 0 {
         return Ok(0);
     }
@@ -2915,6 +2920,11 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
 }
 
 fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<isize, c_int> {
+    if entry.handle.kind == FdKind::ObjectFile
+        && !mochios_posix_client::fd::access_allows_read(entry.handle.open_flags as u32)
+    {
+        return Err(EBADF);
+    }
     if length == 0 {
         return Ok(0);
     }

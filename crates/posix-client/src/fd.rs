@@ -1,6 +1,17 @@
 pub const FD_CLOEXEC: u32 = 1;
 pub const DEFAULT_FD_LIMIT: usize = 256;
 
+/// POSIX descriptor access-mode checks belong above native Handle rights.
+/// A denied descriptor operation reports EBADF without issuing native I/O;
+/// allowed operations still require the kernel's independent rights check.
+pub const fn access_allows_read(open_flags: u32) -> bool {
+    matches!(open_flags & 3, 0 | 2)
+}
+
+pub const fn access_allows_write(open_flags: u32) -> bool {
+    matches!(open_flags & 3, 1 | 2)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry<H> {
     pub handle: H,
