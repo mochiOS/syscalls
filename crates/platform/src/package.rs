@@ -2,6 +2,8 @@ use crate::syscall::{EINVAL, EIO, ENOMEM, ERANGE, SysError};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+pub use crate::native_mpkg_reader::NativeMpkgReader;
+
 const MPKG_HEADER_LEN: u64 = 32;
 const TAR_BLOCK_LEN: u64 = 512;
 const MAX_MPKG_LEN: u64 = 256 * 1024 * 1024;

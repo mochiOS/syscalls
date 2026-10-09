@@ -1706,3 +1706,4 @@ pub mod env {
 }
 
 pub mod package;
+mod native_mpkg_reader;
