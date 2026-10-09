@@ -13,7 +13,6 @@ use mochi_user_syscall as syscall;
 
 const PAGE_SIZE: usize = 4096;
 const HEADER_SIZE: usize = 16;
-const MAP_PRIVATE_ANON: u64 = 0x22;
 
 #[repr(align(16))]
 struct Zst([u8; 1]);
@@ -69,8 +68,8 @@ impl UserAllocator {
             syscall::SyscallNumber::MemoryMap,
             0,
             bytes as u64,
-            3,
-            MAP_PRIVATE_ANON,
+            syscall::MEMORY_ACCESS_READ | syscall::MEMORY_ACCESS_WRITE,
+            0,
             0,
             0,
         )

@@ -1299,25 +1299,31 @@ pub mod memory {
         pub format: u32,
     }
 
-    pub fn mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64) -> SysResult<u64> {
-        mmap_at_offset(addr, len, prot, flags, fd, 0)
-    }
-
-    pub fn mmap_at_offset(
+    pub fn map(
         addr: u64,
         len: u64,
-        prot: u64,
-        flags: u64,
-        fd: u64,
+        access: u64,
+        options: u64,
+        backing_handle: u64,
+    ) -> SysResult<u64> {
+        map_at_offset(addr, len, access, options, backing_handle, 0)
+    }
+
+    pub fn map_at_offset(
+        addr: u64,
+        len: u64,
+        access: u64,
+        options: u64,
+        backing_handle: u64,
         offset: u64,
     ) -> SysResult<u64> {
         syscall::call6(
             syscall::SyscallNumber::MemoryMap,
             addr,
             len,
-            prot,
-            flags,
-            fd,
+            access,
+            options,
+            backing_handle,
             offset,
         )
     }

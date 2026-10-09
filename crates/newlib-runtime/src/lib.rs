@@ -27,8 +27,7 @@ use mochios_posix_protocol::{FileStatus as PosixFileStatus, STAT_NOFOLLOW};
 
 const PAGE_SIZE: usize = 4096;
 const MAX_FDS: usize = 64;
-const PROT_READ_WRITE: u64 = 0x3;
-const MAP_PRIVATE_ANON: u64 = 0x22;
+const NATIVE_READ_WRITE: u64 = mnu_abi::MEMORY_ACCESS_READ | mnu_abi::MEMORY_ACCESS_WRITE;
 const MAP_FAILED: *mut c_void = (-1isize) as *mut c_void;
 const AT_FDCWD: i64 = -100;
 const AT_SYMLINK_NOFOLLOW: u64 = 2;
@@ -1062,8 +1061,8 @@ fn allocate_thread_reent(control: &ThreadControl) -> Result<(), c_int> {
         syscall::SyscallNumber::MemoryMap,
         0,
         mapping_size as u64,
-        PROT_READ_WRITE,
-        MAP_PRIVATE_ANON,
+        NATIVE_READ_WRITE,
+        0,
         0,
         0,
     ))? as usize;
@@ -1151,8 +1150,8 @@ fn setup_signal_delivery(control: &ThreadControl) -> Result<(), c_int> {
         syscall::SyscallNumber::MemoryMap,
         0,
         SIGNAL_UPCALL_STACK_SIZE as u64,
-        PROT_READ_WRITE,
-        MAP_PRIVATE_ANON,
+        NATIVE_READ_WRITE,
+        0,
         0,
         0,
     ))? as usize;
@@ -4789,22 +4788,31 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
             if increment < 0 {
                 return Err(EINVAL);
             }
+            // Keep independent mappings (notably pthread stacks) outside the
+            // contiguous arena required by newlib's sbrk-based allocator.
+            const HEAP_RESERVATION_BYTES: usize = 256 * 1024 * 1024;
             let mapped = syscall_errno(syscall::raw_syscall6(
                 syscall::SyscallNumber::MemoryMap,
                 0,
-                heap.page_size as u64,
-                PROT_READ_WRITE,
-                MAP_PRIVATE_ANON,
+                HEAP_RESERVATION_BYTES as u64,
+                0,
+                0,
                 0,
                 0,
             ))? as usize;
-            let mapped_end = mapped.checked_add(heap.page_size).ok_or(ENOMEM)?;
+            let mapped_end = mapped.checked_add(HEAP_RESERVATION_BYTES).ok_or(ENOMEM)?;
             if mapped_end > heap.maximum_end {
+                let _ = syscall::raw_syscall2(
+                    syscall::SyscallNumber::MemoryUnmap,
+                    mapped as u64,
+                    HEAP_RESERVATION_BYTES as u64,
+                );
                 return Err(ENOMEM);
             }
             heap.base = mapped;
             heap.current_break = mapped;
-            heap.mapped_end = mapped_end;
+            heap.mapped_end = mapped;
+            heap.maximum_end = mapped_end;
         }
         let old_break = heap.current_break;
         let new_break = if increment >= 0 {
@@ -4824,18 +4832,12 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
             let target_end = align_up(new_break, heap.page_size).ok_or(ENOMEM)?;
             let map_len = target_end.checked_sub(heap.mapped_end).ok_or(ENOMEM)?;
             if map_len != 0 {
-                let mapped = syscall_errno(syscall::raw_syscall6(
-                    syscall::SyscallNumber::MemoryMap,
+                syscall_errno(syscall::raw_syscall3(
+                    syscall::SyscallNumber::MemoryProtect,
                     heap.mapped_end as u64,
                     map_len as u64,
-                    PROT_READ_WRITE,
-                    MAP_PRIVATE_ANON,
-                    0,
-                    0,
+                    NATIVE_READ_WRITE,
                 ))?;
-                if mapped as usize != heap.mapped_end {
-                    return Err(ENOMEM);
-                }
                 heap.mapped_end = target_end;
             }
         }
@@ -4863,13 +4865,36 @@ pub extern "C" fn mmap(
         if len == 0 || offset < 0 || (offset as u64) & 4095 != 0 {
             return Err(EINVAL);
         }
+        let access = mochios_posix_client::memory::native_access(prot).ok_or(EINVAL)?;
+        let mapping = mochios_posix_client::memory::native_map(flags).ok_or(EINVAL)?;
+        let backing_handle = if mapping.anonymous {
+            if offset != 0 {
+                return Err(EINVAL);
+            }
+            0
+        } else {
+            let entry = with_fd_entry(fd)?;
+            if entry.handle.kind != FdKind::ObjectFile {
+                return Err(EACCES);
+            }
+            let mut required = syscall::HANDLE_RIGHT_MAP | syscall::HANDLE_RIGHT_READ;
+            if mapping.options & mnu_abi::MEMORY_MAP_SHARED != 0
+                && access & mnu_abi::MEMORY_ACCESS_WRITE != 0
+            {
+                required |= syscall::HANDLE_RIGHT_WRITE;
+            }
+            if entry.rights & required != required {
+                return Err(EACCES);
+            }
+            entry.handle.lower_handle
+        };
         let mapped = syscall_errno(syscall::raw_syscall6(
             syscall::SyscallNumber::MemoryMap,
             addr as u64,
             len as u64,
-            prot as u64,
-            flags as u64,
-            fd as u64,
+            access,
+            mapping.options,
+            backing_handle,
             offset as u64,
         ))?;
         Ok(mapped as *mut c_void)
@@ -4880,7 +4905,7 @@ pub extern "C" fn mmap(
 #[unsafe(no_mangle)]
 pub extern "C" fn munmap(addr: *mut c_void, len: usize) -> c_int {
     let result = (|| {
-        if addr.is_null() || len == 0 {
+        if addr.is_null() || len == 0 || (addr as usize) & (PAGE_SIZE - 1) != 0 {
             return Err(EINVAL);
         }
         let _ = syscall_errno(syscall::raw_syscall2(
@@ -6151,8 +6176,8 @@ pub unsafe extern "C" fn pthread_create(
             syscall::SyscallNumber::MemoryMap,
             0,
             stack_size as u64,
-            PROT_READ_WRITE,
-            MAP_PRIVATE_ANON,
+            NATIVE_READ_WRITE,
+            0,
             0,
             0,
         )) {

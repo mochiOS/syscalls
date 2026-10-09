@@ -19,6 +19,8 @@ pub use mnu_abi::{
     IpcObjectHandle, IpcObjectHandles, PROCESS_STATE_EXITED, PROCESS_STATE_RUNNING,
     PROCESS_WAIT_INFINITE, PROCESS_WAIT_POLL, ProcessStatus, SUCCESS, StreamPair, SyscallNumber,
     ThreadCreateContext, ThreadSecurityContext, ThreadStatus, ThreadUpcallConfig,
+    MEMORY_ACCESS_ALL, MEMORY_ACCESS_EXECUTE, MEMORY_ACCESS_READ, MEMORY_ACCESS_WRITE,
+    MEMORY_MAP_EXACT, MEMORY_MAP_OPTIONS_ALL, MEMORY_MAP_SHARED,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
