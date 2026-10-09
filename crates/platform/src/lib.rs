@@ -1528,21 +1528,6 @@ pub mod file {
         open(path.as_ptr(), flags)
     }
 
-    pub fn openat(dirfd: i64, path_ptr: u64, flags: u64, mode: u64) -> SysResult<u64> {
-        syscall::call4(
-            syscall::SyscallNumber::FileOpenAt,
-            dirfd as u64,
-            path_ptr,
-            flags,
-            mode,
-        )
-    }
-
-    pub fn openat_path(dirfd: i64, path: &str, flags: u64, mode: u64) -> SysResult<u64> {
-        let path = super::path::CPath::<256>::new(path)?;
-        openat(dirfd, path.as_ptr(), flags, mode)
-    }
-
     pub fn close(fd: u64) -> SysResult<u64> {
         syscall::call1(syscall::SyscallNumber::FileClose, fd)
     }
