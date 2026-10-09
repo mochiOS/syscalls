@@ -4,6 +4,15 @@ pub const PROT_WRITE: i32 = 1 << 1;
 pub const PROT_EXEC: i32 = 1 << 2;
 pub const PROTECTION_ALL: i32 = PROT_READ | PROT_WRITE | PROT_EXEC;
 
+pub const MAP_SHARED: i32 = 0x01;
+pub const MAP_PRIVATE: i32 = 0x02;
+pub const MAP_FIXED: i32 = 0x10;
+pub const MAP_ANONYMOUS: i32 = 0x20;
+pub const MAP_NORESERVE: i32 = 0x4000;
+pub const MAP_STACK: i32 = 0x20000;
+pub const MAP_OPTIONS_ALL: i32 =
+    MAP_SHARED | MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS | MAP_NORESERVE | MAP_STACK;
+
 pub const MS_ASYNC: i32 = 0x1;
 pub const MS_INVALIDATE: i32 = 0x2;
 pub const MS_SYNC: i32 = 0x4;
@@ -29,6 +38,12 @@ pub const fn sync_policy(flags: i32) -> Option<SyncPolicy> {
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeMap {
+    pub options: u64,
+    pub anonymous: bool,
+}
+
 /// Translates POSIX `PROT_*` policy into mnu's native VM access ABI.
 ///
 /// Keeping this conversion in user space prevents POSIX flags from becoming
@@ -49,4 +64,28 @@ pub const fn native_access(protection: i32) -> Option<u64> {
         access |= mnu_abi::MEMORY_ACCESS_EXECUTE;
     }
     Some(access)
+}
+
+/// Translates POSIX mapping policy into the native placement/sharing ABI.
+/// `MAP_STACK` and `MAP_NORESERVE` are accepted as user-space compatibility
+/// hints and intentionally have no kernel representation.
+pub const fn native_map(flags: i32) -> Option<NativeMap> {
+    if flags & !MAP_OPTIONS_ALL != 0 {
+        return None;
+    }
+    let sharing = flags & (MAP_SHARED | MAP_PRIVATE);
+    if sharing != MAP_SHARED && sharing != MAP_PRIVATE {
+        return None;
+    }
+    let mut options = 0;
+    if flags & MAP_FIXED != 0 {
+        options |= mnu_abi::MEMORY_MAP_EXACT;
+    }
+    if sharing == MAP_SHARED {
+        options |= mnu_abi::MEMORY_MAP_SHARED;
+    }
+    Some(NativeMap {
+        options,
+        anonymous: flags & MAP_ANONYMOUS != 0,
+    })
 }
