@@ -1881,9 +1881,17 @@ fn newlib_mutable_status_flags(flags: u32) -> c_int {
 }
 
 fn open_posix_object(path: &str, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
+    let limit = process_fd_limit()?;
+    let has_slot = {
+        let state = state();
+        (0..limit).any(|fd| state.fds.get(fd).is_none())
+    };
+    if !has_slot {
+        return Err(EMFILE);
+    }
     let entry = open_posix_entry(path, flags, mode)?;
     let mut state = state();
-    let installed = state.fds.install_from(3, MAX_FDS as c_int, entry);
+    let installed = state.fds.install_from(0, limit, entry);
     drop(state);
     match installed {
         Ok(fd) => Ok(fd),
@@ -2230,6 +2238,9 @@ fn duplicate_fd_entry(
     if old_fd < 0 || new_fd < 0 || old_fd as usize >= MAX_FDS || new_fd as usize >= MAX_FDS {
         return Err(EBADF);
     }
+    if old_fd != new_fd && new_fd >= process_fd_limit()? {
+        return Err(EBADF);
+    }
     let mut operations = RuntimeFdOps;
     fds.duplicate_to(old_fd, new_fd, &mut operations)
         .map_err(map_fd_error)?;
@@ -2244,6 +2255,9 @@ fn duplicate_spawn_fd_entry(
     if old_fd < 0 || new_fd < 0 || old_fd as usize >= MAX_FDS || new_fd as usize >= MAX_FDS {
         return Err(EBADF);
     }
+    if old_fd != new_fd && new_fd >= process_fd_limit()? {
+        return Err(EBADF);
+    }
     let mut operations = RuntimeFdOps;
     fds.duplicate_for_spawn(old_fd, new_fd, &mut operations)
         .map_err(map_fd_error)?;
@@ -2256,7 +2270,14 @@ fn install_spawn_open_entry(
     entry: FdEntry,
 ) -> Result<(), c_int> {
     let mut operations = RuntimeFdOps;
-    if fd < 0 || fd as usize >= MAX_FDS {
+    let limit = match process_fd_limit() {
+        Ok(limit) => limit,
+        Err(errno) => {
+            operations.close_handle(entry.handle);
+            return Err(errno);
+        }
+    };
+    if fd < 0 || fd >= limit {
         operations.close_handle(entry.handle);
         return Err(EBADF);
     }
@@ -2300,17 +2321,18 @@ fn duplicate_live_fd(old_fd: c_int, new_fd: c_int) -> Result<c_int, c_int> {
 fn duplicate_fd_from(
     fds: &mut FdTable<FdObject>,
     fd: c_int,
-    minimum: c_int,
+    minimum: Option<c_int>,
     close_on_exec: bool,
 ) -> Result<c_int, c_int> {
     // Validate the source before the range, as with other descriptor APIs.
     if fd < 0 || fd as usize >= MAX_FDS || fds.get(fd).is_none() {
         return Err(EBADF);
     }
-    if minimum < 0 || minimum as usize >= MAX_FDS {
+    let limit = process_fd_limit()?;
+    if minimum.is_some_and(|minimum| minimum < 0 || minimum >= limit) {
         return Err(EINVAL);
     }
-    fds.duplicate_from(fd, minimum, MAX_FDS as c_int, close_on_exec, &mut RuntimeFdOps)
+    fds.duplicate_from(fd, minimum.unwrap_or(0), limit, close_on_exec, &mut RuntimeFdOps)
         .map_err(|error| match error {
             FdError::InvalidDescriptor => EMFILE,
             other => map_fd_error(other),
@@ -2348,6 +2370,9 @@ fn apply_spawn_file_actions(
             FAE_OPEN => {
                 // Safety: the active union field is determined by fae_action.
                 let open = unsafe { entry.fae_data.open };
+                if entry.fae_fildes < 0 || entry.fae_fildes >= process_fd_limit()? {
+                    return Err(EBADF);
+                }
                 if open.path.is_null() {
                     return Err(EFAULT);
                 }
@@ -2861,12 +2886,13 @@ fn allocate_fd_entry(
     kind: FdKind,
     flags: c_int,
 ) -> Result<c_int, c_int> {
+    let limit = process_fd_limit()?;
     let mut state = state();
     state
         .fds
         .install_from(
-            3,
-            MAX_FDS as c_int,
+            0,
+            limit,
             object_entry(lower_handle, rights, kind, flags),
         )
         .map_err(|_| EMFILE)
@@ -3497,7 +3523,7 @@ pub extern "C" fn fork() -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn dup(fd: c_int) -> c_int {
-    result_with_errno(duplicate_fd_from(&mut state().fds, fd, 0, false), -1)
+    result_with_errno(duplicate_fd_from(&mut state().fds, fd, None, false), -1)
 }
 
 #[unsafe(no_mangle)]
@@ -3515,7 +3541,7 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
         let entry = state.fds.get(fd).ok_or(EBADF)?;
         match cmd {
             F_DUPFD | F_DUPFD_CLOEXEC => {
-                duplicate_fd_from(&mut state.fds, fd, arg, cmd == F_DUPFD_CLOEXEC)
+                duplicate_fd_from(&mut state.fds, fd, Some(arg), cmd == F_DUPFD_CLOEXEC)
             }
             F_GETFD => Ok(entry.descriptor_flags as c_int),
             F_SETFD => {
@@ -5085,7 +5111,7 @@ pub extern "C" fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn sysconf(name: c_int) -> CLong {
     match name {
-        SC_OPEN_MAX => MAX_FDS as CLong,
+        SC_OPEN_MAX => result_with_errno(process_fd_limit().map(CLong::from), -1),
         SC_PAGESIZE => PAGE_SIZE as CLong,
         SC_NPROCESSORS_CONF | SC_NPROCESSORS_ONLN => 1,
         SC_THREAD_STACK_MIN => 16 * 1024,
@@ -5095,6 +5121,17 @@ pub extern "C" fn sysconf(name: c_int) -> CLong {
             -1
         }
     }
+}
+
+fn process_fd_limit() -> Result<c_int, c_int> {
+    // Query the authoritative process policy when allocating descriptors,
+    // including changes made by another process through prlimit. Existing
+    // descriptor I/O remains native and does not consult the service.
+    let limit = posix_client()
+        .map_err(map_posix_client_error)?
+        .resource_limit(0, posix_protocol::RLIMIT_NOFILE, None)
+        .map_err(map_posix_client_error)?;
+    Ok(limit.soft.min(MAX_FDS as u64) as c_int)
 }
 
 fn resource_limit_impl(
