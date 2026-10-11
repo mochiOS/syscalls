@@ -2933,13 +2933,15 @@ fn apply_spawn_attributes(attributes: Option<PosixSpawnAttr>) -> Result<(), c_in
         );
     }
     if flags & mochios_posix_client::spawn::SET_SIGNAL_DEFAULTS != 0 {
-        let mut actions = SIGNAL_ACTIONS.lock();
+        let default = SignalAction::default_action();
         for signal in 1..=posix_protocol::SIGNAL_MAX {
             let bit = mochios_posix_client::signal::signal_bit(signal).unwrap_or(0);
             if attributes.sa_sigdefault & bit != 0
                 && mochios_posix_client::signal::can_change_disposition(signal)
             {
-                actions[signal as usize - 1] = SignalAction::default_action();
+                if unsafe { sigaction(signal as c_int, &default, ptr::null_mut()) } != 0 {
+                    return Err(unsafe { *__errno() });
+                }
             }
         }
     }
@@ -3282,13 +3284,22 @@ pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
     unsafe { initialize_runtime(stack) };
     match has_posix_environment() {
         Ok(false) => {}
-        Ok(true) => {
-            if let Err(error) = posix_client()
-                .and_then(|client| client.set_signal_child_options(0))
-            {
-                startup_failure(b"newlib: POSIX startup failed: ", map_posix_client_error(error));
+        Ok(true) => match posix_client().and_then(|client| client.signal_image_started()) {
+            Ok(ignored) => {
+                let mut actions = SIGNAL_ACTIONS.lock();
+                for (index, action) in actions.iter_mut().enumerate() {
+                    if ignored & (1u64 << index) != 0 {
+                        action.handler = 1;
+                    }
+                }
             }
-        }
+            Err(error) => {
+                startup_failure(
+                    b"newlib: POSIX startup failed: ",
+                    map_posix_client_error(error),
+                );
+            }
+        },
         Err(_) => process_exit(127),
     }
     let (_, initial_thread) = register_initial_thread().unwrap_or_else(|| process_exit(127));
@@ -5647,23 +5658,34 @@ pub unsafe extern "C" fn sigaction(
 
     let _update = SIGNAL_ACTION_UPDATE.lock();
     let previous = SIGNAL_ACTIONS.lock()[index];
-    if signal == posix_protocol::SIGNAL_CHLD as c_int {
-        let options = if replacement.sa_flags & SA_NOCLDSTOP != 0 {
-            posix_protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP
-        } else {
-            0
-        };
-        if let Err(error) = posix_client()
-            .map_err(map_posix_client_error)
-            .and_then(|client| {
-                client
-                    .set_signal_child_options(options)
-                    .map_err(map_posix_client_error)
-            })
-        {
-            set_errno(error);
+    let options = if replacement.sa_flags & SA_NOCLDSTOP != 0 {
+        posix_protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP
+    } else {
+        0
+    };
+    let kind = match replacement.handler {
+        0 => posix_protocol::SIGNAL_DISPOSITION_DEFAULT,
+        1 => posix_protocol::SIGNAL_DISPOSITION_IGNORE,
+        usize::MAX => {
+            set_errno(EINVAL);
             return -1;
         }
+        _ => posix_protocol::SIGNAL_DISPOSITION_CAUGHT,
+    };
+    if let Err(error) = posix_client()
+        .map_err(map_posix_client_error)
+        .and_then(|client| {
+            client
+                .set_signal_disposition(posix_protocol::SignalDisposition {
+                    signal: signal as u32,
+                    kind,
+                    child_options: options,
+                })
+                .map_err(map_posix_client_error)
+        })
+    {
+        set_errno(error);
+        return -1;
     }
     if !old_action.is_null() {
         unsafe { old_action.write(previous) };

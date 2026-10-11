@@ -271,6 +271,15 @@ impl<T: Transport> Client<T> {
         protocol::decode_signal_mask(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    /// Commits exec's disposition reset after the new image has started.
+    /// Caught handlers reset to default; SIG_IGN survives. A failed exec must
+    /// not call this operation or change the original image's signal state.
+    pub fn signal_image_started(&self) -> Result<u64, ClientError<T::Error>> {
+        let mut response = [0; protocol::SIGNAL_MASK_LEN];
+        let length = self.request(protocol::OP_SIGNAL_IMAGE_STARTED, 0, &[], &mut response)?;
+        protocol::decode_signal_mask(&response[..length]).map_err(ClientError::Protocol)
+    }
+
     /// Atomically replaces service-owned metadata, returning the previous
     /// disposition. No handler pointer is transmitted over IPC.
     pub fn set_signal_disposition(

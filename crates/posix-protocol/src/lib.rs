@@ -198,6 +198,9 @@ pub const OP_PROCESS_TREE_TERMINATE: u16 = 61;
 pub const OP_PROCESS_TREE_RECLAIM: u16 = 62;
 /// Signal metadata only; handler addresses remain process-local.
 pub const OP_SIGNAL_DISPOSITION: u16 = 63;
+/// Called by the installed image, never before a potentially failing exec.
+/// Empty payload; returns the SIG_IGN bitset retained across image replacement.
+pub const OP_SIGNAL_IMAGE_STARTED: u16 = 64;
 pub const SIGNAL_DISPOSITION_SET: u32 = 1;
 pub const SIGNAL_DISPOSITION_LEN: usize = 16;
 pub const SIGNAL_DISPOSITION_DEFAULT: u32 = 0;
