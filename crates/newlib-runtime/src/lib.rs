@@ -193,6 +193,7 @@ struct ThreadControl {
     state: AtomicU32,
     generation: AtomicU32,
     native_id: AtomicU64,
+    thread_local_base: AtomicU64,
     start: AtomicUsize,
     argument: AtomicUsize,
     result: AtomicUsize,
@@ -220,6 +221,7 @@ impl ThreadControl {
             state: AtomicU32::new(THREAD_FREE),
             generation: AtomicU32::new(0),
             native_id: AtomicU64::new(0),
+            thread_local_base: AtomicU64::new(0),
             start: AtomicUsize::new(0),
             argument: AtomicUsize::new(0),
             result: AtomicUsize::new(0),
@@ -544,6 +546,7 @@ struct RuntimeState {
     initialized: bool,
     argv: *mut *mut c_char,
     envp: *mut *mut c_char,
+    executable: *const c_char,
     fds: FdTable<FdObject>,
     heap: HeapState,
 }
@@ -558,6 +561,7 @@ impl RuntimeState {
             initialized: false,
             argv: ptr::null_mut(),
             envp: ptr::null_mut(),
+            executable: ptr::null(),
             fds: FdTable::new(),
             heap: HeapState::new(),
         }
@@ -801,6 +805,7 @@ struct StackView {
     argv: *mut *mut c_char,
     envp: *mut *mut c_char,
     stack_top: usize,
+    executable: *const c_char,
 }
 
 fn align_up(value: usize, align: usize) -> Option<usize> {
@@ -938,6 +943,7 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
         control.native_id.store(0, Ordering::Relaxed);
         control.start.store(0, Ordering::Relaxed);
         control.argument.store(0, Ordering::Relaxed);
+        control.thread_local_base.store(0, Ordering::Relaxed);
         control.result.store(0, Ordering::Relaxed);
         control.stack_base.store(0, Ordering::Relaxed);
         control.stack_size.store(0, Ordering::Relaxed);
@@ -1004,6 +1010,7 @@ fn release_thread_control(control: &ThreadControl) {
         );
     }
     control.native_id.store(0, Ordering::Relaxed);
+    control.thread_local_base.store(0, Ordering::Relaxed);
     control.start.store(0, Ordering::Relaxed);
     control.argument.store(0, Ordering::Relaxed);
     control.result.store(0, Ordering::Relaxed);
@@ -1108,6 +1115,13 @@ fn register_initial_thread() -> Option<(Pthread, &'static ThreadControl)> {
     let native_id = native_thread_id().ok()?;
     let (token, control) = reserve_thread_control()?;
     control.native_id.store(native_id, Ordering::Relaxed);
+    // The current initial-runtime TCB ABI places its own base in its first
+    // word. Other runtime-created threads explicitly use a zero TLS base.
+    let tls_base: u64;
+    unsafe {
+        core::arch::asm!("mov {}, fs:[0]", out(reg) tls_base, options(nostack, readonly, preserves_flags));
+    }
+    control.thread_local_base.store(tls_base, Ordering::Relaxed);
     control
         .reent
         .store(unsafe { _impure_ptr } as usize, Ordering::Relaxed);
@@ -1405,11 +1419,20 @@ unsafe fn parse_stack(sp: *const usize) -> StackView {
     while !unsafe { cursor.read() }.is_null() {
         cursor = unsafe { cursor.add(1) };
     }
+    let mut auxiliary = unsafe { cursor.add(1).cast::<usize>() };
+    let mut executable = ptr::null();
+    while unsafe { auxiliary.read() } != 0 {
+        if unsafe { auxiliary.read() } == 31 {
+            executable = unsafe { auxiliary.add(1).read() } as *const c_char;
+        }
+        auxiliary = unsafe { auxiliary.add(2) };
+    }
     StackView {
         argc,
         argv,
         envp,
         stack_top: sp as usize,
+        executable,
     }
 }
 
@@ -2056,6 +2079,7 @@ unsafe fn initialize_runtime(stack: StackView) {
     state.initialized = true;
     state.argv = stack.argv;
     state.envp = stack.envp;
+    state.executable = stack.executable;
     match restore_fd_state_from_launch_context(&mut state.fds) {
         Ok(true) => {}
         Ok(false) => {
@@ -2457,6 +2481,48 @@ fn authorize_exec_path(path_bytes: &[u8]) -> Result<(), c_int> {
     }
 }
 
+fn authorize_clone_path(identity: &str) -> Result<(), c_int> {
+    use mochios_capability_protocol::{
+        RESOLVE_EXECUTION_SECURITY_OPCODE, decode_resolve_execution_security_reply,
+    };
+    if !identity.starts_with('/') || identity.len() >= MAX_EXECUTABLE_PATH_LEN {
+        return Err(EINVAL);
+    }
+    let endpoint = syscall_errno(syscall::raw_syscall2(
+        syscall::SyscallNumber::FindProcessByName,
+        CAPABILITY_SERVICE_NAME.as_ptr() as u64,
+        CAPABILITY_SERVICE_NAME.len() as u64,
+    ))?;
+    if endpoint == 0 {
+        return Err(ENOENT);
+    }
+    let mut request = [0u8; 12 + MAX_EXECUTABLE_PATH_LEN];
+    request[..4].copy_from_slice(&RESOLVE_EXECUTION_SECURITY_OPCODE.to_le_bytes());
+    request[4..12].copy_from_slice(
+        &mnu_abi::exec::ExecutionClass::Unprivileged
+            .as_raw()
+            .to_le_bytes(),
+    );
+    request[12..12 + identity.len()].copy_from_slice(identity.as_bytes());
+    let mut response = [0u8; 8192];
+    let result = syscall_errno(syscall::raw_syscall5(
+        syscall::SyscallNumber::IpcCall,
+        endpoint,
+        request.as_ptr() as u64,
+        (12 + identity.len()) as u64,
+        response.as_mut_ptr() as u64,
+        response.len() as u64,
+    ))?;
+    let length = (result & 0xffff_ffff) as usize;
+    let response = response.get(..length).ok_or(EIO)?;
+    let reply = decode_resolve_execution_security_reply(response).map_err(|_| EIO)?;
+    if reply.status == 0 {
+        Ok(())
+    } else {
+        Err(c_int::try_from(reply.status).unwrap_or(EIO))
+    }
+}
+
 fn replace_process_image(
     path: *const c_char,
     argv: *const *const c_char,
@@ -2559,13 +2625,118 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     // clone returns, so the child never inherits a permanently locked STATE.
     let guard = state();
     let inherited_fds = guard.fds.clone();
-    // POSIX fork selects the child's zero return value, not the kernel.
-    let handle = syscall_errno(syscall::raw_syscall1(syscall::SyscallNumber::ProcessClone, 0))?;
+    let (_, thread_control) = current_thread_control().ok_or(ENOTSUP)?;
+    if guard.executable.is_null() {
+        return Err(ENOENT);
+    }
+    let identity = unsafe { c_bytes(guard.executable) };
+    let identity = core::str::from_utf8(identity).map_err(|_| EINVAL)?;
+    let mut records = [mnu_abi::HandleInfo::default(); mnu_abi::process_create::MAX_HANDLES];
+    let count = syscall_errno(syscall::raw_syscall2(
+        syscall::SyscallNumber::HandleTableRead,
+        records.as_mut_ptr() as u64,
+        records.len() as u64,
+    ))? as usize;
+    let mut grants = [mnu_abi::process_create::HandleGrant {
+        key: 0,
+        source: 0,
+        target: 0,
+        rights: 0,
+    }; mnu_abi::process_create::MAX_HANDLES];
+    let count = mochios_posix_client::inheritance::prepare(&records[..count], &[], &mut grants)
+        .map_err(|error| match error {
+            mochios_posix_client::inheritance::Error::NonTransferable(_) => EACCES,
+            mochios_posix_client::inheritance::Error::TooManyHandles
+            | mochios_posix_client::inheritance::Error::BufferTooSmall => EAGAIN,
+            _ => EIO,
+        })?;
+    let control = syscall_errno(syscall::raw_syscall1(
+        syscall::SyscallNumber::LaunchHandleGet,
+        posix_protocol::CONTROL_HANDLE_KEY,
+    ))?;
+    let endpoint = grants[..count]
+        .iter_mut()
+        .find(|grant| u64::from(grant.source) == control)
+        .ok_or(EBADF)?;
+    endpoint.key = posix_protocol::CONTROL_HANDLE_KEY;
+    let mut metadata = [0u8; mnu_abi::process_create::HEADER_LEN
+        + mnu_abi::process_create::MAX_IDENTITY_BYTES
+        + mnu_abi::process_create::MAX_LABEL_BYTES
+        + mnu_abi::process_create::CONTEXT_LEN
+        + mnu_abi::process_create::MAX_HANDLES * mnu_abi::process_create::HANDLE_LEN];
+    let mut context = syscall::ThreadCreateContext {
+        entry: 1,
+        stack_pointer: 16,
+        ..Default::default()
+    };
+    // Validate metadata capacity and grants before creating a detached image.
+    mnu_abi::process_create::encode_context(
+        identity,
+        "fork-child",
+        &context,
+        &grants[..count],
+        &[],
+        &mut metadata,
+    )
+    .map_err(|_| EINVAL)?;
+    authorize_clone_path(identity)?;
+    let image = unsafe {
+        mochios_posix_client::snapshot::capture_native(
+            &mut context,
+            thread_control.thread_local_base.load(Ordering::Relaxed),
+        )
+    };
     drop(guard);
-    if handle == 0 {
+    if image == 0 {
         state().fds.clear_reservations();
+        // The new native thread has no copied identity or upcall target.
+        thread_control.native_id.store(
+            native_thread_id().unwrap_or_else(|_| process_exit(127)),
+            Ordering::Relaxed,
+        );
+        for other in &THREADS {
+            if !ptr::eq(other, thread_control) && other.state.load(Ordering::Acquire) != THREAD_FREE
+            {
+                release_thread_control(other);
+            }
+        }
+        let old_stack = thread_control.signal_upcall_stack.load(Ordering::Relaxed);
+        let old_size = thread_control
+            .signal_upcall_stack_size
+            .load(Ordering::Relaxed);
+        if setup_signal_delivery(thread_control).is_err() {
+            process_exit(127);
+        }
+        if old_stack != 0 && old_size != 0 {
+            let _ = syscall::raw_syscall2(
+                syscall::SyscallNumber::MemoryUnmap,
+                old_stack as u64,
+                old_size as u64,
+            );
+        }
         return Ok((0, inherited_fds, None));
     }
+    let image = u32::try_from(syscall_errno(syscall::RawSyscallResult::new(image))?)
+        .map_err(|_| EOVERFLOW)?;
+    let created = (|| {
+        let length = mnu_abi::process_create::encode_context(
+            identity,
+            "fork-child",
+            &context,
+            &grants[..count],
+            &[],
+            &mut metadata,
+        )
+        .map_err(|_| EINVAL)?;
+        syscall_errno(syscall::raw_syscall3(
+            syscall::SyscallNumber::ProcessCreate,
+            u64::from(image),
+            metadata.as_ptr() as u64,
+            length as u64,
+        ))
+    })();
+    close_object_handle(image);
+    let handle = created?;
     let handle = match u32::try_from(handle) {
         Ok(handle) => handle,
         Err(_) => {
