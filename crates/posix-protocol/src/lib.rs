@@ -161,7 +161,6 @@ pub const OP_CREATE_SESSION: u16 = 32;
 pub const OP_RESOURCE_LIMIT: u16 = 33;
 pub const OP_SIGNAL_SEND: u16 = 34;
 pub const OP_SIGNAL_PENDING: u16 = 35;
-pub const OP_SIGNAL_DEQUEUE: u16 = 36;
 pub const OP_SIGNAL_THREAD_REGISTER: u16 = 37;
 pub const OP_GROUPS_GET: u16 = 38;
 pub const OP_GROUPS_SET: u16 = 39;

@@ -362,27 +362,6 @@ impl<T: Transport> Client<T> {
             .map(|_| ())
     }
 
-    /// Atomically removes the lowest-numbered pending signal that is not in
-    /// `blocked`. Zero means that no signal is currently deliverable.
-    pub fn dequeue_signal(&self, blocked: u64) -> Result<u32, ClientError<T::Error>> {
-        let delivery = self.dequeue_signal_delivery(blocked)?;
-        if delivery.signal != 0 {
-            self.complete_signal_delivery(delivery)?;
-        }
-        Ok(delivery.signal)
-    }
-
-    pub fn dequeue_signal_delivery(
-        &self,
-        blocked: u64,
-    ) -> Result<protocol::SignalDelivery, ClientError<T::Error>> {
-        let mut request = [0u8; protocol::SIGNAL_MASK_LEN];
-        protocol::encode_signal_mask(blocked, &mut request).map_err(ClientError::Protocol)?;
-        let mut response = [0u8; protocol::SIGNAL_DELIVERY_LEN];
-        let length = self.request(protocol::OP_SIGNAL_DEQUEUE, 0, &request, &mut response)?;
-        protocol::decode_signal_delivery(&response[..length]).map_err(ClientError::Protocol)
-    }
-
     /// Reads a resource limit and optionally replaces it atomically. A
     /// process ID of zero selects the calling process. The returned value is
     /// always the limit that was installed before this request.
