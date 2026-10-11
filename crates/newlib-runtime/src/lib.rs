@@ -832,23 +832,21 @@ fn has_posix_environment() -> Result<bool, c_int> {
 }
 
 fn native_process_id() -> Result<u64, syscall::SysError> {
-    let mut context = syscall::ThreadSecurityContext::default();
-    syscall::call3(
-        syscall::SyscallNumber::GetThreadSecurityContext,
-        0,
-        (&mut context as *mut syscall::ThreadSecurityContext) as u64,
-        core::mem::size_of::<syscall::ThreadSecurityContext>() as u64,
+    let mut context = syscall::ExecutionIdentity::default();
+    syscall::call2(
+        syscall::SyscallNumber::ExecutionIdentityRead,
+        (&mut context as *mut syscall::ExecutionIdentity) as u64,
+        core::mem::size_of::<syscall::ExecutionIdentity>() as u64,
     )?;
     Ok(context.process_id)
 }
 
 fn native_thread_id() -> Result<u64, syscall::SysError> {
-    let mut context = syscall::ThreadSecurityContext::default();
-    syscall::call3(
-        syscall::SyscallNumber::GetThreadSecurityContext,
-        0,
-        (&mut context as *mut syscall::ThreadSecurityContext) as u64,
-        core::mem::size_of::<syscall::ThreadSecurityContext>() as u64,
+    let mut context = syscall::ExecutionIdentity::default();
+    syscall::call2(
+        syscall::SyscallNumber::ExecutionIdentityRead,
+        (&mut context as *mut syscall::ExecutionIdentity) as u64,
+        core::mem::size_of::<syscall::ExecutionIdentity>() as u64,
     )?;
     Ok(context.thread_id)
 }

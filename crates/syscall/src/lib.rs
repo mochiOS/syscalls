@@ -6,6 +6,7 @@ extern crate std;
 use core::arch::asm;
 
 pub use mnu_abi::{
+    ExecutionIdentity,
     ADDRESS_WAIT_INFINITE, AddressWaitResult, ClockId, ClockInstant, EACCES, EAGAIN, EBADF, ECHILD,
     EEXIST, EFAULT, EINVAL, EIO, EISDIR, EMFILE, EMSGSIZE, ENODATA, ENOENT, ENOMEM, ENOSPC, ENOSYS,
     ENOTDIR, ENOTSUP, ENOTTY, ENXIO, EOVERFLOW, EPERM, EPIPE, ERANGE, ESRCH,
