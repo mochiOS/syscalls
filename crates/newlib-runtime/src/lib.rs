@@ -5671,10 +5671,25 @@ pub extern "C" fn getentropy(buffer: *mut c_void, length: usize) -> c_int {
         set_errno(EIO);
         return -1;
     }
-    if getrandom(buffer, length, 0) < 0 {
+    if length != 0 && buffer.is_null() {
+        set_errno(EFAULT);
         return -1;
     }
-    0
+    result_with_errno(
+        mochios_posix_client::random::fill_entropy(length, |offset, remaining| {
+            // Safety: offset is within the non-null caller buffer, and the
+            // native operation validates the remaining writable range.
+            let destination = unsafe { buffer.cast::<u8>().add(offset) };
+            syscall_errno(syscall::raw_syscall2(
+                syscall::SyscallNumber::RandomFill,
+                destination as u64,
+                remaining as u64,
+            ))
+            .and_then(|count| usize::try_from(count).map_err(|_| EIO))
+        })
+        .map(|()| 0),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]
