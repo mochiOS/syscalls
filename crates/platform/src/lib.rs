@@ -1159,33 +1159,6 @@ pub mod service {
         )
     }
 
-    pub fn spawn_manifest_for_requester(
-        path: &str,
-        execution_class: ExecutionClass,
-        requester_tid: u64,
-        args_nul: Option<&[u8]>,
-        caps_nul: Option<&[u8]>,
-    ) -> SysResult<u64> {
-        let path = super::path::CPath::<256>::new(path)?;
-        let args = spawn_arguments(args_nul)?;
-        let args_ptr = args.as_ref().map_or(0, |bytes| bytes.as_ptr() as u64);
-        let (caps_ptr, caps_len) = match caps_nul {
-            Some(bytes) if !bytes.is_empty() => (bytes.as_ptr() as u64, bytes.len() as u64),
-            _ => (0, 0),
-        };
-        let mut request = [0u8; 24];
-        request[0..8].copy_from_slice(&execution_class.as_raw().to_le_bytes());
-        request[8..16].copy_from_slice(&requester_tid.to_le_bytes());
-        syscall::call5(
-            syscall::SyscallNumber::ExecManifestForRequester,
-            path.as_ptr(),
-            args_ptr,
-            caps_ptr,
-            caps_len,
-            request.as_ptr() as u64,
-        )
-    }
-
     pub fn authorize_exec_for_requester(
         requester_tid: u64,
         path: &str,
