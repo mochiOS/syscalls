@@ -4732,6 +4732,29 @@ pub extern "C" fn ppoll(
     result_with_errno(result, -1)
 }
 
+fn suspend_with_signal_mask(mask: *const u64) -> Result<c_int, c_int> {
+    masked_multiplex(mask, |control, caught| {
+        wait_for_multiplex(&mut [], syscall::HANDLE_WAIT_INFINITE, control, caught)?;
+        // No objects and no deadline can never complete successfully.
+        // Keep a broken backend visible instead of reporting a fake signal.
+        Err(EIO)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pause() -> c_int {
+    result_with_errno(suspend_with_signal_mask(ptr::null()), -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn sigsuspend(mask: *const u64) -> c_int {
+    if mask.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    result_with_errno(suspend_with_signal_mask(mask), -1)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn getgroups(gidsetsize: c_int, grouplist: *mut groups::Gid) -> c_int {
     let result = (|| -> Result<c_int, c_int> {
