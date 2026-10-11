@@ -664,6 +664,10 @@ pub mod ipc {
         syscall::call1(syscall::SyscallNumber::IpcEndpointOwner, endpoint)
     }
 
+    pub fn endpoint_execution_identity(endpoint: u64) -> SysResult<syscall::ExecutionIdentity> {
+        syscall::execution::endpoint_identity(endpoint)
+    }
+
     pub fn call(dest_thread_id: u64, request: &[u8], reply: &mut [u8]) -> SysResult<u64> {
         syscall::call5(
             syscall::SyscallNumber::IpcCall,
