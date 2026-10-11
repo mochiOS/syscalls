@@ -182,6 +182,8 @@ pub const OP_PROCESS_SESSION_INFO: u16 = 55;
 pub const OP_PROCESS_LAUNCHED: u16 = 56;
 /// Abort an unpublished broker launch using one explicit WAIT-only child Handle.
 pub const OP_PROCESS_LAUNCH_ABORT: u16 = 57;
+pub const OP_SET_REAL_EFFECTIVE_UID: u16 = 58;
+pub const OP_SET_REAL_EFFECTIVE_GID: u16 = 59;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -196,6 +198,9 @@ pub const STATUS_ENOSYS: i32 = -38;
 pub const SESSION_INFO_LEN: usize = 20;
 pub const UMASK_PAYLOAD_LEN: usize = 4;
 pub const CREDENTIAL_ID_PAYLOAD_LEN: usize = 4;
+pub const CREDENTIAL_PAIR_PAYLOAD_LEN: usize = 8;
+/// Leave this ID unchanged in a real/effective credential update.
+pub const CREDENTIAL_ID_UNCHANGED: u32 = u32::MAX;
 pub const FILE_LENGTH_PAYLOAD_LEN: usize = 8;
 pub const FILE_FLAGS_PAYLOAD_LEN: usize = 4;
 pub const FILE_OWNER_PAYLOAD_LEN: usize = 8;
@@ -754,6 +759,26 @@ pub fn decode_credential_id(input: &[u8]) -> Result<u32, ProtocolError> {
         return Err(ProtocolError::InvalidLength);
     }
     Ok(get_u32(input, 0))
+}
+
+pub fn encode_credential_pair(
+    real: u32,
+    effective: u32,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < CREDENTIAL_PAIR_PAYLOAD_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    put_u32(output, 0, real);
+    put_u32(output, 4, effective);
+    Ok(())
+}
+
+pub fn decode_credential_pair(input: &[u8]) -> Result<(u32, u32), ProtocolError> {
+    if input.len() != CREDENTIAL_PAIR_PAYLOAD_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok((get_u32(input, 0), get_u32(input, 4)))
 }
 
 /// Encodes a supplementary-group list without exposing target ABI layout.

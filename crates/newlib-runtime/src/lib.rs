@@ -4205,6 +4205,38 @@ pub extern "C" fn seteuid(uid: c_int) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn setreuid(real: credentials::Id, effective: credentials::Id) -> c_int {
+    let result = posix_client()
+        .map_err(map_posix_client_error)
+        .and_then(|client| {
+            client
+                .set_real_effective_uid(
+                    credentials::update_id(real),
+                    credentials::update_id(effective),
+                )
+                .map_err(map_posix_client_error)
+        })
+        .map(|_| 0);
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn setregid(real: credentials::Id, effective: credentials::Id) -> c_int {
+    let result = posix_client()
+        .map_err(map_posix_client_error)
+        .and_then(|client| {
+            client
+                .set_real_effective_gid(
+                    credentials::update_id(real),
+                    credentials::update_id(effective),
+                )
+                .map_err(map_posix_client_error)
+        })
+        .map(|_| 0);
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn chmod(path: *const c_char, mode: u32) -> c_int {
     if path.is_null() {
         set_errno(EFAULT);

@@ -355,6 +355,37 @@ impl<T: Transport> Client<T> {
         self.set_credential_id(protocol::OP_SET_EFFECTIVE_GID, gid)
     }
 
+    /// Atomically updates IDs and the saved ID according to `setreuid`.
+    /// `CREDENTIAL_ID_UNCHANGED` leaves the corresponding ID unchanged.
+    pub fn set_real_effective_uid(
+        &self,
+        real: u32,
+        effective: u32,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.set_credential_pair(protocol::OP_SET_REAL_EFFECTIVE_UID, real, effective)
+    }
+
+    /// Atomically updates IDs and the saved ID according to `setregid`.
+    pub fn set_real_effective_gid(
+        &self,
+        real: u32,
+        effective: u32,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.set_credential_pair(protocol::OP_SET_REAL_EFFECTIVE_GID, real, effective)
+    }
+
+    fn set_credential_pair(
+        &self,
+        opcode: u16,
+        real: u32,
+        effective: u32,
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut request = [0; protocol::CREDENTIAL_PAIR_PAYLOAD_LEN];
+        protocol::encode_credential_pair(real, effective, &mut request)
+            .map_err(ClientError::Protocol)?;
+        self.request(opcode, 0, &request, &mut []).map(|_| ())
+    }
+
     /// Atomically restores the effective UID and GID from the calling
     /// process's real IDs, as required by `POSIX_SPAWN_RESETIDS`.
     pub fn reset_effective_ids(&self) -> Result<(), ClientError<T::Error>> {
