@@ -128,6 +128,15 @@ pub struct NewlibTermios {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NewlibWinSize {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+}
+
+#[repr(C)]
 pub struct LockOpaque {
     state: AtomicU32,
     owner: AtomicU64,
@@ -3005,6 +3014,70 @@ fn terminal_control(
     usize::try_from(length).map_err(|_| EOVERFLOW)
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcgetwinsize(fd: c_int, size: *mut NewlibWinSize) -> c_int {
+    let result = (|| {
+        if size.is_null() {
+            return Err(EFAULT);
+        }
+        let entry = with_fd_entry(fd)?;
+        let mut bytes = [0; posix_protocol::TERMINAL_WINDOW_SIZE_LEN];
+        let length = terminal_control(
+            entry,
+            posix_protocol::PTY_CONTROL_GET_WINDOW_SIZE,
+            &[],
+            &mut bytes,
+        )?;
+        if length != bytes.len() {
+            return Err(EIO);
+        }
+        let window = posix_protocol::decode_terminal_window_size(&bytes).map_err(|_| EIO)?;
+        unsafe {
+            size.write(NewlibWinSize {
+                ws_row: window.rows,
+                ws_col: window.columns,
+                ws_xpixel: window.pixel_width,
+                ws_ypixel: window.pixel_height,
+            })
+        };
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcsetwinsize(fd: c_int, size: *const NewlibWinSize) -> c_int {
+    let result = (|| {
+        if size.is_null() {
+            return Err(EFAULT);
+        }
+        let entry = with_fd_entry(fd)?;
+        let window = unsafe { size.read() };
+        let mut bytes = [0; posix_protocol::TERMINAL_WINDOW_SIZE_LEN];
+        posix_protocol::encode_terminal_window_size(
+            posix_protocol::TerminalWindowSize {
+                rows: window.ws_row,
+                columns: window.ws_col,
+                pixel_width: window.ws_xpixel,
+                pixel_height: window.ws_ypixel,
+            },
+            &mut bytes,
+        )
+        .map_err(|_| EINVAL)?;
+        let length = terminal_control(
+            entry,
+            posix_protocol::PTY_CONTROL_SET_WINDOW_SIZE,
+            &bytes,
+            &mut [],
+        )?;
+        if length != 0 {
+            return Err(EIO);
+        }
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
 fn terminal_attachment(fd: c_int) -> Result<ObjectHandleAttachment<u32>, c_int> {
     let entry = with_fd_entry(fd)?;
     if entry.handle.kind != FdKind::ObjectPty {
@@ -3637,7 +3710,7 @@ pub extern "C" fn openpty(
         set_errno(EFAULT);
         return -1;
     }
-    if !name.is_null() || !window_size.is_null() {
+    if !name.is_null() {
         set_errno(ENOTSUP);
         return -1;
     }
@@ -3689,6 +3762,14 @@ pub extern "C" fn openpty(
                 let _ = _close(slave_fd);
                 return Err(errno);
             }
+        }
+        if !window_size.is_null()
+            && unsafe { tcsetwinsize(slave_fd, window_size.cast::<NewlibWinSize>()) } != 0
+        {
+            let errno = unsafe { *__errno() };
+            let _ = _close(master_fd);
+            let _ = _close(slave_fd);
+            return Err(errno);
         }
         unsafe {
             master.write(master_fd);

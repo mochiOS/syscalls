@@ -20,6 +20,13 @@ struct termios {
     speed_t c_ospeed;
 };
 
+struct winsize {
+    unsigned short ws_row;
+    unsigned short ws_col;
+    unsigned short ws_xpixel;
+    unsigned short ws_ypixel;
+};
+
 #define IGNBRK  (1U << 0)
 #define BRKINT  (1U << 1)
 #define IGNPAR  (1U << 2)
@@ -103,6 +110,8 @@ __BEGIN_DECLS
 
 int tcgetattr(int, struct termios *);
 int tcsetattr(int, int, const struct termios *);
+int tcgetwinsize(int, struct winsize *);
+int tcsetwinsize(int, const struct winsize *);
 int tcdrain(int);
 int tcflush(int, int);
 pid_t tcgetpgrp(int);

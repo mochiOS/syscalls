@@ -369,6 +369,45 @@ pub const PTY_CONTROL_SET_ATTRIBUTES_DRAIN: u64 = 0x5054_5900_0000_0003;
 pub const PTY_CONTROL_SET_ATTRIBUTES_FLUSH: u64 = 0x5054_5900_0000_0004;
 pub const PTY_CONTROL_DRAIN: u64 = 0x5054_5900_0000_0005;
 pub const PTY_CONTROL_FLUSH: u64 = 0x5054_5900_0000_0006;
+pub const PTY_CONTROL_GET_WINDOW_SIZE: u64 = 0x5054_5900_0000_0007;
+pub const PTY_CONTROL_SET_WINDOW_SIZE: u64 = 0x5054_5900_0000_0008;
+pub const TERMINAL_WINDOW_SIZE_LEN: usize = 8;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TerminalWindowSize {
+    pub rows: u16,
+    pub columns: u16,
+    pub pixel_width: u16,
+    pub pixel_height: u16,
+}
+
+pub fn encode_terminal_window_size(
+    size: TerminalWindowSize,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < TERMINAL_WINDOW_SIZE_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    for (index, value) in [size.rows, size.columns, size.pixel_width, size.pixel_height]
+        .into_iter()
+        .enumerate()
+    {
+        output[index * 2..index * 2 + 2].copy_from_slice(&value.to_le_bytes());
+    }
+    Ok(())
+}
+
+pub fn decode_terminal_window_size(input: &[u8]) -> Result<TerminalWindowSize, ProtocolError> {
+    if input.len() != TERMINAL_WINDOW_SIZE_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(TerminalWindowSize {
+        rows: u16::from_le_bytes([input[0], input[1]]),
+        columns: u16::from_le_bytes([input[2], input[3]]),
+        pixel_width: u16::from_le_bytes([input[4], input[5]]),
+        pixel_height: u16::from_le_bytes([input[6], input[7]]),
+    })
+}
 
 pub const TERMINAL_FLUSH_INPUT: u32 = 1 << 0;
 pub const TERMINAL_FLUSH_OUTPUT: u32 = 1 << 1;
