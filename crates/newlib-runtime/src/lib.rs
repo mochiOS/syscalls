@@ -4514,16 +4514,9 @@ pub extern "C" fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: c_int) -> c_int 
         }
         let (_, control) = register_current_thread().ok_or(EAGAIN)?;
         let caught = control.caught_signal_generation.load(Ordering::Acquire);
-        let deadline = match timeout_ms {
-            -1 => syscall::HANDLE_WAIT_INFINITE,
-            value if value < -1 => return Err(EINVAL),
-            value => {
-                let duration = u64::try_from(value)
-                    .map_err(|_| EINVAL)?
-                    .checked_mul(1_000_000)
-                    .ok_or(EOVERFLOW)?;
-                deadline_after_nanoseconds(duration)?
-            }
+        let deadline = match mochios_posix_client::multiplex::poll_timeout_nanoseconds(timeout_ms) {
+            None => syscall::HANDLE_WAIT_INFINITE,
+            Some(duration) => deadline_after_nanoseconds(duration)?,
         };
 
         const READ_EVENTS: i16 = POLLIN | POLLPRI | POLLRDNORM | POLLRDBAND;
