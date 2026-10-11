@@ -271,6 +271,46 @@ impl<T: Transport> Client<T> {
         protocol::decode_signal_mask(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    /// Atomically replaces service-owned metadata, returning the previous
+    /// disposition. No handler pointer is transmitted over IPC.
+    pub fn set_signal_disposition(
+        &self,
+        disposition: protocol::SignalDisposition,
+    ) -> Result<protocol::SignalDisposition, ClientError<T::Error>> {
+        self.signal_disposition_request(disposition, protocol::SIGNAL_DISPOSITION_SET)
+    }
+
+    pub fn signal_disposition(
+        &self,
+        signal: u32,
+    ) -> Result<protocol::SignalDisposition, ClientError<T::Error>> {
+        self.signal_disposition_request(
+            protocol::SignalDisposition {
+                signal,
+                ..Default::default()
+            },
+            0,
+        )
+    }
+
+    fn signal_disposition_request(
+        &self,
+        disposition: protocol::SignalDisposition,
+        flags: u32,
+    ) -> Result<protocol::SignalDisposition, ClientError<T::Error>> {
+        let mut request = [0; protocol::SIGNAL_DISPOSITION_LEN];
+        protocol::encode_signal_disposition(disposition, &mut request)
+            .map_err(ClientError::Protocol)?;
+        let mut response = [0; protocol::SIGNAL_DISPOSITION_LEN];
+        let length = self.request(
+            protocol::OP_SIGNAL_DISPOSITION,
+            flags,
+            &request,
+            &mut response,
+        )?;
+        protocol::decode_signal_disposition(&response[..length]).map_err(ClientError::Protocol)
+    }
+
     pub fn set_signal_child_options(
         &self,
         options: u32,

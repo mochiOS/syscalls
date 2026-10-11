@@ -196,6 +196,20 @@ pub const OP_PROCESS_TREE_TERMINATE: u16 = 61;
 /// Empty payload and the same WAIT|SIGNAL root; reclaim only a confirmed exited
 /// tree. ESRCH means no root environment remains, not proof of a prior exit.
 pub const OP_PROCESS_TREE_RECLAIM: u16 = 62;
+/// Signal metadata only; handler addresses remain process-local.
+pub const OP_SIGNAL_DISPOSITION: u16 = 63;
+pub const SIGNAL_DISPOSITION_SET: u32 = 1;
+pub const SIGNAL_DISPOSITION_LEN: usize = 16;
+pub const SIGNAL_DISPOSITION_DEFAULT: u32 = 0;
+pub const SIGNAL_DISPOSITION_IGNORE: u32 = 1;
+pub const SIGNAL_DISPOSITION_CAUGHT: u32 = 2;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SignalDisposition {
+    pub signal: u32,
+    pub kind: u32,
+    pub child_options: u32,
+}
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -935,6 +949,41 @@ pub fn encode_signal_mask(mask: u64, output: &mut [u8]) -> Result<(), ProtocolEr
     }
     put_u64(output, 0, mask);
     Ok(())
+}
+
+pub fn encode_signal_disposition(
+    disposition: SignalDisposition,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < SIGNAL_DISPOSITION_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    if !(1..=SIGNAL_MAX).contains(&disposition.signal)
+        || disposition.kind > SIGNAL_DISPOSITION_CAUGHT
+        || disposition.child_options & !SIGNAL_CHILD_OPTIONS_ALL != 0
+        || (disposition.signal != SIGNAL_CHLD && disposition.child_options != 0)
+    {
+        return Err(ProtocolError::InvalidLength);
+    }
+    put_u32(output, 0, disposition.signal);
+    put_u32(output, 4, disposition.kind);
+    put_u32(output, 8, disposition.child_options);
+    put_u32(output, 12, 0);
+    Ok(())
+}
+
+pub fn decode_signal_disposition(input: &[u8]) -> Result<SignalDisposition, ProtocolError> {
+    if input.len() != SIGNAL_DISPOSITION_LEN || get_u32(input, 12) != 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let disposition = SignalDisposition {
+        signal: get_u32(input, 0),
+        kind: get_u32(input, 4),
+        child_options: get_u32(input, 8),
+    };
+    let mut checked = [0; SIGNAL_DISPOSITION_LEN];
+    encode_signal_disposition(disposition, &mut checked)?;
+    Ok(disposition)
 }
 
 pub fn decode_signal_mask(input: &[u8]) -> Result<u64, ProtocolError> {
