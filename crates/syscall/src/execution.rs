@@ -22,7 +22,7 @@ pub fn endpoint_identity(endpoint: u64) -> SysResult<ExecutionIdentity> {
     }
     let mut identity = ExecutionIdentity::default();
     let status = super::call3(
-        SyscallNumber::ExecutionIdentityRead,
+        SyscallNumber::IpcEndpointIdentityRead,
         (&mut identity as *mut ExecutionIdentity) as u64,
         core::mem::size_of::<ExecutionIdentity>() as u64,
         endpoint,
