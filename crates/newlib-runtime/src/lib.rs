@@ -3225,9 +3225,19 @@ fn wait_for_handle_since(
     control: &ThreadControl,
     caught: u64,
 ) -> Result<u64, c_int> {
+    wait_for_handle_capacity(entry, interests, control, caught, 0)
+}
+
+fn wait_for_handle_capacity(
+    entry: FdEntry,
+    interests: u64,
+    control: &ThreadControl,
+    caught: u64,
+    minimum_write_bytes: u32,
+) -> Result<u64, c_int> {
     let mut item = syscall::HandleWaitItem {
         handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-        reserved: 0,
+        minimum_write_bytes,
         interests,
         observed: 0,
     };
@@ -3264,7 +3274,7 @@ fn stream_io<T>(
 ) -> Result<T, c_int> {
     let (_, control) = register_current_thread().ok_or(EAGAIN)?;
     let caught = control.nonrestart_signal_generation.load(Ordering::Acquire);
-    stream_io_since(entry, interests, control, caught, operation)
+    stream_io_since(entry, interests, control, caught, 0, operation)
 }
 
 fn stream_io_since<T>(
@@ -3272,6 +3282,7 @@ fn stream_io_since<T>(
     interests: u64,
     control: &ThreadControl,
     caught: u64,
+    minimum_write_bytes: u32,
     mut operation: impl FnMut() -> Result<T, c_int>,
 ) -> Result<T, c_int> {
     loop {
@@ -3282,7 +3293,7 @@ fn stream_io_since<T>(
             Err(EAGAIN) if !handle_is_nonblocking(entry)? => {
                 // Preserve the generation from before the attempt, including
                 // across retries and successful prefixes of a large write.
-                wait_for_handle_since(entry, interests, control, caught)?;
+                wait_for_handle_capacity(entry, interests, control, caught, minimum_write_bytes)?;
             }
             result => return result,
         }
@@ -3321,6 +3332,11 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
                         syscall::HANDLE_SIGNAL_WRITABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
                         control,
                         caught,
+                        if complete {
+                            u32::try_from(remaining).map_err(|_| EOVERFLOW)?
+                        } else {
+                            1
+                        },
                         || syscall_errno(syscall::raw_syscall4(
                             syscall::SyscallNumber::StreamWrite,
                             entry.handle.lower_handle,
@@ -4296,7 +4312,7 @@ pub extern "C" fn select(
                 FdKind::ObjectStreamRead if requested_read & mask != 0 => {
                     items[item_count] = syscall::HandleWaitItem {
                         handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-                        reserved: 0,
+                        minimum_write_bytes: 0,
                         interests: syscall::HANDLE_SIGNAL_READABLE
                             | syscall::HANDLE_SIGNAL_PEER_CLOSED,
                         observed: 0,
@@ -4310,7 +4326,7 @@ pub extern "C" fn select(
                 FdKind::ObjectStreamWrite if requested_write & mask != 0 => {
                     items[item_count] = syscall::HandleWaitItem {
                         handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-                        reserved: 0,
+                        minimum_write_bytes: 0,
                         interests: syscall::HANDLE_SIGNAL_WRITABLE
                             | syscall::HANDLE_SIGNAL_PEER_CLOSED,
                         observed: 0,
@@ -4331,7 +4347,7 @@ pub extern "C" fn select(
                     }
                     items[item_count] = syscall::HandleWaitItem {
                         handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-                        reserved: 0,
+                        minimum_write_bytes: 0,
                         interests,
                         observed: 0,
                     };
@@ -4467,7 +4483,7 @@ pub extern "C" fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: c_int) -> c_int 
                     }
                     items[item_count] = syscall::HandleWaitItem {
                         handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-                        reserved: 0,
+                        minimum_write_bytes: 0,
                         interests,
                         observed: 0,
                     };
