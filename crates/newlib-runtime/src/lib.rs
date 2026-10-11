@@ -1135,6 +1135,13 @@ fn setup_signal_delivery(control: &ThreadControl) -> Result<(), c_int> {
     if !has_posix_environment()? {
         return Ok(());
     }
+    // Restore an existing native thread's mask after exec, or seed a new
+    // fork/pthread thread from its inherited cache before upcalls can run.
+    service_signal_mask(
+        control,
+        posix_protocol::SIGNAL_MASK_INITIALIZE,
+        control.signal_mask.load(Ordering::Acquire),
+    )?;
     let stack = syscall_errno(syscall::raw_syscall6(
         syscall::SyscallNumber::MemoryMap,
         0,
@@ -2617,12 +2624,13 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     // its `initializing` state would leave the child waiting for a thread that
     // does not exist in the cloned process.
     let client = posix_client().map_err(map_posix_client_error)?;
+    let (_, thread_control) = current_thread_control().ok_or(ENOTSUP)?;
+    service_signal_mask(thread_control, posix_protocol::SIGNAL_MASK_QUERY, 0)?;
     // Keep the FD table stable across the address-space clone. Both parent and
     // child drop their private copy of this guard immediately after the native
     // clone returns, so the child never inherits a permanently locked STATE.
     let guard = state();
     let inherited_fds = guard.fds.clone();
-    let (_, thread_control) = current_thread_control().ok_or(ENOTSUP)?;
     if guard.executable.is_null() {
         return Err(ENOENT);
     }
@@ -2927,10 +2935,7 @@ fn apply_spawn_attributes(attributes: Option<PosixSpawnAttr>) -> Result<(), c_in
     }
     if flags & mochios_posix_client::spawn::SET_SIGNAL_MASK != 0 {
         let (_, control) = register_current_thread().ok_or(EAGAIN)?;
-        control.signal_mask.store(
-            mochios_posix_client::signal::sanitize_mask(attributes.sa_sigmask),
-            Ordering::Release,
-        );
+        service_signal_mask(control, posix_protocol::SIGNAL_MASK_SET, attributes.sa_sigmask)?;
     }
     if flags & mochios_posix_client::spawn::SET_SIGNAL_DEFAULTS != 0 {
         let default = SignalAction::default_action();
@@ -5697,19 +5702,41 @@ pub unsafe extern "C" fn sigaction(
     0
 }
 
+fn service_signal_mask(control: &ThreadControl, operation: u32, requested: u64) -> Result<u64, c_int> {
+    let previous = posix_client()
+        .map_err(map_posix_client_error)?
+        .thread_signal_mask(operation, requested)
+        .map_err(map_posix_client_error)?;
+    let requested = mochios_posix_client::signal::sanitize_mask(requested);
+    let updated = match operation {
+        posix_protocol::SIGNAL_MASK_SET => requested,
+        posix_protocol::SIGNAL_MASK_BLOCK => previous | requested,
+        posix_protocol::SIGNAL_MASK_UNBLOCK => previous & !requested,
+        _ => previous,
+    };
+    // Only an inheritance cache; delivery/pending always use service state.
+    control.signal_mask.store(updated, Ordering::Release);
+    Ok(previous)
+}
+
 fn update_current_signal_mask(how: c_int, set: *const u64, old_set: *mut u64) -> Result<(), c_int> {
     let (_, control) = register_current_thread().ok_or(EAGAIN)?;
-    let previous = control.signal_mask.load(Ordering::Acquire);
+    let (operation, requested) = if set.is_null() {
+        (posix_protocol::SIGNAL_MASK_QUERY, 0)
+    } else {
+        let operation = match how {
+            mochios_posix_client::signal::SIGNAL_SET_MASK => posix_protocol::SIGNAL_MASK_SET,
+            mochios_posix_client::signal::SIGNAL_BLOCK => posix_protocol::SIGNAL_MASK_BLOCK,
+            mochios_posix_client::signal::SIGNAL_UNBLOCK => posix_protocol::SIGNAL_MASK_UNBLOCK,
+            _ => return Err(EINVAL),
+        };
+        (operation, unsafe { set.read() })
+    };
+    let previous = service_signal_mask(control, operation, requested)?;
     if !old_set.is_null() {
         unsafe { old_set.write(previous) };
     }
-    if set.is_null() {
-        return Ok(());
-    }
-    let requested = unsafe { set.read() };
-    let updated =
-        mochios_posix_client::signal::update_mask(previous, how, requested).ok_or(EINVAL)?;
-    control.signal_mask.store(updated, Ordering::Release);
+    let updated = control.signal_mask.load(Ordering::Acquire);
     if previous & !updated != 0 {
         drain_pending_signals()?;
     }
@@ -5796,7 +5823,7 @@ pub unsafe extern "C" fn sigpending(set: *mut u64) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
-    let (_, control) = match register_current_thread() {
+    let _ = match register_current_thread() {
         Some(current) => current,
         None => {
             set_errno(EAGAIN);
@@ -5806,9 +5833,9 @@ pub unsafe extern "C" fn sigpending(set: *mut u64) -> c_int {
     result_with_errno(
         posix_client()
             .map_err(map_posix_client_error)
-            .and_then(|client| client.pending_signals().map_err(map_posix_client_error))
+            .and_then(|client| client.thread_pending_signals().map_err(map_posix_client_error))
             .map(|pending| {
-                unsafe { set.write(pending & control.signal_mask.load(Ordering::Acquire)) };
+                unsafe { set.write(pending) };
                 0
             }),
         -1,
@@ -5845,29 +5872,27 @@ pub extern "C" fn _init_signal() -> c_int {
     0
 }
 
-fn dispatch_signal(signal: c_int) -> c_int {
+fn dispatch_signal(signal: c_int) -> Result<c_int, c_int> {
     if signal <= 0 || signal > posix_protocol::SIGNAL_MAX as c_int {
-        return -1;
+        return Err(EINVAL);
     }
     let action = SIGNAL_ACTIONS.lock()[signal as usize - 1];
     match action.handler {
-        0 => 1,
-        usize::MAX => 2,
-        1 => 3,
+        0 => Ok(1),
+        usize::MAX => Ok(2),
+        1 => Ok(3),
         handler => {
             let (_, control) = match register_current_thread() {
                 Some(current) => current,
-                None => return -1,
+                None => return Err(EAGAIN),
             };
-            let previous = control.signal_mask.load(Ordering::Acquire);
             let current_signal =
                 mochios_posix_client::signal::signal_bit(signal as u32).unwrap_or(0);
-            control.signal_mask.store(
-                mochios_posix_client::signal::sanitize_mask(
-                    previous | action.sa_mask | current_signal,
-                ),
-                Ordering::Release,
-            );
+            let previous = service_signal_mask(
+                control,
+                posix_protocol::SIGNAL_MASK_BLOCK,
+                action.sa_mask | current_signal,
+            )?;
             let function: unsafe extern "C" fn(c_int) = unsafe { core::mem::transmute(handler) };
             control
                 .caught_signal_generation
@@ -5875,8 +5900,8 @@ fn dispatch_signal(signal: c_int) -> c_int {
             let saved_errno = unsafe { *__errno() };
             unsafe { function(signal) };
             set_errno(saved_errno);
-            control.signal_mask.store(previous, Ordering::Release);
-            0
+            service_signal_mask(control, posix_protocol::SIGNAL_MASK_SET, previous)?;
+            Ok(0)
         }
     }
 }
@@ -5917,28 +5942,27 @@ fn apply_default_signal_action(delivery: posix_protocol::SignalDelivery) -> Resu
 }
 
 fn drain_pending_signals() -> Result<(), c_int> {
-    let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+    register_current_thread().ok_or(EAGAIN)?;
     loop {
-        let blocked = control.signal_mask.load(Ordering::Acquire);
         let delivery = posix_client()
             .map_err(map_posix_client_error)?
-            .dequeue_signal_delivery(blocked)
+            .thread_dequeue_signal_delivery()
             .map_err(map_posix_client_error)?;
         let signal = delivery.signal;
         if signal == 0 {
             return Ok(());
         }
         match dispatch_signal(signal as c_int) {
-            0 | 3 => posix_client()
+            Ok(0 | 3) => posix_client()
                 .map_err(map_posix_client_error)?
                 .complete_signal_delivery(delivery)
                 .map_err(map_posix_client_error)?,
-            1 => apply_default_signal_action(delivery)?,
-            _ => {
+            Ok(1) => apply_default_signal_action(delivery)?,
+            result => {
                 let _ = posix_client()
                     .map_err(map_posix_client_error)?
                     .complete_signal_delivery(delivery);
-                return Err(EINVAL);
+                return Err(result.err().unwrap_or(EINVAL));
             }
         }
     }
@@ -5957,12 +5981,12 @@ extern "C" fn posix_signal_upcall(_payload: u64, token: u64) -> ! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sigtramp_r(_reent: *mut c_void, signal: c_int) -> c_int {
-    dispatch_signal(signal)
+    result_with_errno(dispatch_signal(signal), -1)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __sigtramp(signal: c_int) -> c_int {
-    dispatch_signal(signal)
+    result_with_errno(dispatch_signal(signal), -1)
 }
 
 #[unsafe(no_mangle)]
@@ -6819,7 +6843,14 @@ pub unsafe extern "C" fn pthread_create(
     }
     reap_detached_threads();
     let inherited_signal_mask = match register_current_thread() {
-        Some((_, control)) => control.signal_mask.load(Ordering::Acquire),
+        Some((_, control)) => match has_posix_environment() {
+            Ok(true) => match service_signal_mask(control, posix_protocol::SIGNAL_MASK_QUERY, 0) {
+                Ok(mask) => mask,
+                Err(error) => return error,
+            },
+            Ok(false) => control.signal_mask.load(Ordering::Acquire),
+            Err(error) => return error,
+        },
         None => return EAGAIN,
     };
 
