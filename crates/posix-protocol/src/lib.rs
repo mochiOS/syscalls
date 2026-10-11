@@ -201,6 +201,21 @@ pub const OP_SIGNAL_DISPOSITION: u16 = 63;
 /// Called by the installed image, never before a potentially failing exec.
 /// Empty payload; returns the SIG_IGN bitset retained across image replacement.
 pub const OP_SIGNAL_IMAGE_STARTED: u16 = 64;
+/// The thread is identified by authenticated IPC metadata, not request bytes.
+pub const OP_SIGNAL_THREAD_MASK: u16 = 65;
+pub const SIGNAL_THREAD_MASK_LEN: usize = 16;
+pub const SIGNAL_MASK_QUERY: u32 = 0;
+pub const SIGNAL_MASK_SET: u32 = 1;
+pub const SIGNAL_MASK_BLOCK: u32 = 2;
+pub const SIGNAL_MASK_UNBLOCK: u32 = 3;
+/// Seeds a new thread once, but preserves an existing mask across image entry.
+pub const SIGNAL_MASK_INITIALIZE: u32 = 4;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SignalMaskRequest {
+    pub operation: u32,
+    pub mask: u64,
+}
 pub const SIGNAL_DISPOSITION_SET: u32 = 1;
 pub const SIGNAL_DISPOSITION_LEN: usize = 16;
 pub const SIGNAL_DISPOSITION_DEFAULT: u32 = 0;
@@ -994,6 +1009,37 @@ pub fn decode_signal_mask(input: &[u8]) -> Result<u64, ProtocolError> {
         return Err(ProtocolError::InvalidLength);
     }
     Ok(get_u64(input, 0))
+}
+
+pub fn encode_signal_mask_request(
+    request: SignalMaskRequest,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < SIGNAL_THREAD_MASK_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    if request.operation > SIGNAL_MASK_INITIALIZE
+        || (request.operation == SIGNAL_MASK_QUERY && request.mask != 0)
+    {
+        return Err(ProtocolError::InvalidLength);
+    }
+    put_u32(output, 0, request.operation);
+    put_u32(output, 4, 0);
+    put_u64(output, 8, request.mask);
+    Ok(())
+}
+
+pub fn decode_signal_mask_request(input: &[u8]) -> Result<SignalMaskRequest, ProtocolError> {
+    if input.len() != SIGNAL_THREAD_MASK_LEN || get_u32(input, 4) != 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let request = SignalMaskRequest {
+        operation: get_u32(input, 0),
+        mask: get_u64(input, 8),
+    };
+    let mut checked = [0; SIGNAL_THREAD_MASK_LEN];
+    encode_signal_mask_request(request, &mut checked)?;
+    Ok(request)
 }
 
 pub fn encode_signal_child_options(

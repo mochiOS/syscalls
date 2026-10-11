@@ -280,6 +280,20 @@ impl<T: Transport> Client<T> {
         protocol::decode_signal_mask(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    /// Returns this authenticated thread's previous mask. Initialize returns
+    /// the inherited/current mask, including its seed on first use.
+    pub fn thread_signal_mask(&self, operation: u32, mask: u64) -> Result<u64, ClientError<T::Error>> {
+        let mut request = [0; protocol::SIGNAL_THREAD_MASK_LEN];
+        protocol::encode_signal_mask_request(
+            protocol::SignalMaskRequest { operation, mask },
+            &mut request,
+        )
+        .map_err(ClientError::Protocol)?;
+        let mut response = [0; protocol::SIGNAL_MASK_LEN];
+        let length = self.request(protocol::OP_SIGNAL_THREAD_MASK, 0, &request, &mut response)?;
+        protocol::decode_signal_mask(&response[..length]).map_err(ClientError::Protocol)
+    }
+
     /// Atomically replaces service-owned metadata, returning the previous
     /// disposition. No handler pointer is transmitted over IPC.
     pub fn set_signal_disposition(
