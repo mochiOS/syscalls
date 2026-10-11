@@ -817,6 +817,22 @@ pub mod handle {
         syscall::call1(syscall::SyscallNumber::HandleRightsGet, handle as u64)
     }
 
+    /// Reads metadata for all currently owned Handles, without acquiring any
+    /// reference. An empty slice queries the count. A too-small slice returns
+    /// ENOSPC rather than a truncated list. Later transfers revalidate rights.
+    pub fn table_read(output: &mut [syscall::HandleInfo]) -> SysResult<usize> {
+        syscall::call2(
+            syscall::SyscallNumber::HandleTableRead,
+            if output.is_empty() {
+                0
+            } else {
+                output.as_mut_ptr() as u64
+            },
+            output.len() as u64,
+        )
+        .map(|count| count as usize)
+    }
+
     /// Returns whether two process-local handles refer to the same kernel
     /// object without exposing a reusable global object identifier.
     pub fn same_object(left: Handle, right: Handle) -> SysResult<bool> {

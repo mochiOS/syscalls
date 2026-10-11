@@ -7,6 +7,7 @@ use core::arch::asm;
 pub mod execution;
 
 pub use mnu_abi::{
+    HandleInfo,
     ExecutionIdentity,
     ADDRESS_WAIT_INFINITE, AddressWaitResult, ClockId, ClockInstant, EACCES, EAGAIN, EBADF, ECHILD,
     EEXIST, EFAULT, EINVAL, EIO, EISDIR, EMFILE, EMSGSIZE, ENODATA, ENOENT, ENOMEM, ENOSPC, ENOSYS,
