@@ -12,6 +12,16 @@ pub const fn access_allows_write(open_flags: u32) -> bool {
     matches!(open_flags & 3, 1 | 2)
 }
 
+/// Reject negative POSIX offsets and lengths that cannot fit in ssize_t.
+/// Native positioned I/O receives an unsigned offset, never POSIX flags.
+pub const fn positioned_offset(offset: i64, length: usize) -> Option<u64> {
+    if offset < 0 || length > isize::MAX as usize {
+        None
+    } else {
+        Some(offset as u64)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Entry<H> {
     pub handle: H,

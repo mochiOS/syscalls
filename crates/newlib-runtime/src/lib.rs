@@ -3147,6 +3147,59 @@ pub extern "C" fn read(fd: c_int, buffer: *mut c_void, length: usize) -> isize {
     _read(fd, buffer, length)
 }
 
+fn positioned_file_io(
+    fd: c_int,
+    buffer: *mut c_void,
+    length: usize,
+    offset: i64,
+    write: bool,
+) -> Result<isize, c_int> {
+    let entry = with_fd_entry(fd)?;
+    let offset = mochios_posix_client::fd::positioned_offset(offset, length).ok_or(EINVAL)?;
+    if length != 0 && buffer.is_null() {
+        return Err(EFAULT);
+    }
+    match entry.handle.kind {
+        FdKind::ObjectFile => {}
+        FdKind::ObjectDirectory => return Err(EISDIR),
+        _ => return Err(ESPIPE),
+    }
+    let allowed = if write {
+        mochios_posix_client::fd::access_allows_write(entry.handle.open_flags as u32)
+    } else {
+        mochios_posix_client::fd::access_allows_read(entry.handle.open_flags as u32)
+    };
+    if !allowed {
+        return Err(EBADF);
+    }
+    let operation = if write {
+        syscall::SyscallNumber::HandleWriteAt
+    } else {
+        syscall::SyscallNumber::HandleReadAt
+    };
+    let count = syscall_errno(syscall::raw_syscall4(
+        operation,
+        entry.handle.lower_handle,
+        buffer as u64,
+        length as u64,
+        offset,
+    ))?;
+    if count > length as u64 {
+        return Err(EIO);
+    }
+    Ok(count as isize)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pread(fd: c_int, buffer: *mut c_void, length: usize, offset: i64) -> isize {
+    result_with_errno(positioned_file_io(fd, buffer, length, offset, false), -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pwrite(fd: c_int, buffer: *const c_void, length: usize, offset: i64) -> isize {
+    result_with_errno(positioned_file_io(fd, buffer.cast_mut(), length, offset, true), -1)
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn readv(fd: c_int, iov: *const IoVecMut, iovcnt: c_int) -> isize {
     if iovcnt < 0 {

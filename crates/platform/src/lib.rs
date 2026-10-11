@@ -868,6 +868,30 @@ pub mod handle {
         usize::try_from(length).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
     }
 
+    /// Reads bytes at an explicit offset without changing the object's cursor.
+    pub fn read_at(handle: Handle, buffer: &mut [u8], offset: u64) -> SysResult<usize> {
+        let length = syscall::call4(
+            syscall::SyscallNumber::HandleReadAt,
+            handle as u64,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            offset,
+        )?;
+        usize::try_from(length).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+    }
+
+    /// Writes bytes at an explicit offset without changing the object's cursor.
+    pub fn write_at(handle: Handle, buffer: &[u8], offset: u64) -> SysResult<usize> {
+        let length = syscall::call4(
+            syscall::SyscallNumber::HandleWriteAt,
+            handle as u64,
+            buffer.as_ptr() as u64,
+            buffer.len() as u64,
+            offset,
+        )?;
+        usize::try_from(length).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+    }
+
     /// Sends an opaque bounded control request to an object provider.
     pub fn control(
         handle: Handle,
