@@ -15,6 +15,31 @@ pub const fn poll_timeout_nanoseconds(milliseconds: i32) -> Option<u64> {
     }
 }
 
+pub fn timespec_timeout_nanoseconds(seconds: i64, nanoseconds: i64) -> Option<u64> {
+    if seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds) {
+        return None;
+    }
+    (seconds as u64)
+        .checked_mul(1_000_000_000)?
+        .checked_add(nanoseconds as u64)
+}
+
+/// Install the temporary pselect/ppoll mask and restore it on every returning
+/// path, including operation errors. The caller captures its handler generation
+/// before replacement and uses that generation in its guarded native wait.
+pub fn with_signal_mask<T, E>(
+    mask: Option<u64>,
+    mut replace: impl FnMut(u64) -> Result<u64, E>,
+    operation: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
+    let previous = mask.map(&mut replace).transpose()?;
+    let result = operation();
+    if let Some(previous) = previous {
+        replace(previous)?;
+    }
+    result
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum WaitError<E> {
     Interrupted,

@@ -3,6 +3,10 @@
 
 #include <sys/cdefs.h>
 #include <sys/types.h>
+#if __GNU_VISIBLE
+#include <signal.h>
+#include <time.h>
+#endif
 
 #ifndef _NFDS_T_DECLARED
 typedef unsigned int nfds_t;
@@ -29,6 +33,9 @@ struct pollfd {
 
 __BEGIN_DECLS
 int poll(struct pollfd[], nfds_t, int);
+#if __GNU_VISIBLE
+int ppoll(struct pollfd[], nfds_t, const struct timespec *, const sigset_t *);
+#endif
 __END_DECLS
 
 #endif

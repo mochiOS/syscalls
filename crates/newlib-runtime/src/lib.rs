@@ -4358,6 +4358,25 @@ pub extern "C" fn select(
         }
         let (_, control) = register_current_thread().ok_or(EAGAIN)?;
         let caught = control.caught_signal_generation.load(Ordering::Acquire);
+        let deadline = select_deadline(timeout)?;
+        select_with_deadline(nfds, readfds, writefds, exceptfds, deadline, control, caught)
+    })();
+    result_with_errno(result, -1)
+}
+
+fn select_with_deadline(
+    nfds: c_int,
+    readfds: *mut FdSet,
+    writefds: *mut FdSet,
+    exceptfds: *mut FdSet,
+    requested_deadline: u64,
+    control: &ThreadControl,
+    caught: u64,
+) -> Result<c_int, c_int> {
+    let result = (|| {
+        if nfds < 0 || nfds as usize > MAX_FDS {
+            return Err(EINVAL);
+        }
         let requested_read = if readfds.is_null() {
             0
         } else {
@@ -4384,7 +4403,6 @@ pub extern "C" fn select(
         let requested_write = requested_write & valid_mask;
         let requested_except = requested_except & valid_mask;
         let requested = requested_read | requested_write | requested_except;
-        let requested_deadline = select_deadline(timeout)?;
 
         let mut ready_read = 0u64;
         let mut ready_write = 0u64;
@@ -4499,17 +4517,16 @@ pub extern "C" fn select(
             ready_except,
         ) as c_int)
     })();
-    result_with_errno(result, -1)
+    result
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: c_int) -> c_int {
     let result = (|| {
-        let count = usize::try_from(nfds).map_err(|_| EINVAL)?;
-        if count > MAX_FDS {
+        if nfds as usize > MAX_FDS {
             return Err(EINVAL);
         }
-        if count != 0 && fds.is_null() {
+        if nfds != 0 && fds.is_null() {
             return Err(EFAULT);
         }
         let (_, control) = register_current_thread().ok_or(EAGAIN)?;
@@ -4518,6 +4535,26 @@ pub extern "C" fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: c_int) -> c_int 
             None => syscall::HANDLE_WAIT_INFINITE,
             Some(duration) => deadline_after_nanoseconds(duration)?,
         };
+        poll_with_deadline(fds, nfds, deadline, control, caught)
+    })();
+    result_with_errno(result, -1)
+}
+
+fn poll_with_deadline(
+    fds: *mut PollFd,
+    nfds: u32,
+    deadline: u64,
+    control: &ThreadControl,
+    caught: u64,
+) -> Result<c_int, c_int> {
+    let result = (|| {
+        let count = usize::try_from(nfds).map_err(|_| EINVAL)?;
+        if count > MAX_FDS {
+            return Err(EINVAL);
+        }
+        if count != 0 && fds.is_null() {
+            return Err(EFAULT);
+        }
 
         const READ_EVENTS: i16 = POLLIN | POLLPRI | POLLRDNORM | POLLRDBAND;
         const WRITE_EVENTS: i16 = POLLOUT | POLLWRBAND;
@@ -4615,6 +4652,83 @@ pub extern "C" fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: c_int) -> c_int 
         }
         c_int::try_from(ready).map_err(|_| EOVERFLOW)
     })();
+    result
+}
+
+fn timespec_deadline(timeout: *const NewlibTimespec) -> Result<u64, c_int> {
+    if timeout.is_null() {
+        return Ok(syscall::HANDLE_WAIT_INFINITE);
+    }
+    let value = unsafe { timeout.read() };
+    let duration =
+        mochios_posix_client::multiplex::timespec_timeout_nanoseconds(value.tv_sec, value.tv_nsec)
+            .ok_or(EINVAL)?;
+    deadline_after_nanoseconds(duration)
+}
+
+fn masked_multiplex(
+    mask: *const u64,
+    operation: impl FnOnce(&ThreadControl, u64) -> Result<c_int, c_int>,
+) -> Result<c_int, c_int> {
+    let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+    let has_signals = has_posix_environment()?;
+    // Capture before unblocking: an upcall may execute during the mask RPC.
+    let caught = control.caught_signal_generation.load(Ordering::Acquire);
+    let mask = if mask.is_null() {
+        None
+    } else {
+        Some(unsafe { mask.read() })
+    };
+    let result = mochios_posix_client::multiplex::with_signal_mask(
+        mask,
+        |value| service_signal_mask(control, posix_protocol::SIGNAL_MASK_SET, value),
+        || {
+            if has_signals {
+                drain_pending_signals()?;
+            }
+            operation(control, caught)
+        },
+    );
+    // The helper attempts restoration even on EINTR/EBADF. A failed mask RPC
+    // is propagated, never treated as successful restoration.
+    // Deliver any signals newly unblocked by restoration.
+    if has_signals {
+        drain_pending_signals()?;
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pselect(
+    nfds: c_int,
+    readfds: *mut FdSet,
+    writefds: *mut FdSet,
+    exceptfds: *mut FdSet,
+    timeout: *const NewlibTimespec,
+    mask: *const u64,
+) -> c_int {
+    let result = timespec_deadline(timeout).and_then(|deadline| {
+        masked_multiplex(mask, |control, caught| {
+            select_with_deadline(
+                nfds, readfds, writefds, exceptfds, deadline, control, caught,
+            )
+        })
+    });
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ppoll(
+    fds: *mut PollFd,
+    nfds: u32,
+    timeout: *const NewlibTimespec,
+    mask: *const u64,
+) -> c_int {
+    let result = timespec_deadline(timeout).and_then(|deadline| {
+        masked_multiplex(mask, |control, caught| {
+            poll_with_deadline(fds, nfds, deadline, control, caught)
+        })
+    });
     result_with_errno(result, -1)
 }
 
