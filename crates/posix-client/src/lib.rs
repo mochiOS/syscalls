@@ -16,6 +16,8 @@ pub mod newlib_errno;
 pub mod process_image;
 pub mod random;
 pub mod signal;
+#[cfg(target_arch = "x86_64")]
+pub mod snapshot;
 pub mod spawn;
 pub mod stream;
 #[cfg(feature = "syscall-endpoint")]
