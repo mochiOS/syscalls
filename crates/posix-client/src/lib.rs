@@ -595,6 +595,29 @@ impl<T: ObjectTransport> Client<T> {
         Ok(())
     }
 
+    /// Registers a broker-created image as the requester's POSIX child. Both
+    /// identities come from explicit ProcessHandle attachments, not PID bytes.
+    /// The broker must have userspace POSIX initialization authority; possession
+    /// of these handles never creates or expands native capabilities.
+    pub fn register_launched_child(
+        &self,
+        requester: ObjectHandleAttachment<T::Handle>,
+        child: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(requester)
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        handles
+            .push(child)
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        self.request_with_handles(protocol::OP_PROCESS_LAUNCHED, 0, &[], &mut [], &mut handles)?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(())
+    }
+
     /// Inspects POSIX credentials through an explicitly attached WAIT-only
     /// ProcessHandle. The service authenticates the object, not a supplied PID.
     pub fn process_session_info(
