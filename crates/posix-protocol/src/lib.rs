@@ -189,6 +189,9 @@ pub const OP_SET_REAL_EFFECTIVE_UID: u16 = 58;
 pub const OP_SET_REAL_EFFECTIVE_GID: u16 = 59;
 /// Initialize an already running boot process through an attached ProcessHandle.
 pub const OP_PROCESS_INITIALIZE: u16 = 60;
+/// Empty payload and one WAIT|SIGNAL ProcessHandle for a launcher's tree root.
+/// Only its recorded launcher may terminate and reclaim the userspace tree.
+pub const OP_PROCESS_TREE_TERMINATE: u16 = 61;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;

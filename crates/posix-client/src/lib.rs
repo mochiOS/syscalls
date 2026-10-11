@@ -706,6 +706,31 @@ impl<T: ObjectTransport> Client<T> {
         Ok(())
     }
 
+    /// Terminates a tree registered by this launcher, using its explicit root
+    /// ProcessHandle with WAIT|SIGNAL rights. No PID or credentials are sent.
+    /// Delayed exits return EAGAIN; callers must retain their root reference
+    /// until successful completion and may retry the same request.
+    pub fn terminate_launched_tree(
+        &self,
+        root: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(root)
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        self.request_with_handles(
+            protocol::OP_PROCESS_TREE_TERMINATE,
+            0,
+            &[],
+            &mut [],
+            &mut handles,
+        )?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(())
+    }
+
     /// Inspects POSIX credentials through an explicitly attached WAIT-only
     /// ProcessHandle. The service authenticates the object, not a supplied PID.
     pub fn process_session_info(
