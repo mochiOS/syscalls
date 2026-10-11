@@ -203,6 +203,10 @@ pub const OP_SIGNAL_DISPOSITION: u16 = 63;
 pub const OP_SIGNAL_IMAGE_STARTED: u16 = 64;
 /// The thread is identified by authenticated IPC metadata, not request bytes.
 pub const OP_SIGNAL_THREAD_MASK: u16 = 65;
+/// Empty payload; delivery uses the authenticated thread's service-owned mask.
+pub const OP_SIGNAL_THREAD_DEQUEUE: u16 = 66;
+/// Empty payload; returns pending signals blocked by the authenticated thread.
+pub const OP_SIGNAL_THREAD_PENDING: u16 = 67;
 pub const SIGNAL_THREAD_MASK_LEN: usize = 16;
 pub const SIGNAL_MASK_QUERY: u32 = 0;
 pub const SIGNAL_MASK_SET: u32 = 1;

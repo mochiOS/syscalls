@@ -294,6 +294,23 @@ impl<T: Transport> Client<T> {
         protocol::decode_signal_mask(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    /// Reads pending signals intersected with this thread's service-owned mask.
+    pub fn thread_pending_signals(&self) -> Result<u64, ClientError<T::Error>> {
+        let mut response = [0; protocol::SIGNAL_MASK_LEN];
+        let length = self.request(protocol::OP_SIGNAL_THREAD_PENDING, 0, &[], &mut response)?;
+        protocol::decode_signal_mask(&response[..length]).map_err(ClientError::Protocol)
+    }
+
+    /// Selects delivery using this thread's service-owned mask. The request
+    /// cannot substitute a mask or another thread's identity.
+    pub fn thread_dequeue_signal_delivery(
+        &self,
+    ) -> Result<protocol::SignalDelivery, ClientError<T::Error>> {
+        let mut response = [0; protocol::SIGNAL_DELIVERY_LEN];
+        let length = self.request(protocol::OP_SIGNAL_THREAD_DEQUEUE, 0, &[], &mut response)?;
+        protocol::decode_signal_delivery(&response[..length]).map_err(ClientError::Protocol)
+    }
+
     /// Atomically replaces service-owned metadata, returning the previous
     /// disposition. No handler pointer is transmitted over IPC.
     pub fn set_signal_disposition(
