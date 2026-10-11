@@ -60,6 +60,7 @@ pub trait FileOps<H> {
 pub enum FdError<E> {
     BadDescriptor,
     InvalidDescriptor,
+    BusyDescriptor,
     Handle(E),
 }
 
@@ -91,16 +92,90 @@ pub enum LaunchFdError<E> {
     UnexpectedHandle,
 }
 
-#[derive(Clone, Debug)]
+/// A pending open's slot. Use only with the table that issued it.
+#[derive(Debug)]
+pub struct FdReservation {
+    index: usize,
+    generation: u64,
+}
+
+#[derive(Debug)]
 pub struct FdTable<H> {
     entries: [Option<Entry<H>>; DEFAULT_FD_LIMIT],
+    reservations: [u64; DEFAULT_FD_LIMIT],
+    next_reservation: u64,
+}
+
+impl<H: Copy> Clone for FdTable<H> {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries,
+            reservations: [0; DEFAULT_FD_LIMIT],
+            next_reservation: self.next_reservation,
+        }
+    }
 }
 
 impl<H: Copy> FdTable<H> {
     pub const fn new() -> Self {
         Self {
             entries: [const { None }; DEFAULT_FD_LIMIT],
+            reservations: [0; DEFAULT_FD_LIMIT],
+            next_reservation: 0,
         }
+    }
+
+    fn is_free(&self, index: usize) -> bool {
+        self.entries[index].is_none() && self.reservations[index] == 0
+    }
+
+    /// Reserve before performing a potentially destructive filesystem open.
+    /// The caller must serialize table access, but may release its lock during I/O.
+    pub fn reserve_from(
+        &mut self,
+        minimum: i32,
+        limit: i32,
+    ) -> Result<FdReservation, FdError<core::convert::Infallible>> {
+        if minimum < 0 || minimum >= limit || limit as usize > DEFAULT_FD_LIMIT {
+            return Err(FdError::InvalidDescriptor);
+        }
+        let index = (minimum as usize..limit as usize)
+            .find(|index| self.is_free(*index))
+            .ok_or(FdError::InvalidDescriptor)?;
+        let generation = self
+            .next_reservation
+            .checked_add(1)
+            .ok_or(FdError::InvalidDescriptor)?;
+        self.next_reservation = generation;
+        self.reservations[index] = generation;
+        Ok(FdReservation { index, generation })
+    }
+
+    pub fn commit_reservation(
+        &mut self,
+        reservation: &FdReservation,
+        entry: Entry<H>,
+    ) -> Result<i32, FdError<core::convert::Infallible>> {
+        if !self.cancel_reservation(reservation) {
+            return Err(FdError::InvalidDescriptor);
+        }
+        self.entries[reservation.index] = Some(entry);
+        Ok(reservation.index as i32)
+    }
+
+    pub fn cancel_reservation(&mut self, reservation: &FdReservation) -> bool {
+        if self.reservations[reservation.index] != reservation.generation
+            || self.entries[reservation.index].is_some()
+        {
+            return false;
+        }
+        self.reservations[reservation.index] = 0;
+        true
+    }
+
+    /// After address-space cloning, other threads' pending opens do not survive.
+    pub fn clear_reservations(&mut self) {
+        self.reservations.fill(0);
     }
 
     pub fn get(&self, fd: i32) -> Option<Entry<H>> {
@@ -114,16 +189,7 @@ impl<H: Copy> FdTable<H> {
     }
 
     pub fn install(&mut self, entry: Entry<H>) -> Result<i32, FdError<core::convert::Infallible>> {
-        if let Some((index, slot)) = self
-            .entries
-            .iter_mut()
-            .enumerate()
-            .find(|(_, slot)| slot.is_none())
-        {
-            *slot = Some(entry);
-            return i32::try_from(index).map_err(|_| FdError::InvalidDescriptor);
-        }
-        Err(FdError::InvalidDescriptor)
+        self.install_from(0, DEFAULT_FD_LIMIT as i32, entry)
     }
 
     /// Installs a descriptor in the first free slot within `[minimum, limit)`.
@@ -141,7 +207,7 @@ impl<H: Copy> FdTable<H> {
         if minimum >= limit || limit > DEFAULT_FD_LIMIT || limit > i32::MAX as usize {
             return Err(FdError::InvalidDescriptor);
         }
-        if let Some(index) = (minimum..limit).find(|index| self.entries[*index].is_none()) {
+        if let Some(index) = (minimum..limit).find(|index| self.is_free(*index)) {
             self.entries[index] = Some(entry);
             return Ok(index as i32);
         }
@@ -157,6 +223,9 @@ impl<H: Copy> FdTable<H> {
         let index = usize::try_from(fd).map_err(|_| FdError::InvalidDescriptor)?;
         if index >= DEFAULT_FD_LIMIT {
             return Err(FdError::InvalidDescriptor);
+        }
+        if self.reservations[index] != 0 {
+            return Err(FdError::BusyDescriptor);
         }
         if let Some(replaced) = self.entries[index].replace(entry) {
             operations.close_handle(replaced.handle);
@@ -259,7 +328,7 @@ impl<H: Copy> FdTable<H> {
             return Err(FdError::InvalidDescriptor);
         }
         let index = (minimum as usize..limit as usize)
-            .find(|index| self.entries[*index].is_none())
+            .find(|index| self.is_free(*index))
             .ok_or(FdError::InvalidDescriptor)?;
         let handle = operations
             .clone_handle(source.handle, source.rights)
@@ -286,6 +355,9 @@ impl<H: Copy> FdTable<H> {
             return Ok(target_fd);
         }
         let source = self.get(source_fd).ok_or(FdError::BadDescriptor)?;
+        if self.reservations[target_fd as usize] != 0 {
+            return Err(FdError::BusyDescriptor);
+        }
         let handle = operations
             .clone_handle(source.handle, source.rights)
             .map_err(FdError::Handle)?;

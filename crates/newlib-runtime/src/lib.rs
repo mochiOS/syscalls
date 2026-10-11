@@ -15,8 +15,8 @@ use mochios_capability_protocol::{
 };
 use mochios_filesystem_protocol as filesystem_protocol;
 use mochios_posix_client::fd::{
-    Entry as PosixFdEntry, FdError, FdTable, HandleOps, LaunchContextOps, LaunchFdDescription,
-    LaunchFdError, restore_launch_context, stage_launch_context,
+    Entry as PosixFdEntry, FdError, FdReservation, FdTable, HandleOps, LaunchContextOps,
+    LaunchFdDescription, LaunchFdError, restore_launch_context, stage_launch_context,
 };
 use mochios_posix_client::{
     Client as PosixClient, ClientError as PosixClientError, StatAtBase, SyscallEndpointTransport,
@@ -76,6 +76,7 @@ const EAGAIN: c_int = 11;
 const ENOMEM: c_int = 12;
 const EACCES: c_int = 13;
 const EFAULT: c_int = 14;
+const EBUSY: c_int = 16;
 const EEXIST: c_int = 17;
 const ENOTDIR: c_int = 20;
 const EISDIR: c_int = 21;
@@ -404,6 +405,7 @@ impl HandleOps<FdObject> for RuntimeFdOps {
 fn map_fd_error(error: FdError<c_int>) -> c_int {
     match error {
         FdError::BadDescriptor | FdError::InvalidDescriptor => EBADF,
+        FdError::BusyDescriptor => EBUSY,
         FdError::Handle(errno) => errno,
     }
 }
@@ -1880,25 +1882,27 @@ fn newlib_mutable_status_flags(flags: u32) -> c_int {
     result
 }
 
+struct PendingFdReservation(FdReservation);
+
+impl Drop for PendingFdReservation {
+    fn drop(&mut self) {
+        state().fds.cancel_reservation(&self.0);
+    }
+}
+
 fn open_posix_object(path: &str, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
     let limit = process_fd_limit()?;
-    let has_slot = {
-        let state = state();
-        (0..limit).any(|fd| state.fds.get(fd).is_none())
-    };
-    if !has_slot {
-        return Err(EMFILE);
-    }
+    let reservation = PendingFdReservation(state().fds.reserve_from(0, limit).map_err(|_| EMFILE)?);
+    // Do not hold STATE across filesystem IPC: other threads may allocate FDs,
+    // but cannot consume this open's reserved slot. Drop cancels on every error.
     let entry = open_posix_entry(path, flags, mode)?;
-    let mut state = state();
-    let installed = state.fds.install_from(0, limit, entry);
-    drop(state);
+    let installed = state().fds.commit_reservation(&reservation.0, entry);
     match installed {
         Ok(fd) => Ok(fd),
         Err(_) => {
             let mut operations = RuntimeFdOps;
             operations.close_handle(entry.handle);
-            Err(EMFILE)
+            Err(EIO)
         }
     }
 }
@@ -2332,11 +2336,17 @@ fn duplicate_fd_from(
     if minimum.is_some_and(|minimum| minimum < 0 || minimum >= limit) {
         return Err(EINVAL);
     }
-    fds.duplicate_from(fd, minimum.unwrap_or(0), limit, close_on_exec, &mut RuntimeFdOps)
-        .map_err(|error| match error {
-            FdError::InvalidDescriptor => EMFILE,
-            other => map_fd_error(other),
-        })
+    fds.duplicate_from(
+        fd,
+        minimum.unwrap_or(0),
+        limit,
+        close_on_exec,
+        &mut RuntimeFdOps,
+    )
+    .map_err(|error| match error {
+        FdError::InvalidDescriptor => EMFILE,
+        other => map_fd_error(other),
+    })
 }
 
 fn apply_spawn_file_actions(
@@ -2601,11 +2611,12 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     // Keep the FD table stable across the address-space clone. Both parent and
     // child drop their private copy of this guard immediately after the native
     // clone returns, so the child never inherits a permanently locked STATE.
-    let state = state();
-    let inherited_fds = state.fds.clone();
+    let guard = state();
+    let inherited_fds = guard.fds.clone();
     let handle = syscall_errno(syscall::raw_syscall0(syscall::SyscallNumber::ProcessClone))?;
-    drop(state);
+    drop(guard);
     if handle == 0 {
+        state().fds.clear_reservations();
         return Ok((0, inherited_fds, None));
     }
     let handle = match u32::try_from(handle) {
@@ -2890,11 +2901,7 @@ fn allocate_fd_entry(
     let mut state = state();
     state
         .fds
-        .install_from(
-            0,
-            limit,
-            object_entry(lower_handle, rights, kind, flags),
-        )
+        .install_from(0, limit, object_entry(lower_handle, rights, kind, flags))
         .map_err(|_| EMFILE)
 }
 
@@ -3245,7 +3252,10 @@ pub extern "C" fn pread(fd: c_int, buffer: *mut c_void, length: usize, offset: i
 
 #[unsafe(no_mangle)]
 pub extern "C" fn pwrite(fd: c_int, buffer: *const c_void, length: usize, offset: i64) -> isize {
-    result_with_errno(positioned_file_io(fd, buffer.cast_mut(), length, offset, true), -1)
+    result_with_errno(
+        positioned_file_io(fd, buffer.cast_mut(), length, offset, true),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -5055,8 +5065,8 @@ pub extern "C" fn munmap(addr: *mut c_void, len: usize) -> c_int {
         if addr.is_null() {
             return Err(EINVAL);
         }
-        let native_len = mochios_posix_client::memory::unmap_span(addr as u64, len as u64)
-            .ok_or(EINVAL)?;
+        let native_len =
+            mochios_posix_client::memory::unmap_span(addr as u64, len as u64).ok_or(EINVAL)?;
         let _ = syscall_errno(syscall::raw_syscall2(
             syscall::SyscallNumber::MemoryUnmap,
             addr as u64,
