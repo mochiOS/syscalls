@@ -82,22 +82,42 @@ SDK="$OUT_ROOT/sdk"
 mkdir -p "$BUILD_DIR" "$INSTALL_ROOT" "$TARGET_DIR" "$SDK/bin" "$SDK/lib" "$SDK/share" "$OUT_ROOT/hello"
 # Source builds use make's dependency tracking; a supplied sysroot is immutable input.
 if [[ -n "$NEWLIB_SOURCE" ]]; then
-    if [[ ! -f "$BUILD_DIR/Makefile" ]]; then
+    # A desktop libc must support standard integer, size, positional and long
+    # double conversions. Record configuration separately from CFLAGS so an
+    # existing SDK cannot silently retain the previous reduced stdio profile.
+    configure_options=(
+        --disable-binutils --disable-gas --disable-gdb --disable-gprof
+        --disable-libgloss --disable-multilib --disable-nls --disable-shared
+        --disable-sim --disable-werror --disable-newlib-supplied-syscalls
+        --enable-newlib-multithread=yes --enable-newlib-retargetable-locking
+        --enable-newlib-io-long-long=yes --enable-newlib-io-c99-formats=yes
+        --enable-newlib-io-pos-args=yes --enable-newlib-io-long-double=yes
+    )
+    configure_stamp="$BUILD_DIR/.mochios-configure-options"
+    configure_profile="${configure_options[*]}"
+    if [[ -f "$BUILD_DIR/Makefile" ]] && ! grep -Fqx "srcdir = $NEWLIB_SOURCE" "$BUILD_DIR/Makefile"; then
+        echo "newlib source changed; select a separate --output to preserve the existing build" >&2
+        exit 2
+    fi
+    if [[ ! -f "$BUILD_DIR/Makefile" || ! -f "$configure_stamp" ||
+          "$(<"$configure_stamp")" != "$configure_profile" ]]; then
+        if [[ -f "$BUILD_DIR/Makefile" ]]; then
+            make -C "$BUILD_DIR" clean-target-newlib
+        fi
+        # The target configure cache records CFLAGS and the old feature set.
+        # clean-target-newlib removes objects, not this generated cache.
+        rm -f "$BUILD_DIR/x86_64-elf/newlib/config.cache"
         (cd "$BUILD_DIR"
          CC_FOR_TARGET=x86_64-elf-gcc AR_FOR_TARGET=x86_64-elf-ar RANLIB_FOR_TARGET=x86_64-elf-ranlib \
          "$NEWLIB_SOURCE/configure" --target=x86_64-elf --prefix="$INSTALL_ROOT" \
-             --disable-binutils --disable-gas --disable-gdb --disable-gprof \
-             --disable-libgloss --disable-multilib --disable-nls --disable-shared \
-             --disable-sim --disable-werror --disable-newlib-supplied-syscalls \
-             --enable-newlib-multithread=yes --enable-newlib-retargetable-locking)
-    elif ! grep -Fqx "srcdir = $NEWLIB_SOURCE" "$BUILD_DIR/Makefile"; then
-        echo "newlib source changed; select a separate --output to preserve the existing build" >&2
-        exit 2
+             "${configure_options[@]}")
+        printf '%s\n' "$configure_profile" >"$configure_stamp"
     fi
     target_cflags="-O2 -g0 -D__mochios__ -DGETREENT_PROVIDED -DSIGNAL_PROVIDED -DHAVE_RENAME -ffile-prefix-map=$NEWLIB_SOURCE=/src/newlib -ffile-prefix-map=$OUT_ROOT=/build/newlib"
     flags_stamp="$BUILD_DIR/.mochios-target-cflags"
     if [[ ! -f "$flags_stamp" ]] || [[ "$(<"$flags_stamp")" != "$target_cflags" ]]; then
         make -C "$BUILD_DIR" clean-target-newlib
+        rm -f "$BUILD_DIR/x86_64-elf/newlib/config.cache"
         printf '%s\n' "$target_cflags" >"$flags_stamp"
     fi
     make -C "$BUILD_DIR" -j"$JOBS" CFLAGS_FOR_TARGET="$target_cflags" all-target-newlib
