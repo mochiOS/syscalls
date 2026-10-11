@@ -7,6 +7,8 @@ use mochios_workspace_protocol as protocol;
 
 use crate::syscall::{self, SysError, SysResult};
 
+mod response;
+
 const SERVICE_NAME: &str = "workspace.service";
 const TEXT_CONTENT_TYPE: &str = "text/plain;charset=utf-8";
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -139,7 +141,7 @@ fn call_with_object_handle<'a>(
 fn status(message: protocol::Message<'_>) -> SysResult<(u64, u64)> {
     let (status, generation, value) = protocol::decode_status(message).map_err(|_| invalid())?;
     if status != 0 {
-        return Err(SysError::from_raw(status.unsigned_abs() as i64));
+        return Err(response::status_error(status));
     }
     Ok((generation, value))
 }
@@ -680,7 +682,7 @@ fn decode_file_panel_selection(
             path: result.path.to_string(),
         })),
         1 => Ok(None),
-        status => Err(SysError::from_raw(status.unsigned_abs() as i64)),
+        status => Err(response::status_error(status)),
     }
 }
 
