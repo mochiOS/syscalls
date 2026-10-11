@@ -1,5 +1,6 @@
 #![no_std]
 
+mod child_cleanup;
 mod credentials;
 mod groups;
 
@@ -2566,8 +2567,12 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     }
     let handle = match u32::try_from(handle) {
         Ok(handle) => handle,
-        Err(_) => return Err(EOVERFLOW),
+        Err(_) => {
+            cleanup_failed_child(handle, false);
+            return Err(EOVERFLOW);
+        }
     };
+    let mut registration_attempted = false;
     let result = (|| {
         let mut status = syscall::ProcessStatus::default();
         syscall_errno(syscall::raw_syscall2(
@@ -2577,6 +2582,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         ))?;
         let process_id = status.process_id;
         c_int::try_from(process_id).map_err(|_| EOVERFLOW)?;
+        registration_attempted = true;
         client
             .register_child(ObjectHandleAttachment {
                 handle,
@@ -2589,17 +2595,10 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         ))?;
         Ok(process_id)
     })();
-    if result.is_err() {
-        let _ = syscall::raw_syscall2(
-            syscall::SyscallNumber::ProcessHandleTerminate,
-            u64::from(handle),
-            SPAWN_FAIL_EXIT_STATUS as u64,
-        );
-    }
     match result {
         Ok(process_id) => Ok((process_id, inherited_fds, Some(handle))),
         Err(error) => {
-            close_object_handle(handle);
+            cleanup_failed_child(u64::from(handle), registration_attempted);
             Err(error)
         }
     }
@@ -2654,16 +2653,65 @@ fn read_spawn_status(handle: u32) -> Result<mochios_posix_client::spawn::ExecSta
     }
 }
 
-fn finish_failed_spawn(process_id: u64, process_handle: u32) {
-    let mut status = syscall::ProcessStatus::default();
-    let _ = syscall_errno(syscall::raw_syscall3(
-        syscall::SyscallNumber::ProcessHandleWait,
-        u64::from(process_handle),
-        syscall::PROCESS_WAIT_INFINITE,
-        (&mut status as *mut syscall::ProcessStatus) as u64,
-    ));
-    if let Ok(client) = posix_client() {
-        let _ = client.wait_child(process_id as i64, 0);
+struct FailedChildBackend;
+
+impl child_cleanup::Backend for FailedChildBackend {
+    fn is_exited(&mut self, handle: u64) -> Result<bool, c_int> {
+        let mut status = syscall::ProcessStatus::default();
+        syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::ProcessHandleStatus,
+            handle,
+            (&mut status as *mut syscall::ProcessStatus) as u64,
+        ))?;
+        Ok(status.state == syscall::PROCESS_STATE_EXITED)
+    }
+
+    fn terminate(&mut self, handle: u64) -> Result<(), c_int> {
+        syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::ProcessHandleTerminate,
+            handle,
+            SPAWN_FAIL_EXIT_STATUS as u64,
+        ))
+        .map(|_| ())
+    }
+
+    fn reclaim_registration(&mut self, handle: u64) -> Result<(), c_int> {
+        let handle = u32::try_from(handle).map_err(|_| EOVERFLOW)?;
+        posix_client()
+            .map_err(map_posix_client_error)?
+            .abort_launched_child(ObjectHandleAttachment {
+                handle,
+                rights: syscall::HANDLE_RIGHT_WAIT,
+            })
+            .map_err(map_posix_client_error)
+    }
+
+    fn close(&mut self, handle: u64) -> Result<(), c_int> {
+        syscall_errno(syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, handle))
+            .map(|_| ())
+    }
+}
+
+fn cleanup_failed_child(handle: u64, registration_attempted: bool) {
+    let mut cleanup = child_cleanup::Cleanup::new(handle, registration_attempted);
+    let mut reported_failure = false;
+    // Do not return the failed creation while its cleanup is unresolved. This
+    // stack frame retains the exact owner even across interrupted syscalls or
+    // failed IPC replies; no fixed retry count may turn failure into a leak.
+    while let Err(error) = cleanup.retry(&mut FailedChildBackend) {
+        if error != EAGAIN && error != EINTR && !reported_failure {
+            let message = b"newlib: child cleanup pending; retaining ProcessHandle for retry\n";
+            let _ = syscall::raw_syscall2(
+                syscall::SyscallNumber::DebugWrite,
+                message.as_ptr() as u64,
+                message.len() as u64,
+            );
+            reported_failure = true;
+        }
+        // Sleep only spaces retries; its failure cannot advance cleanup.
+        if syscall_errno(syscall::raw_syscall1(syscall::SyscallNumber::Sleep, 10)).is_err() {
+            let _ = syscall::raw_syscall0(syscall::SyscallNumber::ThreadYield);
+        }
     }
 }
 
@@ -7513,18 +7561,11 @@ pub extern "C" fn _posix_spawn(
             0
         }
         Ok(mochios_posix_client::spawn::ExecStatus::Failed(errno_value)) => {
-            finish_failed_spawn(child_pid, process_handle);
-            close_object_handle(process_handle);
+            cleanup_failed_child(u64::from(process_handle), true);
             errno_value
         }
         Err(errno_value) => {
-            let _ = syscall::raw_syscall2(
-                syscall::SyscallNumber::ProcessHandleTerminate,
-                u64::from(process_handle),
-                SPAWN_FAIL_EXIT_STATUS as u64,
-            );
-            finish_failed_spawn(child_pid, process_handle);
-            close_object_handle(process_handle);
+            cleanup_failed_child(u64::from(process_handle), true);
             errno_value
         }
     }
