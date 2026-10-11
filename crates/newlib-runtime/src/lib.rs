@@ -588,9 +588,9 @@ struct RuntimeMutex<T> {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SignalAction {
-    sa_flags: c_int,
-    sa_mask: u64,
     handler: usize,
+    sa_mask: u64,
+    sa_flags: c_int,
 }
 
 impl SignalAction {
