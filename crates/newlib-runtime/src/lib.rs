@@ -3231,15 +3231,20 @@ fn wait_for_handle_since(
         interests,
         observed: 0,
     };
+    let guard = mnu_abi::HandleWaitGuard {
+        address: (&control.nonrestart_signal_generation as *const AtomicU64) as u64,
+        expected: caught,
+    };
     loop {
         if control.nonrestart_signal_generation.load(Ordering::Acquire) != caught {
             return Err(EINTR);
         }
-        let result = syscall_errno(syscall::raw_syscall3(
-            syscall::SyscallNumber::HandleWaitMany,
+        let result = syscall_errno(syscall::raw_syscall4(
+            syscall::SyscallNumber::HandleWaitManyGuarded,
             (&mut item as *mut syscall::HandleWaitItem) as u64,
             1,
             syscall::HANDLE_WAIT_INFINITE,
+            (&guard as *const mnu_abi::HandleWaitGuard) as u64,
         ));
         if control.nonrestart_signal_generation.load(Ordering::Acquire) != caught {
             return Err(EINTR);

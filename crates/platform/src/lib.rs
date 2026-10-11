@@ -356,6 +356,30 @@ pub mod thread {
         super::runtime_support::yield_now();
     }
 
+    /// Waits on native handles only while the caller's guard word still equals
+    /// its expected value. A changed guard returns native EAGAIN, not a signal
+    /// policy result. See HandleWaitGuard for the notification requirement.
+    pub fn wait_many_guarded(
+        items: &mut [syscall::HandleWaitItem],
+        deadline_nanoseconds: u64,
+        guard: &syscall::HandleWaitGuard,
+    ) -> SysResult<usize> {
+        if items.len() > syscall::HANDLE_WAIT_MANY_MAX_ITEMS {
+            return Err(syscall::SysError::from_raw(syscall::EINVAL as i64));
+        }
+        let index = syscall::call4(
+            syscall::SyscallNumber::HandleWaitManyGuarded,
+            items.as_mut_ptr() as u64,
+            items.len() as u64,
+            deadline_nanoseconds,
+            (guard as *const syscall::HandleWaitGuard) as u64,
+        )?;
+        usize::try_from(index)
+            .ok()
+            .filter(|index| *index < items.len())
+            .ok_or_else(|| syscall::SysError::from_raw(syscall::EIO as i64))
+    }
+
     pub fn exit(code: u64) -> ! {
         let _ = syscall::raw_syscall1(syscall::SyscallNumber::ThreadExit, code);
         loop {
