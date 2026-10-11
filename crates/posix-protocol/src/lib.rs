@@ -15,6 +15,9 @@ pub const MAX_MESSAGE_LEN: usize = 64 * 1024;
 /// This value belongs to the POSIX user-space contract. mnu treats it as an
 /// uninterpreted integer.
 pub const CONTROL_HANDLE_KEY: u64 = u64::from_le_bytes(*b"POSXCTRL");
+/// Explicit ProcessHandle selected by the userspace launcher for bootstrap.
+/// mnu only transfers the opaque key and attenuated object reference.
+pub const BOOTSTRAP_PROCESS_HANDLE_KEY: u64 = u64::from_le_bytes(*b"POSXINIT");
 
 const FD_HANDLE_KEY_PREFIX: u64 = 0x504f_5348_0000_0000;
 const FD_METADATA_KEY_PREFIX: u64 = 0x504f_5346_0000_0000;
