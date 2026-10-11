@@ -18,6 +18,11 @@ use mochios_posix_client::fd::{
     Entry as PosixFdEntry, FdError, FdReservation, FdTable, HandleOps, LaunchContextOps,
     LaunchFdDescription, LaunchFdError, restore_launch_context, stage_launch_context,
 };
+use mochios_posix_client::newlib_errno::{
+    E2BIG, EACCES, EAGAIN, EBADF, EBUSY, ECHILD, EDEADLK, EEXIST, EFAULT, EINTR, EINVAL, EIO, EISDIR,
+    EMFILE, ENAMETOOLONG, ENOENT, ENOMEM, ENOSYS, ENOTDIR, ENOTSUP, ENOTTY, EOVERFLOW, EPERM, EPIPE,
+    ERANGE, ESPIPE, ESRCH,
+};
 use mochios_posix_client::{
     Client as PosixClient, ClientError as PosixClientError, StatAtBase, SyscallEndpointTransport,
 };
@@ -64,33 +69,6 @@ const TCIFLUSH: c_int = 0;
 const TCOFLUSH: c_int = 1;
 const TCIOFLUSH: c_int = 2;
 
-const EPERM: c_int = 1;
-const ENOENT: c_int = 2;
-const ESRCH: c_int = 3;
-const EINTR: c_int = 4;
-const EIO: c_int = 5;
-const E2BIG: c_int = 7;
-const EBADF: c_int = 9;
-const ECHILD: c_int = 10;
-const EAGAIN: c_int = 11;
-const ENOMEM: c_int = 12;
-const EACCES: c_int = 13;
-const EFAULT: c_int = 14;
-const EBUSY: c_int = 16;
-const EEXIST: c_int = 17;
-const ENOTDIR: c_int = 20;
-const EISDIR: c_int = 21;
-const EINVAL: c_int = 22;
-const EMFILE: c_int = 24;
-const ENOTTY: c_int = 25;
-const ESPIPE: c_int = 29;
-const EPIPE: c_int = 32;
-const EDEADLK: c_int = 35;
-const ERANGE: c_int = 34;
-const ENAMETOOLONG: c_int = 36;
-const ENOSYS: c_int = 38;
-const EOVERFLOW: c_int = 75;
-const ENOTSUP: c_int = 95;
 const MAX_EXEC_VECTOR_ENTRIES: usize = 256;
 const MAX_STARTUP_IMAGE_BYTES: usize = mnu_abi::process_image::HEADER_LEN
     + mnu_abi::process_image::MAX_RELOCATIONS * mnu_abi::process_image::RELOCATION_LEN
@@ -1392,32 +1370,7 @@ fn translate_posix_stat(status: &PosixFileStatus) -> NewlibStat {
 }
 
 fn map_kernel_errno(raw: i64) -> c_int {
-    let code = if raw < 0 {
-        (-raw) as c_int
-    } else {
-        raw as c_int
-    };
-    match code {
-        ENOENT => ENOENT,
-        EACCES => EACCES,
-        EINVAL => EINVAL,
-        EBADF => EBADF,
-        ECHILD => ECHILD,
-        EAGAIN => EAGAIN,
-        EEXIST => EEXIST,
-        ENOTDIR => ENOTDIR,
-        EISDIR => EISDIR,
-        ENOMEM => ENOMEM,
-        ENOSYS => ENOSYS,
-        EINTR => EINTR,
-        EPIPE => EPIPE,
-        EPERM => EPERM,
-        ESRCH => ESRCH,
-        EIO => EIO,
-        EFAULT => EFAULT,
-        _ if code > 0 => code,
-        _ => EIO,
-    }
+    mochios_posix_client::newlib_errno::from_status(raw)
 }
 
 fn map_posix_client_error(error: PosixClientError<mochi_user_syscall::SysError>) -> c_int {
@@ -3717,21 +3670,26 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
     result_with_errno(result, -1)
 }
 
-fn monotonic_nanoseconds() -> Result<u64, c_int> {
+fn native_monotonic_nanoseconds() -> Result<u64, syscall::SysError> {
     let mut instant = mnu_abi::ClockInstant::default();
-    syscall_errno(syscall::raw_syscall2(
+    syscall::raw_syscall2(
         syscall::SyscallNumber::ClockRead,
         mnu_abi::ClockId::Monotonic as u64,
         (&mut instant as *mut mnu_abi::ClockInstant) as u64,
-    ))?;
+    )
+    .into_result()?;
     if instant.nanoseconds >= 1_000_000_000 || instant.reserved != 0 {
-        return Err(EIO);
+        return Err(syscall::SysError::from_raw(syscall::EIO as i64));
     }
     instant
         .seconds
         .checked_mul(1_000_000_000)
         .and_then(|seconds| seconds.checked_add(u64::from(instant.nanoseconds)))
-        .ok_or(EOVERFLOW)
+        .ok_or_else(|| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+}
+
+fn monotonic_nanoseconds() -> Result<u64, c_int> {
+    native_monotonic_nanoseconds().map_err(|error| map_kernel_errno(error.raw()))
 }
 
 fn deadline_after_nanoseconds(duration: u64) -> Result<u64, c_int> {
@@ -3757,9 +3715,9 @@ pub extern "C" fn __mochios_wait_on_address_u32(
     let deadline = if timeout_nanoseconds == u64::MAX {
         syscall::ADDRESS_WAIT_INFINITE
     } else {
-        match monotonic_nanoseconds() {
+        match native_monotonic_nanoseconds() {
             Ok(now) => now.saturating_add(timeout_nanoseconds),
-            Err(error) => return (-(i64::from(error))) as u64,
+            Err(error) => return error.raw() as u64,
         }
     };
     match mochios_posix_client::synchronization::wait_u32(unsafe { &*address }, expected, deadline)

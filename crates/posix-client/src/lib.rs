@@ -11,6 +11,7 @@ pub mod io_vector;
 pub mod fd;
 pub mod memory;
 pub mod multiplex;
+pub mod newlib_errno;
 pub mod process_image;
 pub mod random;
 pub mod signal;
