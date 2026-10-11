@@ -43,3 +43,30 @@ pub const fn update_mask(current: u64, operation: i32, requested: u64) -> Option
         _ => None,
     }
 }
+/// Retries an observed default stop or a known backend job-control interruption
+/// whose default signal has been selected for another, not-yet-running thread.
+/// Caught handlers, unrelated EINTR, partial transfers and failed signal drains
+/// must not turn into an unconditional retry loop. Handler generations are
+/// thread-local, but default-stop generations belong to the whole process.
+/// `generations` returns (caught-handler count, completed-default-stop count).
+/// `default_job_stop` must not classify arbitrary native EINTR as job control.
+pub fn terminal_operation<T>(
+    mut operation: impl FnMut() -> Result<T, i32>,
+    mut drain: impl FnMut() -> Result<(), i32>,
+    mut generations: impl FnMut() -> (u64, u64),
+    mut default_job_stop: impl FnMut() -> bool,
+) -> Result<T, i32> {
+    loop {
+        let before = generations();
+        match operation() {
+            Err(crate::newlib_errno::EINTR) => {
+                drain()?;
+                let after = generations();
+                if before.0 != after.0 || (before.1 == after.1 && !default_job_stop()) {
+                    return Err(crate::newlib_errno::EINTR);
+                }
+            }
+            result => return result,
+        }
+    }
+}

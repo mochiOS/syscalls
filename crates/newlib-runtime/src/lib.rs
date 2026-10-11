@@ -693,6 +693,12 @@ unsafe impl<T: Send + Sync> Sync for RuntimeOnce<T> {}
 
 static STATE: RuntimeMutex<RuntimeState> = RuntimeMutex::new(RuntimeState::new());
 static SIGNAL_ACTION_UPDATE: RuntimeMutex<()> = RuntimeMutex::new(());
+// Default stops suspend the process, not just the signal-delivery thread.
+// These counters are private to this runtime's process (including after COW
+// fork); only its default-action dispatcher publishes completed stops.
+static JOB_STOP_GENERATION: AtomicU64 = AtomicU64::new(0);
+static JOB_STOPS_IN_FLIGHT: AtomicU32 = AtomicU32::new(0);
+
 static SIGNAL_ACTIONS: RuntimeMutex<[SignalAction; posix_protocol::SIGNAL_MAX as usize]> =
     RuntimeMutex::new([SignalAction::default_action(); posix_protocol::SIGNAL_MAX as usize]);
 static POSIX_CLIENT: RuntimeOnce<PosixClient<SyscallEndpointTransport>> = RuntimeOnce::new();
@@ -2993,6 +2999,46 @@ fn terminal_attributes_to_newlib(attributes: posix_protocol::TerminalAttributes)
     }
 }
 
+fn retry_terminal_operation<T>(
+    signal: u32,
+    operation: impl FnMut() -> Result<T, c_int>,
+) -> Result<T, c_int> {
+    let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+    mochios_posix_client::signal::terminal_operation(
+        operation,
+        drain_terminal_signals,
+        || {
+            (
+                control.caught_signal_generation.load(Ordering::Acquire),
+                JOB_STOP_GENERATION.load(Ordering::Acquire),
+            )
+        },
+        // Native handle/IPC mechanisms do not synthesize EINTR. On these PTY
+        // paths it is the authenticated POSIX backend's job-control response.
+        // Its signal can already be dequeued for another thread whose upcall
+        // has not started yet; its still-default disposition requires retry.
+        || SIGNAL_ACTIONS.lock()[signal as usize - 1].handler == 0,
+    )
+}
+
+fn drain_terminal_signals() -> Result<(), c_int> {
+    drain_pending_signals()?;
+    loop {
+        let active = JOB_STOPS_IN_FLIGHT.load(Ordering::Acquire);
+        if active == 0 {
+            return Ok(());
+        }
+        // Another thread can receive the group signal. Resume may schedule
+        // this caller before that thread publishes its stop-report outcome.
+        mochios_posix_client::synchronization::wait_u32(
+            &JOB_STOPS_IN_FLIGHT,
+            active,
+            mnu_abi::ADDRESS_WAIT_INFINITE,
+        )
+        .map_err(|error| map_kernel_errno(error.raw()))?;
+    }
+}
+
 fn terminal_control(
     entry: FdEntry,
     control_code: u64,
@@ -3002,15 +3048,17 @@ fn terminal_control(
     if entry.handle.kind != FdKind::ObjectPty {
         return Err(ENOTTY);
     }
-    let length = syscall_errno(syscall::raw_syscall6(
-        syscall::SyscallNumber::HandleControl,
-        entry.handle.lower_handle,
-        control_code,
-        input.as_ptr() as u64,
-        input.len() as u64,
-        output.as_mut_ptr() as u64,
-        output.len() as u64,
-    ))?;
+    let length = retry_terminal_operation(posix_protocol::SIGNAL_TTOU, || {
+        syscall_errno(syscall::raw_syscall6(
+            syscall::SyscallNumber::HandleControl,
+            entry.handle.lower_handle,
+            control_code,
+            input.as_ptr() as u64,
+            input.len() as u64,
+            output.as_mut_ptr() as u64,
+            output.len() as u64,
+        ))
+    })?;
     usize::try_from(length).map_err(|_| EOVERFLOW)
 }
 
@@ -3219,12 +3267,14 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
             length as u64,
         ))?,
         FdKind::ObjectPty => loop {
-            match syscall_errno(syscall::raw_syscall3(
-                syscall::SyscallNumber::HandleWrite,
-                entry.handle.lower_handle,
-                buffer as u64,
-                length as u64,
-            )) {
+            match retry_terminal_operation(posix_protocol::SIGNAL_TTOU, || {
+                syscall_errno(syscall::raw_syscall3(
+                    syscall::SyscallNumber::HandleWrite,
+                    entry.handle.lower_handle,
+                    buffer as u64,
+                    length as u64,
+                ))
+            }) {
                 Ok(written) => break written,
                 Err(EAGAIN) if !handle_is_nonblocking(entry)? => {
                     let _ = wait_for_handle(
@@ -3260,12 +3310,14 @@ fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<is
             length as u64,
         ))?,
         FdKind::ObjectPty => loop {
-            match syscall_errno(syscall::raw_syscall3(
-                syscall::SyscallNumber::HandleRead,
-                entry.handle.lower_handle,
-                buffer as u64,
-                length as u64,
-            )) {
+            match retry_terminal_operation(posix_protocol::SIGNAL_TTIN, || {
+                syscall_errno(syscall::raw_syscall3(
+                    syscall::SyscallNumber::HandleRead,
+                    entry.handle.lower_handle,
+                    buffer as u64,
+                    length as u64,
+                ))
+            }) {
                 Ok(read) => break read,
                 Err(EAGAIN) if !handle_is_nonblocking(entry)? => {
                     let _ = wait_for_handle(
@@ -5212,10 +5264,12 @@ pub extern "C" fn tcsetpgrp(fd: c_int, process_group: c_int) -> c_int {
     }
     let result = (|| {
         let terminal = terminal_attachment(fd)?;
-        posix_client()
-            .map_err(map_posix_client_error)?
-            .set_terminal_foreground_process_group(terminal, process_group as u64)
-            .map_err(map_posix_client_error)?;
+        retry_terminal_operation(posix_protocol::SIGNAL_TTOU, || {
+            posix_client()
+                .map_err(map_posix_client_error)?
+                .set_terminal_foreground_process_group(terminal, process_group as u64)
+                .map_err(map_posix_client_error)
+        })?;
         Ok(0)
     })();
     result_with_errno(result, -1)
@@ -6025,11 +6079,18 @@ fn apply_default_signal_action(delivery: posix_protocol::SignalDelivery) -> Resu
         | posix_protocol::SIGNAL_TSTP
         | posix_protocol::SIGNAL_TTIN
         | posix_protocol::SIGNAL_TTOU => {
-            match posix_client()
-                .map_err(map_posix_client_error)?
-                .report_process_stopped(delivery)
-            {
-                Ok(()) | Err(PosixClientError::Remote(posix_protocol::STATUS_EAGAIN)) => Ok(()),
+            let client = posix_client().map_err(map_posix_client_error)?;
+            JOB_STOPS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
+            let stopped = client.report_process_stopped(delivery);
+            if stopped.is_ok() {
+                JOB_STOP_GENERATION.fetch_add(1, Ordering::Release);
+            }
+            JOB_STOPS_IN_FLIGHT.fetch_sub(1, Ordering::Release);
+            let _ =
+                mochios_posix_client::synchronization::wake_u32(&JOB_STOPS_IN_FLIGHT, usize::MAX);
+            match stopped {
+                Ok(()) => Ok(()),
+                Err(PosixClientError::Remote(posix_protocol::STATUS_EAGAIN)) => Ok(()),
                 Err(error) => Err(map_posix_client_error(error)),
             }
         }
