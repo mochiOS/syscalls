@@ -880,11 +880,6 @@ pub fn binary_requires<'a>(manifest: &'a PackageManifest, path: &str) -> Option<
     manifest.binary_requires(path)
 }
 
-pub fn read_manifest(path: &str) -> Option<PackageManifest> {
-    let bytes = crate::file::read_to_end_path(path).ok()?;
-    let text = core::str::from_utf8(&bytes).ok()?;
-    parse_manifest(text)
-}
 
 #[cfg(test)]
 mod tests {

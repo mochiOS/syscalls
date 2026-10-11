@@ -2,7 +2,6 @@
 
 extern crate alloc;
 
-mod file_read;
 #[cfg(feature = "mboot-wifi")]
 pub mod mboot_wifi;
 pub mod session_control;
@@ -1539,95 +1538,6 @@ pub mod performance {
     }
 }
 
-pub mod file {
-    use super::syscall::{self, SysResult};
-    use alloc::string::{String, ToString};
-    use alloc::vec::Vec;
-
-    pub fn open(path_ptr: u64, flags: u64) -> SysResult<u64> {
-        syscall::call2(syscall::SyscallNumber::FileOpen, path_ptr, flags)
-    }
-
-    pub fn open_path(path: &str, flags: u64) -> SysResult<u64> {
-        let path = super::path::CPath::<4096>::new(path)?;
-        open(path.as_ptr(), flags)
-    }
-
-    pub fn close(fd: u64) -> SysResult<u64> {
-        syscall::call1(syscall::SyscallNumber::FileClose, fd)
-    }
-
-    pub fn read(fd: u64, buf_ptr: u64, len: u64) -> SysResult<u64> {
-        syscall::call3(syscall::SyscallNumber::FileRead, fd, buf_ptr, len)
-    }
-
-    pub fn read_to_end_path(path: &str) -> SysResult<Vec<u8>> {
-        const READ_CHUNK_LEN: usize = 256 * 1024;
-
-        let fd = open_path(path, 0)?;
-        let result = super::file_read::read_to_end(READ_CHUNK_LEN, |buffer| {
-            read(fd, buffer.as_mut_ptr() as u64, buffer.len() as u64).and_then(|count| {
-                usize::try_from(count).map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))
-            })
-        })
-        .map_err(|error| match error {
-            super::file_read::ReadError::Read(error) => error,
-            super::file_read::ReadError::Allocation => {
-                syscall::SysError::from_raw(syscall::ENOMEM as i64)
-            }
-            super::file_read::ReadError::InvalidLength => {
-                syscall::SysError::from_raw(syscall::EIO as i64)
-            }
-        });
-        let _ = close(fd);
-        result
-    }
-
-    pub fn read_dir_names(path: &str) -> SysResult<Vec<String>> {
-        let fd = open_path(path, 0)?;
-        let result = (|| {
-            let mut out = Vec::new();
-            let mut buf = [0u8; 1024];
-            loop {
-                let read = syscall::call3(
-                    syscall::SyscallNumber::FileReadDir,
-                    fd,
-                    buf.as_mut_ptr() as u64,
-                    buf.len() as u64,
-                )?;
-                if read == 0 {
-                    break;
-                }
-                let mut offset = 0usize;
-                let read = read as usize;
-                while offset + 19 <= read {
-                    let reclen = u16::from_ne_bytes([buf[offset + 16], buf[offset + 17]]) as usize;
-                    if reclen == 0 || offset + reclen > read {
-                        break;
-                    }
-                    let name_start = offset + 19;
-                    let name_end = offset + reclen;
-                    let name_bytes = &buf[name_start..name_end];
-                    let name_len = name_bytes
-                        .iter()
-                        .position(|&b| b == 0)
-                        .unwrap_or(name_bytes.len());
-                    if name_len > 0
-                        && let Ok(name) = core::str::from_utf8(&name_bytes[..name_len])
-                        && name != "."
-                        && name != ".."
-                    {
-                        out.push(name.to_string());
-                    }
-                    offset += reclen;
-                }
-            }
-            Ok(out)
-        })();
-        let _ = close(fd);
-        result
-    }
-}
 
 pub mod event {
     use super::syscall::{self, SysResult};
