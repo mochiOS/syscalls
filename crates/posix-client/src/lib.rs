@@ -683,8 +683,10 @@ impl<T: ObjectTransport> Client<T> {
         Ok(())
     }
 
-    /// Terminates and reclaims a failed launch registered by this broker.
+    /// Terminates and reclaims a failed fork or launch registered by this creator.
     /// The child's PID is authenticated from the explicit ProcessHandle.
+    /// Retry after transport failure while retaining the native process owner.
+    /// ESRCH is completed cleanup only when that owner confirms native exit.
     pub fn abort_launched_child(
         &self,
         child: ObjectHandleAttachment<T::Handle>,
