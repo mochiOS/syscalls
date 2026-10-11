@@ -180,6 +180,8 @@ pub const OP_PROCESS_SPAWNED: u16 = 54;
 pub const OP_PROCESS_SESSION_INFO: u16 = 55;
 /// Empty payload, followed by requester WAIT and child WAIT|SIGNAL objects.
 pub const OP_PROCESS_LAUNCHED: u16 = 56;
+/// Abort an unpublished broker launch using one explicit WAIT-only child Handle.
+pub const OP_PROCESS_LAUNCH_ABORT: u16 = 57;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;

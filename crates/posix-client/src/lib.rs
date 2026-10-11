@@ -623,6 +623,29 @@ impl<T: ObjectTransport> Client<T> {
         Ok(())
     }
 
+    /// Terminates and reclaims a failed launch registered by this broker.
+    /// The child's PID is authenticated from the explicit ProcessHandle.
+    pub fn abort_launched_child(
+        &self,
+        child: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(child)
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        self.request_with_handles(
+            protocol::OP_PROCESS_LAUNCH_ABORT,
+            0,
+            &[],
+            &mut [],
+            &mut handles,
+        )?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(())
+    }
+
     /// Inspects POSIX credentials through an explicitly attached WAIT-only
     /// ProcessHandle. The service authenticates the object, not a supplied PID.
     pub fn process_session_info(
