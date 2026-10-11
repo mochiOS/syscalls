@@ -3204,19 +3204,30 @@ fn handle_is_nonblocking(entry: FdEntry) -> Result<bool, c_int> {
 }
 
 fn wait_for_handle(entry: FdEntry, interests: u64) -> Result<u64, c_int> {
+    let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+    let caught = control.caught_signal_generation.load(Ordering::Acquire);
     let mut item = syscall::HandleWaitItem {
         handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
         reserved: 0,
         interests,
         observed: 0,
     };
-    syscall_errno(syscall::raw_syscall3(
-        syscall::SyscallNumber::HandleWaitMany,
-        (&mut item as *mut syscall::HandleWaitItem) as u64,
-        1,
-        syscall::HANDLE_WAIT_INFINITE,
-    ))?;
-    Ok(item.observed)
+    loop {
+        let result = syscall_errno(syscall::raw_syscall3(
+            syscall::SyscallNumber::HandleWaitMany,
+            (&mut item as *mut syscall::HandleWaitItem) as u64,
+            1,
+            syscall::HANDLE_WAIT_INFINITE,
+        ));
+        if control.caught_signal_generation.load(Ordering::Acquire) != caught {
+            return Err(EINTR);
+        }
+        match result {
+            Ok(_) => return Ok(item.observed),
+            Err(EAGAIN) => continue,
+            Err(errno) => return Err(errno),
+        }
+    }
 }
 
 fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result<isize, c_int> {
