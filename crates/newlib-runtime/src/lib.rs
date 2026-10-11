@@ -2091,7 +2091,7 @@ unsafe fn initialize_runtime(stack: StackView) {
                 .fds
                 .install_at(2, FdObject::stdio(FdKind::Stderr), &mut operations);
         }
-        Err(_) => process_exit(127),
+        Err(error) => startup_failure(b"newlib: inherited FD restore failed: ", error),
     }
 
     let stack_limit = align_down(stack.stack_top, PAGE_SIZE).saturating_sub(PAGE_SIZE);
@@ -3250,6 +3250,32 @@ fn next_dirent(stream: &mut DirStream) -> Result<Option<NewlibDirent>, c_int> {
     }
 }
 
+fn startup_failure(stage: &[u8], error: c_int) -> ! {
+    let _ = syscall::raw_syscall2(
+        syscall::SyscallNumber::DebugWrite,
+        stage.as_ptr() as u64,
+        stage.len() as u64,
+    );
+    let mut digits = [0u8; 12];
+    let mut position = digits.len() - 1;
+    digits[position] = b'\n';
+    let mut value = error.unsigned_abs();
+    loop {
+        position -= 1;
+        digits[position] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    let _ = syscall::raw_syscall2(
+        syscall::SyscallNumber::DebugWrite,
+        digits[position..].as_ptr() as u64,
+        (digits.len() - position) as u64,
+    );
+    process_exit(127)
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
     let stack = unsafe { parse_stack(initial_sp) };
@@ -3257,18 +3283,17 @@ pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
     match has_posix_environment() {
         Ok(false) => {}
         Ok(true) => {
-            if posix_client()
+            if let Err(error) = posix_client()
                 .and_then(|client| client.set_signal_child_options(0))
-                .is_err()
             {
-                process_exit(127);
+                startup_failure(b"newlib: POSIX startup failed: ", map_posix_client_error(error));
             }
         }
         Err(_) => process_exit(127),
     }
     let (_, initial_thread) = register_initial_thread().unwrap_or_else(|| process_exit(127));
-    if setup_signal_delivery(initial_thread).is_err() {
-        process_exit(127);
+    if let Err(error) = setup_signal_delivery(initial_thread) {
+        startup_failure(b"newlib: signal startup failed: ", error);
     }
     unsafe { __sinit(_impure_ptr) };
     unsafe {
