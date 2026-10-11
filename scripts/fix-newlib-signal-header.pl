@@ -8,6 +8,7 @@ use File::Basename qw(dirname);
 my ($path) = @ARGV;
 open my $input, '<', $path or die "cannot read $path: $!\n";
 my $text = do { local $/; <$input> };
+my $before = $text;
 close $input or die "cannot close $path: $!\n";
 my $original = '#if !defined(__CYGWIN__) && !defined(__rtems__)';
 my $corrected = "$original && !defined(__mochios__)";
@@ -15,10 +16,16 @@ my $corrected = "$original && !defined(__mochios__)";
 # mochiOS use bit signo-1. Select the real functions for this target only.
 my $count = ($text =~ s/^\Q$original\E$/$corrected/mg);
 if (!$count) {
-    exit 0 if $text =~ /^\Q$corrected\E$/m;
-    die "unsupported newlib signal header: macro guard missing in $path\n";
+    die "unsupported newlib signal header: macro guard missing in $path\n"
+        unless $text =~ /^\Q$corrected\E$/m;
 }
-$count == 1 or die "ambiguous newlib signal macro guards in $path\n";
+$count <= 1 or die "ambiguous newlib signal macro guards in $path\n";
+unless ($text =~ /^#define SA_RESTART 0x10000000$/m) {
+    $text .= "\n/* mochiOS userspace signal restart policy. */\n" .
+        "#if defined(__mochios__) && !defined(SA_RESTART)\n" .
+        "#define SA_RESTART 0x10000000\n#endif\n";
+}
+exit 0 if $text eq $before;
 my ($output, $temporary) = tempfile('.signal-header-XXXXXX', DIR => dirname($path), UNLINK => 1);
 print {$output} $text or die "cannot write $temporary: $!\n";
 close $output or die "cannot close $temporary: $!\n";

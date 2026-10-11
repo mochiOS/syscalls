@@ -62,6 +62,7 @@ const WNOHANG: c_int = 1;
 const WUNTRACED: c_int = 2;
 const WCONTINUED: c_int = 8;
 const SA_NOCLDSTOP: c_int = 1;
+const SA_RESTART: c_int = mochios_posix_client::signal::SA_RESTART;
 const SPAWN_FAIL_EXIT_STATUS: c_int = 127;
 const DIR_BUFFER_SIZE: usize = 4096;
 const DIRENT_NAME_MAX: usize = 256;
@@ -217,6 +218,8 @@ struct ThreadControl {
     cancel_pending: AtomicU32,
     signal_mask: AtomicU64,
     caught_signal_generation: AtomicU64,
+    nonrestart_signal_generation: AtomicU64,
+    restart_signal_generation: AtomicU64,
     signal_upcall_stack: AtomicUsize,
     signal_upcall_stack_size: AtomicUsize,
     specific_values: [AtomicUsize; mochios_posix_client::thread::MAX_THREAD_KEYS],
@@ -245,6 +248,8 @@ impl ThreadControl {
             cancel_pending: AtomicU32::new(0),
             signal_mask: AtomicU64::new(0),
             caught_signal_generation: AtomicU64::new(0),
+            nonrestart_signal_generation: AtomicU64::new(0),
+            restart_signal_generation: AtomicU64::new(0),
             signal_upcall_stack: AtomicUsize::new(0),
             signal_upcall_stack_size: AtomicUsize::new(0),
             specific_values: [const { AtomicUsize::new(0) };
@@ -977,6 +982,8 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
         control.cancel_pending.store(0, Ordering::Relaxed);
         control.signal_mask.store(0, Ordering::Relaxed);
         control.caught_signal_generation.store(0, Ordering::Relaxed);
+        control.nonrestart_signal_generation.store(0, Ordering::Relaxed);
+        control.restart_signal_generation.store(0, Ordering::Relaxed);
         control.signal_upcall_stack.store(0, Ordering::Relaxed);
         control.signal_upcall_stack_size.store(0, Ordering::Relaxed);
         for value in &control.specific_values {
@@ -1035,6 +1042,8 @@ fn release_thread_control(control: &ThreadControl) {
     control.cancel_pending.store(0, Ordering::Relaxed);
     control.signal_mask.store(0, Ordering::Relaxed);
     control.caught_signal_generation.store(0, Ordering::Relaxed);
+    control.nonrestart_signal_generation.store(0, Ordering::Relaxed);
+    control.restart_signal_generation.store(0, Ordering::Relaxed);
     for value in &control.specific_values {
         value.store(0, Ordering::Relaxed);
     }
@@ -3009,8 +3018,9 @@ fn retry_terminal_operation<T>(
         drain_terminal_signals,
         || {
             (
-                control.caught_signal_generation.load(Ordering::Acquire),
+                control.nonrestart_signal_generation.load(Ordering::Acquire),
                 JOB_STOP_GENERATION.load(Ordering::Acquire),
+                control.restart_signal_generation.load(Ordering::Acquire),
             )
         },
         // Native handle/IPC mechanisms do not synthesize EINTR. On these PTY
@@ -3205,7 +3215,7 @@ fn handle_is_nonblocking(entry: FdEntry) -> Result<bool, c_int> {
 
 fn wait_for_handle(entry: FdEntry, interests: u64) -> Result<u64, c_int> {
     let (_, control) = register_current_thread().ok_or(EAGAIN)?;
-    let caught = control.caught_signal_generation.load(Ordering::Acquire);
+    let caught = control.nonrestart_signal_generation.load(Ordering::Acquire);
     let mut item = syscall::HandleWaitItem {
         handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
         reserved: 0,
@@ -3219,7 +3229,7 @@ fn wait_for_handle(entry: FdEntry, interests: u64) -> Result<u64, c_int> {
             1,
             syscall::HANDLE_WAIT_INFINITE,
         ));
-        if control.caught_signal_generation.load(Ordering::Acquire) != caught {
+        if control.nonrestart_signal_generation.load(Ordering::Acquire) != caught {
             return Err(EINTR);
         }
         match result {
@@ -5822,7 +5832,7 @@ pub unsafe extern "C" fn sigaction(
         return 0;
     }
     let mut replacement = unsafe { action.read() };
-    if replacement.sa_flags & !SA_NOCLDSTOP != 0
+    if replacement.sa_flags & !(SA_NOCLDSTOP | SA_RESTART) != 0
         || (replacement.sa_flags & SA_NOCLDSTOP != 0
             && signal != posix_protocol::SIGNAL_CHLD as c_int)
     {
@@ -6067,6 +6077,17 @@ fn dispatch_signal(signal: c_int) -> Result<c_int, c_int> {
             control
                 .caught_signal_generation
                 .fetch_add(1, Ordering::Release);
+            // Record the selected action before invoking it: the handler may
+            // replace its own disposition, which must not change this event.
+            if action.sa_flags & SA_RESTART != 0 {
+                control
+                    .restart_signal_generation
+                    .fetch_add(1, Ordering::Release);
+            } else {
+                control
+                    .nonrestart_signal_generation
+                    .fetch_add(1, Ordering::Release);
+            }
             let saved_errno = unsafe { *__errno() };
             unsafe { function(signal) };
             set_errno(saved_errno);

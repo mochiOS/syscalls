@@ -3,6 +3,7 @@ use mochios_posix_protocol::{SIGNAL_KILL, SIGNAL_MAX, SIGNAL_STOP};
 pub const SIGNAL_SET_MASK: i32 = 0;
 pub const SIGNAL_BLOCK: i32 = 1;
 pub const SIGNAL_UNBLOCK: i32 = 2;
+pub const SA_RESTART: i32 = 0x1000_0000;
 // NSIG in the current newlib target ABI includes signal zero.
 pub const NEWLIB_SIGNAL_COUNT: i32 = 32;
 
@@ -48,12 +49,12 @@ pub const fn update_mask(current: u64, operation: i32, requested: u64) -> Option
 /// Caught handlers, unrelated EINTR, partial transfers and failed signal drains
 /// must not turn into an unconditional retry loop. Handler generations are
 /// thread-local, but default-stop generations belong to the whole process.
-/// `generations` returns (caught-handler count, completed-default-stop count).
+/// `generations` returns (non-restarting handlers, default stops, restarting handlers).
 /// `default_job_stop` must not classify arbitrary native EINTR as job control.
 pub fn terminal_operation<T>(
     mut operation: impl FnMut() -> Result<T, i32>,
     mut drain: impl FnMut() -> Result<(), i32>,
-    mut generations: impl FnMut() -> (u64, u64),
+    mut generations: impl FnMut() -> (u64, u64, u64),
     mut default_job_stop: impl FnMut() -> bool,
 ) -> Result<T, i32> {
     loop {
@@ -62,7 +63,9 @@ pub fn terminal_operation<T>(
             Err(crate::newlib_errno::EINTR) => {
                 drain()?;
                 let after = generations();
-                if before.0 != after.0 || (before.1 == after.1 && !default_job_stop()) {
+                if before.0 != after.0
+                    || (before.1 == after.1 && before.2 == after.2 && !default_job_stop())
+                {
                     return Err(crate::newlib_errno::EINTR);
                 }
             }
