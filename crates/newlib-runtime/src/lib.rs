@@ -3076,6 +3076,14 @@ pub extern "C" fn write(fd: c_int, buffer: *const c_void, length: usize) -> isiz
     _write(fd, buffer, length)
 }
 
+fn vector_errno(error: mochios_posix_client::io_vector::VectorError) -> c_int {
+    match error {
+        mochios_posix_client::io_vector::VectorError::NullBuffer => EFAULT,
+        mochios_posix_client::io_vector::VectorError::InvalidCount
+        | mochios_posix_client::io_vector::VectorError::InvalidLength => EINVAL,
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn writev(fd: c_int, iov: *const IoVec, iovcnt: c_int) -> isize {
     if iovcnt < 0 {
@@ -3084,6 +3092,14 @@ pub unsafe extern "C" fn writev(fd: c_int, iov: *const IoVec, iovcnt: c_int) -> 
     }
     if iovcnt != 0 && iov.is_null() {
         set_errno(EFAULT);
+        return -1;
+    }
+    if let Err(error) = mochios_posix_client::io_vector::validate(iovcnt, |index| {
+        // Safety: the C caller supplies readable metadata for iovcnt vectors.
+        let entry = unsafe { &*iov.add(index) };
+        (entry.iov_base.is_null(), entry.iov_len)
+    }) {
+        set_errno(vector_errno(error));
         return -1;
     }
 
@@ -3104,7 +3120,7 @@ pub unsafe extern "C" fn writev(fd: c_int, iov: *const IoVec, iovcnt: c_int) -> 
         }
 
         let written = written as usize;
-        total = total.saturating_add(written);
+        total += written;
         if written != entry.iov_len {
             break;
         }
@@ -3141,6 +3157,14 @@ pub unsafe extern "C" fn readv(fd: c_int, iov: *const IoVecMut, iovcnt: c_int) -
         set_errno(EFAULT);
         return -1;
     }
+    if let Err(error) = mochios_posix_client::io_vector::validate(iovcnt, |index| {
+        // Safety: the C caller supplies readable metadata for iovcnt vectors.
+        let entry = unsafe { &*iov.add(index) };
+        (entry.iov_base.is_null(), entry.iov_len)
+    }) {
+        set_errno(vector_errno(error));
+        return -1;
+    }
 
     let mut total = 0usize;
     for index in 0..(iovcnt as usize) {
@@ -3162,7 +3186,7 @@ pub unsafe extern "C" fn readv(fd: c_int, iov: *const IoVecMut, iovcnt: c_int) -
         }
 
         let read = read as usize;
-        total = total.saturating_add(read);
+        total += read;
         if read != entry.iov_len {
             break;
         }
