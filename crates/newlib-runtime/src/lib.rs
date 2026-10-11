@@ -224,6 +224,7 @@ struct ThreadControl {
     cancel_type: AtomicU32,
     cancel_pending: AtomicU32,
     signal_mask: AtomicU64,
+    caught_signal_generation: AtomicU64,
     signal_upcall_stack: AtomicUsize,
     signal_upcall_stack_size: AtomicUsize,
     specific_values: [AtomicUsize; mochios_posix_client::thread::MAX_THREAD_KEYS],
@@ -250,6 +251,7 @@ impl ThreadControl {
             cancel_type: AtomicU32::new(PTHREAD_CANCEL_DEFERRED),
             cancel_pending: AtomicU32::new(0),
             signal_mask: AtomicU64::new(0),
+            caught_signal_generation: AtomicU64::new(0),
             signal_upcall_stack: AtomicUsize::new(0),
             signal_upcall_stack_size: AtomicUsize::new(0),
             specific_values: [const { AtomicUsize::new(0) };
@@ -985,6 +987,7 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
             .store(PTHREAD_CANCEL_DEFERRED, Ordering::Relaxed);
         control.cancel_pending.store(0, Ordering::Relaxed);
         control.signal_mask.store(0, Ordering::Relaxed);
+        control.caught_signal_generation.store(0, Ordering::Relaxed);
         control.signal_upcall_stack.store(0, Ordering::Relaxed);
         control.signal_upcall_stack_size.store(0, Ordering::Relaxed);
         for value in &control.specific_values {
@@ -1041,6 +1044,7 @@ fn release_thread_control(control: &ThreadControl) {
         .store(THREAD_JOINABLE, Ordering::Relaxed);
     control.cancel_pending.store(0, Ordering::Relaxed);
     control.signal_mask.store(0, Ordering::Relaxed);
+    control.caught_signal_generation.store(0, Ordering::Relaxed);
     for value in &control.specific_values {
         value.store(0, Ordering::Relaxed);
     }
@@ -5564,7 +5568,12 @@ fn dispatch_signal(signal: c_int) -> c_int {
                 Ordering::Release,
             );
             let function: unsafe extern "C" fn(c_int) = unsafe { core::mem::transmute(handler) };
+            control
+                .caught_signal_generation
+                .fetch_add(1, Ordering::Release);
+            let saved_errno = unsafe { *__errno() };
             unsafe { function(signal) };
+            set_errno(saved_errno);
             control.signal_mask.store(previous, Ordering::Release);
             0
         }
@@ -5780,6 +5789,14 @@ pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Tim
         }
     };
     if duration != 0 {
+        let (_, control) = match register_current_thread() {
+            Some(current) => current,
+            None => {
+                set_errno(EAGAIN);
+                return -1;
+            }
+        };
+        let generation = control.caught_signal_generation.load(Ordering::Acquire);
         let deadline = match monotonic_nanoseconds()
             .and_then(|now| now.checked_add(duration).ok_or(EOVERFLOW))
         {
@@ -5790,20 +5807,42 @@ pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Tim
             }
         };
         loop {
-            match mochios_posix_client::synchronization::wait_u32(&NANOSLEEP_WORD, 0, deadline) {
-                Ok(mochios_posix_client::synchronization::WaitStatus::DeadlineReached) => break,
-                Ok(_) => match monotonic_nanoseconds() {
-                    Ok(now) if now < deadline => continue,
-                    Ok(_) => break,
-                    Err(error) => {
-                        set_errno(error);
-                        return -1;
-                    }
-                },
+            use mochios_posix_client::time::{SleepObservation, observe_sleep};
+            let now = match monotonic_nanoseconds() {
+                Ok(now) => now,
                 Err(error) => {
-                    set_errno(map_kernel_errno(error.raw()));
+                    set_errno(error);
                     return -1;
                 }
+            };
+            match observe_sleep(
+                deadline,
+                now,
+                generation,
+                control.caught_signal_generation.load(Ordering::Acquire),
+            ) {
+                SleepObservation::Complete => break,
+                SleepObservation::Interrupted {
+                    remaining_nanoseconds,
+                } => {
+                    if !remaining.is_null() {
+                        unsafe {
+                            remaining.write(Timespec {
+                                tv_sec: (remaining_nanoseconds / 1_000_000_000) as i64,
+                                tv_nsec: (remaining_nanoseconds % 1_000_000_000) as i64,
+                            })
+                        };
+                    }
+                    set_errno(EINTR);
+                    return -1;
+                }
+                SleepObservation::Waiting => {}
+            }
+            if let Err(error) =
+                mochios_posix_client::synchronization::wait_u32(&NANOSLEEP_WORD, 0, deadline)
+            {
+                set_errno(map_kernel_errno(error.raw()));
+                return -1;
             }
         }
     }
