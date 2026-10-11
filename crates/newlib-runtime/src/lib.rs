@@ -98,6 +98,7 @@ const THREAD_REAPING: u32 = 4;
 const THREAD_JOINABLE: u32 = 0;
 const THREAD_JOIN_CLAIMED: u32 = 1;
 const THREAD_DETACHED: u32 = 2;
+const THREAD_REAP_CLAIMED: u32 = 3;
 const PTHREAD_CANCEL_ENABLE: u32 = 0;
 const PTHREAD_CANCEL_DISABLE: u32 = 1;
 const PTHREAD_CANCEL_DEFERRED: u32 = 0;
@@ -1089,22 +1090,23 @@ fn allocate_thread_reent(control: &ThreadControl) -> Result<(), c_int> {
 
 fn reap_detached_threads() {
     for control in &THREADS {
-        if control.joinability.load(Ordering::Acquire) == THREAD_DETACHED
+        if control.state.load(Ordering::Acquire) == THREAD_EXITED
             && control
-                .state
+                .joinability
                 .compare_exchange(
-                    THREAD_EXITED,
-                    THREAD_REAPING,
+                    THREAD_DETACHED,
+                    THREAD_REAP_CLAIMED,
                     Ordering::AcqRel,
                     Ordering::Relaxed,
                 )
                 .is_ok()
         {
             if native_thread_retired(control) == Ok(true) {
+                control.state.store(THREAD_REAPING, Ordering::Release);
                 release_thread_control(control);
             } else {
-                // Do not recycle the slot while the native thread can still run.
-                control.state.store(THREAD_EXITED, Ordering::Release);
+                // Keep the live thread's TCB visible to callbacks during exit.
+                control.joinability.store(THREAD_DETACHED, Ordering::Release);
             }
         }
     }
@@ -1114,9 +1116,8 @@ fn current_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
     let native_id = native_thread_id().ok()?;
     THREADS.iter().enumerate().find_map(|(index, control)| {
         let state = control.state.load(Ordering::Acquire);
-        // A detached reaper may hold THREAD_REAPING while checking whether
-        // this native thread has exited. Upcalls must still find its own TCB.
         (state != THREAD_FREE
+            && state != THREAD_REAPING
             && control.native_id.load(Ordering::Acquire) == native_id)
             .then(|| thread_token_for(index, control).map(|token| (token, control)))
             .flatten()
