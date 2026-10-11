@@ -294,6 +294,21 @@ impl<T: Transport> Client<T> {
         protocol::decode_signal_mask(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    /// Generates a signal for the authenticated calling thread only.
+    pub fn raise_signal(&self, signal: u32) -> Result<(), ClientError<T::Error>> {
+        let mut request = [0; protocol::SIGNAL_SEND_REQUEST_LEN];
+        protocol::encode_signal_send_request(
+            protocol::SignalSendRequest {
+                selector: 0,
+                signal,
+            },
+            &mut request,
+        )
+        .map_err(ClientError::Protocol)?;
+        self.request(protocol::OP_SIGNAL_THREAD_RAISE, 0, &request, &mut [])
+            .map(|_| ())
+    }
+
     /// Reads pending signals intersected with this thread's service-owned mask.
     pub fn thread_pending_signals(&self) -> Result<u64, ClientError<T::Error>> {
         let mut response = [0; protocol::SIGNAL_MASK_LEN];

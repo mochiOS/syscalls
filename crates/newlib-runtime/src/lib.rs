@@ -3372,7 +3372,7 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
                     } else {
                         0
                     };
-                    stream_io_since(
+                    let result = stream_io_since(
                         entry,
                         syscall::HANDLE_SIGNAL_WRITABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
                         control,
@@ -3389,8 +3389,11 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
                             remaining as u64,
                             flags | mnu_abi::STREAM_IO_TRY,
                         )),
-                    )
-                    .and_then(|count| usize::try_from(count).map_err(|_| EIO))
+                    );
+                    if matches!(result, Err(EPIPE)) {
+                        generate_thread_signal(posix_protocol::SIGNAL_PIPE)?;
+                    }
+                    result.and_then(|count| usize::try_from(count).map_err(|_| EIO))
                 },
             )
             .map(|count| count as isize)
@@ -5937,6 +5940,27 @@ pub extern "C" fn _kill(pid: c_int, sig: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn kill(pid: c_int, sig: c_int) -> c_int {
     _kill(pid, sig)
+}
+
+fn generate_thread_signal(signal: u32) -> Result<(), c_int> {
+    register_current_thread().ok_or(EAGAIN)?;
+    posix_client()
+        .map_err(map_posix_client_error)?
+        .raise_signal(signal)
+        .map_err(map_posix_client_error)?;
+    drain_pending_signals()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn raise(signal: c_int) -> c_int {
+    result_with_errno(
+        if (0..=posix_protocol::SIGNAL_MAX as c_int).contains(&signal) {
+            generate_thread_signal(signal as u32).map(|_| 0)
+        } else {
+            Err(EINVAL)
+        },
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]

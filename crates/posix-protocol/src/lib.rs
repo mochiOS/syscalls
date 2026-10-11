@@ -206,6 +206,9 @@ pub const OP_SIGNAL_THREAD_MASK: u16 = 65;
 pub const OP_SIGNAL_THREAD_DEQUEUE: u16 = 66;
 /// Empty payload; returns pending signals blocked by the authenticated thread.
 pub const OP_SIGNAL_THREAD_PENDING: u16 = 67;
+/// SignalSendRequest with selector zero; the target is the authenticated caller
+/// thread, never a client-provided PID or TID.
+pub const OP_SIGNAL_THREAD_RAISE: u16 = 68;
 pub const SIGNAL_THREAD_MASK_LEN: usize = 16;
 pub const SIGNAL_MASK_QUERY: u32 = 0;
 pub const SIGNAL_MASK_SET: u32 = 1;
@@ -352,6 +355,7 @@ pub const SIGNAL_HUP: u32 = 1;
 pub const SIGNAL_INT: u32 = 2;
 pub const SIGNAL_QUIT: u32 = 3;
 pub const SIGNAL_KILL: u32 = 9;
+pub const SIGNAL_PIPE: u32 = 13;
 pub const SIGNAL_URG: u32 = 16;
 pub const SIGNAL_STOP: u32 = 17;
 pub const SIGNAL_TSTP: u32 = 18;

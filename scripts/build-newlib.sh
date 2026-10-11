@@ -167,6 +167,12 @@ else
 	echo "[cache] reuse newlib SDK sysroot"
 fi
 cp -a "$USER_ROOT/libc-port/include/." "$SDK/sysroot/include/"
+# raise/_raise_r are provided by the runtime with thread-directed delivery.
+# Remove only the generic newlib implementation from the published SDK copy;
+# the supplied/source sysroot is unchanged. Skip unchanged cached archives.
+if x86_64-elf-ar t "$SDK/sysroot/lib/libc.a" | grep -Fx 'libc_a-raise.o' >/dev/null; then
+    x86_64-elf-ar d "$SDK/sysroot/lib/libc.a" libc_a-raise.o
+fi
 perl "$USER_ROOT/scripts/fix-newlib-signal-header.pl" "$SDK/sysroot/include/sys/signal.h"
 
 "$SDK/bin/mochios-cc" -O2 "$USER_ROOT/libc-port/tests/hello.c" -o "$OUT_ROOT/hello/hello.elf"
