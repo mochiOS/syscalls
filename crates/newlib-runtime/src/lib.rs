@@ -4284,6 +4284,46 @@ pub extern "C" fn __mochios_wake_address_u32(
     }
 }
 
+fn wait_for_multiplex(
+    items: &mut [syscall::HandleWaitItem],
+    deadline: u64,
+    control: &ThreadControl,
+    caught: u64,
+) -> Result<(), c_int> {
+    let guard = syscall::HandleWaitGuard {
+        address: (&control.caught_signal_generation as *const AtomicU64) as u64,
+        expected: caught,
+    };
+    mochios_posix_client::multiplex::wait(
+        caught,
+        || control.caught_signal_generation.load(Ordering::Acquire),
+        || match syscall_errno(syscall::raw_syscall4(
+            syscall::SyscallNumber::HandleWaitManyGuarded,
+            items.as_mut_ptr() as u64,
+            items.len() as u64,
+            deadline,
+            (&guard as *const syscall::HandleWaitGuard) as u64,
+        )) {
+            Ok(_) => Ok(true),
+            Err(EAGAIN) => Ok(false),
+            Err(error) => Err(error),
+        },
+        || {
+            if deadline == syscall::HANDLE_WAIT_POLL {
+                Ok(true)
+            } else if deadline == syscall::HANDLE_WAIT_INFINITE {
+                Ok(false)
+            } else {
+                monotonic_nanoseconds().map(|now| now >= deadline)
+            }
+        },
+    )
+    .map_err(|error| match error {
+        mochios_posix_client::multiplex::WaitError::Interrupted => EINTR,
+        mochios_posix_client::multiplex::WaitError::Io(error) => error,
+    })
+}
+
 fn select_deadline(timeout: *const Timeval) -> Result<u64, c_int> {
     if timeout.is_null() {
         return Ok(syscall::HANDLE_WAIT_INFINITE);
@@ -4316,6 +4356,8 @@ pub extern "C" fn select(
         if nfds < 0 || nfds as usize > MAX_FDS {
             return Err(EINVAL);
         }
+        let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+        let caught = control.caught_signal_generation.load(Ordering::Acquire);
         let requested_read = if readfds.is_null() {
             0
         } else {
@@ -4418,17 +4460,7 @@ pub extern "C" fn select(
         } else {
             requested_deadline
         };
-        let wait_result = syscall_errno(syscall::raw_syscall3(
-            syscall::SyscallNumber::HandleWaitMany,
-            items.as_mut_ptr() as u64,
-            item_count as u64,
-            deadline,
-        ));
-        match wait_result {
-            Ok(_) => {}
-            Err(errno) if errno == EAGAIN => {}
-            Err(errno) => return Err(errno),
-        }
+        wait_for_multiplex(&mut items[..item_count], deadline, control, caught)?;
         for index in 0..item_count {
             let fd = item_fds[index];
             let mask = 1u64 << fd;
@@ -4480,6 +4512,8 @@ pub extern "C" fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: c_int) -> c_int 
         if count != 0 && fds.is_null() {
             return Err(EFAULT);
         }
+        let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+        let caught = control.caught_signal_generation.load(Ordering::Acquire);
         let deadline = match timeout_ms {
             -1 => syscall::HANDLE_WAIT_INFINITE,
             value if value < -1 => return Err(EINVAL),
@@ -4551,16 +4585,7 @@ pub extern "C" fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: c_int) -> c_int 
         } else {
             deadline
         };
-        match syscall_errno(syscall::raw_syscall3(
-            syscall::SyscallNumber::HandleWaitMany,
-            items.as_mut_ptr() as u64,
-            item_count as u64,
-            wait_deadline,
-        )) {
-            Ok(_) => {}
-            Err(errno) if errno == EAGAIN => {}
-            Err(errno) => return Err(errno),
-        }
+        wait_for_multiplex(&mut items[..item_count], wait_deadline, control, caught)?;
         for item_index in 0..item_count {
             let poll_index = item_pollfds[item_index];
             let observed = items[item_index].observed;
