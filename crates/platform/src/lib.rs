@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+mod file_read;
 #[cfg(feature = "mboot-wifi")]
 pub mod mboot_wifi;
 pub mod session_control;
@@ -1560,51 +1561,26 @@ pub mod file {
         syscall::call3(syscall::SyscallNumber::FileRead, fd, buf_ptr, len)
     }
 
-    pub fn seek(fd: u64, offset: i64, whence: u64) -> SysResult<u64> {
-        syscall::call3(syscall::SyscallNumber::FileSeek, fd, offset as u64, whence)
-    }
-
     pub fn read_to_end_path(path: &str) -> SysResult<Vec<u8>> {
         const READ_CHUNK_LEN: usize = 256 * 1024;
 
         let fd = open_path(path, 0)?;
-        let expected_len = match seek(fd, 0, 2).and_then(|length| {
-            seek(fd, 0, 0)?;
-            usize::try_from(length).map_err(|_| syscall::SysError::from_raw(syscall::ERANGE as i64))
-        }) {
-            Ok(length) => length,
-            Err(error) => {
-                let _ = close(fd);
-                return Err(error);
+        let result = super::file_read::read_to_end(READ_CHUNK_LEN, |buffer| {
+            read(fd, buffer.as_mut_ptr() as u64, buffer.len() as u64).and_then(|count| {
+                usize::try_from(count).map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))
+            })
+        })
+        .map_err(|error| match error {
+            super::file_read::ReadError::Read(error) => error,
+            super::file_read::ReadError::Allocation => {
+                syscall::SysError::from_raw(syscall::ENOMEM as i64)
             }
-        };
-        let mut out = Vec::new();
-        if out.try_reserve_exact(expected_len).is_err() {
-            let _ = close(fd);
-            return Err(syscall::SysError::from_raw(syscall::ENOMEM as i64));
-        }
-        out.resize(expected_len, 0);
-        let mut offset = 0usize;
-        while offset < expected_len {
-            let chunk_len = core::cmp::min(READ_CHUNK_LEN, expected_len - offset);
-            let read = match read(fd, out[offset..].as_mut_ptr() as u64, chunk_len as u64) {
-                Ok(read) => read,
-                Err(err) => {
-                    let _ = close(fd);
-                    return Err(err);
-                }
-            };
-            if read == 0 {
-                break;
+            super::file_read::ReadError::InvalidLength => {
+                syscall::SysError::from_raw(syscall::EIO as i64)
             }
-            offset += read as usize;
-            if (read as usize) < chunk_len {
-                break;
-            }
-        }
+        });
         let _ = close(fd);
-        out.truncate(offset);
-        Ok(out)
+        result
     }
 
     pub fn read_dir_names(path: &str) -> SysResult<Vec<String>> {
