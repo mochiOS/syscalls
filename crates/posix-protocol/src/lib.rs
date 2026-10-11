@@ -187,6 +187,8 @@ pub const OP_PROCESS_LAUNCHED: u16 = 56;
 pub const OP_PROCESS_LAUNCH_ABORT: u16 = 57;
 pub const OP_SET_REAL_EFFECTIVE_UID: u16 = 58;
 pub const OP_SET_REAL_EFFECTIVE_GID: u16 = 59;
+/// Initialize an already running boot process through an attached ProcessHandle.
+pub const OP_PROCESS_INITIALIZE: u16 = 60;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
