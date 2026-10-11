@@ -440,6 +440,11 @@ impl<T: Transport> Client<T> {
     pub fn into_transport(self) -> T {
         self.transport
     }
+
+    /// Borrow the caller-owned transport without transferring its Handle.
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
 }
 
 impl<T: ObjectTransport> Client<T> {
