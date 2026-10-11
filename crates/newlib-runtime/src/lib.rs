@@ -203,6 +203,7 @@ struct ThreadControl {
     state: AtomicU32,
     generation: AtomicU32,
     native_id: AtomicU64,
+    native_handle: AtomicU32,
     thread_local_base: AtomicU64,
     start: AtomicUsize,
     argument: AtomicUsize,
@@ -233,6 +234,7 @@ impl ThreadControl {
             state: AtomicU32::new(THREAD_FREE),
             generation: AtomicU32::new(0),
             native_id: AtomicU64::new(0),
+            native_handle: AtomicU32::new(0),
             thread_local_base: AtomicU64::new(0),
             start: AtomicUsize::new(0),
             argument: AtomicUsize::new(0),
@@ -961,6 +963,7 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
         );
         control.generation.store(generation, Ordering::Release);
         control.native_id.store(0, Ordering::Relaxed);
+        control.native_handle.store(0, Ordering::Relaxed);
         control.start.store(0, Ordering::Relaxed);
         control.argument.store(0, Ordering::Relaxed);
         control.thread_local_base.store(0, Ordering::Relaxed);
@@ -1002,6 +1005,10 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
 }
 
 fn release_thread_control(control: &ThreadControl) {
+    let handle = control.native_handle.swap(0, Ordering::AcqRel);
+    if handle != 0 {
+        let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, u64::from(handle));
+    }
     let signal_stack = control.signal_upcall_stack.swap(0, Ordering::Relaxed);
     let signal_stack_size = control.signal_upcall_stack_size.swap(0, Ordering::Relaxed);
     if signal_stack != 0 && signal_stack_size != 0 {
@@ -1093,7 +1100,12 @@ fn reap_detached_threads() {
                 )
                 .is_ok()
         {
-            release_thread_control(control);
+            if native_thread_retired(control) == Ok(true) {
+                release_thread_control(control);
+            } else {
+                // Do not recycle the slot while the native thread can still run.
+                control.state.store(THREAD_EXITED, Ordering::Release);
+            }
         }
     }
 }
@@ -1102,8 +1114,9 @@ fn current_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
     let native_id = native_thread_id().ok()?;
     THREADS.iter().enumerate().find_map(|(index, control)| {
         let state = control.state.load(Ordering::Acquire);
+        // A detached reaper may hold THREAD_REAPING while checking whether
+        // this native thread has exited. Upcalls must still find its own TCB.
         (state != THREAD_FREE
-            && state != THREAD_REAPING
             && control.native_id.load(Ordering::Acquire) == native_id)
             .then(|| thread_token_for(index, control).map(|token| (token, control)))
             .flatten()
@@ -1157,6 +1170,13 @@ fn setup_signal_delivery(control: &ThreadControl) -> Result<(), c_int> {
     // Native bootstrap services run before a POSIX endpoint can be delegated.
     // An inherited endpoint still requires successful registration below.
     if !has_posix_environment()? {
+        if control.native_handle.load(Ordering::Acquire) == 0 {
+            let handle = syscall_errno(syscall::raw_syscall0(
+                syscall::SyscallNumber::ThreadHandleCreate,
+            ))?;
+            let handle = u32::try_from(handle).map_err(|_| EOVERFLOW)?;
+            control.native_handle.store(handle, Ordering::Release);
+        }
         return Ok(());
     }
     // Restore an existing native thread's mask after exec, or seed a new
@@ -1220,14 +1240,18 @@ fn setup_signal_delivery(control: &ThreadControl) -> Result<(), c_int> {
                 })
                 .map_err(map_posix_client_error)
         });
-    let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, u64::from(handle));
     if let Err(error) = registration {
+        let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, u64::from(handle));
         let _ = syscall::raw_syscall2(
             syscall::SyscallNumber::MemoryUnmap,
             stack as u64,
             SIGNAL_UPCALL_STACK_SIZE as u64,
         );
         return Err(error);
+    }
+    let previous = control.native_handle.swap(handle, Ordering::AcqRel);
+    if previous != 0 {
+        let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, u64::from(previous));
     }
     control
         .signal_upcall_stack_size
@@ -1295,6 +1319,26 @@ fn finish_thread(control: &ThreadControl, result: *mut c_void) -> ! {
     let _ = syscall::raw_syscall1(syscall::SyscallNumber::ThreadExit, 0);
     loop {
         core::hint::spin_loop();
+    }
+}
+
+// THREAD_EXITED publishes the result, but the thread still executes WakeAddress
+// and ThreadExit afterwards. Its stacks and reent must survive that interval,
+// including any upcall delivered on the way out.
+fn native_thread_retired(control: &ThreadControl) -> Result<bool, c_int> {
+    let handle = control.native_handle.load(Ordering::Acquire);
+    if handle == 0 {
+        return Err(ESRCH);
+    }
+    let mut status = syscall::ThreadStatus::default();
+    match syscall_errno(syscall::raw_syscall2(
+        syscall::SyscallNumber::ThreadHandleStatus,
+        u64::from(handle),
+        (&mut status as *mut syscall::ThreadStatus) as u64,
+    )) {
+        Ok(_) => Ok(status.state == mnu_abi::THREAD_STATE_TERMINATED),
+        Err(ESRCH) => Ok(true), // The native thread record has been removed.
+        Err(error) => Err(error),
     }
 }
 
@@ -7286,7 +7330,17 @@ pub unsafe extern "C" fn pthread_join(thread: Pthread, value: *mut *mut c_void) 
     loop {
         let state = control.state.load(Ordering::Acquire);
         if state == THREAD_EXITED {
-            break;
+            match native_thread_retired(control) {
+                Ok(true) => break,
+                Ok(false) => {
+                    let _ = syscall::raw_syscall0(syscall::SyscallNumber::ThreadYield);
+                    continue;
+                }
+                Err(error) => {
+                    control.joinability.store(THREAD_JOINABLE, Ordering::Release);
+                    return error;
+                }
+            }
         }
         if !matches!(state, THREAD_STARTING | THREAD_RUNNING) {
             return ESRCH;
@@ -7329,18 +7383,7 @@ pub extern "C" fn pthread_detach(thread: Pthread) -> c_int {
     {
         return EINVAL;
     }
-    if control
-        .state
-        .compare_exchange(
-            THREAD_EXITED,
-            THREAD_REAPING,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        )
-        .is_ok()
-    {
-        release_thread_control(control);
-    }
+    reap_detached_threads();
     0
 }
 
