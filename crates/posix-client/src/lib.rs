@@ -8,6 +8,7 @@ pub mod directory;
 #[cfg(feature = "fd-table")]
 pub mod fd;
 pub mod memory;
+pub mod multiplex;
 pub mod process_image;
 pub mod random;
 pub mod signal;

@@ -3750,7 +3750,11 @@ pub extern "C" fn select(
                 })
             };
         }
-        Ok((ready_read | ready_write | ready_except).count_ones() as c_int)
+        Ok(mochios_posix_client::multiplex::select_ready_count(
+            ready_read,
+            ready_write,
+            ready_except,
+        ) as c_int)
     })();
     result_with_errno(result, -1)
 }
