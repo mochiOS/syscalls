@@ -595,6 +595,30 @@ impl<T: ObjectTransport> Client<T> {
         Ok(())
     }
 
+    /// Inspects POSIX credentials through an explicitly attached WAIT-only
+    /// ProcessHandle. The service authenticates the object, not a supplied PID.
+    pub fn process_session_info(
+        &self,
+        process: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<protocol::SessionInfo, ClientError<T::Error>> {
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(process)
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        let mut response = [0; protocol::SESSION_INFO_LEN];
+        let length = self.request_with_handles(
+            protocol::OP_PROCESS_SESSION_INFO,
+            0,
+            &[],
+            &mut response,
+            &mut handles,
+        )?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        protocol::decode_session_info(&response[..length]).map_err(ClientError::Protocol)
+    }
+
     pub fn open_at(
         &self,
         base: OpenAtBase<T::Handle>,

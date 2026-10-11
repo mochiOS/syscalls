@@ -177,6 +177,7 @@ pub const OP_SIGNAL_DELIVERY_COMPLETE: u16 = 51;
 pub const OP_PROCESS_SIGNALED: u16 = 52;
 pub const OP_SIGNAL_CHILD_OPTIONS: u16 = 53;
 pub const OP_PROCESS_SPAWNED: u16 = 54;
+pub const OP_PROCESS_SESSION_INFO: u16 = 55;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
