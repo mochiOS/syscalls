@@ -119,7 +119,6 @@ const PTHREAD_CANCEL_ENABLE: u32 = 0;
 const PTHREAD_CANCEL_DISABLE: u32 = 1;
 const PTHREAD_CANCEL_DEFERRED: u32 = 0;
 const PTHREAD_CANCEL_ASYNCHRONOUS: u32 = 1;
-const PTHREAD_DESTRUCTOR_ITERATIONS: usize = 4;
 const THREAD_KEY_FREE: u32 = 0;
 const THREAD_KEY_INITIALIZING: u32 = 1;
 const THREAD_KEY_ALLOCATED: u32 = 2;
@@ -1244,7 +1243,7 @@ fn run_thread_specific_destructors(control: &ThreadControl) {
     {
         return;
     }
-    for _ in 0..PTHREAD_DESTRUCTOR_ITERATIONS {
+    for _ in 0..mochios_posix_client::thread::DESTRUCTOR_ITERATIONS {
         let mut called_destructor = false;
         for (slot, key_control) in THREAD_KEYS.iter().enumerate() {
             if key_control.allocated.load(Ordering::Acquire) != THREAD_KEY_ALLOCATED {
@@ -5194,6 +5193,9 @@ pub extern "C" fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn sysconf(name: c_int) -> CLong {
+    if let Some(limit) = mochios_posix_client::configuration::local_limit(name) {
+        return limit as CLong;
+    }
     match name {
         SC_OPEN_MAX => result_with_errno(process_fd_limit().map(CLong::from), -1),
         SC_PAGESIZE => PAGE_SIZE as CLong,

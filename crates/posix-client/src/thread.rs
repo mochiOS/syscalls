@@ -11,6 +11,8 @@ const MAX_GENERATION: u32 = u32::MAX >> SLOT_BITS;
 
 /// Maximum number of process-local POSIX thread-specific data keys.
 pub const MAX_THREAD_KEYS: usize = 64;
+/// Maximum destructor passes when thread-specific values are repopulated.
+pub const DESTRUCTOR_ITERATIONS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
