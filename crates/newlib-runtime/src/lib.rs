@@ -6653,6 +6653,7 @@ pub unsafe extern "C" fn pthread_create(
         thread_local_base: 0,
         flags: 0,
         reserved: [0; 3],
+        registers: syscall::ThreadInitialRegisters::default(),
     };
     let native_id = match syscall_errno(syscall::raw_syscall2(
         syscall::SyscallNumber::ThreadCreate,

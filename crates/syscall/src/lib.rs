@@ -20,7 +20,7 @@ pub use mnu_abi::{
     HANDLE_WAIT_MANY_MAX_ITEMS, HANDLE_WAIT_POLL, HandleWaitItem, IPC_MAX_OBJECT_HANDLES,
     IpcObjectHandle, IpcObjectHandles, PROCESS_INFO_RECORD_SIZE, PROCESS_STATE_EXITED, PROCESS_STATE_RUNNING,
     PROCESS_WAIT_INFINITE, PROCESS_WAIT_POLL, ProcessStatus, SUCCESS, StreamPair, SyscallNumber,
-    ThreadCreateContext, ThreadSecurityContext, ThreadStatus, ThreadUpcallConfig,
+    ThreadCreateContext, ThreadInitialRegisters, ThreadSecurityContext, ThreadStatus, ThreadUpcallConfig,
     MEMORY_ACCESS_ALL, MEMORY_ACCESS_EXECUTE, MEMORY_ACCESS_READ, MEMORY_ACCESS_WRITE,
     MEMORY_MAP_EXACT, MEMORY_MAP_OPTIONS_ALL, MEMORY_MAP_SHARED,
 };
