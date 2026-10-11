@@ -5168,6 +5168,30 @@ pub extern "C" fn tcflush(fd: c_int, queue_selector: c_int) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn tcflow(fd: c_int, action: c_int) -> c_int {
+    let result = (|| {
+        let action = u32::try_from(action).map_err(|_| EINVAL)?;
+        let mut encoded = [0; posix_protocol::TERMINAL_FLOW_LEN];
+        posix_protocol::encode_terminal_flow(action, &mut encoded).map_err(|_| EINVAL)?;
+        let entry = with_fd_entry(fd)?;
+        loop {
+            match terminal_control(entry, posix_protocol::PTY_CONTROL_FLOW, &encoded, &mut []) {
+                Ok(0) => return Ok(0),
+                Ok(_) => return Err(EIO),
+                Err(EAGAIN) => {
+                    let _ = wait_for_handle(
+                        entry,
+                        syscall::HANDLE_SIGNAL_IDLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
+                    )?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn tcgetpgrp(fd: c_int) -> c_int {
     let result = (|| {
         let terminal = terminal_attachment(fd)?;

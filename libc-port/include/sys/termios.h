@@ -86,6 +86,10 @@ struct winsize {
 #define TCIFLUSH  0
 #define TCOFLUSH  1
 #define TCIOFLUSH 2
+#define TCOOFF    0
+#define TCOON     1
+#define TCIOFF    2
+#define TCION     3
 
 #define B0       0U
 #define B50      50U
@@ -113,6 +117,7 @@ int tcsetattr(int, int, const struct termios *);
 int tcgetwinsize(int, struct winsize *);
 int tcsetwinsize(int, const struct winsize *);
 int tcdrain(int);
+int tcflow(int, int);
 int tcflush(int, int);
 pid_t tcgetpgrp(int);
 int tcsetpgrp(int, pid_t);

@@ -371,6 +371,12 @@ pub const PTY_CONTROL_DRAIN: u64 = 0x5054_5900_0000_0005;
 pub const PTY_CONTROL_FLUSH: u64 = 0x5054_5900_0000_0006;
 pub const PTY_CONTROL_GET_WINDOW_SIZE: u64 = 0x5054_5900_0000_0007;
 pub const PTY_CONTROL_SET_WINDOW_SIZE: u64 = 0x5054_5900_0000_0008;
+pub const PTY_CONTROL_FLOW: u64 = 0x5054_5900_0000_0009;
+pub const TERMINAL_FLOW_LEN: usize = 4;
+pub const TERMINAL_FLOW_OUTPUT_STOP: u32 = 0;
+pub const TERMINAL_FLOW_OUTPUT_START: u32 = 1;
+pub const TERMINAL_FLOW_INPUT_STOP: u32 = 2;
+pub const TERMINAL_FLOW_INPUT_START: u32 = 3;
 pub const TERMINAL_WINDOW_SIZE_LEN: usize = 8;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1179,6 +1185,25 @@ pub fn encode_terminal_flush(flags: u32, output: &mut [u8]) -> Result<(), Protoc
     }
     put_u32(output, 0, flags);
     Ok(())
+}
+
+pub fn encode_terminal_flow(action: u32, output: &mut [u8]) -> Result<(), ProtocolError> {
+    if output.len() < TERMINAL_FLOW_LEN || action > TERMINAL_FLOW_INPUT_START {
+        return Err(ProtocolError::InvalidLength);
+    }
+    put_u32(output, 0, action);
+    Ok(())
+}
+
+pub fn decode_terminal_flow(input: &[u8]) -> Result<u32, ProtocolError> {
+    if input.len() != TERMINAL_FLOW_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let action = get_u32(input, 0);
+    if action > TERMINAL_FLOW_INPUT_START {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(action)
 }
 
 pub fn decode_terminal_flush(input: &[u8]) -> Result<u32, ProtocolError> {
