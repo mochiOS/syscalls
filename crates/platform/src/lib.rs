@@ -1585,44 +1585,47 @@ pub mod file {
 
     pub fn read_dir_names(path: &str) -> SysResult<Vec<String>> {
         let fd = open_path(path, 0)?;
-        let mut out = Vec::new();
-        let mut buf = [0u8; 1024];
-        loop {
-            let read = syscall::call3(
-                syscall::SyscallNumber::FileReadDir,
-                fd,
-                buf.as_mut_ptr() as u64,
-                buf.len() as u64,
-            )?;
-            if read == 0 {
-                break;
-            }
-            let mut offset = 0usize;
-            let read = read as usize;
-            while offset + 19 <= read {
-                let reclen = u16::from_ne_bytes([buf[offset + 16], buf[offset + 17]]) as usize;
-                if reclen == 0 || offset + reclen > read {
+        let result = (|| {
+            let mut out = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let read = syscall::call3(
+                    syscall::SyscallNumber::FileReadDir,
+                    fd,
+                    buf.as_mut_ptr() as u64,
+                    buf.len() as u64,
+                )?;
+                if read == 0 {
                     break;
                 }
-                let name_start = offset + 19;
-                let name_end = offset + reclen;
-                let name_bytes = &buf[name_start..name_end];
-                let name_len = name_bytes
-                    .iter()
-                    .position(|&b| b == 0)
-                    .unwrap_or(name_bytes.len());
-                if name_len > 0
-                    && let Ok(name) = core::str::from_utf8(&name_bytes[..name_len])
-                    && name != "."
-                    && name != ".."
-                {
-                    out.push(name.to_string());
+                let mut offset = 0usize;
+                let read = read as usize;
+                while offset + 19 <= read {
+                    let reclen = u16::from_ne_bytes([buf[offset + 16], buf[offset + 17]]) as usize;
+                    if reclen == 0 || offset + reclen > read {
+                        break;
+                    }
+                    let name_start = offset + 19;
+                    let name_end = offset + reclen;
+                    let name_bytes = &buf[name_start..name_end];
+                    let name_len = name_bytes
+                        .iter()
+                        .position(|&b| b == 0)
+                        .unwrap_or(name_bytes.len());
+                    if name_len > 0
+                        && let Ok(name) = core::str::from_utf8(&name_bytes[..name_len])
+                        && name != "."
+                        && name != ".."
+                    {
+                        out.push(name.to_string());
+                    }
+                    offset += reclen;
                 }
-                offset += reclen;
             }
-        }
+            Ok(out)
+        })();
         let _ = close(fd);
-        Ok(out)
+        result
     }
 }
 
