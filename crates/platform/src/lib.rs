@@ -449,14 +449,6 @@ pub mod process {
         })
     }
 
-    /// Clones the current address space and process-local native handles. The
-    /// source receives a handle and the copy receives `resume_rax`. The copy
-    /// starts suspended. Preserve the raw register: an explicit high-bit value
-    /// in the copy must not be automatically interpreted as a syscall error.
-    /// This combined backend remains transitional.
-    pub fn clone_process(resume_rax: u64) -> syscall::RawSyscallResult {
-        syscall::raw_syscall1(syscall::SyscallNumber::ProcessClone, resume_rax)
-    }
 
     /// Captures a detached VM image. Closing its final Handle releases it;
     /// this does not create a process or copy native execution authority.
