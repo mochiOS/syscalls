@@ -176,6 +176,7 @@ pub const OP_PROCESS_STOPPED: u16 = 50;
 pub const OP_SIGNAL_DELIVERY_COMPLETE: u16 = 51;
 pub const OP_PROCESS_SIGNALED: u16 = 52;
 pub const OP_SIGNAL_CHILD_OPTIONS: u16 = 53;
+pub const OP_PROCESS_SPAWNED: u16 = 54;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
@@ -705,6 +706,42 @@ pub fn encode_credential_id(value: u32, output: &mut [u8]) -> Result<(), Protoco
     }
     put_u32(output, 0, value);
     Ok(())
+}
+
+/// Fresh-image credentials. Child identity comes only from an attached
+/// ProcessHandle; no PID or native credential layout is serialized.
+pub fn encode_spawn_credentials(
+    uid: u32,
+    gid: u32,
+    groups: &[u32],
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    if uid == u32::MAX || gid == u32::MAX {
+        return Err(ProtocolError::InvalidLength);
+    }
+    if output.len() < 8 {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    let length = encode_group_list(groups, &mut output[8..])?;
+    put_u32(output, 0, uid);
+    put_u32(output, 4, gid);
+    Ok(8 + length)
+}
+
+pub fn decode_spawn_credentials(
+    input: &[u8],
+    groups: &mut [u32],
+) -> Result<(u32, u32, usize), ProtocolError> {
+    if input.len() < 8 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let uid = get_u32(input, 0);
+    let gid = get_u32(input, 4);
+    if uid == u32::MAX || gid == u32::MAX {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let count = decode_group_list(&input[8..], groups)?;
+    Ok((uid, gid, count))
 }
 
 pub fn decode_credential_id(input: &[u8]) -> Result<u32, ProtocolError> {

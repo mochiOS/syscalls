@@ -567,6 +567,34 @@ impl<T: ObjectTransport> Client<T> {
         Ok(())
     }
 
+    /// Registers fresh-image POSIX state before the creator resumes the child.
+    pub fn register_spawned_child(
+        &self,
+        process: ObjectHandleAttachment<T::Handle>,
+        uid: u32,
+        gid: u32,
+        groups: &[u32],
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut payload = [0; 8 + protocol::GROUP_LIST_MAX_LEN];
+        let length = protocol::encode_spawn_credentials(uid, gid, groups, &mut payload)
+            .map_err(ClientError::Protocol)?;
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(process)
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        self.request_with_handles(
+            protocol::OP_PROCESS_SPAWNED,
+            0,
+            &payload[..length],
+            &mut [],
+            &mut handles,
+        )?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(())
+    }
+
     pub fn open_at(
         &self,
         base: OpenAtBase<T::Handle>,
