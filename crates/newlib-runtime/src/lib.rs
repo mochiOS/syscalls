@@ -1,5 +1,7 @@
 #![no_std]
 
+mod groups;
+
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_void};
 use core::mem::MaybeUninit;
@@ -4068,7 +4070,7 @@ pub extern "C" fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: c_int) -> c_int 
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn getgroups(gidsetsize: c_int, grouplist: *mut u32) -> c_int {
+pub extern "C" fn getgroups(gidsetsize: c_int, grouplist: *mut groups::Gid) -> c_int {
     let result = (|| -> Result<c_int, c_int> {
         let capacity = usize::try_from(gidsetsize).map_err(|_| EINVAL)?;
         if capacity != 0 && grouplist.is_null() {
@@ -4084,16 +4086,15 @@ pub extern "C" fn getgroups(gidsetsize: c_int, grouplist: *mut u32) -> c_int {
         if capacity < count {
             return Err(EINVAL);
         }
-        for (index, group) in groups.iter().copied().take(count).enumerate() {
-            unsafe { grouplist.add(index).write(group) };
-        }
+        let destination = unsafe { core::slice::from_raw_parts_mut(grouplist, count) };
+        groups::store(&groups[..count], destination).map_err(|_| EOVERFLOW)?;
         c_int::try_from(count).map_err(|_| EOVERFLOW)
     })();
     result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn setgroups(ngroups: c_int, grouplist: *const u32) -> c_int {
+pub extern "C" fn setgroups(ngroups: c_int, grouplist: *const groups::Gid) -> c_int {
     let result = (|| -> Result<c_int, c_int> {
         let count = usize::try_from(ngroups).map_err(|_| EINVAL)?;
         if count > posix_protocol::MAX_SUPPLEMENTARY_GROUPS {
@@ -4102,13 +4103,15 @@ pub extern "C" fn setgroups(ngroups: c_int, grouplist: *const u32) -> c_int {
         if count != 0 && grouplist.is_null() {
             return Err(EFAULT);
         }
-        let groups = if count == 0 {
+        let source = if count == 0 {
             &[]
         } else {
             unsafe { core::slice::from_raw_parts(grouplist, count) }
         };
+        let mut groups = [0u32; posix_protocol::MAX_SUPPLEMENTARY_GROUPS];
+        groups::widen(source, &mut groups);
         posix_client()
-            .and_then(|client| client.set_groups(groups))
+            .and_then(|client| client.set_groups(&groups[..count]))
             .map_err(map_posix_client_error)?;
         Ok(0)
     })();
