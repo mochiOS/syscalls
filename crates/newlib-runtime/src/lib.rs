@@ -2944,7 +2944,33 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
             buffer as u64,
             length as u64,
         ))?,
-        FdKind::ObjectFile | FdKind::ObjectStreamWrite => syscall_errno(syscall::raw_syscall3(
+        FdKind::ObjectStreamWrite => {
+            return mochios_posix_client::stream::write(
+                length,
+                handle_is_nonblocking(entry)?,
+                |offset, remaining, complete| {
+                    let flags = if complete {
+                        mnu_abi::STREAM_WRITE_COMPLETE
+                    } else {
+                        0
+                    };
+                    syscall_errno(syscall::raw_syscall4(
+                        syscall::SyscallNumber::StreamWrite,
+                        entry.handle.lower_handle,
+                        buffer as u64 + offset as u64,
+                        remaining as u64,
+                        flags,
+                    ))
+                    .and_then(|count| usize::try_from(count).map_err(|_| EIO))
+                },
+            )
+            .map(|count| count as isize)
+            .map_err(|error| match error {
+                mochios_posix_client::stream::WriteError::InvalidResult => EIO,
+                mochios_posix_client::stream::WriteError::Io(errno) => errno,
+            });
+        }
+        FdKind::ObjectFile => syscall_errno(syscall::raw_syscall3(
             syscall::SyscallNumber::HandleWrite,
             entry.handle.lower_handle,
             buffer as u64,
