@@ -422,12 +422,13 @@ pub mod process {
         Ok(context)
     }
 
-    pub fn current_security_context() -> SysResult<syscall::ThreadSecurityContext> {
-        thread_security_context(0)
+    pub fn current_thread_id() -> SysResult<u64> {
+        current_execution_identity().map(|identity| identity.thread_id)
     }
 
-    pub fn current_thread_id() -> SysResult<u64> {
-        current_security_context().map(|context| context.thread_id)
+    /// Identifies only this caller, without kernel UID/GID or package policy.
+    pub fn current_execution_identity() -> SysResult<syscall::ExecutionIdentity> {
+        syscall::execution::identity()
     }
 
     pub fn open_handle_for_endpoint(endpoint: u64, rights: u64) -> SysResult<u32> {
