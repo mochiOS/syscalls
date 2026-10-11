@@ -3216,6 +3216,15 @@ fn handle_is_nonblocking(entry: FdEntry) -> Result<bool, c_int> {
 fn wait_for_handle(entry: FdEntry, interests: u64) -> Result<u64, c_int> {
     let (_, control) = register_current_thread().ok_or(EAGAIN)?;
     let caught = control.nonrestart_signal_generation.load(Ordering::Acquire);
+    wait_for_handle_since(entry, interests, control, caught)
+}
+
+fn wait_for_handle_since(
+    entry: FdEntry,
+    interests: u64,
+    control: &ThreadControl,
+    caught: u64,
+) -> Result<u64, c_int> {
     let mut item = syscall::HandleWaitItem {
         handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
         reserved: 0,
@@ -3223,6 +3232,9 @@ fn wait_for_handle(entry: FdEntry, interests: u64) -> Result<u64, c_int> {
         observed: 0,
     };
     loop {
+        if control.nonrestart_signal_generation.load(Ordering::Acquire) != caught {
+            return Err(EINTR);
+        }
         let result = syscall_errno(syscall::raw_syscall3(
             syscall::SyscallNumber::HandleWaitMany,
             (&mut item as *mut syscall::HandleWaitItem) as u64,
@@ -3236,6 +3248,38 @@ fn wait_for_handle(entry: FdEntry, interests: u64) -> Result<u64, c_int> {
             Ok(_) => return Ok(item.observed),
             Err(EAGAIN) => continue,
             Err(errno) => return Err(errno),
+        }
+    }
+}
+
+fn stream_io<T>(
+    entry: FdEntry,
+    interests: u64,
+    operation: impl FnMut() -> Result<T, c_int>,
+) -> Result<T, c_int> {
+    let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+    let caught = control.nonrestart_signal_generation.load(Ordering::Acquire);
+    stream_io_since(entry, interests, control, caught, operation)
+}
+
+fn stream_io_since<T>(
+    entry: FdEntry,
+    interests: u64,
+    control: &ThreadControl,
+    caught: u64,
+    mut operation: impl FnMut() -> Result<T, c_int>,
+) -> Result<T, c_int> {
+    loop {
+        if control.nonrestart_signal_generation.load(Ordering::Acquire) != caught {
+            return Err(EINTR);
+        }
+        match operation() {
+            Err(EAGAIN) if !handle_is_nonblocking(entry)? => {
+                // Preserve the generation from before the attempt, including
+                // across retries and successful prefixes of a large write.
+                wait_for_handle_since(entry, interests, control, caught)?;
+            }
+            result => return result,
         }
     }
 }
@@ -3256,6 +3300,8 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
             length as u64,
         ))?,
         FdKind::ObjectStreamWrite => {
+            let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+            let caught = control.nonrestart_signal_generation.load(Ordering::Acquire);
             return mochios_posix_client::stream::write(
                 length,
                 handle_is_nonblocking(entry)?,
@@ -3265,13 +3311,19 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
                     } else {
                         0
                     };
-                    syscall_errno(syscall::raw_syscall4(
-                        syscall::SyscallNumber::StreamWrite,
-                        entry.handle.lower_handle,
-                        buffer as u64 + offset as u64,
-                        remaining as u64,
-                        flags,
-                    ))
+                    stream_io_since(
+                        entry,
+                        syscall::HANDLE_SIGNAL_WRITABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
+                        control,
+                        caught,
+                        || syscall_errno(syscall::raw_syscall4(
+                            syscall::SyscallNumber::StreamWrite,
+                            entry.handle.lower_handle,
+                            buffer as u64 + offset as u64,
+                            remaining as u64,
+                            flags | mnu_abi::STREAM_IO_TRY,
+                        )),
+                    )
                     .and_then(|count| usize::try_from(count).map_err(|_| EIO))
                 },
             )
@@ -3324,12 +3376,23 @@ fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<is
     }
     let read = match entry.handle.kind {
         FdKind::Stdin => return Err(EBADF),
-        FdKind::ObjectFile | FdKind::ObjectStreamRead => syscall_errno(syscall::raw_syscall3(
+        FdKind::ObjectFile => syscall_errno(syscall::raw_syscall3(
             syscall::SyscallNumber::HandleRead,
             entry.handle.lower_handle,
             buffer as u64,
             length as u64,
         ))?,
+        FdKind::ObjectStreamRead => stream_io(
+            entry,
+            syscall::HANDLE_SIGNAL_READABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
+            || syscall_errno(syscall::raw_syscall4(
+                syscall::SyscallNumber::StreamRead,
+                entry.handle.lower_handle,
+                buffer as u64,
+                length as u64,
+                mnu_abi::STREAM_IO_TRY,
+            )),
+        )?,
         FdKind::ObjectPty => loop {
             match retry_terminal_operation(posix_protocol::SIGNAL_TTIN, || {
                 syscall_errno(syscall::raw_syscall3(
