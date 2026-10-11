@@ -1389,12 +1389,9 @@ fn map_posix_client_error(error: PosixClientError<mochi_user_syscall::SysError>)
 }
 
 fn syscall_errno(result: syscall::RawSyscallResult) -> Result<u64, c_int> {
-    let raw = result.raw() as i64;
-    if raw < 0 {
-        Err(map_kernel_errno(raw))
-    } else {
-        Ok(result.raw())
-    }
+    result
+        .into_result()
+        .map_err(|error| map_kernel_errno(error.raw()))
 }
 
 fn result_with_errno<T>(result: Result<T, c_int>, error_value: T) -> T {

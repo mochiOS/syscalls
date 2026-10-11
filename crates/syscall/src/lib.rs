@@ -43,8 +43,8 @@ impl SysError {
     }
 
     pub fn errno(self) -> Option<u64> {
-        if self.raw < 0 {
-            Some((-self.raw) as u64)
+        if (-4095..=-1).contains(&self.raw) {
+            Some(self.raw.unsigned_abs())
         } else {
             None
         }
@@ -73,7 +73,9 @@ impl RawSyscallResult {
 
     pub fn into_result(self) -> SysResult<u64> {
         let signed = self.raw as i64;
-        if signed < 0 {
+        // Native values such as Handle rights use all 64 bits. Only the
+        // reserved negative errno range denotes failure, not the sign bit.
+        if (-4095..=-1).contains(&signed) {
             Err(SysError::from_raw(signed))
         } else {
             Ok(self.raw)
