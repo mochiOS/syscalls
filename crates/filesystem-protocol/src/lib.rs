@@ -14,6 +14,16 @@ pub const CREDENTIALS_MAX_LEN: usize =
 /// another user-space service. mnu does not interpret this value.
 pub const CONTROL_HANDLE_KEY: u64 = u64::from_le_bytes(*b"MFS1CTRL");
 
+/// Private read-only boot-generation endpoint, explicitly delegated by its
+/// user-space owner. READ/READDIR carry absolute path payloads with object IDs
+/// zero; flags carry a bounded byte budget. This key has no kernel meaning.
+pub const BOOTSTRAP_READ_HANDLE_KEY: u64 = u64::from_le_bytes(*b"MFS1BOOT");
+/// Bootstrap messages fit the standard inline IPC budget without increasing
+/// kernel mailbox capacity. Larger files are read using independent ranges.
+pub const BOOTSTRAP_MAX_TRANSFER: usize = 8 * 1024 - HEADER_LEN;
+/// EOF flag on bootstrap OP_STATUS replies only.
+pub const BOOTSTRAP_EOF: u32 = 1;
+
 pub const OP_MOUNT: u16 = 1;
 pub const OP_UNMOUNT: u16 = 2;
 pub const OP_LOOKUP: u16 = 3;
