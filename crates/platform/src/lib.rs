@@ -458,6 +458,14 @@ pub mod process {
         syscall::raw_syscall1(syscall::SyscallNumber::ProcessClone, resume_rax)
     }
 
+    /// Captures a detached VM image. Closing its final Handle releases it;
+    /// this does not create a process or copy native execution authority.
+    pub fn clone_address_space() -> SysResult<u32> {
+        syscall::call0(syscall::SyscallNumber::AddressSpaceClone).and_then(|handle| {
+            u32::try_from(handle).map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))
+        })
+    }
+
     pub fn resume_handle(handle: u32) -> SysResult<()> {
         syscall::call1(
             syscall::SyscallNumber::ProcessHandleResume,
