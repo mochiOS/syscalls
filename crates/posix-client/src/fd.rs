@@ -240,15 +240,36 @@ impl<H: Copy> FdTable<H> {
         fd: i32,
         operations: &mut O,
     ) -> Result<i32, FdError<O::Error>> {
+        self.duplicate_from(fd, 0, DEFAULT_FD_LIMIT as i32, false, operations)
+    }
+
+    /// Duplicates into the lowest free descriptor in the caller's range.
+    /// The destination is selected under the caller's table lock before any
+    /// native reference is cloned, so exhaustion cannot leak a Handle.
+    pub fn duplicate_from<O: HandleOps<H>>(
+        &mut self,
+        fd: i32,
+        minimum: i32,
+        limit: i32,
+        close_on_exec: bool,
+        operations: &mut O,
+    ) -> Result<i32, FdError<O::Error>> {
         let source = self.get(fd).ok_or(FdError::BadDescriptor)?;
+        if minimum < 0 || minimum >= limit || limit as usize > DEFAULT_FD_LIMIT {
+            return Err(FdError::InvalidDescriptor);
+        }
+        let index = (minimum as usize..limit as usize)
+            .find(|index| self.entries[*index].is_none())
+            .ok_or(FdError::InvalidDescriptor)?;
         let handle = operations
             .clone_handle(source.handle, source.rights)
             .map_err(FdError::Handle)?;
-        self.install_typed(Entry {
+        self.entries[index] = Some(Entry {
             handle,
             rights: source.rights,
-            descriptor_flags: source.descriptor_flags & !FD_CLOEXEC,
-        })
+            descriptor_flags: if close_on_exec { FD_CLOEXEC } else { 0 },
+        });
+        Ok(index as i32)
     }
 
     pub fn duplicate_to<O: HandleOps<H>>(
@@ -257,7 +278,7 @@ impl<H: Copy> FdTable<H> {
         target_fd: i32,
         operations: &mut O,
     ) -> Result<i32, FdError<O::Error>> {
-        if target_fd < 0 {
+        if target_fd < 0 || target_fd as usize >= DEFAULT_FD_LIMIT {
             return Err(FdError::InvalidDescriptor);
         }
         if source_fd == target_fd {
@@ -269,9 +290,6 @@ impl<H: Copy> FdTable<H> {
             .clone_handle(source.handle, source.rights)
             .map_err(FdError::Handle)?;
         let target_index = target_fd as usize;
-        if target_index >= DEFAULT_FD_LIMIT {
-            return Err(FdError::InvalidDescriptor);
-        }
         if let Some(replaced) = self.entries[target_index].replace(Entry {
             handle,
             rights: source.rights,
@@ -330,19 +348,6 @@ impl<H: Copy> FdTable<H> {
                     .then(|| i32::try_from(index).ok().map(|fd| (fd, entry)))
                     .flatten()
             })
-    }
-
-    fn install_typed<E>(&mut self, entry: Entry<H>) -> Result<i32, FdError<E>> {
-        if let Some((index, slot)) = self
-            .entries
-            .iter_mut()
-            .enumerate()
-            .find(|(_, slot)| slot.is_none())
-        {
-            *slot = Some(entry);
-            return i32::try_from(index).map_err(|_| FdError::InvalidDescriptor);
-        }
-        Err(FdError::InvalidDescriptor)
     }
 }
 

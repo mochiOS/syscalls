@@ -42,6 +42,8 @@ const SC_HOST_NAME_MAX: c_int = 65;
 const O_CLOEXEC: c_int = 0x40000;
 const O_NONBLOCK: c_int = 0x4000;
 const FD_CLOEXEC: c_int = 1;
+const F_DUPFD: c_int = 0;
+const F_DUPFD_CLOEXEC: c_int = 14;
 const F_GETFD: c_int = 1;
 const F_SETFD: c_int = 2;
 const F_GETFL: c_int = 3;
@@ -2295,6 +2297,26 @@ fn duplicate_live_fd(old_fd: c_int, new_fd: c_int) -> Result<c_int, c_int> {
     Ok(new_fd)
 }
 
+fn duplicate_fd_from(
+    fds: &mut FdTable<FdObject>,
+    fd: c_int,
+    minimum: c_int,
+    close_on_exec: bool,
+) -> Result<c_int, c_int> {
+    // Validate the source before the range, as with other descriptor APIs.
+    if fd < 0 || fd as usize >= MAX_FDS || fds.get(fd).is_none() {
+        return Err(EBADF);
+    }
+    if minimum < 0 || minimum as usize >= MAX_FDS {
+        return Err(EINVAL);
+    }
+    fds.duplicate_from(fd, minimum, MAX_FDS as c_int, close_on_exec, &mut RuntimeFdOps)
+        .map_err(|error| match error {
+            FdError::InvalidDescriptor => EMFILE,
+            other => map_fd_error(other),
+        })
+}
+
 fn apply_spawn_file_actions(
     fds: &mut FdTable<FdObject>,
     actions: *const c_void,
@@ -3474,6 +3496,11 @@ pub extern "C" fn fork() -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn dup(fd: c_int) -> c_int {
+    result_with_errno(duplicate_fd_from(&mut state().fds, fd, 0, false), -1)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn dup2(old_fd: c_int, new_fd: c_int) -> c_int {
     result_with_errno(duplicate_live_fd(old_fd, new_fd), -1)
 }
@@ -3487,6 +3514,9 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
         let mut state = state();
         let entry = state.fds.get(fd).ok_or(EBADF)?;
         match cmd {
+            F_DUPFD | F_DUPFD_CLOEXEC => {
+                duplicate_fd_from(&mut state.fds, fd, arg, cmd == F_DUPFD_CLOEXEC)
+            }
             F_GETFD => Ok(entry.descriptor_flags as c_int),
             F_SETFD => {
                 state
