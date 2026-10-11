@@ -1,5 +1,6 @@
 #![no_std]
 
+mod credentials;
 mod groups;
 
 use core::cell::UnsafeCell;
@@ -4129,36 +4130,32 @@ pub extern "C" fn umask(mask: u32) -> u32 {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn getuid() -> u32 {
-    posix_client()
+fn credential_id(select: impl FnOnce(posix_protocol::SessionInfo) -> u32) -> credentials::Id {
+    let result = posix_client()
         .and_then(|client| client.session_info())
-        .map(|session| session.real_uid)
-        .unwrap_or(0)
+        .map(select)
+        .map_err(map_posix_client_error);
+    credentials::finish(result, EOVERFLOW, set_errno)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn geteuid() -> u32 {
-    posix_client()
-        .and_then(|client| client.session_info())
-        .map(|session| session.effective_uid)
-        .unwrap_or(0)
+pub extern "C" fn getuid() -> credentials::Id {
+    credential_id(|session| session.real_uid)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn getgid() -> u32 {
-    posix_client()
-        .and_then(|client| client.session_info())
-        .map(|session| session.real_gid)
-        .unwrap_or(0)
+pub extern "C" fn geteuid() -> credentials::Id {
+    credential_id(|session| session.effective_uid)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn getegid() -> u32 {
-    posix_client()
-        .and_then(|client| client.session_info())
-        .map(|session| session.effective_gid)
-        .unwrap_or(0)
+pub extern "C" fn getgid() -> credentials::Id {
+    credential_id(|session| session.real_gid)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn getegid() -> credentials::Id {
+    credential_id(|session| session.effective_gid)
 }
 
 #[unsafe(no_mangle)]
