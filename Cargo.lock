@@ -484,7 +484,6 @@ dependencies = [
 [[package]]
 name = "libc"
 version = "0.2.190"
-source = "git+https://github.com/mochiOS/libc#21e914d3ed41a3b44b486b8f30424e55d22bbdca"
 
 [[package]]
 name = "libm"
@@ -517,8 +516,8 @@ name = "mochi-user-newlib-runtime"
 version = "0.1.0"
 dependencies = [
  "mnu-abi",
- "mochi-user-syscall 0.1.0",
- "mochios-capability-protocol 0.1.0",
+ "mochi-user-syscall",
+ "mochios-capability-protocol",
  "mochios-filesystem-protocol",
  "mochios-posix-client",
  "mochios-posix-protocol",
@@ -530,36 +529,17 @@ version = "0.1.0"
 dependencies = [
  "mboot-protocol",
  "mnu-abi",
- "mochi-user-runtime 0.1.0 (git+https://github.com/mochiOS/syscalls)",
- "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
- "mochios-capability-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
- "mochios-workspace-protocol 0.1.0",
-]
-
-[[package]]
-name = "mochi-user-platform"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
-dependencies = [
- "mnu-abi",
- "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
- "mochios-capability-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
- "mochios-workspace-protocol 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochi-user-runtime",
+ "mochi-user-syscall",
+ "mochios-capability-protocol",
+ "mochios-workspace-protocol",
 ]
 
 [[package]]
 name = "mochi-user-runtime"
 version = "0.1.0"
 dependencies = [
- "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
-]
-
-[[package]]
-name = "mochi-user-runtime"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
-dependencies = [
- "mochi-user-syscall 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochi-user-syscall",
 ]
 
 [[package]]
@@ -570,21 +550,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "mochi-user-syscall"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
-dependencies = [
- "mnu-abi",
-]
-
-[[package]]
 name = "mochios-capability-protocol"
 version = "0.1.0"
-
-[[package]]
-name = "mochios-capability-protocol"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
 
 [[package]]
 name = "mochios-certificate"
@@ -638,8 +605,8 @@ name = "mochios-posix-client"
 version = "0.1.0"
 dependencies = [
  "mnu-abi",
- "mochi-user-platform 0.1.0",
- "mochi-user-syscall 0.1.0",
+ "mochi-user-platform",
+ "mochi-user-syscall",
  "mochios-filesystem-protocol",
  "mochios-posix-protocol",
 ]
@@ -657,7 +624,7 @@ name = "mochios-tls-client"
 version = "0.1.0"
 dependencies = [
  "getrandom",
- "mochi-user-platform 0.1.0 (git+https://github.com/mochiOS/syscalls)",
+ "mochi-user-platform",
  "rcgen",
  "rustls",
  "rustls-rustcrypto",
@@ -684,11 +651,6 @@ version = "0.1.0"
 [[package]]
 name = "mochios-workspace-protocol"
 version = "0.1.0"
-
-[[package]]
-name = "mochios-workspace-protocol"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/syscalls#38b10ca1d8b95d8ad638e24a2f83adae6aa17034"
 
 [[package]]
 name = "nom"
