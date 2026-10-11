@@ -38,3 +38,43 @@ pub const fn observe_sleep(deadline: u64, now: u64, before: u64, after: u64) -> 
         SleepObservation::Waiting
     }
 }
+
+/// The historic newlib TIMER_ABSTIME value, not the Linux flag value.
+pub const TIMER_ABSTIME: i32 = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClockSleep {
+    pub clock: ClockKind,
+    pub absolute: bool,
+    pub nanoseconds: u64,
+}
+
+impl ClockSleep {
+    pub fn parse(clock_id: i32, flags: i32, seconds: i64, nanoseconds: i64) -> Result<Self, i32> {
+        use crate::newlib_errno::{EINVAL, ENOTSUP};
+        if flags & !TIMER_ABSTIME != 0 || seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds)
+        {
+            return Err(EINVAL);
+        }
+        let clock = match clock_id {
+            1 => ClockKind::Realtime,
+            4 => ClockKind::Monotonic,
+            3 => return Err(EINVAL), // A thread cannot sleep against its own CPU clock.
+            other if classify_clock_id(other).is_some() => return Err(ENOTSUP),
+            _ => return Err(EINVAL),
+        };
+        let nanoseconds = (seconds as u64)
+            .checked_mul(1_000_000_000)
+            .and_then(|value| value.checked_add(nanoseconds as u64))
+            .ok_or(EINVAL)?;
+        Ok(Self {
+            clock,
+            absolute: flags == TIMER_ABSTIME,
+            nanoseconds,
+        })
+    }
+
+    pub fn remaining(self, selected_now: u64) -> u64 {
+        self.nanoseconds.saturating_sub(selected_now)
+    }
+}

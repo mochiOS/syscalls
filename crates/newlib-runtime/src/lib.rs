@@ -5725,6 +5725,94 @@ pub extern "C" fn sched_yield() -> c_int {
     )
 }
 
+/// Unlike nanosleep, POSIX clock_nanosleep returns an error number directly.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn clock_nanosleep(
+    clock_id: c_int,
+    flags: c_int,
+    request: *const Timespec,
+    remaining: *mut Timespec,
+) -> c_int {
+    let saved_errno = unsafe { *__errno() };
+    let result = (|| {
+        use mochios_posix_client::time::{ClockKind, ClockSleep, SleepObservation, observe_sleep};
+        if request.is_null() {
+            return Err(EFAULT);
+        }
+        let request = unsafe { request.read() };
+        let spec = ClockSleep::parse(clock_id, flags, request.tv_sec, request.tv_nsec)?;
+        if !spec.absolute && spec.nanoseconds == 0 {
+            return Ok(());
+        }
+        let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+        let generation = control.caught_signal_generation.load(Ordering::Acquire);
+        let started = monotonic_nanoseconds()?;
+        let relative_deadline = if spec.absolute {
+            0
+        } else {
+            started.checked_add(spec.nanoseconds).ok_or(EOVERFLOW)?
+        };
+        loop {
+            // Read the selected absolute clock again after each wake. Today
+            // native realtime is read-only; a future clock-adjustment mechanism
+            // must also wake absolute-clock waiters instead of polling here.
+            let now = monotonic_nanoseconds()?;
+            let duration = if spec.absolute {
+                let selected_now = match spec.clock {
+                    ClockKind::Monotonic => now,
+                    ClockKind::Realtime => {
+                        let mut instant = mnu_abi::ClockInstant::default();
+                        syscall_errno(syscall::raw_syscall2(
+                            syscall::SyscallNumber::ClockRead,
+                            mnu_abi::ClockId::Realtime as u64,
+                            (&mut instant as *mut mnu_abi::ClockInstant) as u64,
+                        ))?;
+                        if instant.nanoseconds >= 1_000_000_000 || instant.reserved != 0 {
+                            return Err(EIO);
+                        }
+                        instant
+                            .seconds
+                            .checked_mul(1_000_000_000)
+                            .and_then(|value| value.checked_add(u64::from(instant.nanoseconds)))
+                            .ok_or(EOVERFLOW)?
+                    }
+                    _ => return Err(EINVAL),
+                };
+                spec.remaining(selected_now)
+            } else {
+                relative_deadline.saturating_sub(now)
+            };
+            let deadline = now.checked_add(duration).ok_or(EOVERFLOW)?;
+            match observe_sleep(
+                deadline,
+                now,
+                generation,
+                control.caught_signal_generation.load(Ordering::Acquire),
+            ) {
+                SleepObservation::Complete => return Ok(()),
+                SleepObservation::Interrupted {
+                    remaining_nanoseconds,
+                } => {
+                    if !spec.absolute && !remaining.is_null() {
+                        unsafe {
+                            remaining.write(Timespec {
+                                tv_sec: (remaining_nanoseconds / 1_000_000_000) as i64,
+                                tv_nsec: (remaining_nanoseconds % 1_000_000_000) as i64,
+                            });
+                        }
+                    }
+                    return Err(EINTR);
+                }
+                SleepObservation::Waiting => {}
+            }
+            mochios_posix_client::synchronization::wait_u32(&NANOSLEEP_WORD, 0, deadline)
+                .map_err(|error| map_kernel_errno(error.raw()))?;
+        }
+    })();
+    set_errno(saved_errno);
+    result.err().unwrap_or(0)
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Timespec) -> c_int {
     if request.is_null() {
