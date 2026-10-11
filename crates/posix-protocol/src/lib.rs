@@ -190,8 +190,12 @@ pub const OP_SET_REAL_EFFECTIVE_GID: u16 = 59;
 /// Initialize an already running boot process through an attached ProcessHandle.
 pub const OP_PROCESS_INITIALIZE: u16 = 60;
 /// Empty payload and one WAIT|SIGNAL ProcessHandle for a launcher's tree root.
-/// Only its recorded launcher may terminate and reclaim the userspace tree.
+/// Only its recorded launcher may terminate the tree. Retain its userspace
+/// records until a separate reclaim request, including after successful exit.
 pub const OP_PROCESS_TREE_TERMINATE: u16 = 61;
+/// Empty payload and the same WAIT|SIGNAL root; reclaim only a confirmed exited
+/// tree. ESRCH means no root environment remains, not proof of a prior exit.
+pub const OP_PROCESS_TREE_RECLAIM: u16 = 62;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;

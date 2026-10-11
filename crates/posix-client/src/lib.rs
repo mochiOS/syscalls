@@ -709,22 +709,35 @@ impl<T: ObjectTransport> Client<T> {
     /// Terminates a tree registered by this launcher, using its explicit root
     /// ProcessHandle with WAIT|SIGNAL rights. No PID or credentials are sent.
     /// Delayed exits return EAGAIN; callers must retain their root reference
-    /// until successful completion and may retry the same request.
+    /// until successful completion and may retry the same request. Success
+    /// confirms all exits, but retains server references until reclaim.
     pub fn terminate_launched_tree(
         &self,
+        root: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.tree_request(protocol::OP_PROCESS_TREE_TERMINATE, root)
+    }
+
+    /// Reclaims an exited tree after a successful termination confirmation.
+    /// A caller may treat ESRCH as an already completed reclaim ONLY if it
+    /// previously received that confirmation for this same owned root object.
+    pub fn reclaim_launched_tree(
+        &self,
+        root: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.tree_request(protocol::OP_PROCESS_TREE_RECLAIM, root)
+    }
+
+    fn tree_request(
+        &self,
+        opcode: u16,
         root: ObjectHandleAttachment<T::Handle>,
     ) -> Result<(), ClientError<T::Error>> {
         let mut handles = ObjectHandles::new();
         handles
             .push(root)
             .map_err(|_| ClientError::RequestTooLarge)?;
-        self.request_with_handles(
-            protocol::OP_PROCESS_TREE_TERMINATE,
-            0,
-            &[],
-            &mut [],
-            &mut handles,
-        )?;
+        self.request_with_handles(opcode, 0, &[], &mut [], &mut handles)?;
         if !handles.is_empty() {
             return Err(ClientError::MismatchedResponse);
         }
