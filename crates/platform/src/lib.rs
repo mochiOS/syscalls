@@ -377,6 +377,21 @@ pub mod process {
 
     pub const RECORD_SIZE: usize = 112;
 
+    /// Creates an authorized process in a scheduling-suspended state. The
+    /// returned Handle retains exit status even after execution resources are
+    /// reclaimed. Register policy/monitoring before calling resume_handle.
+    pub fn create_stopped(image: u32, metadata: &[u8]) -> SysResult<u32> {
+        mnu_abi::process_create::decode(metadata)
+            .map_err(|_| syscall::SysError::from_raw(syscall::EINVAL as i64))?;
+        let raw = syscall::call3(
+            syscall::SyscallNumber::ProcessCreate,
+            image as u64,
+            metadata.as_ptr() as u64,
+            metadata.len() as u64,
+        )?;
+        u32::try_from(raw).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Record {
         pub pid: u64,
