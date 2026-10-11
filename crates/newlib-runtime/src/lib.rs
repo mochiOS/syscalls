@@ -2559,7 +2559,8 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     // clone returns, so the child never inherits a permanently locked STATE.
     let guard = state();
     let inherited_fds = guard.fds.clone();
-    let handle = syscall_errno(syscall::raw_syscall0(syscall::SyscallNumber::ProcessClone))?;
+    // POSIX fork selects the child's zero return value, not the kernel.
+    let handle = syscall_errno(syscall::raw_syscall1(syscall::SyscallNumber::ProcessClone, 0))?;
     drop(guard);
     if handle == 0 {
         state().fds.clear_reservations();

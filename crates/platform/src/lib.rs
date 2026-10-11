@@ -450,11 +450,12 @@ pub mod process {
     }
 
     /// Clones the current address space and process-local native handles. The
-    /// parent receives a handle for the child and the child receives zero.
-    pub fn clone_process() -> SysResult<u32> {
-        syscall::call0(syscall::SyscallNumber::ProcessClone).and_then(|handle| {
-            u32::try_from(handle).map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))
-        })
+    /// source receives a handle and the copy receives `resume_rax`. The copy
+    /// starts suspended. Preserve the raw register: an explicit high-bit value
+    /// in the copy must not be automatically interpreted as a syscall error.
+    /// This combined backend remains transitional.
+    pub fn clone_process(resume_rax: u64) -> syscall::RawSyscallResult {
+        syscall::raw_syscall1(syscall::SyscallNumber::ProcessClone, resume_rax)
     }
 
     pub fn resume_handle(handle: u32) -> SysResult<()> {
