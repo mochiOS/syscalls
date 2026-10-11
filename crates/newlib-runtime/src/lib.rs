@@ -5695,6 +5695,67 @@ fn update_current_signal_mask(how: c_int, set: *const u64, old_set: *mut u64) ->
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigemptyset(set: *mut u64) -> c_int {
+    if set.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    unsafe { set.write(0) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigfillset(set: *mut u64) -> c_int {
+    if set.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    unsafe { set.write(u64::MAX) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigaddset(set: *mut u64, signal: c_int) -> c_int {
+    let Some(bit) = mochios_posix_client::signal::newlib_set_bit(signal) else {
+        set_errno(EINVAL);
+        return -1;
+    };
+    if set.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    unsafe { set.write(set.read() | bit) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigdelset(set: *mut u64, signal: c_int) -> c_int {
+    let Some(bit) = mochios_posix_client::signal::newlib_set_bit(signal) else {
+        set_errno(EINVAL);
+        return -1;
+    };
+    if set.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    unsafe { set.write(set.read() & !bit) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigismember(set: *const u64, signal: c_int) -> c_int {
+    let Some(bit) = mochios_posix_client::signal::newlib_set_bit(signal) else {
+        set_errno(EINVAL);
+        return -1;
+    };
+    if set.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    c_int::from(unsafe { set.read() } & bit != 0)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigprocmask(how: c_int, set: *const u64, old_set: *mut u64) -> c_int {
     result_with_errno(update_current_signal_mask(how, set, old_set).map(|_| 0), -1)
 }

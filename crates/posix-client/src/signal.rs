@@ -3,6 +3,16 @@ use mochios_posix_protocol::{SIGNAL_KILL, SIGNAL_MAX, SIGNAL_STOP};
 pub const SIGNAL_SET_MASK: i32 = 0;
 pub const SIGNAL_BLOCK: i32 = 1;
 pub const SIGNAL_UNBLOCK: i32 = 2;
+// NSIG in the current newlib target ABI includes signal zero.
+pub const NEWLIB_SIGNAL_COUNT: i32 = 32;
+
+pub const fn newlib_set_bit(signal: i32) -> Option<u64> {
+    if signal <= 0 || signal >= NEWLIB_SIGNAL_COUNT {
+        None
+    } else {
+        signal_bit(signal as u32)
+    }
+}
 
 pub const fn signal_bit(signal: u32) -> Option<u64> {
     if signal == 0 || signal > SIGNAL_MAX {
