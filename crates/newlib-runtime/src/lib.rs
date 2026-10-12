@@ -1317,6 +1317,10 @@ fn run_thread_specific_destructors(control: &ThreadControl) {
 }
 
 fn finish_thread(control: &ThreadControl, result: *mut c_void) -> ! {
+    // Exit/cancellation cleanup must not be interrupted by another pending
+    // cancellation, including when a TLS destructor calls a cancellation point.
+    control.cancel_state.store(PTHREAD_CANCEL_DISABLE, Ordering::Release);
+    control.cancel_type.store(PTHREAD_CANCEL_DEFERRED, Ordering::Release);
     run_thread_specific_destructors(control);
     control.result.store(result as usize, Ordering::Relaxed);
     control.state.store(THREAD_EXITED, Ordering::Release);
@@ -7832,10 +7836,8 @@ pub unsafe extern "C" fn pthread_setcancelstate(state: c_int, old_state: *mut c_
     if !old_state.is_null() {
         unsafe { old_state.write(previous as c_int) };
     }
-    if state as u32 == PTHREAD_CANCEL_ENABLE && control.cancel_pending.load(Ordering::Acquire) != 0
-    {
-        finish_thread(control, usize::MAX as *mut c_void);
-    }
+    // Only deferred cancellation is currently supported. Re-enabling it is
+    // not a cancellation point: retain the request until an explicit point.
     0
 }
 
