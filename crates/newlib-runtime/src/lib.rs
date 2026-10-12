@@ -220,6 +220,7 @@ struct ThreadControl {
     cancel_state: AtomicU32,
     cancel_type: AtomicU32,
     cancel_pending: AtomicU32,
+    sleep_wake_generation: AtomicU32,
     cleanup_head: AtomicUsize,
     signal_mask: AtomicU64,
     caught_signal_generation: AtomicU64,
@@ -252,6 +253,7 @@ impl ThreadControl {
             cancel_state: AtomicU32::new(PTHREAD_CANCEL_ENABLE),
             cancel_type: AtomicU32::new(PTHREAD_CANCEL_DEFERRED),
             cancel_pending: AtomicU32::new(0),
+            sleep_wake_generation: AtomicU32::new(0),
             cleanup_head: AtomicUsize::new(0),
             signal_mask: AtomicU64::new(0),
             caught_signal_generation: AtomicU64::new(0),
@@ -718,7 +720,6 @@ static THREADS: [ThreadControl; mochios_posix_client::thread::MAX_THREADS] =
     [const { ThreadControl::new() }; mochios_posix_client::thread::MAX_THREADS];
 static THREAD_KEYS: [ThreadKeyControl; mochios_posix_client::thread::MAX_THREAD_KEYS] =
     [const { ThreadKeyControl::new() }; mochios_posix_client::thread::MAX_THREAD_KEYS];
-static NANOSLEEP_WORD: AtomicU32 = AtomicU32::new(0);
 
 macro_rules! static_newlib_lock {
     ($name:ident) => {
@@ -988,6 +989,7 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
             .cancel_type
             .store(PTHREAD_CANCEL_DEFERRED, Ordering::Relaxed);
         control.cancel_pending.store(0, Ordering::Relaxed);
+        control.sleep_wake_generation.store(0, Ordering::Relaxed);
         control.cleanup_head.store(0, Ordering::Relaxed);
         control.signal_mask.store(0, Ordering::Relaxed);
         control.caught_signal_generation.store(0, Ordering::Relaxed);
@@ -1053,6 +1055,7 @@ fn release_thread_control(control: &ThreadControl) {
         .joinability
         .store(THREAD_JOINABLE, Ordering::Relaxed);
     control.cancel_pending.store(0, Ordering::Relaxed);
+    control.sleep_wake_generation.store(0, Ordering::Relaxed);
     control.cleanup_head.store(0, Ordering::Relaxed);
     control.signal_mask.store(0, Ordering::Relaxed);
     control.caught_signal_generation.store(0, Ordering::Relaxed);
@@ -6434,6 +6437,7 @@ fn dispatch_signal(signal: c_int) -> Result<c_int, c_int> {
             control
                 .caught_signal_generation
                 .fetch_add(1, Ordering::Release);
+            notify_sleep_waiter(control);
             // Record the selected action before invoking it: the handler may
             // replace its own disposition, which must not change this event.
             if action.sa_flags & SA_RESTART != 0 {
@@ -6747,6 +6751,7 @@ pub unsafe extern "C" fn clock_nanosleep(
     request: *const Timespec,
     remaining: *mut Timespec,
 ) -> c_int {
+    pthread_testcancel();
     let saved_errno = unsafe { *__errno() };
     let result = (|| {
         use mochios_posix_client::time::{ClockKind, ClockSleep, SleepObservation, observe_sleep};
@@ -6767,6 +6772,11 @@ pub unsafe extern "C" fn clock_nanosleep(
             started.checked_add(spec.nanoseconds).ok_or(EOVERFLOW)?
         };
         loop {
+            // Snapshot before checking either cause. A notification arriving
+            // between the checks and WaitOnAddress changes the expected word,
+            // so the native wait cannot lose a cancellation or caught signal.
+            let wake = control.sleep_wake_generation.load(Ordering::Acquire);
+            pthread_testcancel();
             // Read the selected absolute clock again after each wake. Today
             // native realtime is read-only; a future clock-adjustment mechanism
             // must also wake absolute-clock waiters instead of polling here.
@@ -6803,7 +6813,10 @@ pub unsafe extern "C" fn clock_nanosleep(
                 generation,
                 control.caught_signal_generation.load(Ordering::Acquire),
             ) {
-                SleepObservation::Complete => return Ok(()),
+                SleepObservation::Complete => {
+                    pthread_testcancel();
+                    return Ok(());
+                }
                 SleepObservation::Interrupted {
                     remaining_nanoseconds,
                 } => {
@@ -6819,8 +6832,12 @@ pub unsafe extern "C" fn clock_nanosleep(
                 }
                 SleepObservation::Waiting => {}
             }
-            mochios_posix_client::synchronization::wait_u32(&NANOSLEEP_WORD, 0, deadline)
-                .map_err(|error| map_kernel_errno(error.raw()))?;
+            mochios_posix_client::synchronization::wait_u32(
+                &control.sleep_wake_generation,
+                wake,
+                deadline,
+            )
+            .map_err(|error| map_kernel_errno(error.raw()))?;
         }
     })();
     set_errno(saved_errno);
@@ -6829,6 +6846,7 @@ pub unsafe extern "C" fn clock_nanosleep(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Timespec) -> c_int {
+    pthread_testcancel();
     if request.is_null() {
         set_errno(EFAULT);
         return -1;
@@ -6868,6 +6886,8 @@ pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Tim
         };
         loop {
             use mochios_posix_client::time::{SleepObservation, observe_sleep};
+            let wake = control.sleep_wake_generation.load(Ordering::Acquire);
+            pthread_testcancel();
             let now = match monotonic_nanoseconds() {
                 Ok(now) => now,
                 Err(error) => {
@@ -6898,14 +6918,17 @@ pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Tim
                 }
                 SleepObservation::Waiting => {}
             }
-            if let Err(error) =
-                mochios_posix_client::synchronization::wait_u32(&NANOSLEEP_WORD, 0, deadline)
-            {
+            if let Err(error) = mochios_posix_client::synchronization::wait_u32(
+                &control.sleep_wake_generation,
+                wake,
+                deadline,
+            ) {
                 set_errno(map_kernel_errno(error.raw()));
                 return -1;
             }
         }
     }
+    pthread_testcancel();
     if !remaining.is_null() {
         unsafe {
             remaining.write(Timespec {
@@ -7915,8 +7938,14 @@ pub extern "C" fn pthread_cancel(thread: Pthread) -> c_int {
         return ESRCH;
     };
     control.cancel_pending.store(1, Ordering::Release);
+    notify_sleep_waiter(control);
     native_mutex_wake_all(&control.state);
     0
+}
+
+fn notify_sleep_waiter(control: &ThreadControl) {
+    control.sleep_wake_generation.fetch_add(1, Ordering::Release);
+    native_mutex_wake_all(&control.sleep_wake_generation);
 }
 
 #[unsafe(no_mangle)]
