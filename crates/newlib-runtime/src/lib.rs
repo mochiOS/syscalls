@@ -217,10 +217,11 @@ struct ThreadControl {
     reent: AtomicUsize,
     reent_mapping_size: AtomicUsize,
     joinability: AtomicU32,
+    join_waiter: AtomicU32,
     cancel_state: AtomicU32,
     cancel_type: AtomicU32,
     cancel_pending: AtomicU32,
-    sleep_wake_generation: AtomicU32,
+    wait_generation: AtomicU32,
     cleanup_head: AtomicUsize,
     signal_mask: AtomicU64,
     caught_signal_generation: AtomicU64,
@@ -250,10 +251,11 @@ impl ThreadControl {
             reent: AtomicUsize::new(0),
             reent_mapping_size: AtomicUsize::new(0),
             joinability: AtomicU32::new(THREAD_JOINABLE),
+            join_waiter: AtomicU32::new(0),
             cancel_state: AtomicU32::new(PTHREAD_CANCEL_ENABLE),
             cancel_type: AtomicU32::new(PTHREAD_CANCEL_DEFERRED),
             cancel_pending: AtomicU32::new(0),
-            sleep_wake_generation: AtomicU32::new(0),
+            wait_generation: AtomicU32::new(0),
             cleanup_head: AtomicUsize::new(0),
             signal_mask: AtomicU64::new(0),
             caught_signal_generation: AtomicU64::new(0),
@@ -982,6 +984,7 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
         control
             .joinability
             .store(THREAD_JOINABLE, Ordering::Relaxed);
+        control.join_waiter.store(0, Ordering::Relaxed);
         control
             .cancel_state
             .store(PTHREAD_CANCEL_ENABLE, Ordering::Relaxed);
@@ -989,7 +992,7 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
             .cancel_type
             .store(PTHREAD_CANCEL_DEFERRED, Ordering::Relaxed);
         control.cancel_pending.store(0, Ordering::Relaxed);
-        control.sleep_wake_generation.store(0, Ordering::Relaxed);
+        control.wait_generation.store(0, Ordering::Relaxed);
         control.cleanup_head.store(0, Ordering::Relaxed);
         control.signal_mask.store(0, Ordering::Relaxed);
         control.caught_signal_generation.store(0, Ordering::Relaxed);
@@ -1054,8 +1057,9 @@ fn release_thread_control(control: &ThreadControl) {
     control
         .joinability
         .store(THREAD_JOINABLE, Ordering::Relaxed);
+    control.join_waiter.store(0, Ordering::Relaxed);
     control.cancel_pending.store(0, Ordering::Relaxed);
-    control.sleep_wake_generation.store(0, Ordering::Relaxed);
+    control.wait_generation.store(0, Ordering::Relaxed);
     control.cleanup_head.store(0, Ordering::Relaxed);
     control.signal_mask.store(0, Ordering::Relaxed);
     control.caught_signal_generation.store(0, Ordering::Relaxed);
@@ -1333,6 +1337,7 @@ fn finish_thread(control: &ThreadControl, result: *mut c_void) -> ! {
     run_thread_specific_destructors(control);
     control.result.store(result as usize, Ordering::Relaxed);
     control.state.store(THREAD_EXITED, Ordering::Release);
+    notify_join_waiter(control);
     native_mutex_wake_all(&control.state);
     let _ = syscall::raw_syscall1(syscall::SyscallNumber::ThreadExit, 0);
     loop {
@@ -6437,7 +6442,7 @@ fn dispatch_signal(signal: c_int) -> Result<c_int, c_int> {
             control
                 .caught_signal_generation
                 .fetch_add(1, Ordering::Release);
-            notify_sleep_waiter(control);
+            notify_thread_waiter(control);
             // Record the selected action before invoking it: the handler may
             // replace its own disposition, which must not change this event.
             if action.sa_flags & SA_RESTART != 0 {
@@ -6775,7 +6780,7 @@ pub unsafe extern "C" fn clock_nanosleep(
             // Snapshot before checking either cause. A notification arriving
             // between the checks and WaitOnAddress changes the expected word,
             // so the native wait cannot lose a cancellation or caught signal.
-            let wake = control.sleep_wake_generation.load(Ordering::Acquire);
+            let wake = control.wait_generation.load(Ordering::Acquire);
             pthread_testcancel();
             // Read the selected absolute clock again after each wake. Today
             // native realtime is read-only; a future clock-adjustment mechanism
@@ -6833,7 +6838,7 @@ pub unsafe extern "C" fn clock_nanosleep(
                 SleepObservation::Waiting => {}
             }
             mochios_posix_client::synchronization::wait_u32(
-                &control.sleep_wake_generation,
+                &control.wait_generation,
                 wake,
                 deadline,
             )
@@ -6886,7 +6891,7 @@ pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Tim
         };
         loop {
             use mochios_posix_client::time::{SleepObservation, observe_sleep};
-            let wake = control.sleep_wake_generation.load(Ordering::Acquire);
+            let wake = control.wait_generation.load(Ordering::Acquire);
             pthread_testcancel();
             let now = match monotonic_nanoseconds() {
                 Ok(now) => now,
@@ -6919,7 +6924,7 @@ pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Tim
                 SleepObservation::Waiting => {}
             }
             if let Err(error) = mochios_posix_client::synchronization::wait_u32(
-                &control.sleep_wake_generation,
+                &control.wait_generation,
                 wake,
                 deadline,
             ) {
@@ -7663,10 +7668,14 @@ pub unsafe extern "C" fn pthread_create(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_join(thread: Pthread, value: *mut *mut c_void) -> c_int {
+    pthread_testcancel();
     let Some(control) = thread_control(thread) else {
         return ESRCH;
     };
-    if current_thread_control().is_some_and(|(current, _)| current == thread) {
+    let Some((current, waiter)) = register_current_thread() else {
+        return EAGAIN;
+    };
+    if current == thread {
         return EDEADLK;
     }
     if control
@@ -7681,25 +7690,41 @@ pub unsafe extern "C" fn pthread_join(thread: Pthread, value: *mut *mut c_void) 
     {
         return EINVAL;
     }
+    // The join claim permits exactly one waiter. Publish its generation-tagged
+    // process-local token before inspecting target state, never an IPC pointer.
+    control.join_waiter.store(current, Ordering::Release);
     loop {
+        let wake = waiter.wait_generation.load(Ordering::Acquire);
+        join_cancel_point(control);
         let state = control.state.load(Ordering::Acquire);
         if state == THREAD_EXITED {
             match native_thread_retired(control) {
-                Ok(true) => break,
+                Ok(true) => {
+                    join_cancel_point(control);
+                    break;
+                }
                 Ok(false) => {
                     let _ = syscall::raw_syscall0(syscall::SyscallNumber::ThreadYield);
                     continue;
                 }
                 Err(error) => {
-                    control.joinability.store(THREAD_JOINABLE, Ordering::Release);
+                    release_join_claim(control);
                     return error;
                 }
             }
         }
         if !matches!(state, THREAD_STARTING | THREAD_RUNNING) {
+            release_join_claim(control);
             return ESRCH;
         }
-        native_mutex_wait(&control.state, state);
+        if let Err(error) = mochios_posix_client::synchronization::wait_u32(
+            &waiter.wait_generation,
+            wake,
+            syscall::ADDRESS_WAIT_INFINITE,
+        ) {
+            release_join_claim(control);
+            return map_kernel_errno(error.raw());
+        }
     }
     if !value.is_null() {
         unsafe { value.write(control.result.load(Ordering::Acquire) as *mut c_void) };
@@ -7714,10 +7739,37 @@ pub unsafe extern "C" fn pthread_join(thread: Pthread, value: *mut *mut c_void) 
         )
         .is_err()
     {
+        release_join_claim(control);
         return ESRCH;
     }
     release_thread_control(control);
     0
+}
+
+fn release_join_claim(control: &ThreadControl) {
+    control.join_waiter.store(0, Ordering::Release);
+    control.joinability.store(THREAD_JOINABLE, Ordering::Release);
+}
+
+fn join_cancel_point(target: &ThreadControl) {
+    let Some((_, caller)) = current_thread_control() else {
+        return;
+    };
+    if caller.cancel_state.load(Ordering::Acquire) == PTHREAD_CANCEL_ENABLE
+        && caller.cancel_pending.load(Ordering::Acquire) != 0
+    {
+        // ThreadExit does not unwind Rust guards. Undo the internal join claim
+        // explicitly before running application cleanup (which may join again).
+        release_join_claim(target);
+        finish_thread(caller, usize::MAX as *mut c_void);
+    }
+}
+
+fn notify_join_waiter(target: &ThreadControl) {
+    let token = target.join_waiter.load(Ordering::Acquire);
+    if let Some(waiter) = thread_control(token) {
+        notify_thread_waiter(waiter);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -7938,14 +7990,14 @@ pub extern "C" fn pthread_cancel(thread: Pthread) -> c_int {
         return ESRCH;
     };
     control.cancel_pending.store(1, Ordering::Release);
-    notify_sleep_waiter(control);
+    notify_thread_waiter(control);
     native_mutex_wake_all(&control.state);
     0
 }
 
-fn notify_sleep_waiter(control: &ThreadControl) {
-    control.sleep_wake_generation.fetch_add(1, Ordering::Release);
-    native_mutex_wake_all(&control.sleep_wake_generation);
+fn notify_thread_waiter(control: &ThreadControl) {
+    control.wait_generation.fetch_add(1, Ordering::Release);
+    native_mutex_wake_all(&control.wait_generation);
 }
 
 #[unsafe(no_mangle)]
