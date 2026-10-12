@@ -3319,30 +3319,39 @@ fn wait_for_handle_capacity(
         interests,
         observed: 0,
     };
-    let guard = mnu_abi::HandleWaitGuard {
-        address: (&control.nonrestart_signal_generation as *const AtomicU64) as u64,
-        expected: caught,
-    };
-    loop {
-        if control.nonrestart_signal_generation.load(Ordering::Acquire) != caught {
-            return Err(EINTR);
-        }
-        let result = syscall_errno(syscall::raw_syscall4(
-            syscall::SyscallNumber::HandleWaitManyGuarded,
-            (&mut item as *mut syscall::HandleWaitItem) as u64,
-            1,
-            syscall::HANDLE_WAIT_INFINITE,
-            (&guard as *const mnu_abi::HandleWaitGuard) as u64,
-        ));
-        if control.nonrestart_signal_generation.load(Ordering::Acquire) != caught {
-            return Err(EINTR);
-        }
-        match result {
-            Ok(_) => return Ok(item.observed),
-            Err(EAGAIN) => continue,
-            Err(errno) => return Err(errno),
-        }
-    }
+    mochios_posix_client::multiplex::wait_cancellable(
+        caught,
+        || control.nonrestart_signal_generation.load(Ordering::Acquire),
+        || {
+            control.cancel_state.load(Ordering::Acquire) == PTHREAD_CANCEL_ENABLE
+                && control.cancel_pending.load(Ordering::Acquire) != 0
+        },
+        || control.multiplex_generation.load(Ordering::Acquire),
+        |notification| {
+            let guard = mnu_abi::HandleWaitGuard {
+                address: (&control.multiplex_generation as *const AtomicU64) as u64,
+                expected: notification,
+            };
+            match syscall_errno(syscall::raw_syscall4(
+                syscall::SyscallNumber::HandleWaitManyGuarded,
+                (&mut item as *mut syscall::HandleWaitItem) as u64,
+                1,
+                syscall::HANDLE_WAIT_INFINITE,
+                (&guard as *const mnu_abi::HandleWaitGuard) as u64,
+            )) {
+                Ok(_) => Ok(true),
+                Err(EAGAIN) => Ok(false),
+                Err(error) => Err(error),
+            }
+        },
+        || Ok(false),
+    )
+    .map_err(|error| match error {
+        mochios_posix_client::multiplex::WaitError::Interrupted
+        | mochios_posix_client::multiplex::WaitError::Cancelled => EINTR,
+        mochios_posix_client::multiplex::WaitError::Io(error) => error,
+    })?;
+    Ok(item.observed)
 }
 
 fn stream_io<T>(
@@ -3364,6 +3373,13 @@ fn stream_io_since<T>(
     mut operation: impl FnMut() -> Result<T, c_int>,
 ) -> Result<T, c_int> {
     loop {
+        if control.cancel_state.load(Ordering::Acquire) == PTHREAD_CANCEL_ENABLE
+            && control.cancel_pending.load(Ordering::Acquire) != 0
+        {
+            // Return through callers so partial writes and owned temporary
+            // buffers are resolved before the public API cancels this thread.
+            return Err(EINTR);
+        }
         if control.nonrestart_signal_generation.load(Ordering::Acquire) != caught {
             return Err(EINTR);
         }
@@ -3668,7 +3684,19 @@ pub extern "C" fn _write(fd: c_int, buffer: *const c_void, length: usize) -> isi
 // reentrant wrappers still resolve through the plain POSIX spellings.
 #[unsafe(no_mangle)]
 pub extern "C" fn write(fd: c_int, buffer: *const c_void, length: usize) -> isize {
-    _write(fd, buffer, length)
+    pthread_testcancel();
+    finish_io_cancellation(_write(fd, buffer, length))
+}
+
+fn finish_io_cancellation(result: isize) -> isize {
+    // Report committed progress rather than hiding a transferred prefix. A
+    // pending request remains pending for the next cancellation point.
+    // _read/_write also back newlib stdio under FILE locks: only the public
+    // API exits a thread, after internal callers and their cleanup have returned.
+    if result <= 0 {
+        pthread_testcancel();
+    }
+    result
 }
 
 fn vector_errno(error: mochios_posix_client::io_vector::VectorError) -> c_int {
@@ -3718,6 +3746,7 @@ impl Drop for VectorBuffer {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn writev(fd: c_int, iov: *const IoVec, iovcnt: c_int) -> isize {
+    pthread_testcancel();
     if iovcnt < 0 {
         set_errno(EINVAL);
         return -1;
@@ -3765,7 +3794,7 @@ pub unsafe extern "C" fn writev(fd: c_int, iov: *const IoVec, iovcnt: c_int) -> 
             mochios_posix_client::io_vector::TransferError::Io(errno) => errno,
         })
     })();
-    result_with_errno(result, -1)
+    finish_io_cancellation(result_with_errno(result, -1))
 }
 
 #[unsafe(no_mangle)]
@@ -3783,7 +3812,8 @@ pub extern "C" fn _read(fd: c_int, buffer: *mut c_void, length: usize) -> isize 
 
 #[unsafe(no_mangle)]
 pub extern "C" fn read(fd: c_int, buffer: *mut c_void, length: usize) -> isize {
-    _read(fd, buffer, length)
+    pthread_testcancel();
+    finish_io_cancellation(_read(fd, buffer, length))
 }
 
 fn positioned_file_io(
@@ -3844,6 +3874,7 @@ pub extern "C" fn pwrite(fd: c_int, buffer: *const c_void, length: usize, offset
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn readv(fd: c_int, iov: *const IoVecMut, iovcnt: c_int) -> isize {
+    pthread_testcancel();
     if iovcnt < 0 {
         set_errno(EINVAL);
         return -1;
@@ -3891,7 +3922,7 @@ pub unsafe extern "C" fn readv(fd: c_int, iov: *const IoVecMut, iovcnt: c_int) -
             mochios_posix_client::io_vector::TransferError::Io(errno) => errno,
         })
     })();
-    result_with_errno(result, -1)
+    finish_io_cancellation(result_with_errno(result, -1))
 }
 
 #[unsafe(no_mangle)]
