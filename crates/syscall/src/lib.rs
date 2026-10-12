@@ -9,6 +9,7 @@ pub mod execution;
 pub use mnu_abi::{
     HandleInfo, HandleWaitGuard,
     ExecutionIdentity,
+    ProcessExecutionUsage,
     ADDRESS_WAIT_INFINITE, AddressWaitResult, ClockId, ClockInstant, EACCES, EAGAIN, EBADF, ECHILD,
     EEXIST, EFAULT, EINVAL, EIO, EISDIR, EMFILE, EMSGSIZE, ENODATA, ENOENT, ENOMEM, ENOSPC, ENOSYS,
     ENOTDIR, ENOTSUP, ENOTTY, ENXIO, EOVERFLOW, EPERM, EPIPE, ERANGE, ESRCH,

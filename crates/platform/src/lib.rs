@@ -525,6 +525,27 @@ pub mod process {
         Ok(status)
     }
 
+    /// Samples the CPU execution domains of the caller (None) or of a native
+    /// Process Handle granting WAIT. Process identifiers are never accepted.
+    pub fn execution_usage(handle: Option<u32>) -> SysResult<syscall::ProcessExecutionUsage> {
+        let raw = match handle {
+            None => 0,
+            Some(0) => return Err(syscall::SysError::from_raw(syscall::EINVAL as i64)),
+            Some(handle) => handle,
+        };
+        let mut usage = syscall::ProcessExecutionUsage::default();
+        syscall::call3(
+            syscall::SyscallNumber::ProcessExecutionRead,
+            u64::from(raw),
+            (&mut usage as *mut syscall::ProcessExecutionUsage) as u64,
+            core::mem::size_of::<syscall::ProcessExecutionUsage>() as u64,
+        )?;
+        if usage.ticks_per_second == 0 || usage.reserved != 0 {
+            return Err(syscall::SysError::from_raw(syscall::EIO as i64));
+        }
+        Ok(usage)
+    }
+
     pub fn wait_handle(
         handle: u32,
         deadline_nanoseconds: u64,
