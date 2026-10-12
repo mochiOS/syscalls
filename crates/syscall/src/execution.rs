@@ -1,6 +1,26 @@
 //! Native caller identification without credentials or service discovery.
 
-use super::{ExecutionIdentity, SysError, SysResult, SyscallNumber};
+use super::{ExecutionIdentity, ProcessExecutionUsage, SysError, SysResult, SyscallNumber};
+
+/// Observe only the caller (None) or an explicit WAIT-capable Process Handle.
+pub fn usage(handle: Option<u32>) -> SysResult<ProcessExecutionUsage> {
+    let raw = match handle {
+        None => 0,
+        Some(0) => return Err(SysError::from_raw(mnu_abi::EINVAL as i64)),
+        Some(handle) => handle,
+    };
+    let mut usage = ProcessExecutionUsage::default();
+    let status = super::call3(
+        SyscallNumber::ProcessExecutionRead,
+        u64::from(raw),
+        (&mut usage as *mut ProcessExecutionUsage) as u64,
+        core::mem::size_of::<ProcessExecutionUsage>() as u64,
+    )?;
+    if status != mnu_abi::SUCCESS || usage.ticks_per_second == 0 || usage.reserved != 0 {
+        return Err(SysError::from_raw(mnu_abi::EIO as i64));
+    }
+    Ok(usage)
+}
 
 pub fn identity() -> SysResult<ExecutionIdentity> {
     let mut identity = ExecutionIdentity::default();

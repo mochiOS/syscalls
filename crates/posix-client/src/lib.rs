@@ -5,6 +5,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use mochios_posix_protocol as protocol;
 
 pub mod configuration;
+pub mod accounting;
 pub mod inheritance;
 pub mod directory;
 pub mod io_vector;
@@ -184,6 +185,12 @@ impl<T: Transport> Client<T> {
         let mut response = [0u8; protocol::WAIT_RESULT_LEN];
         let length = self.request(protocol::OP_WAIT_CHILD, 0, &request, &mut response)?;
         protocol::decode_wait_result(&response[..length]).map_err(ClientError::Protocol)
+    }
+
+    pub fn waited_child_cpu_usage(&self) -> Result<protocol::WaitedChildCpuUsage, ClientError<T::Error>> {
+        let mut response = [0; protocol::WAITED_CHILD_CPU_USAGE_LEN];
+        let length = self.request(protocol::OP_WAITED_CHILD_CPU_USAGE, 0, &[], &mut response)?;
+        protocol::decode_waited_child_cpu_usage(&response[..length]).map_err(ClientError::Protocol)
     }
 
     pub fn thread_signal_epoch(&self) -> Result<u64, ClientError<T::Error>> {

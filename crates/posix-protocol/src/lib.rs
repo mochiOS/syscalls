@@ -220,6 +220,48 @@ pub const OP_SIGNAL_THREAD_SEND: u16 = 71;
 /// SignalWaitRequest; accepts one blocked signal for the authenticated thread.
 /// EAGAIN is internal to deferred service processing, not a polling reply.
 pub const OP_SIGNAL_THREAD_WAIT: u16 = 72;
+/// Empty request. Returns CPU counts of children waited for by the caller;
+/// caller identity comes only from authenticated transport metadata.
+pub const OP_WAITED_CHILD_CPU_USAGE: u16 = 73;
+pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WaitedChildCpuUsage {
+    pub user_ticks: u128,
+    pub kernel_ticks: u128,
+    pub ticks_per_second: u64,
+}
+
+pub fn encode_waited_child_cpu_usage(
+    usage: WaitedChildCpuUsage,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < WAITED_CHILD_CPU_USAGE_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    if usage.ticks_per_second == 0 && (usage.user_ticks != 0 || usage.kernel_ticks != 0) {
+        return Err(ProtocolError::InvalidLength);
+    }
+    output[..16].copy_from_slice(&usage.user_ticks.to_le_bytes());
+    output[16..32].copy_from_slice(&usage.kernel_ticks.to_le_bytes());
+    put_u64(output, 32, usage.ticks_per_second);
+    Ok(())
+}
+
+pub fn decode_waited_child_cpu_usage(input: &[u8]) -> Result<WaitedChildCpuUsage, ProtocolError> {
+    if input.len() != WAITED_CHILD_CPU_USAGE_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let usage = WaitedChildCpuUsage {
+        user_ticks: u128::from_le_bytes(input[..16].try_into().unwrap()),
+        kernel_ticks: u128::from_le_bytes(input[16..32].try_into().unwrap()),
+        ticks_per_second: get_u64(input, 32),
+    };
+    if usage.ticks_per_second == 0 && (usage.user_ticks != 0 || usage.kernel_ticks != 0) {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(usage)
+}
 pub const SIGNAL_WAIT_REQUEST_LEN: usize = 16;
 pub const WAIT_GUARDED_REQUEST_LEN: usize = 24;
 pub const SIGNAL_THREAD_MASK_LEN: usize = 16;

@@ -112,10 +112,10 @@ const CAPABILITY_SERVICE_NAME: &[u8] = b"capability.service";
 
 #[repr(C)]
 pub struct Tms {
-    tms_utime: i64,
-    tms_stime: i64,
-    tms_cutime: i64,
-    tms_cstime: i64,
+    tms_utime: u64,
+    tms_stime: u64,
+    tms_cutime: u64,
+    tms_cstime: u64,
 }
 
 #[repr(C)]
@@ -6577,24 +6577,59 @@ pub extern "C" fn pthread_kill(thread: Pthread, signal: c_int) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _times(buf: *mut Tms) -> i64 {
-    if !buf.is_null() {
-        unsafe {
-            *buf = Tms {
-                tms_utime: 0,
-                tms_stime: 0,
-                tms_cutime: 0,
-                tms_cstime: 0,
-            };
+pub extern "C" fn _times(buf: *mut Tms) -> u64 {
+    let result = (|| {
+        use mochios_posix_client::accounting::clock_ticks;
+        if buf.is_null() {
+            return elapsed_clock_ticks();
         }
+        let own = syscall::execution::usage(None)
+            .map_err(|error| map_kernel_errno(error.raw()))?;
+        let child = posix_client().map_err(map_posix_client_error)?
+            .waited_child_cpu_usage().map_err(map_posix_client_error)?;
+        let value = Tms {
+            tms_utime: clock_ticks(u128::from(own.user_ticks), own.ticks_per_second)?,
+            tms_stime: clock_ticks(u128::from(own.kernel_ticks), own.ticks_per_second)?,
+            tms_cutime: clock_ticks(child.user_ticks, child.ticks_per_second)?,
+            tms_cstime: clock_ticks(child.kernel_ticks, child.ticks_per_second)?,
+        };
+        let elapsed = elapsed_clock_ticks()?;
+        // No partial output on an unavailable service, bad metadata, or overflow.
+        unsafe { buf.write(value) };
+        Ok(elapsed)
+    })();
+    result_with_errno(result, u64::MAX)
+}
+
+fn elapsed_clock_ticks() -> Result<u64, c_int> {
+    let mut instant = mnu_abi::ClockInstant::default();
+    syscall_errno(syscall::raw_syscall2(
+        syscall::SyscallNumber::ClockRead,
+        mnu_abi::ClockId::Monotonic as u64,
+        (&mut instant as *mut mnu_abi::ClockInstant) as u64,
+    ))?;
+    if instant.reserved != 0 {
+        return Err(EIO);
     }
-    let result = syscall_errno(syscall::raw_syscall0(syscall::SyscallNumber::TimeNow))
-        .map(|ticks| ticks as i64);
-    result_with_errno(result, -1)
+    mochios_posix_client::accounting::elapsed_clock_ticks(instant.seconds, instant.nanoseconds)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn times(buf: *mut Tms) -> i64 {
+pub extern "C" fn clock() -> u64 {
+    let result = syscall::execution::usage(None)
+        .map_err(|error| map_kernel_errno(error.raw()))
+        .and_then(|usage| {
+            mochios_posix_client::accounting::clock_ticks(
+                u128::from(usage.user_ticks) + u128::from(usage.kernel_ticks),
+                usage.ticks_per_second,
+            )
+        });
+    // CPU-only ISO C clock stays native, including bootstrap without POSIX IPC.
+    result_with_errno(result, u64::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn times(buf: *mut Tms) -> u64 {
     _times(buf)
 }
 
