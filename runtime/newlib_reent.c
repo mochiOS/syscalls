@@ -52,3 +52,13 @@ int ftrylockfile(FILE *stream) {
 void funlockfile(FILE *stream) {
     _funlockfile(stream);
 }
+
+/* Use the same allocation, stream locking and cancellation scopes as newlib.
+ * The buffer is caller-owned and remains freeable after errors/cancellation. */
+ssize_t getdelim(char **lineptr, size_t *capacity, int delimiter, FILE *stream) {
+    return __getdelim(lineptr, capacity, delimiter, stream);
+}
+
+ssize_t getline(char **lineptr, size_t *capacity, FILE *stream) {
+    return __getdelim(lineptr, capacity, '\n', stream);
+}
