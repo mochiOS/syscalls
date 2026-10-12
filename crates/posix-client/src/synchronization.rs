@@ -46,6 +46,35 @@ pub fn wake_u64(address: &AtomicU64, maximum_count: usize) -> Result<usize, sysc
     wake_address(address as *const AtomicU64 as u64, maximum_count)
 }
 
+/// Waits on a 64-bit value and a separately snapshotted notification word.
+/// Both must retain their address and mapping until this call returns.
+pub fn wait_u64_guarded(
+    address: &AtomicU64,
+    expected: u64,
+    notification: &AtomicU64,
+    expected_notification: u64,
+    deadline_nanoseconds: u64,
+) -> Result<WaitStatus, syscall::SysError> {
+    let guard = syscall::AddressWaitGuard {
+        address: notification as *const AtomicU64 as u64,
+        expected: expected_notification,
+    };
+    let raw = syscall::call5(
+        syscall::SyscallNumber::WaitOnAddressGuarded,
+        address as *const AtomicU64 as u64,
+        expected,
+        core::mem::size_of::<u64>() as u64,
+        deadline_nanoseconds,
+        (&guard as *const syscall::AddressWaitGuard) as u64,
+    )?;
+    match syscall::AddressWaitResult::from_raw(raw) {
+        Some(syscall::AddressWaitResult::Awoken) => Ok(WaitStatus::Awoken),
+        Some(syscall::AddressWaitResult::ValueChanged) => Ok(WaitStatus::ValueChanged),
+        Some(syscall::AddressWaitResult::DeadlineReached) => Ok(WaitStatus::DeadlineReached),
+        None => Err(syscall::SysError::from_raw(syscall::EIO as i64)),
+    }
+}
+
 fn wake_address(address: u64, maximum_count: usize) -> Result<usize, syscall::SysError> {
     let raw = syscall::call2(
         syscall::SyscallNumber::WakeAddress,
