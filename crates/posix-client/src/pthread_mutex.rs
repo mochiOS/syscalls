@@ -107,6 +107,7 @@ impl Mutex {
         &self,
         thread: u64,
         mut wait: impl FnMut(&AtomicU32, u32) -> Result<(), E>,
+        mut wake: impl FnMut(&AtomicU32),
     ) -> Result<Result<(), Error>, E> {
         if let Err(error) = self.validate(thread) {
             return Ok(Err(error));
@@ -139,7 +140,16 @@ impl Mutex {
                 self.acquired(thread);
                 return Ok(Ok(()));
             }
-            wait(&self.state, 2)?;
+            if let Err(error) = wait(&self.state, 2) {
+                // An unlock may have selected this waiter just before the
+                // wait failed. Do not consume that wake without acquiring:
+                // another admitted waiter must get a chance to take the lock.
+                // Keep our registration until the handoff is complete.
+                if self.state.load(Ordering::Acquire) == 0 {
+                    wake(&self.state);
+                }
+                return Err(error);
+            }
         }
     }
 

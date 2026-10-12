@@ -164,23 +164,31 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut Mutex) -> c_int {
         Ok(thread) => thread,
         Err(err) => return err,
     };
-    match mutex.lock(thread, |address, expected| {
-        loop {
-            match mochios_posix_client::synchronization::wait_u32(
-                address,
-                expected,
-                syscall::ADDRESS_WAIT_INFINITE,
-            ) {
-                Ok(_) => return Ok(()),
-                Err(err) => {
-                    let err = map_kernel_errno(err.raw());
-                    if err != EINTR {
-                        return Err(err);
+    match mutex.lock(
+        thread,
+        |address, expected| {
+            loop {
+                match mochios_posix_client::synchronization::wait_u32(
+                    address,
+                    expected,
+                    syscall::ADDRESS_WAIT_INFINITE,
+                ) {
+                    Ok(_) => return Ok(()),
+                    Err(err) => {
+                        let err = map_kernel_errno(err.raw());
+                        if err != EINTR {
+                            return Err(err);
+                        }
                     }
                 }
             }
-        }
-    }) {
+        },
+        |address| {
+            // Preserve the original wait failure; the replacement wake does not
+            // turn this failed acquisition into a successful lock operation.
+            let _ = mochios_posix_client::synchronization::wake_u32(address, 1);
+        },
+    ) {
         Ok(result) => result.map_or_else(error, |()| 0),
         Err(err) => err,
     }
