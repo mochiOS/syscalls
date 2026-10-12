@@ -217,6 +217,10 @@ pub const OP_WAIT_CHILD_GUARDED: u16 = 70;
 /// SignalSendRequest with selector zero and one WAIT|SIGNAL ThreadHandle.
 /// Sender and target identities are obtained from native metadata only.
 pub const OP_SIGNAL_THREAD_SEND: u16 = 71;
+/// SignalWaitRequest; accepts one blocked signal for the authenticated thread.
+/// EAGAIN is internal to deferred service processing, not a polling reply.
+pub const OP_SIGNAL_THREAD_WAIT: u16 = 72;
+pub const SIGNAL_WAIT_REQUEST_LEN: usize = 16;
 pub const WAIT_GUARDED_REQUEST_LEN: usize = 24;
 pub const SIGNAL_THREAD_MASK_LEN: usize = 16;
 pub const SIGNAL_MASK_QUERY: u32 = 0;
@@ -1054,6 +1058,28 @@ pub fn encode_signal_mask(mask: u64, output: &mut [u8]) -> Result<(), ProtocolEr
     }
     put_u64(output, 0, mask);
     Ok(())
+}
+
+/// Contains only a selection mask and async delivery epoch, never an identity
+/// or pointer. Sender identity is authenticated by the native IPC endpoint.
+pub fn encode_signal_wait_request(
+    mask: u64,
+    epoch: u64,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < SIGNAL_WAIT_REQUEST_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    put_u64(output, 0, mask);
+    put_u64(output, 8, epoch);
+    Ok(())
+}
+
+pub fn decode_signal_wait_request(input: &[u8]) -> Result<(u64, u64), ProtocolError> {
+    if input.len() != SIGNAL_WAIT_REQUEST_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok((get_u64(input, 0), get_u64(input, 8)))
 }
 
 pub fn encode_signal_disposition(

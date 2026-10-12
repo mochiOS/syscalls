@@ -6339,6 +6339,37 @@ pub unsafe extern "C" fn sigpending(set: *mut u64) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigwait(set: *const u64, selected: *mut c_int) -> c_int {
+    let result = (|| {
+        if set.is_null() || selected.is_null() {
+            return Err(EFAULT);
+        }
+        let _ = register_current_thread().ok_or(EAGAIN)?;
+        let mask = unsafe { set.read() };
+        let client = posix_client().map_err(map_posix_client_error)?;
+        loop {
+            let epoch = client.thread_signal_epoch().map_err(map_posix_client_error)?;
+            match client.wait_thread_signal_since(mask, epoch) {
+                Ok(signal) => {
+                    // This signal was consumed synchronously. Do not dispatch
+                    // its handler or discard it due to a later async delivery.
+                    unsafe { selected.write(signal as c_int) };
+                    return Ok(());
+                }
+                Err(PosixClientError::Remote(posix_protocol::STATUS_EINTR)) => {
+                    // Unlike waitpid, sigwait retries unrelated caught signals
+                    // regardless of SA_RESTART, without unblocking its set.
+                    drain_pending_signals()?;
+                }
+                Err(error) => return Err(map_posix_client_error(error)),
+            }
+        }
+    })();
+    // POSIX thread APIs return the error number directly, not through errno.
+    result.err().unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn _signal_r(_reent: *mut c_void, signal: c_int, handler: usize) -> usize {
     let replacement = SignalAction {
         sa_flags: 0,

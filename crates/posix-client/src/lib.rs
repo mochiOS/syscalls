@@ -192,6 +192,31 @@ impl<T: Transport> Client<T> {
         protocol::decode_signal_mask(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    /// Waits for and accepts one signal without running its handler. The
+    /// service retains a blocked request; unrelated async delivery returns
+    /// EINTR so the runtime can dispatch it and retry with a fresh epoch.
+    pub fn wait_thread_signal_since(
+        &self,
+        mask: u64,
+        epoch: u64,
+    ) -> Result<u32, ClientError<T::Error>> {
+        let mut request = [0; protocol::SIGNAL_WAIT_REQUEST_LEN];
+        protocol::encode_signal_wait_request(mask, epoch, &mut request)
+            .map_err(ClientError::Protocol)?;
+        let mut response = [0; protocol::SIGNAL_MASK_LEN];
+        let length = self.request(protocol::OP_SIGNAL_THREAD_WAIT, 0, &request, &mut response)?;
+        let signal = protocol::decode_signal_mask(&response[..length])
+            .map_err(ClientError::Protocol)?;
+        if !(1..=u64::from(protocol::SIGNAL_MAX)).contains(&signal)
+            || mask & (1u64 << (signal - 1)) == 0
+            || signal == u64::from(protocol::SIGNAL_KILL)
+            || signal == u64::from(protocol::SIGNAL_STOP)
+        {
+            return Err(ClientError::Protocol(protocol::ProtocolError::InvalidLength));
+        }
+        Ok(signal as u32)
+    }
+
     pub fn wait_child_since(
         &self,
         selector: i64,
