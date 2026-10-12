@@ -3,6 +3,7 @@
 mod child_cleanup;
 mod credentials;
 mod groups;
+mod stdio_cancellation;
 mod thread_cleanup;
 
 use core::cell::UnsafeCell;
@@ -224,6 +225,7 @@ struct ThreadControl {
     wait_generation: AtomicU32,
     multiplex_generation: AtomicU64,
     cleanup_head: AtomicUsize,
+    stdio_scope: stdio_cancellation::Scope,
     signal_mask: AtomicU64,
     caught_signal_generation: AtomicU64,
     nonrestart_signal_generation: AtomicU64,
@@ -259,6 +261,7 @@ impl ThreadControl {
             wait_generation: AtomicU32::new(0),
             multiplex_generation: AtomicU64::new(0),
             cleanup_head: AtomicUsize::new(0),
+            stdio_scope: stdio_cancellation::Scope::new(),
             signal_mask: AtomicU64::new(0),
             caught_signal_generation: AtomicU64::new(0),
             nonrestart_signal_generation: AtomicU64::new(0),
@@ -1003,6 +1006,7 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
         control.wait_generation.store(0, Ordering::Relaxed);
         control.multiplex_generation.store(0, Ordering::Relaxed);
         control.cleanup_head.store(0, Ordering::Relaxed);
+        control.stdio_scope.reset();
         control.signal_mask.store(0, Ordering::Relaxed);
         control.caught_signal_generation.store(0, Ordering::Relaxed);
         control.nonrestart_signal_generation.store(0, Ordering::Relaxed);
@@ -1041,7 +1045,17 @@ fn release_thread_control(control: &ThreadControl) {
     let reent = control.reent.swap(0, Ordering::Relaxed);
     let reent_mapping_size = control.reent_mapping_size.swap(0, Ordering::Relaxed);
     if reent != 0 && reent_mapping_size != 0 {
+        // Reclamation is internal to join/detach/startup cleanup, not an
+        // application stdio cancellation point. Do not abandon its owned TCB
+        // and mappings if reent cleanup happens to flush a stream.
+        let caller = current_thread_control();
+        let previous = caller.map(|(_, caller)| {
+            caller.cancel_state.swap(PTHREAD_CANCEL_DISABLE, Ordering::AcqRel)
+        });
         unsafe { __mochios_reent_destroy(reent as *mut c_void) };
+        if let (Some((_, caller)), Some(previous)) = (caller, previous) {
+            caller.cancel_state.store(previous, Ordering::Release);
+        }
         let _ = syscall::raw_syscall2(
             syscall::SyscallNumber::MemoryUnmap,
             reent as u64,
@@ -1071,6 +1085,7 @@ fn release_thread_control(control: &ThreadControl) {
     control.wait_generation.store(0, Ordering::Relaxed);
     control.multiplex_generation.store(0, Ordering::Relaxed);
     control.cleanup_head.store(0, Ordering::Relaxed);
+    control.stdio_scope.reset();
     control.signal_mask.store(0, Ordering::Relaxed);
     control.caught_signal_generation.store(0, Ordering::Relaxed);
     control.nonrestart_signal_generation.store(0, Ordering::Relaxed);
@@ -3322,10 +3337,7 @@ fn wait_for_handle_capacity(
     mochios_posix_client::multiplex::wait_cancellable(
         caught,
         || control.nonrestart_signal_generation.load(Ordering::Acquire),
-        || {
-            control.cancel_state.load(Ordering::Acquire) == PTHREAD_CANCEL_ENABLE
-                && control.cancel_pending.load(Ordering::Acquire) != 0
-        },
+        || io_cancellation_requested(control),
         || control.multiplex_generation.load(Ordering::Acquire),
         |notification| {
             let guard = mnu_abi::HandleWaitGuard {
@@ -3373,9 +3385,7 @@ fn stream_io_since<T>(
     mut operation: impl FnMut() -> Result<T, c_int>,
 ) -> Result<T, c_int> {
     loop {
-        if control.cancel_state.load(Ordering::Acquire) == PTHREAD_CANCEL_ENABLE
-            && control.cancel_pending.load(Ordering::Acquire) != 0
-        {
+        if io_cancellation_requested(control) {
             // Return through callers so partial writes and owned temporary
             // buffers are resolved before the public API cancels this thread.
             return Err(EINTR);
@@ -3391,6 +3401,47 @@ fn stream_io_since<T>(
             }
             result => return result,
         }
+    }
+}
+
+fn io_cancellation_requested(control: &ThreadControl) -> bool {
+    control.cancel_pending.load(Ordering::Acquire) != 0
+        && (control.cancel_state.load(Ordering::Acquire) == PTHREAD_CANCEL_ENABLE
+            || control.stdio_scope.permits_interrupt())
+}
+
+fn record_stdio_io(result: &Result<isize, c_int>) {
+    let Some((_, control)) = current_thread_control() else {
+        return;
+    };
+    match result {
+        Ok(count) if *count > 0 => control.stdio_scope.note_progress(),
+        Err(EINTR) if io_cancellation_requested(control) => control.stdio_scope.note_interruption(),
+        _ => {}
+    }
+}
+
+/// Internal newlib hook, called after cancellation is disabled but before a
+/// FILE/list lock is acquired. No kernel or IPC ABI knows about this scope.
+#[unsafe(no_mangle)]
+pub extern "C" fn __mochios_stdio_cancel_enter(previous: c_int) {
+    let (_, control) = current_thread_control().unwrap_or_else(|| process_exit(127));
+    if !control
+        .stdio_scope
+        .enter(previous as u32 == PTHREAD_CANCEL_ENABLE)
+    {
+        process_exit(127);
+    }
+}
+
+/// Called only after newlib unlocks and restores the previous cancel state.
+#[unsafe(no_mangle)]
+pub extern "C" fn __mochios_stdio_cancel_leave() {
+    let (_, control) = current_thread_control().unwrap_or_else(|| process_exit(127));
+    match control.stdio_scope.leave() {
+        Some(true) => pthread_testcancel(),
+        Some(false) => {}
+        None => process_exit(127),
     }
 }
 
@@ -3677,6 +3728,7 @@ pub extern "C" fn _write(fd: c_int, buffer: *const c_void, length: usize) -> isi
         let entry = with_fd_entry(fd)?;
         syscall_write(entry, buffer, length)
     })();
+    record_stdio_io(&result);
     result_with_errno(result, -1)
 }
 
@@ -3807,6 +3859,7 @@ pub extern "C" fn _read(fd: c_int, buffer: *mut c_void, length: usize) -> isize 
         let entry = with_fd_entry(fd)?;
         syscall_read(entry, buffer, length)
     })();
+    record_stdio_io(&result);
     result_with_errno(result, -1)
 }
 
