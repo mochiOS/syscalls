@@ -222,6 +222,7 @@ struct ThreadControl {
     cancel_type: AtomicU32,
     cancel_pending: AtomicU32,
     wait_generation: AtomicU32,
+    multiplex_generation: AtomicU64,
     cleanup_head: AtomicUsize,
     signal_mask: AtomicU64,
     caught_signal_generation: AtomicU64,
@@ -256,6 +257,7 @@ impl ThreadControl {
             cancel_type: AtomicU32::new(PTHREAD_CANCEL_DEFERRED),
             cancel_pending: AtomicU32::new(0),
             wait_generation: AtomicU32::new(0),
+            multiplex_generation: AtomicU64::new(0),
             cleanup_head: AtomicUsize::new(0),
             signal_mask: AtomicU64::new(0),
             caught_signal_generation: AtomicU64::new(0),
@@ -899,6 +901,12 @@ fn native_mutex_wake_all(state: &AtomicU32) {
     }
 }
 
+fn native_counter_wake_all(state: &AtomicU64) {
+    if mochios_posix_client::synchronization::wake_u64(state, usize::MAX).is_err() {
+        process_exit(127);
+    }
+}
+
 fn native_mutex_acquire(state: &AtomicU32) {
     if state
         .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
@@ -993,6 +1001,7 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
             .store(PTHREAD_CANCEL_DEFERRED, Ordering::Relaxed);
         control.cancel_pending.store(0, Ordering::Relaxed);
         control.wait_generation.store(0, Ordering::Relaxed);
+        control.multiplex_generation.store(0, Ordering::Relaxed);
         control.cleanup_head.store(0, Ordering::Relaxed);
         control.signal_mask.store(0, Ordering::Relaxed);
         control.caught_signal_generation.store(0, Ordering::Relaxed);
@@ -1060,6 +1069,7 @@ fn release_thread_control(control: &ThreadControl) {
     control.join_waiter.store(0, Ordering::Relaxed);
     control.cancel_pending.store(0, Ordering::Relaxed);
     control.wait_generation.store(0, Ordering::Relaxed);
+    control.multiplex_generation.store(0, Ordering::Relaxed);
     control.cleanup_head.store(0, Ordering::Relaxed);
     control.signal_mask.store(0, Ordering::Relaxed);
     control.caught_signal_generation.store(0, Ordering::Relaxed);
@@ -4313,23 +4323,30 @@ fn wait_for_multiplex(
     control: &ThreadControl,
     caught: u64,
 ) -> Result<(), c_int> {
-    let guard = syscall::HandleWaitGuard {
-        address: (&control.caught_signal_generation as *const AtomicU64) as u64,
-        expected: caught,
-    };
-    mochios_posix_client::multiplex::wait(
+    mochios_posix_client::multiplex::wait_cancellable(
         caught,
         || control.caught_signal_generation.load(Ordering::Acquire),
-        || match syscall_errno(syscall::raw_syscall4(
-            syscall::SyscallNumber::HandleWaitManyGuarded,
-            items.as_mut_ptr() as u64,
-            items.len() as u64,
-            deadline,
-            (&guard as *const syscall::HandleWaitGuard) as u64,
-        )) {
-            Ok(_) => Ok(true),
-            Err(EAGAIN) => Ok(false),
-            Err(error) => Err(error),
+        || {
+            control.cancel_state.load(Ordering::Acquire) == PTHREAD_CANCEL_ENABLE
+                && control.cancel_pending.load(Ordering::Acquire) != 0
+        },
+        || control.multiplex_generation.load(Ordering::Acquire),
+        |notification| {
+            let guard = syscall::HandleWaitGuard {
+                address: (&control.multiplex_generation as *const AtomicU64) as u64,
+                expected: notification,
+            };
+            match syscall_errno(syscall::raw_syscall4(
+                syscall::SyscallNumber::HandleWaitManyGuarded,
+                items.as_mut_ptr() as u64,
+                items.len() as u64,
+                deadline,
+                (&guard as *const syscall::HandleWaitGuard) as u64,
+            )) {
+                Ok(_) => Ok(true),
+                Err(EAGAIN) => Ok(false),
+                Err(error) => Err(error),
+            }
         },
         || {
             if deadline == syscall::HANDLE_WAIT_POLL {
@@ -4343,6 +4360,8 @@ fn wait_for_multiplex(
     )
     .map_err(|error| match error {
         mochios_posix_client::multiplex::WaitError::Interrupted => EINTR,
+        // Masked waits restore their mask before the public API cancels.
+        mochios_posix_client::multiplex::WaitError::Cancelled => EINTR,
         mochios_posix_client::multiplex::WaitError::Io(error) => error,
     })
 }
@@ -4375,6 +4394,7 @@ pub extern "C" fn select(
     exceptfds: *mut FdSet,
     timeout: *mut Timeval,
 ) -> c_int {
+    pthread_testcancel();
     let result = (|| {
         if nfds < 0 || nfds as usize > MAX_FDS {
             return Err(EINVAL);
@@ -4384,6 +4404,7 @@ pub extern "C" fn select(
         let deadline = select_deadline(timeout)?;
         select_with_deadline(nfds, readfds, writefds, exceptfds, deadline, control, caught)
     })();
+    pthread_testcancel();
     result_with_errno(result, -1)
 }
 
@@ -4545,6 +4566,7 @@ fn select_with_deadline(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: c_int) -> c_int {
+    pthread_testcancel();
     let result = (|| {
         if nfds as usize > MAX_FDS {
             return Err(EINVAL);
@@ -4560,6 +4582,7 @@ pub extern "C" fn poll(fds: *mut PollFd, nfds: u32, timeout_ms: c_int) -> c_int 
         };
         poll_with_deadline(fds, nfds, deadline, control, caught)
     })();
+    pthread_testcancel();
     result_with_errno(result, -1)
 }
 
@@ -4730,6 +4753,7 @@ pub extern "C" fn pselect(
     timeout: *const NewlibTimespec,
     mask: *const u64,
 ) -> c_int {
+    pthread_testcancel();
     let result = timespec_deadline(timeout).and_then(|deadline| {
         masked_multiplex(mask, |control, caught| {
             select_with_deadline(
@@ -4737,6 +4761,7 @@ pub extern "C" fn pselect(
             )
         })
     });
+    pthread_testcancel();
     result_with_errno(result, -1)
 }
 
@@ -4747,11 +4772,13 @@ pub extern "C" fn ppoll(
     timeout: *const NewlibTimespec,
     mask: *const u64,
 ) -> c_int {
+    pthread_testcancel();
     let result = timespec_deadline(timeout).and_then(|deadline| {
         masked_multiplex(mask, |control, caught| {
             poll_with_deadline(fds, nfds, deadline, control, caught)
         })
     });
+    pthread_testcancel();
     result_with_errno(result, -1)
 }
 
@@ -4766,16 +4793,22 @@ fn suspend_with_signal_mask(mask: *const u64) -> Result<c_int, c_int> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn pause() -> c_int {
-    result_with_errno(suspend_with_signal_mask(ptr::null()), -1)
+    pthread_testcancel();
+    let result = suspend_with_signal_mask(ptr::null());
+    pthread_testcancel();
+    result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn sigsuspend(mask: *const u64) -> c_int {
+    pthread_testcancel();
     if mask.is_null() {
         set_errno(EFAULT);
         return -1;
     }
-    result_with_errno(suspend_with_signal_mask(mask), -1)
+    let result = suspend_with_signal_mask(mask);
+    pthread_testcancel();
+    result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
@@ -7996,6 +8029,8 @@ pub extern "C" fn pthread_cancel(thread: Pthread) -> c_int {
 }
 
 fn notify_thread_waiter(control: &ThreadControl) {
+    control.multiplex_generation.fetch_add(1, Ordering::Release);
+    native_counter_wake_all(&control.multiplex_generation);
     control.wait_generation.fetch_add(1, Ordering::Release);
     native_mutex_wake_all(&control.wait_generation);
 }

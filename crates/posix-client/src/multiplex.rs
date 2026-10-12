@@ -43,6 +43,7 @@ pub fn with_signal_mask<T, E>(
 #[derive(Debug, PartialEq, Eq)]
 pub enum WaitError<E> {
     Interrupted,
+    Cancelled,
     Io(E),
 }
 
@@ -54,13 +55,43 @@ pub fn wait<E>(
     captured: u64,
     generation: impl Fn() -> u64,
     mut native_wait: impl FnMut() -> Result<bool, E>,
+    expired: impl FnMut() -> Result<bool, E>,
+) -> Result<(), WaitError<E>> {
+    wait_cancellable(
+        captured,
+        &generation,
+        || false,
+        &generation,
+        |_| native_wait(),
+        expired,
+    )
+}
+
+/// Keeps caught signals and cancellation distinct. The notification snapshot
+/// precedes predicate checks and is the backend's native admission guard.
+/// Disabled cancellation may wake the wait, but does not interrupt or spin.
+/// Cancellation is returned so callers can restore temporary state before
+/// running application cleanup; this function never exits a thread.
+pub fn wait_cancellable<E>(
+    captured: u64,
+    generation: impl Fn() -> u64,
+    cancellation_requested: impl Fn() -> bool,
+    notification_generation: impl Fn() -> u64,
+    mut native_wait: impl FnMut(u64) -> Result<bool, E>,
     mut expired: impl FnMut() -> Result<bool, E>,
 ) -> Result<(), WaitError<E>> {
     loop {
+        let notification = notification_generation();
+        if cancellation_requested() {
+            return Err(WaitError::Cancelled);
+        }
         if generation() != captured {
             return Err(WaitError::Interrupted);
         }
-        let ready = native_wait().map_err(WaitError::Io)?;
+        let ready = native_wait(notification).map_err(WaitError::Io)?;
+        if cancellation_requested() {
+            return Err(WaitError::Cancelled);
+        }
         if generation() != captured {
             return Err(WaitError::Interrupted);
         }

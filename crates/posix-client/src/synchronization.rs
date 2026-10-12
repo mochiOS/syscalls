@@ -1,6 +1,6 @@
 //! Native fast path for process-local and shared-memory synchronization.
 
-use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicU32, AtomicU64};
 
 use mochi_user_syscall as syscall;
 
@@ -37,13 +37,19 @@ pub fn wait_u32(
 }
 
 /// Wakes up to `maximum_count` waiters for `address`.
-pub fn wake_u32(
-    address: &AtomicU32,
-    maximum_count: usize,
-) -> Result<usize, syscall::SysError> {
+pub fn wake_u32(address: &AtomicU32, maximum_count: usize) -> Result<usize, syscall::SysError> {
+    wake_address(address as *const AtomicU32 as u64, maximum_count)
+}
+
+/// Wakes address and guarded-object waiters subscribed to a 64-bit counter.
+pub fn wake_u64(address: &AtomicU64, maximum_count: usize) -> Result<usize, syscall::SysError> {
+    wake_address(address as *const AtomicU64 as u64, maximum_count)
+}
+
+fn wake_address(address: u64, maximum_count: usize) -> Result<usize, syscall::SysError> {
     let raw = syscall::call2(
         syscall::SyscallNumber::WakeAddress,
-        address as *const AtomicU32 as u64,
+        address,
         maximum_count as u64,
     )?;
     usize::try_from(raw).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
