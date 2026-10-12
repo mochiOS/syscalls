@@ -3,6 +3,7 @@
 mod child_cleanup;
 mod credentials;
 mod groups;
+mod thread_cleanup;
 
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_void};
@@ -219,6 +220,7 @@ struct ThreadControl {
     cancel_state: AtomicU32,
     cancel_type: AtomicU32,
     cancel_pending: AtomicU32,
+    cleanup_head: AtomicUsize,
     signal_mask: AtomicU64,
     caught_signal_generation: AtomicU64,
     nonrestart_signal_generation: AtomicU64,
@@ -250,6 +252,7 @@ impl ThreadControl {
             cancel_state: AtomicU32::new(PTHREAD_CANCEL_ENABLE),
             cancel_type: AtomicU32::new(PTHREAD_CANCEL_DEFERRED),
             cancel_pending: AtomicU32::new(0),
+            cleanup_head: AtomicUsize::new(0),
             signal_mask: AtomicU64::new(0),
             caught_signal_generation: AtomicU64::new(0),
             nonrestart_signal_generation: AtomicU64::new(0),
@@ -985,6 +988,7 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
             .cancel_type
             .store(PTHREAD_CANCEL_DEFERRED, Ordering::Relaxed);
         control.cancel_pending.store(0, Ordering::Relaxed);
+        control.cleanup_head.store(0, Ordering::Relaxed);
         control.signal_mask.store(0, Ordering::Relaxed);
         control.caught_signal_generation.store(0, Ordering::Relaxed);
         control.nonrestart_signal_generation.store(0, Ordering::Relaxed);
@@ -1049,6 +1053,7 @@ fn release_thread_control(control: &ThreadControl) {
         .joinability
         .store(THREAD_JOINABLE, Ordering::Relaxed);
     control.cancel_pending.store(0, Ordering::Relaxed);
+    control.cleanup_head.store(0, Ordering::Relaxed);
     control.signal_mask.store(0, Ordering::Relaxed);
     control.caught_signal_generation.store(0, Ordering::Relaxed);
     control.nonrestart_signal_generation.store(0, Ordering::Relaxed);
@@ -1321,6 +1326,7 @@ fn finish_thread(control: &ThreadControl, result: *mut c_void) -> ! {
     // cancellation, including when a TLS destructor calls a cancellation point.
     control.cancel_state.store(PTHREAD_CANCEL_DISABLE, Ordering::Release);
     control.cancel_type.store(PTHREAD_CANCEL_DEFERRED, Ordering::Release);
+    unsafe { thread_cleanup::drain(&control.cleanup_head) };
     run_thread_specific_destructors(control);
     control.result.store(result as usize, Ordering::Relaxed);
     control.state.store(THREAD_EXITED, Ordering::Release);
@@ -7821,6 +7827,47 @@ pub extern "C" fn pthread_getspecific(key: PthreadKey) -> *mut c_void {
         return ptr::null_mut();
     }
     thread.specific_values[token.slot()].load(Ordering::Acquire) as *mut c_void
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _pthread_cleanup_push(
+    context: *mut thread_cleanup::Context,
+    routine: Option<thread_cleanup::Routine>,
+    argument: *mut c_void,
+) {
+    if context.is_null() {
+        process_exit(127);
+    }
+    let (_, control) = register_current_thread().unwrap_or_else(|| process_exit(127));
+    let cancel_type = control.cancel_type.load(Ordering::Acquire) as c_int;
+    unsafe { thread_cleanup::push(&control.cleanup_head, context, routine, argument, cancel_type) };
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _pthread_cleanup_pop(context: *mut thread_cleanup::Context, execute: c_int) {
+    let (_, control) = register_current_thread().unwrap_or_else(|| process_exit(127));
+    let _ = unsafe { thread_cleanup::pop(&control.cleanup_head, context, execute != 0) };
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _pthread_cleanup_push_defer(
+    context: *mut thread_cleanup::Context,
+    routine: Option<thread_cleanup::Routine>,
+    argument: *mut c_void,
+) {
+    // Asynchronous cancellation is not yet supported, so the saved type is
+    // currently deferred. Preserve it using the SDK context for future support.
+    unsafe { _pthread_cleanup_push(context, routine, argument) };
+    let (_, control) = register_current_thread().unwrap_or_else(|| process_exit(127));
+    control.cancel_type.store(PTHREAD_CANCEL_DEFERRED, Ordering::Release);
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn _pthread_cleanup_pop_restore(context: *mut thread_cleanup::Context, execute: c_int) {
+    let (_, control) = register_current_thread().unwrap_or_else(|| process_exit(127));
+    if let Some(previous) = unsafe { thread_cleanup::pop(&control.cleanup_head, context, execute != 0) } {
+        control.cancel_type.store(previous as u32, Ordering::Release);
+    }
 }
 
 #[unsafe(no_mangle)]
