@@ -6820,13 +6820,16 @@ pub extern "C" fn getentropy(buffer: *mut c_void, length: usize) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn clock_gettime(clock_id: c_int, tp: *mut Timespec) -> c_int {
+pub extern "C" fn clock_gettime(clock_id: u64, tp: *mut Timespec) -> c_int {
     if tp.is_null() {
         set_errno(EFAULT);
         return -1;
     }
 
-    let native_clock = match mochios_posix_client::time::classify_clock_id(clock_id) {
+    let native_clock = match c_int::try_from(clock_id)
+        .ok()
+        .and_then(mochios_posix_client::time::classify_clock_id)
+    {
         Some(mochios_posix_client::time::ClockKind::Realtime) => mnu_abi::ClockId::Realtime,
         Some(mochios_posix_client::time::ClockKind::Monotonic) => mnu_abi::ClockId::Monotonic,
         Some(mochios_posix_client::time::ClockKind::ProcessCpu) => mnu_abi::ClockId::ProcessCpu,
@@ -6870,7 +6873,7 @@ pub extern "C" fn sched_yield() -> c_int {
 /// Unlike nanosleep, POSIX clock_nanosleep returns an error number directly.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clock_nanosleep(
-    clock_id: c_int,
+    clock_id: u64,
     flags: c_int,
     request: *const Timespec,
     remaining: *mut Timespec,
@@ -6883,6 +6886,7 @@ pub unsafe extern "C" fn clock_nanosleep(
             return Err(EFAULT);
         }
         let request = unsafe { request.read() };
+        let clock_id = c_int::try_from(clock_id).map_err(|_| EINVAL)?;
         let spec = ClockSleep::parse(clock_id, flags, request.tv_sec, request.tv_nsec)?;
         if !spec.absolute && spec.nanoseconds == 0 {
             return Ok(());
