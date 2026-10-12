@@ -7316,10 +7316,35 @@ pub extern "C" fn _waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_
         if options & !(WNOHANG | WUNTRACED | WCONTINUED) != 0 {
             return Err(EINVAL);
         }
+        let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+        let caught = control.nonrestart_signal_generation.load(Ordering::Acquire);
         let client = posix_client().map_err(map_posix_client_error)?;
-        let waited = client
-            .wait_child(pid as i64, options as u32)
-            .map_err(map_posix_client_error)?;
+        let waited = if options & WNOHANG != 0 {
+            client
+                .wait_child(pid as i64, options as u32)
+                .map_err(map_posix_client_error)?
+        } else {
+            loop {
+                if control.nonrestart_signal_generation.load(Ordering::Acquire) != caught {
+                    return Err(EINTR);
+                }
+                let epoch = client
+                    .thread_signal_epoch()
+                    .map_err(map_posix_client_error)?;
+                if control.nonrestart_signal_generation.load(Ordering::Acquire) != caught {
+                    return Err(EINTR);
+                }
+                match client.wait_child_since(pid as i64, options as u32, epoch) {
+                    Ok(waited) => break waited,
+                    Err(PosixClientError::Remote(posix_protocol::STATUS_EINTR)) => {
+                        // The server did not consume any child event. Dispatch
+                        // before choosing EINTR, restart, or default stop/resume.
+                        drain_pending_signals()?;
+                    }
+                    Err(error) => return Err(map_posix_client_error(error)),
+                }
+            }
+        };
         if waited.process_id == 0 {
             return Ok(0);
         }

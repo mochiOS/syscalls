@@ -186,6 +186,30 @@ impl<T: Transport> Client<T> {
         protocol::decode_wait_result(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    pub fn thread_signal_epoch(&self) -> Result<u64, ClientError<T::Error>> {
+        let mut response = [0; protocol::SIGNAL_MASK_LEN];
+        let length = self.request(protocol::OP_SIGNAL_THREAD_EPOCH, 0, &[], &mut response)?;
+        protocol::decode_signal_mask(&response[..length]).map_err(ClientError::Protocol)
+    }
+
+    pub fn wait_child_since(
+        &self,
+        selector: i64,
+        options: u32,
+        epoch: u64,
+    ) -> Result<protocol::WaitResult, ClientError<T::Error>> {
+        let mut request = [0; protocol::WAIT_GUARDED_REQUEST_LEN];
+        protocol::encode_guarded_wait_request(
+            protocol::WaitRequest { selector, options },
+            epoch,
+            &mut request,
+        )
+        .map_err(ClientError::Protocol)?;
+        let mut response = [0; protocol::WAIT_RESULT_LEN];
+        let length = self.request(protocol::OP_WAIT_CHILD_GUARDED, 0, &request, &mut response)?;
+        protocol::decode_wait_result(&response[..length]).map_err(ClientError::Protocol)
+    }
+
     /// Reports a default job-control stop for the authenticated calling
     /// process. The request intentionally carries no process identifier.
     pub fn report_process_stopped(

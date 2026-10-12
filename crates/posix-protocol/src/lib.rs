@@ -209,6 +209,12 @@ pub const OP_SIGNAL_THREAD_PENDING: u16 = 67;
 /// SignalSendRequest with selector zero; the target is the authenticated caller
 /// thread, never a client-provided PID or TID.
 pub const OP_SIGNAL_THREAD_RAISE: u16 = 68;
+/// Empty payload; returns the authenticated thread's signal-delivery sequence.
+pub const OP_SIGNAL_THREAD_EPOCH: u16 = 69;
+/// WaitRequest followed by a u64 delivery epoch. Caller identity is supplied
+/// by authenticated endpoint metadata, not the request payload.
+pub const OP_WAIT_CHILD_GUARDED: u16 = 70;
+pub const WAIT_GUARDED_REQUEST_LEN: usize = 24;
 pub const SIGNAL_THREAD_MASK_LEN: usize = 16;
 pub const SIGNAL_MASK_QUERY: u32 = 0;
 pub const SIGNAL_MASK_SET: u32 = 1;
@@ -948,6 +954,29 @@ pub fn decode_wait_request(input: &[u8]) -> Result<WaitRequest, ProtocolError> {
         selector: get_u64(input, 0) as i64,
         options: get_u32(input, 8),
     })
+}
+
+pub fn encode_guarded_wait_request(
+    request: WaitRequest,
+    epoch: u64,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < WAIT_GUARDED_REQUEST_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    encode_wait_request(request, &mut output[..WAIT_REQUEST_LEN])?;
+    put_u64(output, WAIT_REQUEST_LEN, epoch);
+    Ok(())
+}
+
+pub fn decode_guarded_wait_request(input: &[u8]) -> Result<(WaitRequest, u64), ProtocolError> {
+    if input.len() != WAIT_GUARDED_REQUEST_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok((
+        decode_wait_request(&input[..WAIT_REQUEST_LEN])?,
+        get_u64(input, WAIT_REQUEST_LEN),
+    ))
 }
 
 pub fn encode_wait_result(result: WaitResult, output: &mut [u8]) -> Result<(), ProtocolError> {
