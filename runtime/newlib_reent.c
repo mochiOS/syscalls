@@ -2,7 +2,9 @@
 #include <errno.h>
 #include <signal.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
+#include <sys/stdio.h>
 
 extern void __sinit(struct _reent *);
 
@@ -30,4 +32,23 @@ int _raise_r(struct _reent *reent, int signal) {
         _REENT_ERRNO(reent) = errno;
     }
     return result;
+}
+
+/* Share the actual FILE lock with newlib's internal stdio operations. These
+ * ownership operations are not cancellation points. String-only pseudo-FILEs
+ * have no initialized lock, just as in newlib's internal locking macros. */
+void flockfile(FILE *stream) {
+    _flockfile(stream);
+}
+
+int ftrylockfile(FILE *stream) {
+    if (stream->_flags & __SSTR) {
+        return 0;
+    }
+    /* The retargetable lock reports one on acquisition; POSIX reports zero. */
+    return __lock_try_acquire_recursive(stream->_lock) ? 0 : 1;
+}
+
+void funlockfile(FILE *stream) {
+    _funlockfile(stream);
 }
