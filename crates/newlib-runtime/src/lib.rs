@@ -4,6 +4,7 @@ mod child_cleanup;
 mod credentials;
 mod groups;
 mod pthread_mutex;
+mod pthread_cond;
 mod stdio_cancellation;
 mod thread_cleanup;
 

@@ -82,6 +82,15 @@ impl Mutex {
         self.owner.store(thread, Ordering::Release);
     }
 
+    pub fn check_owner(&self, thread: u64) -> Result<(), Error> {
+        self.validate(thread)?;
+        if self.owner.load(Ordering::Acquire) == thread {
+            Ok(())
+        } else {
+            Err(Error::NotOwner)
+        }
+    }
+
     pub fn try_lock(&self, thread: u64) -> Result<(), Error> {
         self.validate(thread)?;
         if self.relock(thread, true)? {
