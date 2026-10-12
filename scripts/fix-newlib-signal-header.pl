@@ -25,6 +25,11 @@ unless ($text =~ /^#define SA_RESTART 0x10000000$/m) {
         "#if defined(__mochios__) && !defined(SA_RESTART)\n" .
         "#define SA_RESTART 0x10000000\n#endif\n";
 }
+unless ($text =~ /^#define SA_NOCLDWAIT 0x2$/m) {
+    $text .= "\n/* mochiOS userspace child-status retention policy. */\n" .
+        "#if defined(__mochios__) && !defined(SA_NOCLDWAIT)\n" .
+        "#define SA_NOCLDWAIT 0x2\n#endif\n";
+}
 exit 0 if $text eq $before;
 my ($output, $temporary) = tempfile('.signal-header-XXXXXX', DIR => dirname($path), UNLINK => 1);
 print {$output} $text or die "cannot write $temporary: $!\n";

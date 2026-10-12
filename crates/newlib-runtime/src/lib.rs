@@ -62,6 +62,7 @@ const WNOHANG: c_int = 1;
 const WUNTRACED: c_int = 2;
 const WCONTINUED: c_int = 8;
 const SA_NOCLDSTOP: c_int = 1;
+const SA_NOCLDWAIT: c_int = 2;
 const SA_RESTART: c_int = mochios_posix_client::signal::SA_RESTART;
 const SPAWN_FAIL_EXIT_STATUS: c_int = 127;
 const DIR_BUFFER_SIZE: usize = 4096;
@@ -6140,8 +6141,8 @@ pub unsafe extern "C" fn sigaction(
         return 0;
     }
     let mut replacement = unsafe { action.read() };
-    if replacement.sa_flags & !(SA_NOCLDSTOP | SA_RESTART) != 0
-        || (replacement.sa_flags & SA_NOCLDSTOP != 0
+    if replacement.sa_flags & !(SA_NOCLDSTOP | SA_NOCLDWAIT | SA_RESTART) != 0
+        || (replacement.sa_flags & (SA_NOCLDSTOP | SA_NOCLDWAIT) != 0
             && signal != posix_protocol::SIGNAL_CHLD as c_int)
     {
         set_errno(EINVAL);
@@ -6151,11 +6152,14 @@ pub unsafe extern "C" fn sigaction(
 
     let _update = SIGNAL_ACTION_UPDATE.lock();
     let previous = SIGNAL_ACTIONS.lock()[index];
-    let options = if replacement.sa_flags & SA_NOCLDSTOP != 0 {
+    let mut options = if replacement.sa_flags & SA_NOCLDSTOP != 0 {
         posix_protocol::SIGNAL_CHILD_OPTION_NOCLDSTOP
     } else {
         0
     };
+    if replacement.sa_flags & SA_NOCLDWAIT != 0 {
+        options |= posix_protocol::SIGNAL_CHILD_OPTION_NOCLDWAIT;
+    }
     let kind = match replacement.handler {
         0 => posix_protocol::SIGNAL_DISPOSITION_DEFAULT,
         1 => posix_protocol::SIGNAL_DISPOSITION_IGNORE,
