@@ -214,6 +214,9 @@ pub const OP_SIGNAL_THREAD_EPOCH: u16 = 69;
 /// WaitRequest followed by a u64 delivery epoch. Caller identity is supplied
 /// by authenticated endpoint metadata, not the request payload.
 pub const OP_WAIT_CHILD_GUARDED: u16 = 70;
+/// SignalSendRequest with selector zero and one WAIT|SIGNAL ThreadHandle.
+/// Sender and target identities are obtained from native metadata only.
+pub const OP_SIGNAL_THREAD_SEND: u16 = 71;
 pub const WAIT_GUARDED_REQUEST_LEN: usize = 24;
 pub const SIGNAL_THREAD_MASK_LEN: usize = 16;
 pub const SIGNAL_MASK_QUERY: u32 = 0;

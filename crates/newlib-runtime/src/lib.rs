@@ -1232,6 +1232,12 @@ fn setup_signal_delivery(control: &ThreadControl) -> Result<(), c_int> {
             return Err(error);
         }
     };
+    // Publish before registration can trigger a pending-signal upcall. A
+    // handler on this starting thread may use its own pthread identity.
+    let previous = control.native_handle.swap(handle, Ordering::AcqRel);
+    if previous != 0 {
+        let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, u64::from(previous));
+    }
     let registration = posix_client()
         .map_err(map_posix_client_error)
         .and_then(|client| {
@@ -1243,6 +1249,7 @@ fn setup_signal_delivery(control: &ThreadControl) -> Result<(), c_int> {
                 .map_err(map_posix_client_error)
         });
     if let Err(error) = registration {
+        control.native_handle.store(0, Ordering::Release);
         let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, u64::from(handle));
         let _ = syscall::raw_syscall2(
             syscall::SyscallNumber::MemoryUnmap,
@@ -1250,10 +1257,6 @@ fn setup_signal_delivery(control: &ThreadControl) -> Result<(), c_int> {
             SIGNAL_UPCALL_STACK_SIZE as u64,
         );
         return Err(error);
-    }
-    let previous = control.native_handle.swap(handle, Ordering::AcqRel);
-    if previous != 0 {
-        let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, u64::from(previous));
     }
     control
         .signal_upcall_stack_size
@@ -1348,15 +1351,16 @@ unsafe extern "C" fn pthread_start_trampoline(argument: *mut c_void) -> ! {
     let control = unsafe { &*argument.cast::<ThreadControl>() };
     let native_id = native_thread_id().unwrap_or_else(|_| process_exit(127));
     control.native_id.store(native_id, Ordering::Relaxed);
+    if setup_signal_delivery(control).is_err() {
+        process_exit(127);
+    }
     let _ = control.state.compare_exchange(
         THREAD_STARTING,
         THREAD_RUNNING,
         Ordering::Release,
         Ordering::Relaxed,
     );
-    if setup_signal_delivery(control).is_err() {
-        process_exit(127);
-    }
+    native_mutex_wake_all(&control.state);
     let start_address = control.start.load(Ordering::Acquire);
     if start_address == 0 {
         process_exit(127);
@@ -6497,6 +6501,48 @@ pub extern "C" fn __sigtramp_r(_reent: *mut c_void, signal: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn __sigtramp(signal: c_int) -> c_int {
     result_with_errno(dispatch_signal(signal), -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_kill(thread: Pthread, signal: c_int) -> c_int {
+    let result = (|| {
+        if !(0..=posix_protocol::SIGNAL_MAX as c_int).contains(&signal) {
+            return Err(EINVAL);
+        }
+        register_current_thread().ok_or(EAGAIN)?;
+        let control = thread_control(thread).ok_or(ESRCH)?;
+        let current = current_thread_control().is_some_and(|(current, _)| current == thread);
+        loop {
+            let state = control.state.load(Ordering::Acquire);
+            if state == THREAD_STARTING && !current {
+                native_mutex_wait(&control.state, state);
+                continue;
+            }
+            if state != THREAD_RUNNING && !(current && state == THREAD_STARTING) {
+                return Err(ESRCH);
+            }
+            break;
+        }
+        let handle = control.native_handle.load(Ordering::Acquire);
+        if handle == 0 {
+            return Err(ESRCH);
+        }
+        posix_client()
+            .map_err(map_posix_client_error)?
+            .send_thread_signal(
+                signal as u32,
+                ObjectHandleAttachment {
+                    handle,
+                    rights: syscall::HANDLE_RIGHT_WAIT | syscall::HANDLE_RIGHT_SIGNAL,
+                },
+            )
+            .map_err(map_posix_client_error)?;
+        if current {
+            drain_pending_signals()?;
+        }
+        Ok(())
+    })();
+    result.err().unwrap_or(0)
 }
 
 #[unsafe(no_mangle)]

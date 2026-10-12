@@ -687,6 +687,37 @@ impl<T: ObjectTransport> Client<T> {
         Ok(())
     }
 
+    pub fn send_thread_signal(
+        &self,
+        signal: u32,
+        thread: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut request = [0; protocol::SIGNAL_SEND_REQUEST_LEN];
+        protocol::encode_signal_send_request(
+            protocol::SignalSendRequest {
+                selector: 0,
+                signal,
+            },
+            &mut request,
+        )
+        .map_err(ClientError::Protocol)?;
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(thread)
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        self.request_with_handles(
+            protocol::OP_SIGNAL_THREAD_SEND,
+            0,
+            &request,
+            &mut [],
+            &mut handles,
+        )?;
+        if !handles.is_empty() {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(())
+    }
+
     /// Registers a freshly cloned process as a POSIX child. Identity is
     /// derived from the attached ProcessHandle, never from request bytes.
     pub fn register_child(
