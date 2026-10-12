@@ -3,6 +3,8 @@
 use super::*;
 use mochios_posix_client::pthread_mutex::{self as state, Error, Mutex};
 
+const ETIMEDOUT: c_int = 116;
+
 #[repr(C)]
 pub struct Attribute {
     initialized: c_int,
@@ -212,4 +214,80 @@ pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut Mutex) -> c_int {
         Ok(()) => wake_error,
         Err(err) => error(err),
     }
+}
+
+unsafe fn timed_lock(mutex: *mut Mutex, clock: u64, time: *const Timespec) -> c_int {
+    if !matches!(clock, 1 | 4) {
+        return EINVAL;
+    }
+    let Some(mutex) = (unsafe { mutex.as_ref() }) else {
+        return EINVAL;
+    };
+    let thread = match owner() {
+        Ok(thread) => thread,
+        Err(err) => return err,
+    };
+    let mut absolute = None;
+    match mutex.lock(
+        thread,
+        |address, expected| {
+            // Mutex::lock tries uncontended and recursive acquisition first.
+            // An immediately available mutex never times out or reads abstime.
+            let absolute = match absolute {
+                Some(value) => value,
+                None => {
+                    let time = unsafe { time.as_ref() }.ok_or(EINVAL)?;
+                    if !(0..1_000_000_000).contains(&time.tv_nsec) {
+                        return Err(EINVAL);
+                    }
+                    let value =
+                        (i128::from(time.tv_sec) * 1_000_000_000 + i128::from(time.tv_nsec)).max(0);
+                    let value = u64::try_from(value).map_err(|_| EOVERFLOW)?;
+                    absolute = Some(value);
+                    value
+                }
+            };
+            loop {
+                let deadline = super::pthread_time::deadline(clock as c_int, absolute)?;
+                if deadline <= monotonic_nanoseconds()? {
+                    return Err(ETIMEDOUT);
+                }
+                match mochios_posix_client::synchronization::wait_u32(address, expected, deadline) {
+                    Ok(mochios_posix_client::synchronization::WaitStatus::DeadlineReached) => {
+                        // Re-read the selected clock, including after a realtime adjustment.
+                    }
+                    Ok(_) => return Ok(()),
+                    Err(err) => {
+                        let err = map_kernel_errno(err.raw());
+                        if err != EINTR {
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+        },
+        |address| {
+            let _ = mochios_posix_client::synchronization::wake_u32(address, 1);
+        },
+    ) {
+        Ok(result) => result.map_or_else(error, |()| 0),
+        Err(err) => err,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_timedlock(
+    mutex: *mut Mutex,
+    time: *const Timespec,
+) -> c_int {
+    unsafe { timed_lock(mutex, 1, time) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_mutex_clocklock(
+    mutex: *mut Mutex,
+    clock: u64,
+    time: *const Timespec,
+) -> c_int {
+    unsafe { timed_lock(mutex, clock, time) }
 }

@@ -5,6 +5,7 @@ mod credentials;
 mod groups;
 mod pthread_mutex;
 mod pthread_cond;
+mod pthread_time;
 mod stdio_cancellation;
 mod thread_cleanup;
 

@@ -4,6 +4,7 @@
 use super::*;
 use mochios_posix_client::pthread_cond::{Condition, Error};
 use mochios_posix_client::pthread_mutex::Mutex;
+use super::pthread_time::deadline;
 
 const ETIMEDOUT: c_int = 116;
 
@@ -148,30 +149,6 @@ pub unsafe extern "C" fn pthread_cond_signal(cond: *mut Condition) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_cond_broadcast(cond: *mut Condition) -> c_int {
     notify(cond, true)
-}
-
-fn deadline(clock: c_int, absolute: u64) -> Result<u64, c_int> {
-    let now = monotonic_nanoseconds()?;
-    let selected_now = if clock == 4 {
-        now
-    } else {
-        let mut instant = mnu_abi::ClockInstant::default();
-        syscall_errno(syscall::raw_syscall2(
-            syscall::SyscallNumber::ClockRead,
-            mnu_abi::ClockId::Realtime as u64,
-            (&mut instant as *mut mnu_abi::ClockInstant) as u64,
-        ))?;
-        if instant.nanoseconds >= 1_000_000_000 || instant.reserved != 0 {
-            return Err(EIO);
-        }
-        instant
-            .seconds
-            .checked_mul(1_000_000_000)
-            .and_then(|n| n.checked_add(u64::from(instant.nanoseconds)))
-            .ok_or(EOVERFLOW)?
-    };
-    now.checked_add(absolute.saturating_sub(selected_now))
-        .ok_or(EOVERFLOW)
 }
 
 unsafe fn wait(
