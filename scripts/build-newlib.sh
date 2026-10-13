@@ -113,7 +113,7 @@ if [[ -n "$NEWLIB_SOURCE" ]]; then
              "${configure_options[@]}")
         printf '%s\n' "$configure_profile" >"$configure_stamp"
     fi
-    target_cflags="-O2 -g0 -D__mochios__ -DGETREENT_PROVIDED -DSIGNAL_PROVIDED -DHAVE_RENAME -ffile-prefix-map=$NEWLIB_SOURCE=/src/newlib -ffile-prefix-map=$OUT_ROOT=/build/newlib"
+    target_cflags="-O2 -g0 -D__mochios__ -DGETREENT_PROVIDED -DSIGNAL_PROVIDED -DHAVE_RENAME -I$USER_ROOT/libc-port/include -ffile-prefix-map=$NEWLIB_SOURCE=/src/newlib -ffile-prefix-map=$OUT_ROOT=/build/newlib"
     flags_stamp="$BUILD_DIR/.mochios-target-cflags"
     if [[ ! -f "$flags_stamp" ]] || [[ "$(<"$flags_stamp")" != "$target_cflags" ]]; then
         make -C "$BUILD_DIR" clean-target-newlib
