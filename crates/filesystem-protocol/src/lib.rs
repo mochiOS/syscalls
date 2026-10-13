@@ -195,17 +195,6 @@ pub const ACCESS_AT_FLAGS_ALL: u32 = ACCESS_AT_READ
     | ACCESS_AT_BASE_ATTACHED
     | ACCESS_AT_ROOT_ATTACHED;
 
-/// Registers an IPC endpoint as an opaque filesystem provider.
-///
-/// This mirrors `mnu_abi::SyscallNumber::FilesystemRegister`. Keep the wire
-/// protocol independent from the kernel crate while reserving the number in
-/// the canonical ABI enum.
-pub const SYS_FILESYSTEM_REGISTER: u64 = 624;
-/// Mounts a registered filesystem provider at a caller-supplied path.
-///
-/// This mirrors `mnu_abi::SyscallNumber::FilesystemMount`.
-pub const SYS_FILESYSTEM_MOUNT: u64 = 625;
-
 /// `Header::flags` carries the requested byte count for `OP_READ` and
 /// `OP_READDIR`.
 pub const MAX_IO_LEN: usize = MAX_MESSAGE_LEN - HEADER_LEN;
@@ -633,13 +622,5 @@ mod tests {
         let mut bytes = [0u8; METADATA_LEN];
         assert_eq!(encode_metadata(metadata, &mut bytes).unwrap(), METADATA_LEN);
         assert_eq!(decode_metadata(&bytes).unwrap(), metadata);
-    }
-
-    #[test]
-    fn filesystem_syscall_numbers_do_not_overlap_handle_transfer() {
-        assert_eq!(SYS_FILESYSTEM_REGISTER, 624);
-        assert_eq!(SYS_FILESYSTEM_MOUNT, 625);
-        assert!(![621, 622, 623].contains(&SYS_FILESYSTEM_REGISTER));
-        assert!(![621, 622, 623].contains(&SYS_FILESYSTEM_MOUNT));
     }
 }
