@@ -18,6 +18,18 @@ pub const fn classify_clock_id(clock_id: i32) -> Option<ClockKind> {
     }
 }
 
+/// Convert a native source quantum into a normalized POSIX timespec.
+/// Zero is malformed metadata, not a claim of infinitely precise time.
+pub fn clock_resolution(quantum_nanoseconds: u64) -> Result<(i64, i64), i32> {
+    if quantum_nanoseconds == 0 {
+        return Err(crate::newlib_errno::EIO);
+    }
+    Ok((
+        (quantum_nanoseconds / 1_000_000_000) as i64,
+        (quantum_nanoseconds % 1_000_000_000) as i64,
+    ))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SleepObservation {
     Waiting,

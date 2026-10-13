@@ -6821,6 +6821,42 @@ pub extern "C" fn getentropy(buffer: *mut c_void, length: usize) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn clock_getres(clock_id: u64, resolution: *mut Timespec) -> c_int {
+    let native_clock = match c_int::try_from(clock_id)
+        .ok()
+        .and_then(mochios_posix_client::time::classify_clock_id)
+    {
+        Some(mochios_posix_client::time::ClockKind::Realtime) => mnu_abi::ClockId::Realtime,
+        Some(mochios_posix_client::time::ClockKind::Monotonic) => mnu_abi::ClockId::Monotonic,
+        Some(mochios_posix_client::time::ClockKind::ProcessCpu) => mnu_abi::ClockId::ProcessCpu,
+        Some(mochios_posix_client::time::ClockKind::ThreadCpu) => mnu_abi::ClockId::ThreadCpu,
+        _ => {
+            set_errno(EINVAL);
+            return -1;
+        }
+    };
+    let mut info = mnu_abi::ClockInfo::default();
+    let result = syscall_errno(syscall::raw_syscall3(
+        syscall::SyscallNumber::ClockDescribe,
+        native_clock as u64,
+        (&mut info as *mut mnu_abi::ClockInfo) as u64,
+        core::mem::size_of::<mnu_abi::ClockInfo>() as u64,
+    ))
+    .and_then(|_| {
+        let (seconds, nanoseconds) =
+            mochios_posix_client::time::clock_resolution(info.quantum_nanoseconds)?;
+        // POSIX permits a NULL result while still checking clock validity.
+        if !resolution.is_null() {
+            unsafe {
+                resolution.write(Timespec { tv_sec: seconds, tv_nsec: nanoseconds });
+            }
+        }
+        Ok(0)
+    });
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn clock_gettime(clock_id: u64, tp: *mut Timespec) -> c_int {
     if tp.is_null() {
         set_errno(EFAULT);
