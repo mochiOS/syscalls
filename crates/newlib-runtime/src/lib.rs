@@ -9,6 +9,7 @@ mod pthread_once;
 mod pthread_rwlock;
 mod pthread_time;
 mod semaphore;
+mod named_semaphore;
 mod stdio_cancellation;
 mod thread_cleanup;
 
@@ -584,6 +585,7 @@ struct RuntimeState {
     envp: *mut *mut c_char,
     executable: *const c_char,
     fds: FdTable<FdObject>,
+    named_semaphores: mochios_posix_client::named_semaphore::Mappings<u32, 128>,
     heap: HeapState,
 }
 
@@ -599,6 +601,7 @@ impl RuntimeState {
             envp: ptr::null_mut(),
             executable: ptr::null(),
             fds: FdTable::new(),
+            named_semaphores: mochios_posix_client::named_semaphore::Mappings::new(),
             heap: HeapState::new(),
         }
     }

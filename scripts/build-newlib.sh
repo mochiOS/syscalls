@@ -145,6 +145,10 @@ x86_64-elf-gcc --sysroot="$SYSROOT" -isystem "$SYSROOT/include" -I"$USER_ROOT/li
     -D__mochios__ -ffreestanding -O2 -Wall -Wextra -Werror \
     -c "$USER_ROOT/runtime/newlib_ioctl.c" -o "$OUT_ROOT/hello/newlib_ioctl.o"
 x86_64-elf-ar r "$RUNTIME_ARCHIVE" "$OUT_ROOT/hello/newlib_ioctl.o"
+x86_64-elf-gcc --sysroot="$SYSROOT" -isystem "$SYSROOT/include" -I"$USER_ROOT/libc-port/include" \
+    -D__mochios__ -ffreestanding -O2 -Wall -Wextra -Werror \
+    -c "$USER_ROOT/runtime/newlib_semaphore.c" -o "$OUT_ROOT/hello/newlib_semaphore.o"
+x86_64-elf-ar r "$RUNTIME_ARCHIVE" "$OUT_ROOT/hello/newlib_semaphore.o"
 x86_64-elf-ranlib "$RUNTIME_ARCHIVE"
 install -C -m 0644 "$RUNTIME_ARCHIVE" "$SDK/lib/libmochi_user_newlib_runtime.a"
 install -C -m 0644 "$USER_ROOT/runtime/linker.ld" "$SDK/lib/linker.ld"
