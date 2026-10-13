@@ -10,6 +10,7 @@ pub const VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 32;
 pub const MAX_MESSAGE_LEN: usize = 64 * 1024;
 pub mod named_semaphore;
+pub mod shared_memory;
 
 /// Opaque LaunchContext key under which the POSIX control endpoint is passed.
 ///
@@ -226,6 +227,8 @@ pub const OP_SIGNAL_THREAD_WAIT: u16 = 72;
 pub const OP_WAITED_CHILD_CPU_USAGE: u16 = 73;
 pub const OP_SEMAPHORE_OPEN: u16 = 74;
 pub const OP_SEMAPHORE_UNLINK: u16 = 75;
+pub const OP_SHARED_MEMORY_OPEN: u16 = 76;
+pub const OP_SHARED_MEMORY_UNLINK: u16 = 77;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

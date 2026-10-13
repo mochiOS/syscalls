@@ -122,6 +122,12 @@ impl MemoryObject {
         self.handle
     }
 
+    /// Transfer ownership into a raw, process-local Handle. The recipient is
+    /// responsible for closing it; this wrapper no longer releases the reference.
+    pub fn into_handle(mut self) -> handle::Handle {
+        core::mem::replace(&mut self.handle, 0)
+    }
+
     pub fn length(&self) -> SysResult<u64> {
         syscall::call1(SyscallNumber::MemoryObjectLength, self.handle as u64)
     }
