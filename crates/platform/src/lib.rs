@@ -1407,11 +1407,6 @@ pub mod memory {
         syscall::call2(syscall::SyscallNumber::CommitFramebuffer, position, size)
     }
 
-    pub fn get_physical_addr(virt: u64) -> SysResult<u64> {
-        syscall::call1(syscall::SyscallNumber::GetPhysicalAddr, virt)
-    }
-
-
     pub fn dma_alloc(len: u64) -> SysResult<DmaAllocation> {
         let mut alloc = DmaAllocation::default();
         syscall::call2(
