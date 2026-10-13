@@ -25,6 +25,7 @@ pub use mnu_abi::{
     ThreadCreateContext, ThreadInitialRegisters, ThreadSecurityContext, ThreadStatus, ThreadUpcallConfig,
     MEMORY_ACCESS_ALL, MEMORY_ACCESS_EXECUTE, MEMORY_ACCESS_READ, MEMORY_ACCESS_WRITE,
     MEMORY_MAP_EXACT, MEMORY_MAP_OPTIONS_ALL, MEMORY_MAP_SHARED,
+    MEMORY_OBJECT_RESIZABLE,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

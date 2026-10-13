@@ -89,7 +89,17 @@ impl MemoryObject {
         if length == 0 || length % PAGE_BYTES != 0 {
             return Err(SysError::from_raw(syscall::EINVAL as i64));
         }
-        let raw = syscall::call2(SyscallNumber::MemoryObjectCreate, length, 0)?;
+        Self::create_with_options(length, 0)
+    }
+
+    /// Create byte-sized, possibly empty RAM backing with extent CONTROL.
+    /// Mappings reserve capacity independently of the current backing length.
+    pub fn create_resizable(length: u64) -> SysResult<Self> {
+        Self::create_with_options(length, syscall::MEMORY_OBJECT_RESIZABLE)
+    }
+
+    fn create_with_options(length: u64, options: u64) -> SysResult<Self> {
+        let raw = syscall::call2(SyscallNumber::MemoryObjectCreate, length, options)?;
         let handle = u32::try_from(raw)
             .ok()
             .filter(|handle| *handle != 0)
@@ -114,6 +124,13 @@ impl MemoryObject {
 
     pub fn length(&self) -> SysResult<u64> {
         syscall::call1(SyscallNumber::MemoryObjectLength, self.handle as u64)
+    }
+
+    /// Change the logical extent. Requires CONTROL on this process-local
+    /// Handle. Shrink invalidates affected pages of existing mappings;
+    /// subsequent access beyond the live extent faults. Regrowth is zeroed.
+    pub fn resize(&self, length: u64) -> SysResult<()> {
+        syscall::call2(SyscallNumber::MemoryObjectResize, self.handle as u64, length).map(|_| ())
     }
 
     pub fn rights(&self) -> SysResult<u64> {
