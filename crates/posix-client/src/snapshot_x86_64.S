@@ -1,4 +1,6 @@
-.text
+// The same client can occur in both a Rust dependency and the C runtime
+// archive. Keep one identical continuation body when both are linked.
+.section .text.mochios_posix_capture_snapshot,"axG",@progbits,mochios_posix_capture_snapshot,comdat
 .globl mochios_posix_capture_snapshot
 .type mochios_posix_capture_snapshot,@function
 mochios_posix_capture_snapshot:
