@@ -2819,6 +2819,18 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     };
     drop(guard);
     if image == 0 {
+        // Fork's numeric slot labels are temporary transfer metadata, not exec
+        // inheritance policy. Keep only the selected control endpoint key;
+        // later exec stages exactly its intended descriptors into context.
+        if mochios_posix_client::inheritance::clear_transient_context(
+            &grants[..count], posix_protocol::CONTROL_HANDLE_KEY, |key| {
+                syscall_errno(syscall::raw_syscall1(
+                    syscall::SyscallNumber::ContextHandleRemove, key,
+                )).map(|_| ())
+            },
+        ).is_err() {
+            process_exit(127);
+        }
         state().fds.clear_reservations();
         // The new native thread has no copied identity or upcall target.
         thread_control.native_id.store(

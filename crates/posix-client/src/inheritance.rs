@@ -1,6 +1,6 @@
 //! Explicit native Handle inheritance for a cloned POSIX address space.
 
-use mnu_abi::{process_create, HandleInfo, HANDLE_RIGHT_ALL, HANDLE_RIGHT_TRANSFER};
+use mnu_abi::{HANDLE_RIGHT_ALL, HANDLE_RIGHT_TRANSFER, HandleInfo, process_create};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -73,4 +73,20 @@ pub fn prepare(
         written += 1;
     }
     Ok(written)
+}
+
+/// Fork slot labels transfer resources into a copied address space; they are
+/// not declarations that all those resources should survive a later exec.
+/// Removing the opaque labels leaves the child's owned Handles untouched.
+pub fn clear_transient_context<E>(
+    grants: &[process_create::HandleGrant],
+    retained_key: u64,
+    mut remove: impl FnMut(u64) -> Result<(), E>,
+) -> Result<(), E> {
+    for grant in grants {
+        if grant.key != retained_key {
+            remove(grant.key)?;
+        }
+    }
+    Ok(())
 }
