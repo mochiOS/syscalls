@@ -36,6 +36,27 @@ pub fn wait_u32(
     }
 }
 
+/// Waits while a 64-bit word retains `expected`, using a native deadline.
+pub fn wait_u64(
+    address: &AtomicU64,
+    expected: u64,
+    deadline_nanoseconds: u64,
+) -> Result<WaitStatus, syscall::SysError> {
+    let raw = syscall::call4(
+        syscall::SyscallNumber::WaitOnAddress,
+        address as *const AtomicU64 as u64,
+        expected,
+        core::mem::size_of::<u64>() as u64,
+        deadline_nanoseconds,
+    )?;
+    match syscall::AddressWaitResult::from_raw(raw) {
+        Some(syscall::AddressWaitResult::Awoken) => Ok(WaitStatus::Awoken),
+        Some(syscall::AddressWaitResult::ValueChanged) => Ok(WaitStatus::ValueChanged),
+        Some(syscall::AddressWaitResult::DeadlineReached) => Ok(WaitStatus::DeadlineReached),
+        None => Err(syscall::SysError::from_raw(syscall::EIO as i64)),
+    }
+}
+
 /// Wakes up to `maximum_count` waiters for `address`.
 pub fn wake_u32(address: &AtomicU32, maximum_count: usize) -> Result<usize, syscall::SysError> {
     wake_address(address as *const AtomicU32 as u64, maximum_count)
