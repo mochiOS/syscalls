@@ -1411,25 +1411,6 @@ pub mod memory {
         syscall::call1(syscall::SyscallNumber::GetPhysicalAddr, virt)
     }
 
-    pub fn alloc_shared_pages(phys_pages: &mut [u64]) -> SysResult<u64> {
-        syscall::call4(
-            syscall::SyscallNumber::AllocSharedPages,
-            phys_pages.len() as u64,
-            phys_pages.as_mut_ptr() as u64,
-            phys_pages.len() as u64,
-            0,
-        )
-    }
-
-    pub fn alloc_shared_page_count(page_count: usize) -> SysResult<u64> {
-        syscall::call4(
-            syscall::SyscallNumber::AllocSharedPages,
-            page_count as u64,
-            0,
-            0,
-            0,
-        )
-    }
 
     pub fn dma_alloc(len: u64) -> SysResult<DmaAllocation> {
         let mut alloc = DmaAllocation::default();
