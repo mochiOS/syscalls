@@ -7579,6 +7579,11 @@ pub extern "C" fn execve(
     _execve(path, argv, envp)
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn execv(path: *const c_char, argv: *const *const c_char) -> c_int {
+    _execve(path, argv, unsafe { environ as *const *const c_char })
+}
+
 fn search_executable_path<T>(
     file: &[u8],
     mut execute: impl FnMut(*const c_char) -> Result<T, c_int>,
