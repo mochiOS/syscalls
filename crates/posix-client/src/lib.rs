@@ -29,6 +29,7 @@ pub mod synchronization;
 pub mod pthread_mutex;
 pub mod pthread_once;
 pub mod pthread_rwlock;
+pub mod pthread_barrier;
 pub mod semaphore;
 pub mod named_semaphore;
 pub mod pthread_cond;
