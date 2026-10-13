@@ -8,6 +8,7 @@ mod pthread_cond;
 mod pthread_once;
 mod pthread_rwlock;
 mod pthread_barrier;
+mod pthread_spin;
 mod pthread_time;
 mod semaphore;
 mod named_semaphore;
