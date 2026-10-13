@@ -1758,7 +1758,7 @@ impl ObjectTransport for EndpointTransport {
                 mochi_user_platform::syscall::EOVERFLOW as i64,
             )
         })?;
-        if count > MAX_OBJECT_HANDLES || native.reserved != 0 {
+        if count > MAX_OBJECT_HANDLES || native.delivery_flags != 0 {
             for attachment in native.handles.iter().take(count.min(MAX_OBJECT_HANDLES)) {
                 if attachment.handle != 0 {
                     let _ = mochi_user_platform::handle::close(attachment.handle);
@@ -1898,7 +1898,7 @@ impl ObjectTransport for SyscallEndpointTransport {
         let count = usize::try_from(native.count).map_err(|_| {
             mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EOVERFLOW as i64)
         })?;
-        if count > MAX_OBJECT_HANDLES || native.reserved != 0 {
+        if count > MAX_OBJECT_HANDLES || native.delivery_flags != 0 {
             close_syscall_attachments(&native, count);
             return Err(mochi_user_syscall::SysError::from_raw(
                 mochi_user_syscall::EINVAL as i64,
