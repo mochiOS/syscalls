@@ -9,6 +9,8 @@ pub mod accounting;
 pub mod inheritance;
 pub mod directory;
 pub mod io_vector;
+#[cfg(feature = "launch-arguments")]
+pub mod launch_arguments;
 #[cfg(feature = "fd-table")]
 pub mod fd;
 pub mod memory;
