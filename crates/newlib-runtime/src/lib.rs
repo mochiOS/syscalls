@@ -1,6 +1,7 @@
 #![no_std]
 
 mod child_cleanup;
+mod atfork;
 mod credentials;
 mod groups;
 mod pthread_mutex;
@@ -4388,11 +4389,13 @@ pub extern "C" fn pipe(fds: *mut c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn fork() -> c_int {
     result_with_errno(
-        clone_registered_process().and_then(|(pid, _, process_handle)| {
-            if let Some(process_handle) = process_handle {
-                close_object_handle(process_handle);
-            }
-            c_int::try_from(pid).map_err(|_| EOVERFLOW)
+        atfork::run(|| {
+            clone_registered_process().and_then(|(pid, _, process_handle)| {
+                if let Some(process_handle) = process_handle {
+                    close_object_handle(process_handle);
+                }
+                c_int::try_from(pid).map_err(|_| EOVERFLOW)
+            })
         }),
         -1,
     )
