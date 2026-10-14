@@ -1283,6 +1283,12 @@ fn setup_signal_delivery(control: &ThreadControl) -> Result<(), c_int> {
         }
         return Ok(());
     }
+    // Registration can make a pending signal deliverable immediately. Keep
+    // callbacks deferred until the new native stack and identity are both
+    // published, including when a fork child still has copied active frames.
+    let _preparation =
+        mochios_posix_client::upcall_guard::Guard::enter(&control.native_delivery_defer)
+            .ok_or(EOVERFLOW)?;
     // Restore an existing native thread's mask after exec, or seed a new
     // fork/pthread thread from its inherited cache before upcalls can run.
     service_signal_mask(
