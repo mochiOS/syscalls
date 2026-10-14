@@ -1123,16 +1123,12 @@ impl<T: ObjectTransport> Client<T> {
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
         let mut response = [0u8; protocol::FILE_STATUS_LEN];
-        let response_len = self.request_with_handles(
+        let response_len = self.request_without_reply_handles(
             protocol::OP_STAT_AT,
-            0,
             &payload[..payload_len],
             &mut response,
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         protocol::decode_file_status(&response[..response_len]).map_err(ClientError::Protocol)
     }
 
@@ -1176,16 +1172,12 @@ impl<T: ObjectTransport> Client<T> {
                 .push(directory)
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
-        self.request_with_handles(
+        self.request_without_reply_handles(
             protocol::OP_ACCESS_AT,
-            0,
             &payload[..payload_len],
             &mut [],
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         Ok(())
     }
 
@@ -1215,16 +1207,12 @@ impl<T: ObjectTransport> Client<T> {
                 .push(directory)
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
-        self.request_with_handles(
+        self.request_without_reply_handles(
             protocol::OP_CHDIR_AT,
-            0,
             &payload[..payload_len],
             &mut [],
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         Ok(())
     }
 
@@ -1254,16 +1242,12 @@ impl<T: ObjectTransport> Client<T> {
                 .push(directory)
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
-        self.request_with_handles(
+        self.request_without_reply_handles(
             protocol::OP_CHROOT_AT,
-            0,
             &payload[..payload_len],
             &mut [],
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         Ok(())
     }
 
@@ -1275,10 +1259,7 @@ impl<T: ObjectTransport> Client<T> {
         handles
             .push(directory)
             .map_err(|_| ClientError::RequestTooLarge)?;
-        self.request_with_handles(protocol::OP_FCHDIR, 0, &[], &mut [], &mut handles)?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
+        self.request_without_reply_handles(protocol::OP_FCHDIR, &[], &mut [], &mut handles)?;
         Ok(())
     }
 
@@ -1393,16 +1374,12 @@ impl<T: ObjectTransport> Client<T> {
                 .push(directory)
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
-        self.request_with_handles(
+        self.request_without_reply_handles(
             protocol::OP_MKDIR_AT,
-            0,
             &payload[..payload_len],
             &mut [],
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         Ok(())
     }
 
@@ -1427,16 +1404,12 @@ impl<T: ObjectTransport> Client<T> {
                 .push(directory)
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
-        self.request_with_handles(
+        self.request_without_reply_handles(
             protocol::OP_UNLINK_AT,
-            0,
             &payload[..payload_len],
             &mut [],
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         Ok(())
     }
 
@@ -1477,16 +1450,12 @@ impl<T: ObjectTransport> Client<T> {
                 .push(directory)
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
-        self.request_with_handles(
+        self.request_without_reply_handles(
             protocol::OP_RENAME_AT,
-            0,
             &payload[..payload_len],
             &mut [],
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         Ok(())
     }
 
@@ -1529,16 +1498,12 @@ impl<T: ObjectTransport> Client<T> {
                 .push(directory)
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
-        self.request_with_handles(
+        self.request_without_reply_handles(
             protocol::OP_LINK_AT,
-            0,
             &payload[..payload_len],
             &mut [],
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         Ok(())
     }
 
@@ -1565,16 +1530,12 @@ impl<T: ObjectTransport> Client<T> {
                 .push(directory)
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
-        self.request_with_handles(
+        self.request_without_reply_handles(
             protocol::OP_TRUNCATE_AT,
-            0,
             &payload[..payload_len],
             &mut [],
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         Ok(())
     }
 
@@ -1605,16 +1566,12 @@ impl<T: ObjectTransport> Client<T> {
                 .push(directory)
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
-        self.request_with_handles(
+        self.request_without_reply_handles(
             protocol::OP_SYMLINK_AT,
-            0,
             &payload[..payload_len],
             &mut [],
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         Ok(())
     }
 
@@ -1647,16 +1604,12 @@ impl<T: ObjectTransport> Client<T> {
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
         let mut target = [0u8; protocol::MAX_PATH_LEN];
-        let length = self.request_with_handles(
+        let length = self.request_without_reply_handles(
             protocol::OP_READLINK_AT,
-            0,
             &payload[..payload_len],
             &mut target,
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         let copied = core::cmp::min(length, output.len());
         output[..copied].copy_from_slice(&target[..copied]);
         Ok(copied)
@@ -1690,16 +1643,12 @@ impl<T: ObjectTransport> Client<T> {
                 .push(directory)
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
-        self.request_with_handles(
+        self.request_without_reply_handles(
             protocol::OP_CHMOD_AT,
-            0,
             &payload[..payload_len],
             &mut [],
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         Ok(())
     }
 
@@ -1734,16 +1683,12 @@ impl<T: ObjectTransport> Client<T> {
                 .push(directory)
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
-        self.request_with_handles(
+        self.request_without_reply_handles(
             protocol::OP_CHOWN_AT,
-            0,
             &payload[..payload_len],
             &mut [],
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         Ok(())
     }
 
@@ -1800,11 +1745,24 @@ impl<T: ObjectTransport> Client<T> {
         handles
             .push(file)
             .map_err(|_| ClientError::RequestTooLarge)?;
-        let result = self.request_with_handles(opcode, 0, payload, response, &mut handles);
+        self.request_without_reply_handles(opcode, payload, response, &mut handles)
+    }
+
+    /// Scalar/path replies cannot return objects. Keep all outgoing borrows
+    /// separate from newly owned replies, including two-anchor operations.
+    fn request_without_reply_handles(
+        &self,
+        opcode: u16,
+        payload: &[u8],
+        response: &mut [u8],
+        handles: &mut ObjectHandles<T::Handle>,
+    ) -> Result<usize, ClientError<T::Error>> {
+        let borrowed = handles.clone();
+        let result = self.request_with_handles(opcode, 0, payload, response, handles);
         let unexpected = !handles.is_empty();
         for (index, attached) in handles.iter().enumerate() {
             if attached.handle != T::Handle::default()
-                && attached.handle != file.handle
+                && !borrowed.iter().any(|source| source.handle == attached.handle)
                 && !handles
                     .iter()
                     .take(index)
@@ -1813,6 +1771,7 @@ impl<T: ObjectTransport> Client<T> {
                 self.transport.close_received_handle(attached.handle);
             }
         }
+        handles.clear();
         let length = result?;
         if unexpected {
             return Err(ClientError::MismatchedResponse);
