@@ -1478,6 +1478,8 @@ pub mod event {
 }
 
 pub mod capability {
+    mod prepared_image;
+    pub use prepared_image::{PreparedExecutionImage, prepare_execution_image};
     use super::syscall::{self, SysResult};
     pub use mochios_capability_protocol::{
         AUTHORIZE_EXEC_OPCODE, CAPABILITY_DECISION_OPCODE, CAPABILITY_PERSISTENT_QUERY_OPCODE,
