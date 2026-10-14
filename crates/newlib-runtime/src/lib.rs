@@ -249,6 +249,7 @@ struct ThreadControl {
     restart_signal_generation: AtomicU64,
     signal_upcall_stack: AtomicUsize,
     signal_upcall_stack_size: AtomicUsize,
+    active_native_signal_frame: AtomicUsize,
     alternate_stack: mochios_posix_client::signal_stack::AlternateStack,
     specific_values: [AtomicUsize; mochios_posix_client::thread::MAX_THREAD_KEYS],
     specific_generations: [AtomicU32; mochios_posix_client::thread::MAX_THREAD_KEYS],
@@ -286,6 +287,7 @@ impl ThreadControl {
             restart_signal_generation: AtomicU64::new(0),
             signal_upcall_stack: AtomicUsize::new(0),
             signal_upcall_stack_size: AtomicUsize::new(0),
+            active_native_signal_frame: AtomicUsize::new(0),
             alternate_stack: mochios_posix_client::signal_stack::AlternateStack::new(),
             specific_values: [const { AtomicUsize::new(0) };
                 mochios_posix_client::thread::MAX_THREAD_KEYS],
@@ -1034,6 +1036,7 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
         control.restart_signal_generation.store(0, Ordering::Relaxed);
         control.signal_upcall_stack.store(0, Ordering::Relaxed);
         control.signal_upcall_stack_size.store(0, Ordering::Relaxed);
+        control.active_native_signal_frame.store(0, Ordering::Relaxed);
         control.alternate_stack.reset();
         for value in &control.specific_values {
             value.store(0, Ordering::Relaxed);
@@ -2859,7 +2862,9 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         if setup_signal_delivery(thread_control).is_err() {
             process_exit(127);
         }
-        if old_stack != 0 && old_size != 0 {
+        if old_stack != 0 && old_size != 0
+            && !signal_delivery::stack_is_active(thread_control, old_stack, old_size)
+        {
             let _ = syscall::raw_syscall2(
                 syscall::SyscallNumber::MemoryUnmap,
                 old_stack as u64,
@@ -6942,7 +6947,15 @@ fn drain_pending_signals_with_context(context: &mut UContext, native: bool) -> R
         if signal == 0 {
             return Ok(());
         }
-        match dispatch_signal(delivery, None, context, native) {
+        let owner = native_process_id().map_err(|error| map_kernel_errno(error.raw()))?;
+        let dispatched = dispatch_signal(delivery, None, context, native);
+        if native_process_id().map_err(|error| map_kernel_errno(error.raw()))? != owner {
+            // A fork child resumes the copied handler, not its parent's
+            // service-owned delivery. Only the original process may finish it.
+            dispatched?;
+            continue;
+        }
+        match dispatched {
             Ok(0 | 3) => posix_client()
                 .map_err(map_posix_client_error)?
                 .complete_signal_delivery(delivery)
@@ -6967,6 +6980,11 @@ extern "C" fn posix_signal_upcall(
     _instruction: u64,
     cause: u64,
 ) -> ! {
+    let mut native_frame = match signal_delivery::NativeFrame::new() {
+        Ok(frame) => frame,
+        Err(_) => process_exit(127),
+    };
+    native_frame.activate();
     let mut context = match signal_delivery::interrupted(token) {
         Ok(context) => context,
         Err(_) => process_exit(127),
@@ -6980,7 +6998,7 @@ extern "C" fn posix_signal_upcall(
             process_exit(127);
         }
     }
-    signal_delivery::resume(token, &context)
+    signal_delivery::resume(token, &context, &native_frame)
 }
 
 #[unsafe(no_mangle)]

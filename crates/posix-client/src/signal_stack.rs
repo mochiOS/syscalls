@@ -139,6 +139,11 @@ pub fn current_pointer() -> usize {
 
 core::arch::global_asm!(include_str!("signal_stack_x86_64.S"));
 unsafe extern "C" {
+    fn mochios_posix_enter_on_stack(
+        top: usize,
+        callback: unsafe extern "C" fn(*mut c_void) -> !,
+        argument: *mut c_void,
+    ) -> !;
     fn mochios_posix_call_on_stack(
         top: usize,
         callback: unsafe extern "C" fn(*mut c_void),
@@ -158,4 +163,19 @@ pub unsafe fn call_on(
     argument: *mut c_void,
 ) {
     unsafe { mochios_posix_call_on_stack(top, callback, argument) };
+}
+
+/// Enter a nonreturning callback on caller-owned writable storage.
+///
+/// # Safety
+/// As with call_on, the selected region must be live, sufficiently large and
+/// disjoint from all still-active frames. All old-stack cleanup must already
+/// be finished. The callback must never return or read freed argument storage;
+/// it must copy anything needed before releasing the previous stack.
+pub unsafe fn enter_on(
+    top: usize,
+    callback: unsafe extern "C" fn(*mut c_void) -> !,
+    argument: *mut c_void,
+) -> ! {
+    unsafe { mochios_posix_enter_on_stack(top, callback, argument) }
 }

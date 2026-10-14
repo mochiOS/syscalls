@@ -7,6 +7,7 @@ pub(super) fn deliver(cause: u64, address: usize, context: &mut UContext) -> Res
         .map_err(|_| EINVAL)?;
     let signal = info.si_signo as u32;
     let client = posix_client().map_err(map_posix_client_error)?;
+    let owner = native_process_id().map_err(|error| map_kernel_errno(error.raw()))?;
     let fault = client
         .fault_signal_delivery(signal)
         .map_err(map_posix_client_error)?;
@@ -15,7 +16,13 @@ pub(super) fn deliver(cause: u64, address: usize, context: &mut UContext) -> Res
         return Err(EIO);
     }
     if fault.disposition == posix_protocol::SIGNAL_DISPOSITION_CAUGHT {
-        match dispatch_signal(fault.signal, Some(info), context, true) {
+        let dispatched = dispatch_signal(fault.signal, Some(info), context, true);
+        if native_process_id().map_err(|error| map_kernel_errno(error.raw()))? != owner {
+            // The copied handler may repair its child context, but cannot
+            // consume the parent's still-authenticated fault delivery.
+            return dispatched.and_then(|result| if result == 0 { Ok(()) } else { Err(EINVAL) });
+        }
+        match dispatched {
             Ok(0) => {
                 return client
                     .complete_signal_delivery(fault.signal)
