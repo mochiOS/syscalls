@@ -40,7 +40,7 @@ pub enum Request {
     Commit {
         offset: u64,
     },
-    /// Socket READ plus RAM WRITE|MAP; consuming receive, no client pointers.
+    /// Socket READ plus RAM WRITE|MAP; consume a record or stream prefix.
     Receive {
         offset: u64,
         length: u32,
@@ -238,6 +238,7 @@ pub fn deliver(offset: u16, maximum: u16) -> Result<[u8; HEADER_LEN], ProtocolEr
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReceiveReply<'a> {
     pub copied: u32,
+    /// Original datagram size, or actual returned span for a byte stream.
     pub length: u32,
     pub total_rights: u16,
     pub available_rights: u16,

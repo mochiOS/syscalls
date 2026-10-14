@@ -278,7 +278,7 @@ where
     )
 }
 
-/// Consume one datagram, copying data into an explicit RAM object. Reserve
+/// Consume one datagram or stream prefix into an explicit RAM object. Reserve
 /// local FD/control capacity first and pass that bound as `maximum_rights`.
 /// No retry is safe after an ambiguous transport error: the record may already
 /// have been consumed. `response` holds the returned source address's storage.

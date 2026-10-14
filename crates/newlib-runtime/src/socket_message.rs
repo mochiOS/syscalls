@@ -6,6 +6,8 @@ use mochios_posix_protocol::socket_transfer as wire;
 
 const MSG_CTRUNC: c_int = 0x8;
 const MSG_TRUNC: c_int = 0x20;
+const MSG_PEEK: c_int = 0x2;
+const MSG_WAITALL: c_int = 0x100;
 const MSG_CMSG_CLOEXEC: c_int = 0x4000_0000;
 
 #[repr(C)]
@@ -37,6 +39,13 @@ struct Incoming {
     reservation: FdReservations,
     entries: [Option<FdEntry>; control::MAX_RIGHTS],
     count: usize,
+}
+
+struct ReceiveCall<'a> {
+    entry: FdEntry,
+    thread: &'a ThreadControl,
+    caught: u64,
+    wait: socket::SocketWait,
 }
 impl Drop for Incoming {
     fn drop(&mut self) {
@@ -411,7 +420,7 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
             return Err(EFAULT);
         }
     }
-    let vectors = &vectors[..message.vector_count];
+    let vectors = &mut vectors[..message.vector_count];
     let total = mochios_posix_client::io_vector::validate(message.vector_count as i32, |index| {
         (vectors[index].base.is_null(), vectors[index].length)
     })
@@ -420,17 +429,80 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
     if !entry.handle.kind.is_socket() {
         return Err(mochios_posix_client::newlib_errno::from_status(-88));
     }
+    let wait_all = !socket::is_datagram(entry)? && flags & MSG_WAITALL != 0 && flags & MSG_PEEK == 0;
+    let (_, thread) = register_current_thread().ok_or(EAGAIN)?;
+    let mut call = ReceiveCall {
+        entry,
+        thread,
+        caught: thread.nonrestart_signal_generation.load(Ordering::Acquire),
+        wait: socket::SocketWait::new(entry, syscall::HANDLE_SIGNAL_READABLE)?,
+    };
+    let original = message;
+    let mut copied = 0;
+    let mut head = 0;
+    loop {
+        let mut part = original;
+        let result = unsafe {
+            receive_once(
+                fd,
+                &mut call,
+                &mut part,
+                &vectors[head..],
+                total - copied,
+                if wait_all { flags & !MSG_WAITALL } else { flags },
+            )
+        };
+        let count = match result {
+            Ok(count) => count as usize,
+            Err(error) if copied == 0 => return Err(error),
+            Err(_) => break,
+        };
+        copied += count;
+        message = part;
+        // Ancillary data forms a stream barrier even when control capacity is
+        // zero (MSG_CTRUNC). Never consume a second rights-bearing segment.
+        if !wait_all
+            || count == 0
+            || copied == total
+            || message.control_length != 0
+            || message.flags & MSG_CTRUNC != 0
+        {
+            break;
+        }
+        let mut left = count;
+        while left != 0 {
+            let vector = &mut vectors[head];
+            if vector.length <= left {
+                left -= vector.length;
+                head += 1;
+            } else {
+                vector.base = vector.base.wrapping_add(left);
+                vector.length -= left;
+                left = 0;
+            }
+        }
+    }
+    unsafe { output.write_unaligned(message) };
+    Ok(copied as isize)
+}
+
+unsafe fn receive_once(
+    fd: c_int,
+    call: &mut ReceiveCall<'_>,
+    output: &mut Message,
+    vectors: &[Vector],
+    total: usize,
+    flags: c_int,
+) -> Result<isize, c_int> {
+    let entry = call.entry;
+    let mut message = *output;
     let options = mochios_posix_client::socket::message_options(
         flags & !(MSG_TRUNC | MSG_CMSG_CLOEXEC),
         false,
     )
     .map_err(|_| mochios_posix_client::newlib_errno::EOPNOTSUPP)?;
-    if !socket::is_datagram(entry)? {
-        // Stream ancillary markers are implemented separately, never silently
-        // dropped by treating a byte stream as an ancillary-free datagram.
-        if message.control_length != 0 {
-            return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
-        }
+    let datagram = socket::is_datagram(entry)?;
+    if !datagram && options.peek && message.control_length == 0 {
         let mut peer = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
         let mut required = peer.len() as u32;
         if !message.name.is_null() {
@@ -468,10 +540,13 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
         }
         message.control_length = 0;
         message.flags = 0;
-        unsafe { output.write_unaligned(message) };
+        *output = message;
         return Ok(count as isize);
     }
     if options.peek {
+        return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
+    }
+    if !datagram && flags & MSG_TRUNC != 0 {
         return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
     }
     let capacity = message.control_length.saturating_sub(control::HEADER_LEN) / 4;
@@ -488,9 +563,8 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
         raw,
     ))?;
     let transport = socket_record::endpoint()?;
-    let (_, thread) = register_current_thread().ok_or(EAGAIN)?;
-    let caught = thread.nonrestart_signal_generation.load(Ordering::Acquire);
-    let mut wait = socket::SocketWait::new(entry, syscall::HANDLE_SIGNAL_READABLE)?;
+    let thread = call.thread;
+    let caught = call.caught;
     let mut response = [0; wire::MAX_RECEIVE_REPLY_LEN];
     let (received, mut incoming) = loop {
         if io_cancellation_requested(thread)
@@ -522,11 +596,12 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
             incoming.reservation.len() as u16,
             &mut response,
             close_object_handle,
-        )
-        .map_err(map_posix_client_error);
+        );
         match result {
             Ok(received) => break (received, incoming),
-            Err(EAGAIN) if !options.dont_wait && !handle_is_nonblocking(entry)? => {
+            Err(PosixClientError::Remote(-11))
+                if !options.dont_wait && !handle_is_nonblocking(entry)? =>
+            {
                 // Do not monopolize the local FD table while waiting for data.
                 drop(incoming);
                 wait_for_handle_capacity(
@@ -535,10 +610,10 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
                     thread,
                     caught,
                     0,
-                    wait.deadline(entry)?,
+                    call.wait.deadline(entry)?,
                 )?;
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(map_posix_client_error(error)),
         }
     };
     let _receipt = received.receipt.map(|receipt| OwnedHandle(receipt.handle));
@@ -588,7 +663,9 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
     let required =
         mochios_posix_client::socket::encode_sockaddr(received.message.source, &mut native)
             .map_err(|_| EIO)?;
-    if !message.name.is_null() {
+    if !datagram {
+        message.name_length = 0;
+    } else if !message.name.is_null() {
         unsafe {
             ptr::copy_nonoverlapping(
                 native.as_ptr(),
@@ -640,7 +717,7 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
     } else {
         0
     };
-    unsafe { output.write_unaligned(message) };
+    *output = message;
     Ok(if flags & MSG_TRUNC != 0 {
         received.message.length
     } else {
