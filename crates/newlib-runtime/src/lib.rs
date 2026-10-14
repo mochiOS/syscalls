@@ -6305,7 +6305,20 @@ pub extern "C" fn sysconf(name: c_int) -> CLong {
     match name {
         SC_OPEN_MAX => result_with_errno(process_fd_limit().map(CLong::from), -1),
         SC_PAGESIZE => PAGE_SIZE as CLong,
-        SC_NPROCESSORS_CONF | SC_NPROCESSORS_ONLN => 1,
+        SC_NPROCESSORS_CONF | SC_NPROCESSORS_ONLN => {
+            let result = (|| {
+                let mut info = syscall::ProcessorInfo::default();
+                syscall_errno(syscall::raw_syscall2(
+                    syscall::SyscallNumber::ProcessorDescribe,
+                    (&mut info as *mut syscall::ProcessorInfo) as u64,
+                    core::mem::size_of_val(&info) as u64,
+                ))?;
+                mochios_posix_client::configuration::processor_count(name, info)
+                    .map(CLong::from)
+                    .map_err(|status| mochios_posix_client::newlib_errno::from_status(i64::from(status)))
+            })();
+            result_with_errno(result, -1)
+        }
         SC_THREAD_STACK_MIN => 16 * 1024,
         SC_GETPW_R_SIZE_MAX | SC_HOST_NAME_MAX => 256,
         _ => {
