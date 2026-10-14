@@ -1105,63 +1105,8 @@ pub mod input {
 }
 
 pub mod service {
-    use alloc::vec;
-    use alloc::vec::Vec;
-
     use super::syscall::{self, SysResult};
     pub use mnu_abi::exec::ExecutionClass;
-
-    // The kernel reads this fixed-size argument block because the original
-    // ExecManifest ABI does not carry an argument length.
-    const SPAWN_ARGUMENT_BYTES: usize = 4096;
-
-    fn spawn_arguments(args_nul: Option<&[u8]>) -> SysResult<Option<Vec<u8>>> {
-        let Some(bytes) = args_nul.filter(|bytes| !bytes.is_empty()) else {
-            return Ok(None);
-        };
-        if bytes.len() > SPAWN_ARGUMENT_BYTES {
-            return Err(syscall::SysError::from_raw(syscall::EINVAL as i64));
-        }
-        let mut storage = vec![0; SPAWN_ARGUMENT_BYTES];
-        storage[..bytes.len()].copy_from_slice(bytes);
-        Ok(Some(storage))
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn spawn_arguments_preserve_payloads_larger_than_the_old_limit() {
-            let payload = vec![b'x'; 1024];
-            let storage = spawn_arguments(Some(&payload)).unwrap().unwrap();
-            assert_eq!(&storage[..payload.len()], payload.as_slice());
-            assert!(storage[payload.len()..].iter().all(|byte| *byte == 0));
-        }
-    }
-
-    pub fn spawn_manifest(
-        path: &str,
-        execution_class: ExecutionClass,
-        args_nul: Option<&[u8]>,
-        caps_nul: Option<&[u8]>,
-    ) -> SysResult<u64> {
-        let path = super::path::CPath::<256>::new(path)?;
-        let args = spawn_arguments(args_nul)?;
-        let args_ptr = args.as_ref().map_or(0, |bytes| bytes.as_ptr() as u64);
-        let (caps_ptr, caps_len) = match caps_nul {
-            Some(bytes) if !bytes.is_empty() => (bytes.as_ptr() as u64, bytes.len() as u64),
-            _ => (0, 0),
-        };
-        syscall::call5(
-            syscall::SyscallNumber::ExecManifest,
-            path.as_ptr(),
-            args_ptr,
-            caps_ptr,
-            caps_len,
-            execution_class.as_raw(),
-        )
-    }
 
     pub fn authorize_exec_for_requester(
         requester_tid: u64,
