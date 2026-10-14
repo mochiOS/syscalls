@@ -1543,6 +1543,8 @@ pub mod capability {
         PACKAGE_INDEX_CHANGED_OPCODE, PROTOCOL_VERSION, ProtocolError, RESOLVE_CAPABILITIES_OPCODE,
         RESOLVE_CAPABILITIES_REPLY_STATUS_LEN, RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN,
         RESOLVE_EXECUTION_SECURITY_OPCODE, ResolveCapabilitiesReply, ResolveExecutionSecurityReply,
+        PREPARE_EXECUTION_IMAGE_OPCODE, encode_prepare_execution_image_request,
+        decode_prepare_execution_image_request, decode_prepare_execution_image_reply,
         ResourceDescriptor, decode_authorize_exec_request, decode_decision_request, decode_request,
         decode_resolve_capabilities_reply, decode_resolve_capabilities_request,
         decode_resolve_execution_security_reply, decode_resolve_execution_security_request,

@@ -15,6 +15,9 @@ pub const CAPABILITY_DECISION_OPCODE: u32 = 0x4350_5244;
 pub const CAPABILITY_PERSISTENT_QUERY_OPCODE: u32 = 0x4350_5150;
 pub const RESOLVE_CAPABILITIES_OPCODE: u32 = 0x4341_5053;
 pub const RESOLVE_EXECUTION_SECURITY_OPCODE: u32 = 0x4341_4553;
+/// Trusted launcher request. Success replies with exactly one READ-only RAM
+/// image Handle; failures have no attachments. No PID/FD enters the request.
+pub const PREPARE_EXECUTION_IMAGE_OPCODE: u32 = 0x4341_4549;
 pub const PACKAGE_INDEX_CHANGED_OPCODE: u32 = 0x4341_5049;
 /// Installs the rights-restricted POSIX endpoint attached to the request.
 ///
@@ -137,6 +140,48 @@ pub fn decode_resolve_execution_security_request(
     }
     let execution_class = u64::from_le_bytes(bytes[4..12].try_into().unwrap());
     Ok((execution_class, resolve_capabilities_path(&bytes[12..])?))
+}
+
+#[cfg(feature = "alloc")]
+pub fn encode_prepare_execution_image_request(
+    execution_class: u64,
+    path: &str,
+) -> Result<Vec<u8>, ProtocolError> {
+    if !matches!(execution_class, 2 | 3) {
+        return Err(ProtocolError::InvalidField);
+    }
+    resolve_capabilities_path(path.as_bytes())?;
+    let mut bytes = Vec::with_capacity(16 + path.len());
+    bytes.extend_from_slice(&PREPARE_EXECUTION_IMAGE_OPCODE.to_le_bytes());
+    bytes.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&execution_class.to_le_bytes());
+    bytes.extend_from_slice(path.as_bytes());
+    Ok(bytes)
+}
+
+pub fn decode_prepare_execution_image_request(bytes: &[u8]) -> Result<(u64, &str), ProtocolError> {
+    if bytes.len() < 16 {
+        return Err(ProtocolError::TooShort);
+    }
+    if u32::from_le_bytes(bytes[..4].try_into().unwrap()) != PREPARE_EXECUTION_IMAGE_OPCODE {
+        return Err(ProtocolError::UnknownOpcode);
+    }
+    if u32::from_le_bytes(bytes[4..8].try_into().unwrap()) != PROTOCOL_VERSION {
+        return Err(ProtocolError::UnsupportedVersion);
+    }
+    let class = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+    if !matches!(class, 2 | 3) {
+        return Err(ProtocolError::InvalidField);
+    }
+    Ok((class, resolve_capabilities_path(&bytes[16..])?))
+}
+
+pub fn decode_prepare_execution_image_reply(bytes: &[u8]) -> Result<u64, ProtocolError> {
+    let status = u64::from_le_bytes(bytes.try_into().map_err(|_| ProtocolError::InvalidLength)?);
+    if status > 4095 {
+        return Err(ProtocolError::InvalidField);
+    }
+    Ok(status)
 }
 
 #[cfg(feature = "alloc")]
