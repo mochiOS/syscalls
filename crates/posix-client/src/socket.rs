@@ -11,6 +11,16 @@ pub const MSG_WAITALL: i32 = 0x100;
 pub const MSG_NOSIGNAL: i32 = 0x4000;
 pub const MAX_SOCKADDR_LEN: usize = 110;
 
+/// Pending owns one received notification reference, not a local FD. Wait on
+/// its native READABLE signal, query CONTROL_CONNECT_RESULT, and close on every
+/// exit path. Dropping the final reference cancels an uncommitted attempt.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "release a pending connection job on completion or interruption"]
+pub enum ConnectStarted<H> {
+    Connected,
+    Pending(ObjectHandleAttachment<H>),
+}
+
 /// One received socket reference plus validated, owned peer-address bytes.
 /// The caller reserves a local FD before requesting this resource and releases
 /// `socket.handle` if FD installation fails. No FD number enters the protocol.
@@ -225,6 +235,72 @@ pub fn poll_events(bits: u32, events: i16) -> i16 {
 }
 
 impl<T: ObjectTransport> Client<T> {
+    /// Attach explicit socket authority; never send a FD, PID, or object ID.
+    /// Shared description flags decide whether a full backlog can wait.
+    pub fn connect_socket(
+        &self,
+        socket: ObjectHandleAttachment<T::Handle>,
+        address: wire::Address<'_>,
+        mut close: impl FnMut(T::Handle),
+    ) -> Result<ConnectStarted<T::Handle>, ClientError<T::Error>>
+    where
+        T::Handle: Eq + Default,
+    {
+        let required = wire::connect_socket_rights();
+        if socket.handle == T::Handle::default() || socket.rights & required != required {
+            return Err(ClientError::Remote(-13));
+        }
+        let mut payload = [0; wire::MAX_ADDRESS_LEN];
+        let payload_len = address
+            .encode(&mut payload)
+            .map_err(ClientError::Protocol)?;
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(ObjectHandleAttachment {
+                handle: socket.handle,
+                rights: required,
+            })
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        let mut reply = [0; wire::CONNECT_REPLY_LEN];
+        let result = self.request_with_handles(
+            protocol::OP_SOCKET_CONNECT,
+            0,
+            &payload[..payload_len],
+            &mut reply,
+            &mut handles,
+        );
+        if let Ok(length) = result {
+            match wire::ConnectReply::decode(&reply[..length]) {
+                Ok(wire::ConnectReply::Connected) if handles.is_empty() => {
+                    return Ok(ConnectStarted::Connected);
+                }
+                Ok(wire::ConnectReply::Waiting) if handles.len() == 1 => {
+                    let job = handles.get(0).unwrap();
+                    if job.handle != T::Handle::default()
+                        && job.handle != socket.handle
+                        && job.rights == wire::connect_job_rights()
+                    {
+                        return Ok(ConnectStarted::Pending(job));
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Transport replaced borrowed outgoing authority with owned received
+        // references, including on errors. Reclaim malformed replies once.
+        for (index, received) in handles.iter().enumerate() {
+            if received.handle != T::Handle::default()
+                && !handles
+                    .iter()
+                    .take(index)
+                    .any(|old| old.handle == received.handle)
+            {
+                close(received.handle);
+            }
+        }
+        Err(result.err().unwrap_or(ClientError::MismatchedResponse))
+    }
+
     /// Nonblocking queue operation. The native listener's WAIT authority is
     /// used separately by libc for a blocking accept, cancellation and EINTR.
     pub fn accept_socket(

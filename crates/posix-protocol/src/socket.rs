@@ -7,6 +7,59 @@ use super::ProtocolError;
 pub const CREATE_LEN: usize = 16;
 pub const NONBLOCKING: u32 = 1;
 pub const ACCEPT_LEN: usize = 8;
+pub const CONNECT_REPLY_LEN: usize = 8;
+
+/// The reply contains no description/job identity. Authority to inspect or
+/// cancel a pending attempt is carried only by the attached job Handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectReply {
+    Connected,
+    Waiting,
+}
+
+impl ConnectReply {
+    pub fn encode(self, output: &mut [u8]) -> Result<usize, ProtocolError> {
+        if output.len() < CONNECT_REPLY_LEN {
+            return Err(ProtocolError::BufferTooSmall);
+        }
+        output[..CONNECT_REPLY_LEN].fill(0);
+        let phase: u32 = match self {
+            Self::Connected => 0,
+            Self::Waiting => 1,
+        };
+        output[..4].copy_from_slice(&phase.to_le_bytes());
+        Ok(CONNECT_REPLY_LEN)
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self, ProtocolError> {
+        if input.len() != CONNECT_REPLY_LEN || input[4..] != [0; 4] {
+            return Err(ProtocolError::InvalidLength);
+        }
+        match u32::from_le_bytes(
+            input[..4]
+                .try_into()
+                .map_err(|_| ProtocolError::InvalidLength)?,
+        ) {
+            0 => Ok(Self::Connected),
+            1 => Ok(Self::Waiting),
+            _ => Err(ProtocolError::InvalidLength),
+        }
+    }
+}
+
+pub const fn connect_socket_rights() -> u64 {
+    mnu_abi::HANDLE_RIGHT_CONTROL | mnu_abi::HANDLE_RIGHT_TRANSFER
+}
+
+/// No data, seek/map, or duplication authority. Final release cancels only an
+/// uncommitted attempt; it never shuts down an already-connected socket.
+pub const fn connect_job_rights() -> u64 {
+    mnu_abi::HANDLE_RIGHT_CONTROL | mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_TRANSFER
+}
+
+/// HandleControl with empty input/output. Pending returns EAGAIN; a completed
+/// attempt returns success or its stored error. Queries do not consume it.
+pub const CONTROL_CONNECT_RESULT: u64 = u64::from_le_bytes(*b"SOCRES01");
 
 /// Options apply to the new socket description. Listener blocking behavior
 /// and descriptor-local CLOEXEC are not copied into this request.

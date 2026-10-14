@@ -243,6 +243,10 @@ pub const OP_SOCKET_PAIR: u16 = 80;
 /// Request carries socket::Accept; success carries peer Address and one new
 /// socket Handle. Empty queue returns EAGAIN; waiting remains client-side.
 pub const OP_SOCKET_ACCEPT: u16 = 81;
+/// Address payload and exactly one attached socket Handle. Blocking behavior
+/// comes from the shared socket description, not a caller-supplied flag.
+/// Success returns socket::ConnectReply; Waiting also attaches one job Handle.
+pub const OP_SOCKET_CONNECT: u16 = 82;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
