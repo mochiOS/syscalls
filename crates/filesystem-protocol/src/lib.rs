@@ -96,6 +96,10 @@ pub const OPEN_STATUS_FLAGS_ALL: u32 = OPEN_STATUS_APPEND | OPEN_STATUS_NONBLOCK
 pub const MKDIR_AT_BASE_ATTACHED: u32 = 1 << 0;
 pub const MKDIR_AT_ROOT_ATTACHED: u32 = 1 << 1;
 pub const MKDIR_AT_FLAGS_ALL: u32 = MKDIR_AT_BASE_ATTACHED | MKDIR_AT_ROOT_ATTACHED;
+/// Socket-node creation uses the same ordered root/base directory attachments.
+pub const SOCKET_AT_BASE_ATTACHED: u32 = 1 << 0;
+pub const SOCKET_AT_ROOT_ATTACHED: u32 = 1 << 1;
+pub const SOCKET_AT_FLAGS_ALL: u32 = SOCKET_AT_BASE_ATTACHED | SOCKET_AT_ROOT_ATTACHED;
 
 pub const UNLINK_AT_REMOVE_DIRECTORY: u32 = 1 << 0;
 pub const UNLINK_AT_BASE_ATTACHED: u32 = 1 << 1;
@@ -207,6 +211,7 @@ pub const NODE_TYPE_REGULAR: u32 = 1;
 pub const NODE_TYPE_DIRECTORY: u32 = 2;
 pub const NODE_TYPE_SYMLINK: u32 = 3;
 pub const NODE_TYPE_SPECIAL: u32 = 4;
+pub const NODE_TYPE_SOCKET: u32 = 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Header {
