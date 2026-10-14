@@ -23,6 +23,7 @@ struct sockaddr {
 #define SOCK_SEQPACKET 5
 #define SOCK_NONBLOCK 0x800
 #define SOCK_CLOEXEC 0x80000
+#define SOMAXCONN 128
 #define SHUT_RD 0
 #define SHUT_WR 1
 #define SHUT_RDWR 2
@@ -38,6 +39,7 @@ extern "C" {
 int socketpair(int domain, int type, int protocol, int sv[2]);
 int socket(int domain, int type, int protocol);
 int bind(int socket, const struct sockaddr *address, socklen_t length);
+int listen(int socket, int backlog);
 int shutdown(int socket, int how);
 ssize_t send(int socket, const void *buffer, size_t length, int flags);
 ssize_t recv(int socket, void *buffer, size_t length, int flags);

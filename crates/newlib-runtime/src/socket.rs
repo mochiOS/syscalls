@@ -7,6 +7,24 @@ use mochios_posix_protocol::socket as wire;
 struct PendingPair([FdReservation; 2]);
 
 #[unsafe(no_mangle)]
+pub extern "C" fn listen(fd: c_int, backlog: c_int) -> c_int {
+    let result = (|| {
+        let entry = with_fd_entry(fd)?;
+        if entry.handle.kind != FdKind::ObjectSocket {
+            return Err(mochios_posix_client::newlib_errno::from_status(-88));
+        }
+        control(
+            entry,
+            wire::CONTROL_LISTEN,
+            &(backlog.max(0) as u32).to_le_bytes(),
+            &mut [],
+        )?;
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn bind(fd: c_int, address: *const c_void, length: u32) -> c_int {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
