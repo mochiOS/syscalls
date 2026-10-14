@@ -381,6 +381,23 @@ impl<T: Transport> Client<T> {
             .map(|_| ())
     }
 
+    /// Creates an immediate synchronous fault delivery for this authenticated
+    /// thread. The service chooses handler versus fatal default from its state.
+    pub fn fault_signal_delivery(
+        &self,
+        signal: u32,
+    ) -> Result<protocol::fault_signal::Delivery, ClientError<T::Error>> {
+        let mut request = [0; protocol::SIGNAL_SEND_REQUEST_LEN];
+        protocol::encode_signal_send_request(
+            protocol::SignalSendRequest { selector: 0, signal },
+            &mut request,
+        )
+        .map_err(ClientError::Protocol)?;
+        let mut response = [0; protocol::fault_signal::DELIVERY_LEN];
+        let length = self.request(protocol::OP_SIGNAL_THREAD_FAULT, 0, &request, &mut response)?;
+        protocol::fault_signal::decode(&response[..length]).map_err(ClientError::Protocol)
+    }
+
     /// Reads pending signals intersected with this thread's service-owned mask.
     pub fn thread_pending_signals(&self) -> Result<u64, ClientError<T::Error>> {
         let mut response = [0; protocol::SIGNAL_MASK_LEN];

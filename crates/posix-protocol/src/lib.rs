@@ -12,6 +12,7 @@ pub const MAX_MESSAGE_LEN: usize = 64 * 1024;
 pub mod named_semaphore;
 pub mod shared_memory;
 pub mod socket;
+pub mod fault_signal;
 
 /// Opaque LaunchContext key under which the POSIX control endpoint is passed.
 ///
@@ -247,6 +248,9 @@ pub const OP_SOCKET_ACCEPT: u16 = 81;
 /// comes from the shared socket description, not a caller-supplied flag.
 /// Success returns socket::ConnectReply; Waiting also attaches one job Handle.
 pub const OP_SOCKET_CONNECT: u16 = 82;
+/// SignalSendRequest with selector zero; synchronous BUS/SEGV delivery to
+/// the authenticated calling thread, without consuming pending signals.
+pub const OP_SIGNAL_THREAD_FAULT: u16 = 83;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -435,6 +439,8 @@ pub const SIGNAL_HUP: u32 = 1;
 pub const SIGNAL_INT: u32 = 2;
 pub const SIGNAL_QUIT: u32 = 3;
 pub const SIGNAL_KILL: u32 = 9;
+pub const SIGNAL_BUS: u32 = 10;
+pub const SIGNAL_SEGV: u32 = 11;
 pub const SIGNAL_PIPE: u32 = 13;
 pub const SIGNAL_URG: u32 = 16;
 pub const SIGNAL_STOP: u32 = 17;

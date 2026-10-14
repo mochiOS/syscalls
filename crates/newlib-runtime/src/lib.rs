@@ -16,6 +16,7 @@ mod shared_memory;
 mod socket;
 mod stdio_cancellation;
 mod thread_cleanup;
+mod fault_signal;
 
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_void};
@@ -1251,7 +1252,7 @@ fn setup_signal_delivery(control: &ThreadControl) -> Result<(), c_int> {
         entry: posix_signal_upcall as *const () as u64,
         stack_base: stack as u64,
         stack_size: SIGNAL_UPCALL_STACK_SIZE as u64,
-        flags: 0,
+        flags: syscall::THREAD_UPCALL_EXCEPTIONS,
         reserved: [0; 4],
     };
     let install = syscall_errno(syscall::raw_syscall2(
@@ -6838,8 +6839,22 @@ fn drain_pending_signals() -> Result<(), c_int> {
     }
 }
 
-extern "C" fn posix_signal_upcall(_payload: u64, token: u64) -> ! {
-    let _ = drain_pending_signals();
+extern "C" fn posix_signal_upcall(
+    payload: u64,
+    token: u64,
+    kind: u64,
+    _address: u64,
+    _cpu_error: u64,
+    _instruction: u64,
+    cause: u64,
+) -> ! {
+    if kind == syscall::THREAD_UPCALL_KIND_EXCEPTION {
+        if payload != 14 || fault_signal::deliver(cause).is_err() {
+            process_exit(127);
+        }
+    } else {
+        let _ = drain_pending_signals();
+    }
     let result = syscall::raw_syscall1(syscall::SyscallNumber::ThreadUpcallReturn, token);
     let error = result.raw() as i64;
     process_exit(if error < 0 {
