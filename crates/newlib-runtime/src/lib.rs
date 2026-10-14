@@ -2852,10 +2852,13 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     let client = posix_client().map_err(map_posix_client_error)?;
     let (_, thread_control) = current_thread_control().ok_or(ENOTSUP)?;
     service_signal_mask(thread_control, posix_protocol::SIGNAL_MASK_QUERY, 0)?;
+    // malloc can enter _sbrk and acquire STATE. Stabilize its arena first, not
+    // after taking STATE, and retain the caller's existing recursion depth.
+    let allocator_guard = atfork::freeze_allocator();
     // Acquire runtime-owned state in dependency order before STATE. Signal
     // disposition updates hold UPDATE before ACTIONS; endpoint initialization
     // may perform IPC but never runs while STATE is held. Both processes must
-    // release these copied guards before rebuilding child thread state.
+    // release these copied guards before rebuilding child upcall state.
     let socket_guard = socket_record::freeze_for_clone();
     let update_guard = SIGNAL_ACTION_UPDATE.lock();
     let actions_guard = SIGNAL_ACTIONS.lock();
@@ -2924,10 +2927,6 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
             thread_control.thread_local_base.load(Ordering::Relaxed),
         )
     };
-    drop(guard);
-    drop(actions_guard);
-    drop(update_guard);
-    drop(socket_guard);
     if image == 0 {
         if FORK_EPOCH
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| epoch.checked_add(1))
@@ -2935,6 +2934,19 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         {
             process_exit(EOVERFLOW);
         }
+        // Rebind before releasing owner-tracked newlib locks: the copied
+        // ThreadControl retains its private lock identity, not its native ID.
+        thread_control.native_id.store(
+            native_thread_id().unwrap_or_else(|_| process_exit(127)),
+            Ordering::Relaxed,
+        );
+    }
+    drop(guard);
+    drop(actions_guard);
+    drop(update_guard);
+    drop(socket_guard);
+    drop(allocator_guard);
+    if image == 0 {
         // Fork's numeric slot labels are temporary transfer metadata, not exec
         // inheritance policy. Keep only the selected control endpoint key;
         // later exec stages exactly its intended descriptors into context.
@@ -2948,11 +2960,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
             process_exit(127);
         }
         state().fds.clear_reservations();
-        // The new native thread has no copied identity or upcall target.
-        thread_control.native_id.store(
-            native_thread_id().unwrap_or_else(|_| process_exit(127)),
-            Ordering::Relaxed,
-        );
+        // The new native thread has no copied upcall target.
         for other in &THREADS {
             if !ptr::eq(other, thread_control) && other.state.load(Ordering::Acquire) != THREAD_FREE
             {

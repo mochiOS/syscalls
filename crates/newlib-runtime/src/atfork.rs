@@ -3,6 +3,26 @@ use mochios_posix_client::atfork::{Callback, Handlers, Registry};
 
 static REGISTRY: RuntimeMutex<Registry> = RuntimeMutex::new(Registry::new());
 
+pub(super) struct AllocatorGuard {
+    _delivery: Option<mochios_posix_client::upcall_guard::Guard<'static>>,
+}
+
+pub(super) fn freeze_allocator() -> AllocatorGuard {
+    let delivery = defer_native_delivery();
+    __retarget_lock_acquire_recursive(ptr::from_ref(&__lock___malloc_recursive_mutex).cast_mut());
+    AllocatorGuard {
+        _delivery: delivery,
+    }
+}
+
+impl Drop for AllocatorGuard {
+    fn drop(&mut self) {
+        __retarget_lock_release_recursive(
+            ptr::from_ref(&__lock___malloc_recursive_mutex).cast_mut(),
+        );
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn pthread_atfork(
     prepare: Option<Callback>,
