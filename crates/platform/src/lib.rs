@@ -1164,6 +1164,23 @@ pub mod time {
             })
             .ok_or_else(|| syscall::SysError::from_raw(EOVERFLOW as i64))
     }
+
+    pub fn monotonic_nanoseconds() -> SysResult<u64> {
+        let mut instant = ClockInstant::default();
+        syscall::call2(
+            syscall::SyscallNumber::ClockRead,
+            ClockId::Monotonic as u64,
+            (&mut instant as *mut ClockInstant) as u64,
+        )?;
+        if instant.nanoseconds >= 1_000_000_000 || instant.reserved != 0 {
+            return Err(syscall::SysError::from_raw(syscall::EIO as i64));
+        }
+        instant
+            .seconds
+            .checked_mul(1_000_000_000)
+            .and_then(|seconds| seconds.checked_add(u64::from(instant.nanoseconds)))
+            .ok_or_else(|| syscall::SysError::from_raw(EOVERFLOW as i64))
+    }
 }
 
 pub mod synchronization {

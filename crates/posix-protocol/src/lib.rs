@@ -258,6 +258,9 @@ pub const OP_SIGNAL_DELIVERY_ORIGIN: u16 = 85;
 /// for the authenticated thread. Returns signal_wait::Accepted. EAGAIN stays
 /// internal to deferred service processing. The old number-only opcode is gone.
 pub const OP_SIGNAL_THREAD_WAIT_INFO: u16 = 86;
+/// signal_wait timed request: mask, epoch and finite absolute monotonic ns.
+/// Success returns signal_wait::Accepted; expiry returns EAGAIN.
+pub const OP_SIGNAL_THREAD_TIMED_WAIT: u16 = 87;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

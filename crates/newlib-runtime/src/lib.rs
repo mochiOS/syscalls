@@ -6699,7 +6699,36 @@ pub unsafe extern "C" fn sigwaitinfo(
     set: *const u64,
     info: *mut mochios_posix_client::signal_context::SigInfo,
 ) -> c_int {
+    result_with_errno(wait_signal_info(set, info, None), -1)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigtimedwait(
+    set: *const u64,
+    info: *mut mochios_posix_client::signal_context::SigInfo,
+    timeout: *const NewlibTimespec,
+) -> c_int {
     let result = (|| {
+        let deadline = if timeout.is_null() {
+            None
+        } else {
+            let deadline = timespec_deadline(timeout)?;
+            if deadline == syscall::HANDLE_WAIT_INFINITE {
+                return Err(EOVERFLOW);
+            }
+            Some(deadline)
+        };
+        wait_signal_info(set, info, deadline)
+    })();
+    result_with_errno(result, -1)
+}
+
+fn wait_signal_info(
+    set: *const u64,
+    info: *mut mochios_posix_client::signal_context::SigInfo,
+    deadline: Option<u64>,
+) -> Result<c_int, c_int> {
+    (|| {
         if set.is_null() {
             return Err(EFAULT);
         }
@@ -6707,7 +6736,11 @@ pub unsafe extern "C" fn sigwaitinfo(
         let mask = unsafe { set.read() };
         let client = posix_client().map_err(map_posix_client_error)?;
         let epoch = client.thread_signal_epoch().map_err(map_posix_client_error)?;
-        let accepted = match client.wait_thread_signal_info_since(mask, epoch) {
+        let received = match deadline {
+            Some(deadline) => client.wait_thread_signal_info_until(mask, epoch, deadline),
+            None => client.wait_thread_signal_info_since(mask, epoch),
+        };
+        let accepted = match received {
             Ok(accepted) => accepted,
             Err(PosixClientError::Remote(posix_protocol::STATUS_EINTR)) => {
                 drain_pending_signals()?;
@@ -6727,9 +6760,7 @@ pub unsafe extern "C" fn sigwaitinfo(
             unsafe { info.write(value) };
         }
         Ok(accepted.signal as c_int)
-    })();
-    // Unlike sigwait, this API returns -1 and sets errno on interruption.
-    result_with_errno(result, -1)
+    })()
 }
 
 #[unsafe(no_mangle)]

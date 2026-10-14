@@ -235,14 +235,45 @@ impl<T: Transport> Client<T> {
         mask: u64,
         epoch: u64,
     ) -> Result<protocol::signal_wait::Accepted, ClientError<T::Error>> {
-        let mut request = [0; protocol::SIGNAL_WAIT_REQUEST_LEN];
-        protocol::encode_signal_wait_request(mask, epoch, &mut request)
-            .map_err(ClientError::Protocol)?;
+        self.wait_thread_signal_info(mask, epoch, None)
+    }
+
+    pub fn wait_thread_signal_info_until(
+        &self,
+        mask: u64,
+        epoch: u64,
+        deadline: u64,
+    ) -> Result<protocol::signal_wait::Accepted, ClientError<T::Error>> {
+        self.wait_thread_signal_info(mask, epoch, Some(deadline))
+    }
+
+    fn wait_thread_signal_info(
+        &self,
+        mask: u64,
+        epoch: u64,
+        deadline: Option<u64>,
+    ) -> Result<protocol::signal_wait::Accepted, ClientError<T::Error>> {
+        let mut request = [0; protocol::signal_wait::TIMED_REQUEST_LEN];
+        let (opcode, length) = if let Some(deadline) = deadline {
+            protocol::signal_wait::encode_timed_request(mask, epoch, deadline, &mut request)
+                .map_err(ClientError::Protocol)?;
+            (
+                protocol::OP_SIGNAL_THREAD_TIMED_WAIT,
+                protocol::signal_wait::TIMED_REQUEST_LEN,
+            )
+        } else {
+            protocol::encode_signal_wait_request(mask, epoch, &mut request)
+                .map_err(ClientError::Protocol)?;
+            (
+                protocol::OP_SIGNAL_THREAD_WAIT_INFO,
+                protocol::SIGNAL_WAIT_REQUEST_LEN,
+            )
+        };
         let mut response = [0; protocol::signal_wait::LEN];
         let length = self.request(
-            protocol::OP_SIGNAL_THREAD_WAIT_INFO,
+            opcode,
             0,
-            &request,
+            &request[..length],
             &mut response,
         )?;
         let accepted =

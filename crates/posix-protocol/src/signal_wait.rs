@@ -2,6 +2,36 @@
 use super::*;
 
 pub const LEN: usize = 8 + signal_origin::LEN;
+pub const TIMED_REQUEST_LEN: usize = SIGNAL_WAIT_REQUEST_LEN + 8;
+
+pub fn encode_timed_request(
+    mask: u64,
+    epoch: u64,
+    deadline: u64,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < TIMED_REQUEST_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    if deadline == u64::MAX {
+        return Err(ProtocolError::InvalidLength);
+    }
+    encode_signal_wait_request(mask, epoch, output)?;
+    put_u64(output, SIGNAL_WAIT_REQUEST_LEN, deadline);
+    Ok(())
+}
+
+pub fn decode_timed_request(input: &[u8]) -> Result<(u64, u64, u64), ProtocolError> {
+    if input.len() != TIMED_REQUEST_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let (mask, epoch) = decode_signal_wait_request(&input[..SIGNAL_WAIT_REQUEST_LEN])?;
+    let deadline = get_u64(input, SIGNAL_WAIT_REQUEST_LEN);
+    if deadline == u64::MAX {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok((mask, epoch, deadline))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Accepted {
