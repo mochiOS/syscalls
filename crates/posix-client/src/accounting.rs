@@ -3,6 +3,18 @@ use crate::newlib_errno::{EIO, EOVERFLOW};
 /// Matches the newlib SDK's CLOCKS_PER_SEC and sysconf(_SC_CLK_TCK).
 pub const CLOCK_TICKS_PER_SECOND: u64 = 1000;
 
+/// POSIX timeval CPU duration, converted only after child counters have been
+/// aggregated. Avoid multiplying the whole wide counter by a unit scale.
+pub fn cpu_timeval(ticks: u128, sampling_rate: u64) -> Result<(i64, i64), i32> {
+    if sampling_rate == 0 {
+        return if ticks == 0 { Ok((0, 0)) } else { Err(EIO) };
+    }
+    let rate = u128::from(sampling_rate);
+    let seconds = i64::try_from(ticks / rate).map_err(|_| EOVERFLOW)?;
+    let microseconds = ((ticks % rate) * 1_000_000 / rate) as i64;
+    Ok((seconds, microseconds))
+}
+
 /// Convert after aggregation. Quotient/remainder avoids overflowing a large
 /// intermediate product when the final clock_t remains representable.
 pub fn clock_ticks(ticks: u128, sampling_rate: u64) -> Result<u64, i32> {
