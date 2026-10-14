@@ -87,6 +87,9 @@ pub const OP_CHMOD_HANDLE: u16 = 35;
 pub const OP_CHOWN_HANDLE: u16 = 36;
 /// Atomically creates a hard link between two Handle-anchored paths.
 pub const OP_LINK_AT: u16 = 37;
+/// Creates one exclusive socket inode after Handle-anchored path traversal.
+/// Only explicitly delegated filesystem-control holders may supply credentials.
+pub const OP_CREATE_SOCKET_AT: u16 = 38;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const OPEN_STATUS_APPEND: u32 = 1 << 0;
