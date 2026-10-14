@@ -5587,7 +5587,9 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
             return Ok(0);
         }
         if entry.handle.kind == FdKind::ObjectSocket {
-            return Err(ENOTSUP);
+            let status = socket::stat(entry)?;
+            unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), status) };
+            return Ok(0);
         }
         if matches!(
             entry.handle.kind,

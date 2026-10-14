@@ -146,3 +146,10 @@ pub(super) fn poll_events(entry: FdEntry, events: i16) -> Result<i16, c_int> {
     }
     Ok(mochios_posix_client::socket::poll_events(bits, events))
 }
+
+pub(super) fn stat(entry: FdEntry) -> Result<NewlibStat, c_int> {
+    let mut bytes = [0; posix_protocol::FILE_STATUS_LEN];
+    control(entry, wire::CONTROL_STAT, &[], &mut bytes)?;
+    let status = posix_protocol::decode_file_status(&bytes).map_err(|_| EIO)?;
+    translate_posix_stat(&status)
+}
