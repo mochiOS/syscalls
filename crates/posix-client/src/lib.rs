@@ -398,6 +398,19 @@ impl<T: Transport> Client<T> {
         protocol::fault_signal::decode(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    /// Reads the immutable origin recorded for this thread's active delivery.
+    /// Neither the process ID nor UID is supplied by the requesting client.
+    pub fn signal_delivery_origin(
+        &self,
+        delivery: protocol::SignalDelivery,
+    ) -> Result<protocol::signal_origin::Origin, ClientError<T::Error>> {
+        let mut request = [0; protocol::SIGNAL_DELIVERY_LEN];
+        protocol::encode_signal_delivery(delivery, &mut request).map_err(ClientError::Protocol)?;
+        let mut response = [0; protocol::signal_origin::LEN];
+        let length = self.request(protocol::OP_SIGNAL_DELIVERY_ORIGIN, 0, &request, &mut response)?;
+        protocol::signal_origin::decode(&response[..length]).map_err(ClientError::Protocol)
+    }
+
     /// Reads pending signals intersected with this thread's service-owned mask.
     pub fn thread_pending_signals(&self) -> Result<u64, ClientError<T::Error>> {
         let mut response = [0; protocol::SIGNAL_MASK_LEN];

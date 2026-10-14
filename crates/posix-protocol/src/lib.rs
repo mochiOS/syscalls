@@ -13,6 +13,7 @@ pub mod named_semaphore;
 pub mod shared_memory;
 pub mod socket;
 pub mod fault_signal;
+pub mod signal_origin;
 
 /// Opaque LaunchContext key under which the POSIX control endpoint is passed.
 ///
@@ -251,6 +252,9 @@ pub const OP_SOCKET_CONNECT: u16 = 82;
 /// SignalSendRequest with selector zero; synchronous BUS/SEGV delivery to
 /// the authenticated calling thread, without consuming pending signals.
 pub const OP_SIGNAL_THREAD_FAULT: u16 = 83;
+/// SignalDelivery request; reads provenance only for a delivery owned by the
+/// authenticated calling thread. Does not consume the completion token.
+pub const OP_SIGNAL_DELIVERY_ORIGIN: u16 = 84;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
