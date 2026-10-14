@@ -1,0 +1,175 @@
+//! Socket policy wire types. Domains/kinds are this userspace protocol's tags,
+//! not native mnu ABI values. FD numbers, sockaddr padding and pointers never
+//! enter these payloads. Attached Handles carry resource authority separately.
+
+use super::ProtocolError;
+
+pub const CREATE_LEN: usize = 16;
+pub const NONBLOCKING: u32 = 1;
+pub const ADDRESS_HEADER_LEN: usize = 8;
+/// Space for a NUL terminator (pathname) or namespace prefix (abstract) remains
+/// in the libc sockaddr_un. Neither is included in the serialized name bytes.
+pub const MAX_UNIX_NAME_BYTES: usize = 107;
+pub const MAX_ADDRESS_LEN: usize = ADDRESS_HEADER_LEN + MAX_UNIX_NAME_BYTES;
+
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Domain {
+    Unix = 1,
+    Ipv4 = 2,
+    Ipv6 = 3,
+}
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Stream = 1,
+    Datagram = 2,
+    SequencedPacket = 3,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Create {
+    pub domain: Domain,
+    pub kind: Kind,
+    pub protocol: u32,
+    pub options: u32,
+}
+impl Create {
+    pub fn encode(self, output: &mut [u8]) -> Result<usize, ProtocolError> {
+        if self.options & !NONBLOCKING != 0 {
+            return Err(ProtocolError::InvalidLength);
+        }
+        if output.len() < CREATE_LEN {
+            return Err(ProtocolError::BufferTooSmall);
+        }
+        output[..CREATE_LEN].fill(0);
+        output[..2].copy_from_slice(&(self.domain as u16).to_le_bytes());
+        output[2..4].copy_from_slice(&(self.kind as u16).to_le_bytes());
+        output[4..8].copy_from_slice(&self.protocol.to_le_bytes());
+        output[8..12].copy_from_slice(&self.options.to_le_bytes());
+        Ok(CREATE_LEN)
+    }
+    pub fn decode(input: &[u8]) -> Result<Self, ProtocolError> {
+        if input.len() != CREATE_LEN || input[12..].iter().any(|byte| *byte != 0) {
+            return Err(ProtocolError::InvalidLength);
+        }
+        let domain = match u16::from_le_bytes(input[..2].try_into().unwrap()) {
+            1 => Domain::Unix,
+            2 => Domain::Ipv4,
+            3 => Domain::Ipv6,
+            _ => return Err(ProtocolError::InvalidLength),
+        };
+        let kind = match u16::from_le_bytes(input[2..4].try_into().unwrap()) {
+            1 => Kind::Stream,
+            2 => Kind::Datagram,
+            3 => Kind::SequencedPacket,
+            _ => return Err(ProtocolError::InvalidLength),
+        };
+        let options = u32::from_le_bytes(input[8..12].try_into().unwrap());
+        if options & !NONBLOCKING != 0 {
+            return Err(ProtocolError::InvalidLength);
+        }
+        Ok(Self {
+            domain,
+            kind,
+            protocol: u32::from_le_bytes(input[4..8].try_into().unwrap()),
+            options,
+        })
+    }
+}
+
+/// Ports/flow/scope are host-value integers serialized explicitly little-endian.
+/// IP addresses remain network-order octets. The libc adapter converts sockaddr
+/// network-order integers at its boundary, not inside mnu or this codec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Address<'a> {
+    UnixPath(&'a [u8]),
+    UnixAbstract(&'a [u8]),
+    UnixUnnamed,
+    Ipv4 {
+        address: [u8; 4],
+        port: u16,
+    },
+    Ipv6 {
+        address: [u8; 16],
+        port: u16,
+        flow_info: u32,
+        scope_id: u32,
+    },
+}
+impl<'a> Address<'a> {
+    pub fn encode(self, output: &mut [u8]) -> Result<usize, ProtocolError> {
+        let (domain, form, length) = match self {
+            Self::UnixPath(name)
+                if !name.is_empty() && !name.contains(&0) && name.len() <= MAX_UNIX_NAME_BYTES =>
+            {
+                (Domain::Unix, 0, name.len())
+            }
+            Self::UnixAbstract(name) if name.len() <= MAX_UNIX_NAME_BYTES => {
+                (Domain::Unix, 1, name.len())
+            }
+            Self::UnixUnnamed => (Domain::Unix, 2, 0),
+            Self::Ipv4 { .. } => (Domain::Ipv4, 0, 6),
+            Self::Ipv6 { .. } => (Domain::Ipv6, 0, 26),
+            _ => return Err(ProtocolError::InvalidLength),
+        };
+        let total = ADDRESS_HEADER_LEN + length;
+        if output.len() < total {
+            return Err(ProtocolError::BufferTooSmall);
+        }
+        output[..total].fill(0);
+        output[..2].copy_from_slice(&(domain as u16).to_le_bytes());
+        output[2] = form;
+        output[4..8].copy_from_slice(&(length as u32).to_le_bytes());
+        let data = &mut output[ADDRESS_HEADER_LEN..total];
+        match self {
+            Self::UnixPath(name) | Self::UnixAbstract(name) => data.copy_from_slice(name),
+            Self::UnixUnnamed => (),
+            Self::Ipv4 { address, port } => {
+                data[..2].copy_from_slice(&port.to_le_bytes());
+                data[2..].copy_from_slice(&address);
+            }
+            Self::Ipv6 {
+                address,
+                port,
+                flow_info,
+                scope_id,
+            } => {
+                data[..2].copy_from_slice(&port.to_le_bytes());
+                data[2..6].copy_from_slice(&flow_info.to_le_bytes());
+                data[6..10].copy_from_slice(&scope_id.to_le_bytes());
+                data[10..].copy_from_slice(&address);
+            }
+        }
+        Ok(total)
+    }
+    pub fn decode(input: &'a [u8]) -> Result<Self, ProtocolError> {
+        if input.len() < ADDRESS_HEADER_LEN || input[3] != 0 {
+            return Err(ProtocolError::InvalidLength);
+        }
+        let data = &input[ADDRESS_HEADER_LEN..];
+        if u32::from_le_bytes(input[4..8].try_into().unwrap()) as usize != data.len() {
+            return Err(ProtocolError::InvalidLength);
+        }
+        match (u16::from_le_bytes(input[..2].try_into().unwrap()), input[2]) {
+            (1, 0)
+                if !data.is_empty() && !data.contains(&0) && data.len() <= MAX_UNIX_NAME_BYTES =>
+            {
+                Ok(Self::UnixPath(data))
+            }
+            (1, 1) if data.len() <= MAX_UNIX_NAME_BYTES => Ok(Self::UnixAbstract(data)),
+            (1, 2) if data.is_empty() => Ok(Self::UnixUnnamed),
+            (2, 0) if data.len() == 6 => Ok(Self::Ipv4 {
+                port: u16::from_le_bytes(data[..2].try_into().unwrap()),
+                address: data[2..].try_into().unwrap(),
+            }),
+            (3, 0) if data.len() == 26 => Ok(Self::Ipv6 {
+                port: u16::from_le_bytes(data[..2].try_into().unwrap()),
+                flow_info: u32::from_le_bytes(data[2..6].try_into().unwrap()),
+                scope_id: u32::from_le_bytes(data[6..10].try_into().unwrap()),
+                address: data[10..].try_into().unwrap(),
+            }),
+            _ => Err(ProtocolError::InvalidLength),
+        }
+    }
+}
