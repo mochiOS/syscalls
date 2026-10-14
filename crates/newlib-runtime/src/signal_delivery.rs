@@ -127,6 +127,100 @@ pub(super) fn stack_is_active(control: &ThreadControl, base: usize, size: usize)
     frame >= base && frame - base < size
 }
 
+/// Local storage/return metadata, never a grant of authority over another
+/// thread. In a fork child, `owner` differs and `token` must not be returned.
+#[derive(Clone, Copy)]
+pub(super) struct AbandonedFrame {
+    pub(super) owner: u64,
+    pub(super) token: u64,
+    pub(super) stack: usize,
+    pub(super) size: usize,
+}
+
+unsafe fn walk_to(
+    control: &ThreadControl,
+    target: u64,
+    mut visit: impl FnMut(AbandonedFrame) -> Result<(), c_int>,
+) -> Result<(), c_int> {
+    if control.native_delivery_defer.load(Ordering::Acquire) == 0 {
+        return Err(EINVAL);
+    }
+    let mut pointer = control.active_native_signal_frame.load(Ordering::Acquire);
+    let mut id = control
+        .active_native_signal_frame_id
+        .load(Ordering::Acquire);
+    loop {
+        if pointer == 0 {
+            return if id == 0 && target == 0 {
+                Ok(())
+            } else {
+                Err(EINVAL)
+            };
+        }
+        let frame = unsafe { &*(pointer as *const NativeFrame) };
+        if id == 0
+            || frame.id != id
+            || !frame.active
+            || frame.retired
+            || !core::ptr::eq(frame.control, control)
+            || frame.previous_id >= id
+            || (frame.previous == 0) != (frame.previous_id == 0)
+        {
+            return Err(EINVAL);
+        }
+        if id == target {
+            return Ok(());
+        }
+        visit(AbandonedFrame {
+            owner: frame.owner,
+            token: frame.token,
+            stack: frame.stack,
+            size: frame.size,
+        })?;
+        pointer = frame.previous;
+        id = frame.previous_id;
+    }
+}
+
+/// Stage the metadata needed to leave native callbacks during a nonlocal jump.
+/// The destination is validated before the visitor is called even once.
+///
+/// # Safety
+/// Only the owning thread may call this, with its native delivery guard held.
+/// Its published records must remain pinned and live. The visitor must not
+/// alter that chain or execute a user callback. It must stage metadata only:
+/// no recorded stack may be unmapped while execution can still use it.
+pub(super) unsafe fn visit_abandoned(
+    control: &ThreadControl,
+    target: u64,
+    visit: impl FnMut(AbandonedFrame) -> Result<(), c_int>,
+) -> Result<(), c_int> {
+    unsafe { walk_to(control, target, |_| Ok(())) }?;
+    unsafe { walk_to(control, target, visit) }
+}
+
+/// Unlink only callbacks inside the saved destination. This does not consume
+/// a kernel return token, restore CPU state or free any stack mapping.
+///
+/// # Safety
+/// The requirements of `visit_abandoned` apply. The caller must first retain
+/// any required return/storage metadata and must not return through retired
+/// callback frames. Keep delivery deferred until the actual stack transition;
+/// removing a local record alone does not end an active native upcall.
+pub(super) unsafe fn retire_to(control: &ThreadControl, target: u64) -> Result<(), c_int> {
+    unsafe { walk_to(control, target, |_| Ok(())) }?;
+    while control
+        .active_native_signal_frame_id
+        .load(Ordering::Acquire)
+        != target
+    {
+        let pointer = control.active_native_signal_frame.load(Ordering::Acquire);
+        let frame = unsafe { Pin::new_unchecked(&mut *(pointer as *mut NativeFrame)) };
+        frame.deactivate()?;
+    }
+    Ok(())
+}
+
 fn context(machine: MachineContext) -> UContext {
     UContext {
         uc_flags: 0,
