@@ -8,7 +8,7 @@ pub const HEADER_LEN: usize = 16;
 pub const SOL_SOCKET: i32 = 1;
 pub const SCM_RIGHTS: i32 = 1;
 /// Linux-compatible per-message policy, independent of IPC attachment batches.
-pub const MAX_RIGHTS: usize = 253;
+pub const MAX_RIGHTS: usize = mochios_posix_protocol::socket::MAX_TRANSFERRED_DESCRIPTORS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {

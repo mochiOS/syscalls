@@ -109,6 +109,8 @@ impl Accept {
 pub const fn accept_listener_rights() -> u64 {
     mnu_abi::HANDLE_RIGHT_CONTROL | mnu_abi::HANDLE_RIGHT_TRANSFER
 }
+/// Per-message SCM_RIGHTS limit, independent of native IPC batch size.
+pub const MAX_TRANSFERRED_DESCRIPTORS: usize = 253;
 /// Userspace control tags carried by generic HandleControl, not mnu opcodes.
 pub const CONTROL_GET_OPTIONS: u64 = u64::from_le_bytes(*b"SOPOGT01");
 pub const CONTROL_SET_OPTIONS: u64 = u64::from_le_bytes(*b"SOPOST01");
