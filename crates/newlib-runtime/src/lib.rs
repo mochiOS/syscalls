@@ -6972,35 +6972,57 @@ fn drain_pending_signals() -> Result<(), c_int> {
 fn drain_pending_signals_with_context(context: &mut UContext, native: bool) -> Result<(), c_int> {
     register_current_thread().ok_or(EAGAIN)?;
     loop {
-        let delivery = posix_client()
-            .map_err(map_posix_client_error)?
-            .thread_dequeue_signal_delivery()
-            .map_err(map_posix_client_error)?;
+        let epoch = FORK_EPOCH.load(Ordering::Acquire);
+        let received = posix_client()
+            .map_err(map_posix_client_error)
+            .and_then(|client| {
+                client
+                    .thread_dequeue_signal_delivery()
+                    .map_err(map_posix_client_error)
+            });
+        if FORK_EPOCH.load(Ordering::Acquire) != epoch {
+            // Neither a token nor an error/empty result copied from a parent
+            // describes this child's pending state. Query the child afresh.
+            continue;
+        }
+        let delivery = received?;
         let signal = delivery.signal;
         if signal == 0 {
             return Ok(());
         }
-        let owner = native_process_id().map_err(|error| map_kernel_errno(error.raw()))?;
         let dispatched = dispatch_signal(delivery, None, context, native);
-        if native_process_id().map_err(|error| map_kernel_errno(error.raw()))? != owner {
+        if FORK_EPOCH.load(Ordering::Acquire) != epoch {
             // A fork child resumes the copied handler, not its parent's
             // service-owned delivery. Only the original process may finish it.
             dispatched?;
             continue;
         }
-        match dispatched {
+        let finished = match dispatched {
             Ok(0 | 3) => posix_client()
-                .map_err(map_posix_client_error)?
-                .complete_signal_delivery(delivery)
-                .map_err(map_posix_client_error)?,
-            Ok(1) => apply_default_signal_action(delivery)?,
+                .map_err(map_posix_client_error)
+                .and_then(|client| {
+                    client
+                        .complete_signal_delivery(delivery)
+                        .map_err(map_posix_client_error)
+                }),
+            Ok(1) => apply_default_signal_action(delivery),
             result => {
                 let _ = posix_client()
-                    .map_err(map_posix_client_error)?
-                    .complete_signal_delivery(delivery);
-                return Err(result.err().unwrap_or(EINVAL));
+                    .map_err(map_posix_client_error)
+                    .and_then(|client| {
+                        client
+                            .complete_signal_delivery(delivery)
+                            .map_err(map_posix_client_error)
+                    });
+                Err(result.err().unwrap_or(EINVAL))
             }
+        };
+        // Do not replay a completion/default-action request in the child.
+        // Its copied reply, including failure, belongs to the parent.
+        if FORK_EPOCH.load(Ordering::Acquire) != epoch {
+            continue;
         }
+        finished?;
     }
 }
 
