@@ -266,6 +266,10 @@ pub const OP_SIGNAL_THREAD_TIMED_WAIT: u16 = 87;
 /// length. Empty success payload and one WAIT|TRANSFER notification Handle.
 /// Registration is atomic with the queue check; final Handle release cancels.
 pub const OP_SOCKET_RECEIVE_WAIT: u16 = 88;
+/// Empty request, no attachments. Returns one SEND|TRANSFER socket-worker
+/// endpoint. It permits transport only: every record request must separately
+/// attach a socket with the required data rights and a RAM buffer.
+pub const OP_SOCKET_RECORD_ENDPOINT: u16 = 89;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

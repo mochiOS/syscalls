@@ -10,6 +10,7 @@ pub const REQUEST_LEN: usize = 32;
 pub const REPLY_HEADER_LEN: usize = 24;
 pub const MAX_REPLY_LEN: usize = REPLY_HEADER_LEN + crate::socket::MAX_ADDRESS_LEN;
 pub const REQUEST_MAGIC: [u8; 4] = *b"DGRM";
+pub const ENDPOINT_RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_SEND | mnu_abi::HANDLE_RIGHT_TRANSFER;
 const REPLY_MAGIC: [u8; 4] = *b"DGRR";
 const VERSION: u16 = 1;
 

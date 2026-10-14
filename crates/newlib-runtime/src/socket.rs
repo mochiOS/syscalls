@@ -421,6 +421,11 @@ pub extern "C" fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int {
     let result = (|| {
         let (create, cloexec) = mochios_posix_client::socket::newlib_create(domain, kind, protocol)
             .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
+        // Keep the C API disabled until its record-aware data path is wired;
+        // ordinary native stream I/O must never split a datagram into chunks.
+        if create.kind == wire::Kind::Datagram {
+            return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
+        }
         let limit = process_fd_limit()?;
         let pending = PendingFdReservation(state().fds.reserve_from(0, limit).map_err(|_| EMFILE)?);
         let opened = posix_client()
@@ -467,6 +472,9 @@ pub unsafe extern "C" fn socketpair(
         }
         let (create, cloexec) = mochios_posix_client::socket::newlib_create(domain, kind, protocol)
             .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
+        if create.kind == wire::Kind::Datagram {
+            return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
+        }
         let limit = process_fd_limit()?;
         let pending = PendingPair(
             state()
