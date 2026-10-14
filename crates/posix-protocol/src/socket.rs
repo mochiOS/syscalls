@@ -113,6 +113,9 @@ pub const fn accept_listener_rights() -> u64 {
 pub const CONTROL_GET_OPTIONS: u64 = u64::from_le_bytes(*b"SOPOGT01");
 pub const CONTROL_SET_OPTIONS: u64 = u64::from_le_bytes(*b"SOPOST01");
 pub const CONTROL_SHUTDOWN: u64 = u64::from_le_bytes(*b"SOPSHD01");
+/// Empty input/output; remove a datagram's default peer and receive filter,
+/// retaining its local binding, flags, timeout options and shutdown state.
+pub const CONTROL_DISCONNECT: u64 = u64::from_le_bytes(*b"SODISC01");
 pub const CONTROL_READINESS: u64 = u64::from_le_bytes(*b"SOPRDY01");
 pub const CONTROL_STAT: u64 = u64::from_le_bytes(*b"SOPSTA01");
 pub const CONTROL_LOCAL_ADDRESS: u64 = u64::from_le_bytes(*b"SOPLOC01");

@@ -104,6 +104,27 @@ impl<H> Accepted<H> {
     }
 }
 
+/// A connect-only operation selector, distinct from a peer or source address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectAddress<'a> {
+    Disconnect,
+    Peer(wire::Address<'a>),
+}
+
+/// AF_UNSPEC is an operation selector only for connect, not a peer/source
+/// address that bind/sendto or received-address codecs should accept.
+pub fn decode_connect_sockaddr(input: &[u8]) -> Result<ConnectAddress<'_>, i32> {
+    if input.len() > MAX_SOCKADDR_LEN {
+        return Err(-22);
+    }
+    let family = input.get(..2).ok_or(-22)?;
+    if u16::from_le_bytes(family.try_into().unwrap()) == 0 {
+        Ok(ConnectAddress::Disconnect)
+    } else {
+        decode_sockaddr(input).map(ConnectAddress::Peer)
+    }
+}
+
 /// Decode the C ABI without casting potentially unaligned bytes to sockaddr.
 /// UNIX abstract names are binary; pathname terminators and IP padding are not
 /// transmitted. Path traversal and authorization belong to the service layer.

@@ -205,8 +205,18 @@ unsafe fn connect_io(fd: c_int, address: *const c_void, length: u32) -> Result<c
         return Err(EINVAL);
     }
     let bytes = unsafe { core::slice::from_raw_parts(address.cast::<u8>(), length as usize) };
-    let address = mochios_posix_client::socket::decode_sockaddr(bytes)
+    let address = mochios_posix_client::socket::decode_connect_sockaddr(bytes)
         .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
+    let address = match address {
+        mochios_posix_client::socket::ConnectAddress::Disconnect => {
+            if entry.handle.kind != FdKind::ObjectDatagram {
+                return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
+            }
+            control(entry, wire::CONTROL_DISCONNECT, &[], &mut [])?;
+            return Ok(0);
+        }
+        mochios_posix_client::socket::ConnectAddress::Peer(address) => address,
+    };
     let (_, thread) = register_current_thread().ok_or(EAGAIN)?;
     let caught = thread.nonrestart_signal_generation.load(Ordering::Acquire);
     let mut wait = SocketWait::new(entry, syscall::HANDLE_SIGNAL_WRITABLE)?;
