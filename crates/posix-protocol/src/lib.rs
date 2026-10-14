@@ -14,6 +14,7 @@ pub mod shared_memory;
 pub mod socket;
 pub mod socket_record;
 pub mod socket_route;
+pub mod socket_transfer;
 pub mod fault_signal;
 pub mod signal_origin;
 pub mod signal_wait;
