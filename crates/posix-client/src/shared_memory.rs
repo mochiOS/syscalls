@@ -8,6 +8,38 @@ pub fn rights(read_write: bool) -> u64 {
     wire::descriptor_rights(read_write)
 }
 
+/// Decode newlib's shm_open flags without passing libc flag values to mnu.
+/// FD_CLOEXEC is mandatory for shm_open and handled by the local FD table.
+pub fn newlib_open_options(flags: i32) -> Option<u32> {
+    const CREATE: i32 = 0x0200;
+    const TRUNCATE: i32 = 0x0400;
+    const EXCLUSIVE: i32 = 0x0800;
+    const CLOEXEC: i32 = 0x40000;
+    if flags & !(3 | CREATE | TRUNCATE | EXCLUSIVE | CLOEXEC) != 0
+        || flags & EXCLUSIVE != 0 && flags & CREATE == 0
+    {
+        return None;
+    }
+    let mut options = match flags & 3 {
+        0 => 0,
+        2 => wire::READ_WRITE,
+        _ => return None,
+    };
+    if flags & TRUNCATE != 0 && options & wire::READ_WRITE == 0 {
+        return None;
+    }
+    for (flag, option) in [
+        (CREATE, wire::CREATE),
+        (TRUNCATE, wire::TRUNCATE),
+        (EXCLUSIVE, wire::EXCLUSIVE),
+    ] {
+        if flags & flag != 0 {
+            options |= option;
+        }
+    }
+    Some(options)
+}
+
 impl<T: ObjectTransport> Client<T> {
     /// Borrow an explicitly attached descriptor and receive a new attenuated
     /// RAM Handle for native mapping. The returned Handle must be closed after

@@ -12,6 +12,7 @@ mod pthread_spin;
 mod pthread_time;
 mod semaphore;
 mod named_semaphore;
+mod shared_memory;
 mod stdio_cancellation;
 mod thread_cleanup;
 
@@ -371,6 +372,7 @@ enum FdKind {
     ObjectStreamRead = 7,
     ObjectStreamWrite = 8,
     ObjectPty = 9,
+    ObjectSharedMemory = 10,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -467,6 +469,7 @@ fn inherited_fd_kind(kind: FdKind) -> Option<u8> {
         FdKind::ObjectStreamRead => Some(posix_protocol::INHERITED_FD_KIND_STREAM_READ),
         FdKind::ObjectStreamWrite => Some(posix_protocol::INHERITED_FD_KIND_STREAM_WRITE),
         FdKind::ObjectPty => Some(posix_protocol::INHERITED_FD_KIND_PTY),
+        FdKind::ObjectSharedMemory => Some(posix_protocol::INHERITED_FD_KIND_SHARED_MEMORY),
     }
 }
 
@@ -480,6 +483,7 @@ fn fd_kind_from_inherited(kind: u8) -> Option<FdKind> {
         posix_protocol::INHERITED_FD_KIND_STREAM_READ => Some(FdKind::ObjectStreamRead),
         posix_protocol::INHERITED_FD_KIND_STREAM_WRITE => Some(FdKind::ObjectStreamWrite),
         posix_protocol::INHERITED_FD_KIND_PTY => Some(FdKind::ObjectPty),
+        posix_protocol::INHERITED_FD_KIND_SHARED_MEMORY => Some(FdKind::ObjectSharedMemory),
         _ => None,
     }
 }
@@ -3469,7 +3473,7 @@ pub extern "C" fn __mochios_stdio_cancel_leave() {
 }
 
 fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result<isize, c_int> {
-    if entry.handle.kind == FdKind::ObjectFile
+    if matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSharedMemory)
         && !mochios_posix_client::fd::access_allows_write(entry.handle.open_flags as u32)
     {
         return Err(EBADF);
@@ -3525,7 +3529,7 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
                 mochios_posix_client::stream::WriteError::Io(errno) => errno,
             });
         }
-        FdKind::ObjectFile => syscall_errno(syscall::raw_syscall3(
+        FdKind::ObjectFile | FdKind::ObjectSharedMemory => syscall_errno(syscall::raw_syscall3(
             syscall::SyscallNumber::HandleWrite,
             entry.handle.lower_handle,
             buffer as u64,
@@ -3558,7 +3562,7 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
 }
 
 fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<isize, c_int> {
-    if entry.handle.kind == FdKind::ObjectFile
+    if matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSharedMemory)
         && !mochios_posix_client::fd::access_allows_read(entry.handle.open_flags as u32)
     {
         return Err(EBADF);
@@ -3568,7 +3572,7 @@ fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<is
     }
     let read = match entry.handle.kind {
         FdKind::Stdin => return Err(EBADF),
-        FdKind::ObjectFile => syscall_errno(syscall::raw_syscall3(
+        FdKind::ObjectFile | FdKind::ObjectSharedMemory => syscall_errno(syscall::raw_syscall3(
             syscall::SyscallNumber::HandleRead,
             entry.handle.lower_handle,
             buffer as u64,
@@ -3905,7 +3909,7 @@ fn positioned_file_io(
         return Err(EFAULT);
     }
     match entry.handle.kind {
-        FdKind::ObjectFile => {}
+        FdKind::ObjectFile | FdKind::ObjectSharedMemory => {}
         FdKind::ObjectDirectory => return Err(EISDIR),
         _ => return Err(ESPIPE),
     }
@@ -4257,6 +4261,8 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
                 duplicate_fd_from(&mut state.fds, fd, Some(arg), cmd == F_DUPFD_CLOEXEC)
             }
             F_GETFD => Ok(entry.descriptor_flags as c_int),
+            F_GETFL if entry.handle.kind == FdKind::ObjectSharedMemory =>
+                Ok(entry.handle.open_flags & 0x3),
             F_SETFD => {
                 state
                     .fds
@@ -4298,6 +4304,11 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
             }
             F_GETFL => Ok(entry.handle.open_flags),
             F_SETFL => {
+                if entry.handle.kind == FdKind::ObjectSharedMemory {
+                    // Shared status flags must not be written into one FD's
+                    // local copy. Provider controls will implement them.
+                    return Err(ENOTSUP);
+                }
                 if matches!(
                     entry.handle.kind,
                     FdKind::ObjectFile | FdKind::ObjectDirectory
@@ -5385,7 +5396,7 @@ pub extern "C" fn readdir(dirp: *mut c_void) -> *mut NewlibDirent {
 pub extern "C" fn _lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if entry.handle.kind != FdKind::ObjectFile {
+        if !matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSharedMemory) {
             return Err(ESPIPE);
         }
         let basis = match whence {
@@ -5451,6 +5462,10 @@ pub extern "C" fn _ftruncate(fd: c_int, length: i64) -> c_int {
     }
     let result = (|| {
         let entry = with_fd_entry(fd)?;
+        if entry.handle.kind == FdKind::ObjectSharedMemory {
+            shared_memory::truncate(entry, length as u64)?;
+            return Ok(0);
+        }
         if entry.handle.kind != FdKind::ObjectFile {
             return Err(EBADF);
         }
@@ -5505,6 +5520,11 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
     }
     let result = (|| {
         let entry = with_fd_entry(fd)?;
+        if entry.handle.kind == FdKind::ObjectSharedMemory {
+            // Do not invent inode/owner/mode values from the calling process.
+            // Shared service-owned metadata is required for this operation.
+            return Err(ENOSYS);
+        }
         if matches!(
             entry.handle.kind,
             FdKind::ObjectFile | FdKind::ObjectDirectory
@@ -5965,6 +5985,7 @@ pub extern "C" fn mmap(
         }
         let access = mochios_posix_client::memory::native_access(prot).ok_or(EINVAL)?;
         let mapping = mochios_posix_client::memory::native_map(flags).ok_or(EINVAL)?;
+        let mut shared_backing = None;
         let backing_handle = if mapping.anonymous {
             if offset != 0 {
                 return Err(EINVAL);
@@ -5972,19 +5993,26 @@ pub extern "C" fn mmap(
             0
         } else {
             let entry = with_fd_entry(fd)?;
-            if entry.handle.kind != FdKind::ObjectFile {
-                return Err(EACCES);
+            if entry.handle.kind == FdKind::ObjectSharedMemory {
+                let writable = mapping.options & mnu_abi::MEMORY_MAP_SHARED != 0
+                    && access & mnu_abi::MEMORY_ACCESS_WRITE != 0;
+                shared_backing = Some(shared_memory::mapping(entry, writable)?);
+                u64::from(shared_backing.as_ref().unwrap().0)
+            } else {
+                if entry.handle.kind != FdKind::ObjectFile {
+                    return Err(EACCES);
+                }
+                let mut required = syscall::HANDLE_RIGHT_MAP | syscall::HANDLE_RIGHT_READ;
+                if mapping.options & mnu_abi::MEMORY_MAP_SHARED != 0
+                    && access & mnu_abi::MEMORY_ACCESS_WRITE != 0
+                {
+                    required |= syscall::HANDLE_RIGHT_WRITE;
+                }
+                if entry.rights & required != required {
+                    return Err(EACCES);
+                }
+                entry.handle.lower_handle
             }
-            let mut required = syscall::HANDLE_RIGHT_MAP | syscall::HANDLE_RIGHT_READ;
-            if mapping.options & mnu_abi::MEMORY_MAP_SHARED != 0
-                && access & mnu_abi::MEMORY_ACCESS_WRITE != 0
-            {
-                required |= syscall::HANDLE_RIGHT_WRITE;
-            }
-            if entry.rights & required != required {
-                return Err(EACCES);
-            }
-            entry.handle.lower_handle
         };
         let mapped = syscall_errno(syscall::raw_syscall6(
             syscall::SyscallNumber::MemoryMap,
@@ -5995,6 +6023,9 @@ pub extern "C" fn mmap(
             backing_handle,
             offset as u64,
         ))?;
+        // Native MemoryMap retained the backing; RAII also closes it if map
+        // failed. The FD continues to own its independent Provider reference.
+        drop(shared_backing);
         Ok(mapped as *mut c_void)
     })();
     result_with_errno(result, MAP_FAILED)

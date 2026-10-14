@@ -76,7 +76,7 @@ fn error(error: Error<c_int>) -> c_int {
     }
 }
 
-unsafe fn name<'a>(pointer: *const c_char) -> Result<&'a [u8], c_int> {
+pub(super) unsafe fn name<'a>(pointer: *const c_char) -> Result<&'a [u8], c_int> {
     if pointer.is_null() {
         return Err(EINVAL);
     }
