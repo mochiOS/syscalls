@@ -147,9 +147,8 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
         }
         return socket::message_entry(entry, bytes.as_ptr() as u64, bytes.len(), flags, true);
     }
-    if !socket::is_datagram(entry)? || !message.name.is_null() {
-        // Explicit destinations and stream ancillary markers require their own
-        // atomic route/byte-boundary handling, never an implicit connect/send.
+    if !socket::is_datagram(entry)? {
+        // Stream ancillary markers require atomic byte-boundary handling.
         return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
     }
     if total > posix_protocol::socket_record::MAX_RECORD_SIZE {
@@ -189,6 +188,27 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
         handle: entry.handle.lower_handle as u32,
         rights: entry.rights,
     };
+    let mut address = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
+    let route = if message.name.is_null() {
+        None
+    } else {
+        let length = message.name_length as usize;
+        if length > address.len() {
+            return Err(EINVAL);
+        }
+        unsafe { ptr::copy_nonoverlapping(message.name.cast(), address.as_mut_ptr(), length) };
+        let address = mochios_posix_client::socket::decode_sockaddr(&address[..length])
+            .map_err(|status| mochios_posix_client::newlib_errno::from_status(status as i64))?;
+        let route = mochios_posix_client::socket_record::prepare_route(
+            &transport,
+            source,
+            total,
+            address,
+            close_object_handle,
+        )
+        .map_err(map_posix_client_error)?;
+        Some((route, OwnedHandle(route.handle)))
+    };
     let job = {
         // Keep all source FDs stable across validation and every staging batch.
         // Only bounded worker calls happen here, never capacity waits. Once
@@ -211,7 +231,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
         }
         let job = socket_transfer::begin(
             &transport,
-            source,
+            route.as_ref().map(|(route, _)| *route).unwrap_or(source),
             total as u32,
             count as u16,
             close_object_handle,
@@ -268,6 +288,19 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
             Err(PosixClientError::Remote(-11))
                 if !options.dont_wait && !handle_is_nonblocking(entry)? =>
             {
+                if let Some((route, _)) = &route {
+                    let notice =
+                        object_entry(route.handle as u64, route.rights, FdKind::ObjectSocket, 2);
+                    wait_for_handle_capacity(
+                        notice,
+                        syscall::HANDLE_SIGNAL_WRITABLE,
+                        thread,
+                        caught,
+                        0,
+                        wait.deadline(entry)?,
+                    )?;
+                    continue;
+                }
                 let notification = mochios_posix_client::socket_record::wait_send(
                     &transport,
                     source,

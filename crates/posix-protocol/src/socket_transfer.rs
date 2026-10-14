@@ -1,5 +1,5 @@
 //! Ancillary messages. Authority is carried ONLY in IPC attachments: send
-//! staging attaches socket WRITE; consuming receive attaches socket READ.
+//! staging attaches socket or prepared-route WRITE; consuming receive attaches socket READ.
 //! File batches require transaction CONTROL and transfer explicit references.
 //! Inline fields contain lengths, batch indices and FD dispatch metadata only.
 use crate::{InheritedFdMetadata, ProtocolError, socket::MAX_TRANSFERRED_DESCRIPTORS};

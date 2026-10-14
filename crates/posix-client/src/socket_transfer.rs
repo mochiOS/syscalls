@@ -97,7 +97,8 @@ fn reply<'a, E>(
     Ok(bytes)
 }
 
-/// Start one atomic send. The caller owns the returned transaction and must
+/// Start one atomic send through a socket or a prepared per-call route's WRITE
+/// authority. The caller owns the returned transaction and must
 /// close it after commit or abort; closing an uncommitted job drops all stages.
 pub fn begin<T: ObjectTransport>(
     transport: &T,
