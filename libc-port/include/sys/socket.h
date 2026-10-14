@@ -70,23 +70,36 @@ static inline struct cmsghdr *__mochios_cmsg_nxthdr(const struct msghdr *m,
 #define SOCK_CLOEXEC 0x80000
 #define SOMAXCONN 128
 #define SOL_SOCKET 1
+#define SO_DEBUG 1
+#define SO_REUSEADDR 2
 #define SO_TYPE 3
 #define SO_ERROR 4
+#define SO_DONTROUTE 5
+#define SO_BROADCAST 6
 #define SO_SNDBUF 7
 #define SO_RCVBUF 8
+#define SO_KEEPALIVE 9
+#define SO_OOBINLINE 10
+#define SO_LINGER 13
+#define SO_REUSEPORT 15
+#define SO_RCVLOWAT 18
+#define SO_SNDLOWAT 19
 #define SO_RCVTIMEO 20
 #define SO_SNDTIMEO 21
+#define SO_TIMESTAMP 29
 #define SO_ACCEPTCONN 30
 #define SHUT_RD 0
 #define SHUT_WR 1
 #define SHUT_RDWR 2
 #define MSG_OOB 0x1
 #define MSG_PEEK 0x2
+#define MSG_DONTROUTE 0x4
 #define MSG_CTRUNC 0x8
 #define MSG_TRUNC 0x20
 #define MSG_DONTWAIT 0x40
 #define MSG_WAITALL 0x100
 #define MSG_NOSIGNAL 0x4000
+#define MSG_MORE 0x8000
 #define MSG_CMSG_CLOEXEC 0x40000000
 
 #ifdef __cplusplus
