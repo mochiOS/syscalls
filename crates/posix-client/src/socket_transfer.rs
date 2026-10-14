@@ -1,4 +1,4 @@
-//! Ancillary receive over the dedicated socket worker endpoint. FD numbers
+//! Ancillary transfer over the dedicated socket worker endpoint. FD numbers
 //! remain local; only explicitly attached, attenuated authority crosses IPC.
 use crate::{ClientError, ObjectHandleAttachment as Handle, ObjectHandles, ObjectTransport};
 use mochios_posix_protocol::{InheritedFdMetadata, socket_transfer as wire};
@@ -28,6 +28,14 @@ pub struct ReceivedFile<H> {
 pub struct Delivery<H> {
     pub files: [Option<ReceivedFile<H>>; crate::MAX_OBJECT_HANDLES],
     pub count: usize,
+}
+
+/// Borrowed source reference. Repeating it transfers independent references to
+/// the same object; it never transfers a sender-local FD number or CLOEXEC.
+#[derive(Clone, Copy, Debug)]
+pub struct SendFile<H> {
+    pub object: Handle<H>,
+    pub metadata: InheritedFdMetadata,
 }
 
 fn attach<T: ObjectTransport>(
@@ -87,6 +95,161 @@ fn reply<'a, E>(
         });
     }
     Ok(bytes)
+}
+
+/// Start one atomic send. The caller owns the returned transaction and must
+/// close it after commit or abort; closing an uncommitted job drops all stages.
+pub fn begin<T: ObjectTransport>(
+    transport: &T,
+    socket: Handle<T::Handle>,
+    length: u32,
+    descriptors: u16,
+    mut close: impl FnMut(T::Handle),
+) -> Result<Handle<T::Handle>, ClientError<T::Error>>
+where
+    T::Handle: Default + Eq,
+{
+    let request = wire::begin(length, descriptors).map_err(ClientError::Protocol)?;
+    let mut handles = ObjectHandles::new();
+    attach::<T>(&mut handles, socket, mnu_abi::HANDLE_RIGHT_WRITE)?;
+    let mut response = [0; 4];
+    let result = transport
+        .call_with_handles(&request, &mut response, &mut handles)
+        .map_err(ClientError::Transport);
+    if matches!(result, Ok(4)) && i32::from_le_bytes(response) == 0 && handles.len() == 1 {
+        let job = handles.get(0).unwrap();
+        if job.handle != T::Handle::default()
+            && job.handle != socket.handle
+            && job.rights == wire::RIGHTS
+        {
+            return Ok(job);
+        }
+    }
+    cleanup(&handles, &[socket.handle], &mut close);
+    Err(match result {
+        Err(error) => error,
+        Ok(4) if handles.is_empty() && i32::from_le_bytes(response) < 0 => {
+            ClientError::Remote(i32::from_le_bytes(response))
+        }
+        _ => ClientError::MismatchedResponse,
+    })
+}
+
+fn status<T: ObjectTransport>(
+    transport: &T,
+    request: &[u8],
+    handles: &mut ObjectHandles<T::Handle>,
+    expected: u32,
+    mut close: impl FnMut(T::Handle),
+) -> Result<(), ClientError<T::Error>>
+where
+    T::Handle: Default + Eq,
+{
+    let mut borrowed = [T::Handle::default(); crate::MAX_OBJECT_HANDLES];
+    for (target, item) in borrowed.iter_mut().zip(handles.iter()) {
+        *target = item.handle;
+    }
+    let mut response = [0; 4];
+    let result = transport
+        .call_with_handles(request, &mut response, handles)
+        .map_err(ClientError::Transport);
+    let unexpected = !handles.is_empty();
+    cleanup(handles, &borrowed, &mut close);
+    let count = result?;
+    if count != 4 || unexpected {
+        return Err(ClientError::MismatchedResponse);
+    }
+    let value = i32::from_le_bytes(response);
+    if value < 0 {
+        return Err(ClientError::Remote(value));
+    }
+    if value as u32 != expected {
+        return Err(ClientError::MismatchedResponse);
+    }
+    Ok(())
+}
+
+/// Append one ordered batch. Borrowed sources must stay alive through this
+/// call. Descriptor-local flags are stripped, never inherited by the receiver.
+/// On any error abort the transaction; do not replay an ambiguous IPC result.
+pub fn append<T: ObjectTransport>(
+    transport: &T,
+    job: Handle<T::Handle>,
+    offset: u16,
+    files: &[SendFile<T::Handle>],
+    close: impl FnMut(T::Handle),
+) -> Result<(), ClientError<T::Error>>
+where
+    T::Handle: Default + Eq,
+{
+    if files.is_empty() || files.len() > wire::BATCH_SIZE {
+        return Err(ClientError::Protocol(
+            mochios_posix_protocol::ProtocolError::InvalidLength,
+        ));
+    }
+    let metadata = core::array::from_fn::<_, { wire::BATCH_SIZE }, _>(|index| {
+        let mut info = files[index.min(files.len() - 1)].metadata;
+        info.descriptor_flags = 0;
+        info
+    });
+    let mut request = [0; wire::MAX_REQUEST_LEN];
+    let count = wire::append(offset, &metadata[..files.len()], &mut request)
+        .map_err(ClientError::Protocol)?;
+    let mut handles = ObjectHandles::new();
+    attach::<T>(&mut handles, job, mnu_abi::HANDLE_RIGHT_CONTROL)?;
+    for file in files {
+        if file.object.handle == job.handle || file.object.rights & !mnu_abi::HANDLE_RIGHT_ALL != 0
+        {
+            return Err(ClientError::Remote(-13));
+        }
+        // No extra READ/WRITE/DUPLICATE authority is required to pass a file.
+        attach::<T>(&mut handles, file.object, file.object.rights)?;
+    }
+    status(
+        transport,
+        &request[..count],
+        &mut handles,
+        offset as u32 + files.len() as u32,
+        close,
+    )
+}
+
+/// Commit data plus staged references once. Only an explicit remote EAGAIN
+/// permits retrying this same job; a transport failure is ambiguous and must
+/// abort. The source RAM is borrowed and only READ|MAP is attached.
+pub fn commit<T: ObjectTransport>(
+    transport: &T,
+    job: Handle<T::Handle>,
+    buffer: Handle<T::Handle>,
+    offset: u64,
+    length: u32,
+    close: impl FnMut(T::Handle),
+) -> Result<(), ClientError<T::Error>>
+where
+    T::Handle: Default + Eq,
+{
+    if length > wire::MAX_PAYLOAD_LEN
+        || offset.checked_add(length as u64).is_none()
+        || job.handle == buffer.handle
+    {
+        return Err(ClientError::Protocol(
+            mochios_posix_protocol::ProtocolError::InvalidLength,
+        ));
+    }
+    let mut handles = ObjectHandles::new();
+    attach::<T>(&mut handles, job, mnu_abi::HANDLE_RIGHT_CONTROL)?;
+    attach::<T>(
+        &mut handles,
+        buffer,
+        mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_MAP,
+    )?;
+    status(
+        transport,
+        &wire::commit(offset),
+        &mut handles,
+        length,
+        close,
+    )
 }
 
 /// Consume one datagram, copying data into an explicit RAM object. Reserve
