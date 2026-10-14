@@ -2,6 +2,7 @@
 
 mod child_cleanup;
 mod atfork;
+mod thread_lifecycle;
 mod credentials;
 mod groups;
 mod pthread_mutex;
@@ -1045,7 +1046,9 @@ fn thread_control(token: Pthread) -> Option<&'static ThreadControl> {
     Some(control)
 }
 
-fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
+fn reserve_thread_control()
+-> Option<(Pthread, &'static ThreadControl, thread_lifecycle::Mutation)> {
+    let preparation = thread_lifecycle::mutate();
     for (index, control) in THREADS.iter().enumerate() {
         if control
             .state
@@ -1114,12 +1117,13 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
             .specific_destructors_running
             .store(0, Ordering::Relaxed);
         let token = mochios_posix_client::thread::ThreadToken::new(index, generation)?;
-        return Some((token.raw(), control));
+        return Some((token.raw(), control, preparation));
     }
     None
 }
 
 fn release_thread_control(control: &ThreadControl) {
+    let _reclamation = thread_lifecycle::mutate();
     control.active_native_signal_frame.store(0, Ordering::Relaxed);
     control.active_native_signal_frame_id.store(0, Ordering::Relaxed);
     control.active_signal_scope.store(0, Ordering::Relaxed);
@@ -1271,7 +1275,7 @@ fn register_current_thread() -> Option<(Pthread, &'static ThreadControl)> {
     }
     reap_detached_threads();
     let native_id = native_thread_id().ok()?;
-    let (token, control) = reserve_thread_control()?;
+    let (token, control, _preparation) = reserve_thread_control()?;
     control.native_id.store(native_id, Ordering::Relaxed);
     control.newlib_lock_identity.store(native_id, Ordering::Relaxed);
     control.state.store(THREAD_RUNNING, Ordering::Release);
@@ -1293,7 +1297,7 @@ fn register_initial_thread() -> Option<(Pthread, &'static ThreadControl)> {
         return Some(current);
     }
     let native_id = native_thread_id().ok()?;
-    let (token, control) = reserve_thread_control()?;
+    let (token, control, _preparation) = reserve_thread_control()?;
     control.native_id.store(native_id, Ordering::Relaxed);
     control.newlib_lock_identity.store(native_id, Ordering::Relaxed);
     // The current initial-runtime TCB ABI places its own base in its first
@@ -1503,6 +1507,7 @@ fn native_thread_retired(control: &ThreadControl) -> Result<bool, c_int> {
 }
 
 unsafe extern "C" fn pthread_start_trampoline(argument: *mut c_void) -> ! {
+    let preparation = thread_lifecycle::mutate();
     let control = unsafe { &*argument.cast::<ThreadControl>() };
     let native_id = native_thread_id().unwrap_or_else(|_| process_exit(127));
     control.native_id.store(native_id, Ordering::Relaxed);
@@ -1517,6 +1522,7 @@ unsafe extern "C" fn pthread_start_trampoline(argument: *mut c_void) -> ! {
         Ordering::Relaxed,
     );
     native_mutex_wake_all(&control.state);
+    drop(preparation);
     let start_address = control.start.load(Ordering::Acquire);
     if start_address == 0 {
         process_exit(127);
@@ -2852,6 +2858,9 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     let client = posix_client().map_err(map_posix_client_error)?;
     let (_, thread_control) = current_thread_control().ok_or(ENOTSUP)?;
     service_signal_mask(thread_control, posix_protocol::SIGNAL_MASK_QUERY, 0)?;
+    // Do not snapshot a thread slot during publication/reclamation. Acquire
+    // this before the allocator, which those operations may themselves use.
+    let lifecycle_guard = thread_lifecycle::capture()?;
     // malloc can enter _sbrk and acquire STATE. Stabilize its arena first, not
     // after taking STATE, and retain the caller's existing recursion depth.
     let allocator_guard = atfork::freeze_allocator();
@@ -2950,6 +2959,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     drop(socket_guard);
     drop(registry_guard);
     drop(allocator_guard);
+    drop(lifecycle_guard);
     if image == 0 {
         // Fork's numeric slot labels are temporary transfer metadata, not exec
         // inheritance policy. Keep only the selected control endpoint key;
@@ -8228,7 +8238,7 @@ pub unsafe extern "C" fn pthread_create(
     } else {
         stack_address as usize
     };
-    let Some((token, control)) = reserve_thread_control() else {
+    let Some((token, control, _preparation)) = reserve_thread_control() else {
         if owns_stack {
             let _ = syscall::raw_syscall2(
                 syscall::SyscallNumber::MemoryUnmap,

@@ -6,6 +6,7 @@ use mochios_posix_protocol as protocol;
 
 pub mod configuration;
 pub mod atfork;
+pub mod thread_lifecycle;
 pub mod accounting;
 pub mod inheritance;
 pub mod directory;
