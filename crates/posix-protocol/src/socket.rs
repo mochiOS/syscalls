@@ -114,6 +114,10 @@ pub const CONTROL_KIND: u64 = u64::from_le_bytes(*b"SOPKND01");
 pub const CONTROL_ACCEPTING: u64 = u64::from_le_bytes(*b"SOPACC01");
 /// Empty input; u32 positive wire errno (or zero), atomically read and cleared.
 pub const CONTROL_TAKE_ERROR: u64 = u64::from_le_bytes(*b"SOPERR01");
+/// Empty input, u32 effective receive queue limit in bytes.
+pub const CONTROL_GET_RECEIVE_CAPACITY: u64 = u64::from_le_bytes(*b"SORCGT01");
+/// u32 requested receive queue limit, empty output. Service applies its bounds.
+pub const CONTROL_SET_RECEIVE_CAPACITY: u64 = u64::from_le_bytes(*b"SORCST01");
 pub const SHUTDOWN_READ: u32 = 0;
 pub const SHUTDOWN_WRITE: u32 = 1;
 pub const SHUTDOWN_BOTH: u32 = 2;

@@ -7,6 +7,41 @@ use mochios_posix_protocol::socket as wire;
 struct PendingPair([FdReservation; 2]);
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn setsockopt(
+    fd: c_int,
+    level: c_int,
+    option: c_int,
+    value: *const c_void,
+    length: u32,
+) -> c_int {
+    let result = (|| {
+        let entry = with_fd_entry(fd)?;
+        if entry.handle.kind != FdKind::ObjectSocket {
+            return Err(mochios_posix_client::newlib_errno::from_status(-88));
+        }
+        if length < core::mem::size_of::<c_int>() as u32 {
+            return Err(EINVAL);
+        }
+        if value.is_null() {
+            return Err(EFAULT);
+        }
+        let mut native = [0; 4];
+        unsafe {
+            ptr::copy_nonoverlapping(value.cast::<u8>(), native.as_mut_ptr(), native.len());
+        }
+        let (tag, payload) = mochios_posix_client::socket::newlib_setsockopt(
+            level,
+            option,
+            c_int::from_ne_bytes(native),
+        )
+        .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
+        control(entry, tag, &payload, &mut [])?;
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn getsockopt(
     fd: c_int,
     level: c_int,

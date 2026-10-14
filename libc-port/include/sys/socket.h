@@ -27,6 +27,7 @@ struct sockaddr {
 #define SOL_SOCKET 1
 #define SO_TYPE 3
 #define SO_ERROR 4
+#define SO_RCVBUF 8
 #define SO_ACCEPTCONN 30
 #define SHUT_RD 0
 #define SHUT_WR 1
@@ -46,6 +47,7 @@ int bind(int socket, const struct sockaddr *address, socklen_t length);
 int listen(int socket, int backlog);
 int connect(int socket, const struct sockaddr *address, socklen_t length);
 int getsockopt(int socket, int level, int option, void *value, socklen_t *length);
+int setsockopt(int socket, int level, int option, const void *value, socklen_t length);
 int accept(int socket, struct sockaddr *address, socklen_t *length);
 int accept4(int socket, struct sockaddr *address, socklen_t *length, int flags);
 int shutdown(int socket, int how);
