@@ -13,6 +13,7 @@
 #define TIOCSPGRP   0x5410UL
 #define TIOCGWINSZ  0x5413UL
 #define TIOCSWINSZ  0x5414UL
+#define FIONBIO     0x5421UL
 
 __BEGIN_DECLS
 int ioctl(int, unsigned long, ...);

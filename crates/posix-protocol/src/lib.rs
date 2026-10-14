@@ -275,6 +275,9 @@ pub const OP_SOCKET_RECEIVE_WAIT: u16 = 88;
 /// endpoint. It permits transport only: every record request must separately
 /// attach a socket with the required data rights and a RAM buffer.
 pub const OP_SOCKET_RECORD_ENDPOINT: u16 = 89;
+/// Atomically updates selected mutable flags of one explicitly attached OFD.
+/// Requires CONTROL|TRANSFER. FILE_FLAGS_UPDATE_PAYLOAD_LEN input; empty reply.
+pub const OP_FUPDATEFL: u16 = 90;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -362,6 +365,7 @@ pub const CREDENTIAL_PAIR_PAYLOAD_LEN: usize = 8;
 pub const CREDENTIAL_ID_UNCHANGED: u32 = u32::MAX;
 pub const FILE_LENGTH_PAYLOAD_LEN: usize = 8;
 pub const FILE_FLAGS_PAYLOAD_LEN: usize = 4;
+pub const FILE_FLAGS_UPDATE_PAYLOAD_LEN: usize = 8;
 pub const FILE_OWNER_PAYLOAD_LEN: usize = 8;
 pub const OPEN_AT_HEADER_LEN: usize = 16;
 pub const STAT_AT_HEADER_LEN: usize = 12;
@@ -1506,6 +1510,34 @@ pub fn decode_file_flags(input: &[u8]) -> Result<u32, ProtocolError> {
         return Err(ProtocolError::InvalidLength);
     }
     Ok(get_u32(input, 0))
+}
+
+pub fn encode_file_flags_update(
+    mask: u32,
+    flags: u32,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if mask & !MUTABLE_STATUS_FLAGS != 0 || flags & !mask != 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    if output.len() < FILE_FLAGS_UPDATE_PAYLOAD_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    put_u32(output, 0, mask);
+    put_u32(output, 4, flags);
+    Ok(())
+}
+
+pub fn decode_file_flags_update(input: &[u8]) -> Result<(u32, u32), ProtocolError> {
+    if input.len() != FILE_FLAGS_UPDATE_PAYLOAD_LEN {
+        return Err(ProtocolError::InvalidLength);
+    }
+    let mask = get_u32(input, 0);
+    let flags = get_u32(input, 4);
+    if mask & !MUTABLE_STATUS_FLAGS != 0 || flags & !mask != 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok((mask, flags))
 }
 
 pub fn encode_open_at(

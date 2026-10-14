@@ -13,6 +13,7 @@ mod pthread_time;
 mod semaphore;
 mod named_semaphore;
 mod shared_memory;
+mod fd_options;
 mod socket;
 mod socket_record;
 mod socket_message;

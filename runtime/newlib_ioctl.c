@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <sys/ioctl.h>
 
+extern int __mochios_fd_set_nonblocking(int fd, int enabled);
+
 int ioctl(int fd, unsigned long request, ...) {
     /* Descriptor-local validation: no provider request and no extra argument
      * access are needed to reject a bad FD or unsupported request. */
@@ -18,6 +20,7 @@ int ioctl(int fd, unsigned long request, ...) {
     case TIOCSPGRP:
     case TIOCGWINSZ:
     case TIOCSWINSZ:
+    case FIONBIO:
         break;
     default:
         errno = ENOTTY;
@@ -34,6 +37,8 @@ int ioctl(int fd, unsigned long request, ...) {
     }
 
     switch (request) {
+    case FIONBIO:
+        return __mochios_fd_set_nonblocking(fd, *(const int *)argument != 0);
     case TCGETS:
         return tcgetattr(fd, argument);
     case TCSETS:

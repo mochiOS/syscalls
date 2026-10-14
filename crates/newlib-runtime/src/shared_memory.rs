@@ -136,6 +136,24 @@ pub(super) fn set_status_flags(entry: FdEntry, flags: c_int) -> Result<(), c_int
     Ok(())
 }
 
+pub(super) fn update_status_flags(entry: FdEntry, mask: u32, flags: u32) -> Result<(), c_int> {
+    let mut bytes = [0; posix_protocol::FILE_FLAGS_UPDATE_PAYLOAD_LEN];
+    posix_protocol::encode_file_flags_update(mask, flags, &mut bytes).map_err(|_| EINVAL)?;
+    let length = syscall_errno(syscall::raw_syscall6(
+        syscall::SyscallNumber::HandleControl,
+        entry.handle.lower_handle,
+        wire::CONTROL_UPDATE_FLAGS,
+        bytes.as_ptr() as u64,
+        bytes.len() as u64,
+        0,
+        0,
+    ))?;
+    if length != 0 {
+        return Err(EIO);
+    }
+    Ok(())
+}
+
 pub(super) struct MappingBacking(pub u32);
 impl Drop for MappingBacking {
     fn drop(&mut self) {

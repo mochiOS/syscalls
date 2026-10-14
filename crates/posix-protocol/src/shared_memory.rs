@@ -19,6 +19,8 @@ pub const CONTROL_RESIZE: u64 = u64::from_le_bytes(*b"SHMSIZ01");
 /// empty output. Flags are POSIX protocol OPEN_APPEND / OPEN_NONBLOCK bits.
 pub const CONTROL_GET_FLAGS: u64 = u64::from_le_bytes(*b"SHMFGT01");
 pub const CONTROL_SET_FLAGS: u64 = u64::from_le_bytes(*b"SHMFST01");
+/// FILE_FLAGS_UPDATE_PAYLOAD_LEN input (mask, flags), empty output.
+pub const CONTROL_UPDATE_FLAGS: u64 = u64::from_le_bytes(*b"SHMFUP01");
 /// STAT: empty input; FILE_STATUS_LEN output bytes encoded as FileStatus.
 pub const CONTROL_STAT: u64 = u64::from_le_bytes(*b"SHMSTA01");
 

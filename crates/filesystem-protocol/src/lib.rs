@@ -96,6 +96,11 @@ pub const OP_CREATE_SOCKET_AT: u16 = 38;
 /// returns NodeStatus plus a retained metadata-only Handle. Uses SOCKET_AT
 /// root/base flags; credentials require the delegated control endpoint.
 pub const OP_OPEN_SOCKET_AT: u16 = 39;
+/// Updates selected mutable OFD status flags. Header.flags supplies the value;
+/// the four-byte little-endian payload supplies the mask. One explicit Handle
+/// CONTROL|TRANSFER attachment identifies the open description; inline IDs
+/// confer no authority. Removing CONTROL prevents changes to shared flags.
+pub const OP_UPDATE_FLAGS_HANDLE: u16 = 40;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const OPEN_STATUS_APPEND: u32 = 1 << 0;
