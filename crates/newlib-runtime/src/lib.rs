@@ -760,6 +760,9 @@ static JOB_STOPS_IN_FLIGHT: AtomicU32 = AtomicU32::new(0);
 static SIGNAL_ACTIONS: RuntimeMutex<[SignalAction; posix_protocol::SIGNAL_MAX as usize]> =
     RuntimeMutex::new([SignalAction::default_action(); posix_protocol::SIGNAL_MAX as usize]);
 static POSIX_CLIENT: RuntimeOnce<PosixClient<SyscallEndpointTransport>> = RuntimeOnce::new();
+// A copied syscall result can still describe the parent after a signal
+// handler forks. Invalidate in-flight runtime identity lookups in the child.
+static FORK_EPOCH: AtomicU64 = AtomicU64::new(0);
 static THREADS: [ThreadControl; mochios_posix_client::thread::MAX_THREADS] =
     [const { ThreadControl::new() }; mochios_posix_client::thread::MAX_THREADS];
 static THREAD_KEYS: [ThreadKeyControl; mochios_posix_client::thread::MAX_THREAD_KEYS] =
@@ -1192,15 +1195,22 @@ fn reap_detached_threads() {
 }
 
 fn current_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
-    let native_id = native_thread_id().ok()?;
-    THREADS.iter().enumerate().find_map(|(index, control)| {
-        let state = control.state.load(Ordering::Acquire);
-        (state != THREAD_FREE
-            && state != THREAD_REAPING
-            && control.native_id.load(Ordering::Acquire) == native_id)
-            .then(|| thread_token_for(index, control).map(|token| (token, control)))
-            .flatten()
-    })
+    loop {
+        let epoch = FORK_EPOCH.load(Ordering::Acquire);
+        let current = native_thread_id().ok().and_then(|native_id| {
+            THREADS.iter().enumerate().find_map(|(index, control)| {
+                let state = control.state.load(Ordering::Acquire);
+                (state != THREAD_FREE
+                    && state != THREAD_REAPING
+                    && control.native_id.load(Ordering::Acquire) == native_id)
+                    .then(|| thread_token_for(index, control).map(|token| (token, control)))
+                    .flatten()
+            })
+        });
+        if FORK_EPOCH.load(Ordering::Acquire) == epoch {
+            return current;
+        }
+    }
 }
 
 fn register_current_thread() -> Option<(Pthread, &'static ThreadControl)> {
@@ -2848,6 +2858,12 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     };
     drop(guard);
     if image == 0 {
+        if FORK_EPOCH
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| epoch.checked_add(1))
+            .is_err()
+        {
+            process_exit(EOVERFLOW);
+        }
         // Fork's numeric slot labels are temporary transfer metadata, not exec
         // inheritance policy. Keep only the selected control endpoint key;
         // later exec stages exactly its intended descriptors into context.
