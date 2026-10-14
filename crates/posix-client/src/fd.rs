@@ -163,6 +163,61 @@ impl<H: Copy> FdTable<H> {
         Ok(reservation.index as i32)
     }
 
+    /// Reserve both descriptor slots before creating a pair of remote objects.
+    /// Failure leaves the table unchanged; neither slot is visible until commit.
+    pub fn reserve_pair_from(
+        &mut self,
+        minimum: i32,
+        limit: i32,
+    ) -> Result<[FdReservation; 2], FdError<core::convert::Infallible>> {
+        if minimum < 0 || minimum >= limit || limit as usize > DEFAULT_FD_LIMIT {
+            return Err(FdError::InvalidDescriptor);
+        }
+        let mut free = (minimum as usize..limit as usize).filter(|index| self.is_free(*index));
+        let first = free.next().ok_or(FdError::InvalidDescriptor)?;
+        let second = free.next().ok_or(FdError::InvalidDescriptor)?;
+        let generation = self
+            .next_reservation
+            .checked_add(2)
+            .ok_or(FdError::InvalidDescriptor)?;
+        self.reservations[first] = generation - 1;
+        self.reservations[second] = generation;
+        self.next_reservation = generation;
+        Ok([
+            FdReservation {
+                index: first,
+                generation: generation - 1,
+            },
+            FdReservation {
+                index: second,
+                generation,
+            },
+        ])
+    }
+
+    /// Validate both tokens before publishing either entry. The caller retains
+    /// ownership of both Handles on error and must cancel valid reservations.
+    /// Serialize this operation with every other local FD-table operation.
+    pub fn commit_pair(
+        &mut self,
+        reservations: [&FdReservation; 2],
+        entries: [Entry<H>; 2],
+    ) -> Result<[i32; 2], FdError<core::convert::Infallible>> {
+        if reservations[0].index == reservations[1].index
+            || reservations.iter().any(|reservation| {
+                self.reservations[reservation.index] != reservation.generation
+                    || self.entries[reservation.index].is_some()
+            })
+        {
+            return Err(FdError::InvalidDescriptor);
+        }
+        for (reservation, entry) in reservations.into_iter().zip(entries) {
+            self.reservations[reservation.index] = 0;
+            self.entries[reservation.index] = Some(entry);
+        }
+        Ok([reservations[0].index as i32, reservations[1].index as i32])
+    }
+
     pub fn cancel_reservation(&mut self, reservation: &FdReservation) -> bool {
         if self.reservations[reservation.index] != reservation.generation
             || self.entries[reservation.index].is_some()
