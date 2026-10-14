@@ -1,14 +1,20 @@
 //! Named RAM requests contain only serialized names and options. The reply
 //! delegates a native object through IPC, never a path, PID or FD number.
 
-use super::{get_u32, put_u32, ProtocolError};
+use super::{ProtocolError, get_u32, put_u32};
 
-pub use super::named_semaphore::{decode_name, encode_name, MAX_NAME_BYTES, NAME_HEADER_LEN};
+pub use super::named_semaphore::{MAX_NAME_BYTES, NAME_HEADER_LEN, decode_name, encode_name};
 pub const OPEN_HEADER_LEN: usize = 16;
 pub const READ_WRITE: u32 = 1;
 pub const CREATE: u32 = 2;
 pub const EXCLUSIVE: u32 = 4;
 pub const TRUNCATE: u32 = 8;
+
+/// Provider control codes interpreted only by the userspace POSIX layer.
+/// LENGTH: empty input, exactly eight output bytes (little-endian u64).
+/// RESIZE: exactly eight input bytes (little-endian u64), no output bytes.
+pub const CONTROL_LENGTH: u64 = u64::from_le_bytes(*b"SHMLEN01");
+pub const CONTROL_RESIZE: u64 = u64::from_le_bytes(*b"SHMSIZ01");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Open<'a> {
