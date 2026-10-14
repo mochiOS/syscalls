@@ -118,7 +118,12 @@ impl<H: Copy> Default for ObjectHandles<H> {
 }
 
 pub trait ObjectTransport: Transport {
-    type Handle: Copy;
+    /// Default denotes an invalid Handle, never an owned resource.
+    type Handle: Copy + Default + Eq;
+
+    /// Releases one owned receiver-local Handle. Borrowed outgoing Handles
+    /// must never be passed here. A failed release must not replay the request.
+    fn close_received_handle(&self, handle: Self::Handle);
 
     /// Performs one request while replacing outgoing attachments with the
     /// receiver-local handles attached to the response.
@@ -1135,16 +1140,8 @@ impl<T: ObjectTransport> Client<T> {
         &self,
         file: ObjectHandleAttachment<T::Handle>,
     ) -> Result<protocol::FileStatus, ClientError<T::Error>> {
-        let mut handles = ObjectHandles::new();
-        handles
-            .push(file)
-            .map_err(|_| ClientError::RequestTooLarge)?;
         let mut response = [0u8; protocol::FILE_STATUS_LEN];
-        let response_len =
-            self.request_with_handles(protocol::OP_FSTAT, 0, &[], &mut response, &mut handles)?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
+        let response_len = self.file_request(protocol::OP_FSTAT, &[], file, &mut response)?;
         protocol::decode_file_status(&response[..response_len]).map_err(ClientError::Protocol)
     }
 
@@ -1306,16 +1303,8 @@ impl<T: ObjectTransport> Client<T> {
         &self,
         file: ObjectHandleAttachment<T::Handle>,
     ) -> Result<u32, ClientError<T::Error>> {
-        let mut handles = ObjectHandles::new();
-        handles
-            .push(file)
-            .map_err(|_| ClientError::RequestTooLarge)?;
         let mut payload = [0u8; protocol::FILE_FLAGS_PAYLOAD_LEN];
-        let payload_len =
-            self.request_with_handles(protocol::OP_FGETFL, 0, &[], &mut payload, &mut handles)?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
+        let payload_len = self.file_request(protocol::OP_FGETFL, &[], file, &mut payload)?;
         protocol::decode_file_flags(&payload[..payload_len]).map_err(ClientError::Protocol)
     }
 
@@ -1783,6 +1772,19 @@ impl<T: ObjectTransport> Client<T> {
         payload: &[u8],
         file: ObjectHandleAttachment<T::Handle>,
     ) -> Result<(), ClientError<T::Error>> {
+        self.file_request(opcode, payload, file, &mut [])
+            .map(|_| ())
+    }
+
+    /// These operations never return objects. Drain unexpected owned replies
+    /// before returning on every outcome, retaining the original error.
+    fn file_request(
+        &self,
+        opcode: u16,
+        payload: &[u8],
+        file: ObjectHandleAttachment<T::Handle>,
+        response: &mut [u8],
+    ) -> Result<usize, ClientError<T::Error>> {
         let file = if let Some(required) = protocol::file_mutation_rights(opcode) {
             if file.rights & required != required {
                 return Err(ClientError::Remote(-13));
@@ -1798,11 +1800,24 @@ impl<T: ObjectTransport> Client<T> {
         handles
             .push(file)
             .map_err(|_| ClientError::RequestTooLarge)?;
-        self.request_with_handles(opcode, 0, payload, &mut [], &mut handles)?;
-        if !handles.is_empty() {
+        let result = self.request_with_handles(opcode, 0, payload, response, &mut handles);
+        let unexpected = !handles.is_empty();
+        for (index, attached) in handles.iter().enumerate() {
+            if attached.handle != T::Handle::default()
+                && attached.handle != file.handle
+                && !handles
+                    .iter()
+                    .take(index)
+                    .any(|old| old.handle == attached.handle)
+            {
+                self.transport.close_received_handle(attached.handle);
+            }
+        }
+        let length = result?;
+        if unexpected {
             return Err(ClientError::MismatchedResponse);
         }
-        Ok(())
+        Ok(length)
     }
 
     pub fn request_with_handles(
@@ -1911,6 +1926,10 @@ impl Transport for EndpointTransport {
 #[cfg(feature = "endpoint")]
 impl ObjectTransport for EndpointTransport {
     type Handle = mochi_user_platform::handle::Handle;
+
+    fn close_received_handle(&self, handle: Self::Handle) {
+        let _ = mochi_user_platform::handle::close(handle);
+    }
 
     fn call_with_handles(
         &self,
@@ -2051,6 +2070,13 @@ impl Transport for SyscallEndpointTransport {
 #[cfg(feature = "syscall-endpoint")]
 impl ObjectTransport for SyscallEndpointTransport {
     type Handle = u32;
+
+    fn close_received_handle(&self, handle: Self::Handle) {
+        let _ = mochi_user_syscall::call1(
+            mochi_user_syscall::SyscallNumber::HandleClose,
+            u64::from(handle),
+        );
+    }
 
     fn call_with_handles(
         &self,
