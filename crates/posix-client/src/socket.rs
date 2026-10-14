@@ -16,6 +16,7 @@ pub const MAX_SOCKADDR_LEN: usize = 110;
 pub fn newlib_getsockopt_tag(level: i32, option: i32) -> Result<u64, i32> {
     match (level, option) {
         (1, 3) => Ok(wire::CONTROL_KIND),       // SOL_SOCKET / SO_TYPE
+        (1, 4) => Ok(wire::CONTROL_TAKE_ERROR), // SOL_SOCKET / SO_ERROR
         (1, 30) => Ok(wire::CONTROL_ACCEPTING), // SOL_SOCKET / SO_ACCEPTCONN
         _ => Err(-92),
     }
@@ -28,6 +29,10 @@ pub fn newlib_getsockopt_value(tag: u64, bytes: &[u8]) -> Result<i32, i32> {
         (wire::CONTROL_KIND, 2) => Ok(2), // Datagram
         (wire::CONTROL_KIND, 3) => Ok(5), // SequencedPacket
         (wire::CONTROL_ACCEPTING, 0 | 1) => Ok(value as i32),
+        (wire::CONTROL_TAKE_ERROR, 0) => Ok(0),
+        (wire::CONTROL_TAKE_ERROR, 1..=0x7fff_ffff) => {
+            Ok(crate::newlib_errno::from_status(i64::from(value)))
+        }
         _ => Err(-5),
     }
 }
@@ -238,6 +243,14 @@ pub fn newlib_create(domain: i32, kind: i32, protocol: i32) -> Result<(wire::Cre
     ))
 }
 
+pub fn decode_readiness(bytes: &[u8]) -> Result<u32, i32> {
+    let bits = u32::from_le_bytes(bytes.try_into().map_err(|_| -5)?);
+    if bits & !wire::READINESS_MASK != 0 {
+        return Err(-5);
+    }
+    Ok(bits)
+}
+
 pub fn poll_events(bits: u32, events: i16) -> i16 {
     let mut result = 0;
     if bits & wire::READY_READ != 0 {
@@ -246,7 +259,7 @@ pub fn poll_events(bits: u32, events: i16) -> i16 {
     if bits & (wire::READY_WRITE | wire::WRITE_CLOSED) != 0 {
         result |= events & crate::multiplex::NORMAL_WRITE_EVENTS;
     }
-    if bits & wire::WRITE_ERROR != 0 {
+    if bits & wire::ERROR_PENDING != 0 {
         result |= 0x8;
     }
     if bits & (wire::READ_CLOSED | wire::WRITE_CLOSED) == (wire::READ_CLOSED | wire::WRITE_CLOSED) {

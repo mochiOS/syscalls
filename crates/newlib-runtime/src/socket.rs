@@ -488,10 +488,7 @@ pub(super) fn set_status_flags(entry: FdEntry, flags: c_int) -> Result<(), c_int
 pub(super) fn poll_events(entry: FdEntry, events: i16) -> Result<i16, c_int> {
     let mut bytes = [0; 4];
     control(entry, wire::CONTROL_READINESS, &[], &mut bytes)?;
-    let bits = u32::from_le_bytes(bytes);
-    if bits & !31 != 0 {
-        return Err(EIO);
-    }
+    let bits = mochios_posix_client::socket::decode_readiness(&bytes).map_err(|_| EIO)?;
     Ok(mochios_posix_client::socket::poll_events(bits, events))
 }
 

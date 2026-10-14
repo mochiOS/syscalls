@@ -112,6 +112,8 @@ pub const CONTROL_LISTEN: u64 = u64::from_le_bytes(*b"SOPLSN01");
 pub const CONTROL_KIND: u64 = u64::from_le_bytes(*b"SOPKND01");
 /// Empty input; one u32 boolean reflecting the shared listener state.
 pub const CONTROL_ACCEPTING: u64 = u64::from_le_bytes(*b"SOPACC01");
+/// Empty input; u32 positive wire errno (or zero), atomically read and cleared.
+pub const CONTROL_TAKE_ERROR: u64 = u64::from_le_bytes(*b"SOPERR01");
 pub const SHUTDOWN_READ: u32 = 0;
 pub const SHUTDOWN_WRITE: u32 = 1;
 pub const SHUTDOWN_BOTH: u32 = 2;
@@ -120,6 +122,9 @@ pub const READY_WRITE: u32 = 2;
 pub const READ_CLOSED: u32 = 4;
 pub const WRITE_CLOSED: u32 = 8;
 pub const WRITE_ERROR: u32 = 16;
+pub const ERROR_PENDING: u32 = 32;
+pub const READINESS_MASK: u32 =
+    READY_READ | READY_WRITE | READ_CLOSED | WRITE_CLOSED | WRITE_ERROR | ERROR_PENDING;
 
 /// No seek/map authority: a socket description is a duplex byte stream.
 pub const fn descriptor_rights() -> u64 {
