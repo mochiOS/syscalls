@@ -2834,6 +2834,13 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     let client = posix_client().map_err(map_posix_client_error)?;
     let (_, thread_control) = current_thread_control().ok_or(ENOTSUP)?;
     service_signal_mask(thread_control, posix_protocol::SIGNAL_MASK_QUERY, 0)?;
+    // Acquire runtime-owned state in dependency order before STATE. Signal
+    // disposition updates hold UPDATE before ACTIONS; endpoint initialization
+    // may perform IPC but never runs while STATE is held. Both processes must
+    // release these copied guards before rebuilding child thread state.
+    let socket_guard = socket_record::freeze_for_clone();
+    let update_guard = SIGNAL_ACTION_UPDATE.lock();
+    let actions_guard = SIGNAL_ACTIONS.lock();
     // Keep the FD table stable across the address-space clone. Both parent and
     // child drop their private copy of this guard immediately after the native
     // clone returns, so the child never inherits a permanently locked STATE.
@@ -2900,6 +2907,9 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         )
     };
     drop(guard);
+    drop(actions_guard);
+    drop(update_guard);
+    drop(socket_guard);
     if image == 0 {
         if FORK_EPOCH
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| epoch.checked_add(1))

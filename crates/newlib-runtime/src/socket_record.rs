@@ -5,6 +5,13 @@ use mochios_posix_protocol::socket_record as wire;
 
 static ENDPOINT: RuntimeMutex<Option<u32>> = RuntimeMutex::new(None);
 
+pub(super) fn freeze_for_clone() -> RuntimeMutexGuard<'static, Option<u32>> {
+    // Do not initialize an unused endpoint just to fork. Holding the cache
+    // across capture excludes a partially published handle and a lock owned
+    // by a thread that will not exist in the child.
+    ENDPOINT.lock()
+}
+
 pub(super) fn endpoint() -> Result<SyscallEndpointTransport, c_int> {
     let mut cached = ENDPOINT.lock();
     let handle = match *cached {
