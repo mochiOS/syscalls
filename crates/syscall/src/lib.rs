@@ -28,6 +28,7 @@ pub use mnu_abi::{
     MEMORY_OBJECT_RESIZABLE,
     THREAD_UPCALL_EXCEPTIONS, THREAD_UPCALL_KIND_INTERRUPT, THREAD_UPCALL_KIND_EXCEPTION,
     MemoryFaultCause,
+    ThreadUpcallSnapshot,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
