@@ -756,16 +756,24 @@ impl<T: Transport> Client<T> {
 }
 
 impl<T: ObjectTransport> Client<T> {
+    /// Returns ownership of two distinct valid endpoints. Failed or malformed
+    /// replies release received references without replaying PTY creation.
     pub fn open_pty(&self) -> Result<PtyPair<T::Handle>, ClientError<T::Error>> {
         let mut handles = ObjectHandles::new();
-        self.request_with_handles(protocol::OP_PTY_OPEN, 0, &[], &mut [], &mut handles)?;
-        if handles.len() != 2 {
-            return Err(ClientError::MismatchedResponse);
+        let result = self.request_with_handles(protocol::OP_PTY_OPEN, 0, &[], &mut [], &mut handles);
+        if result.is_ok()
+            && handles.len() == 2
+            && let (Some(master), Some(slave)) = (handles.get(0), handles.get(1))
+            && master.handle != T::Handle::default()
+            && slave.handle != T::Handle::default()
+            && master.handle != slave.handle
+        {
+            handles.clear();
+            return Ok(PtyPair { master, slave });
         }
-        Ok(PtyPair {
-            master: handles.get(0).ok_or(ClientError::MismatchedResponse)?,
-            slave: handles.get(1).ok_or(ClientError::MismatchedResponse)?,
-        })
+        self.discard_received_handles(&mut handles, &ObjectHandles::new());
+        result?;
+        Err(ClientError::MismatchedResponse)
     }
 
     pub fn acquire_controlling_terminal(
@@ -835,11 +843,7 @@ impl<T: ObjectTransport> Client<T> {
         handles
             .push(terminal)
             .map_err(|_| ClientError::RequestTooLarge)?;
-        let length = self.request_with_handles(opcode, 0, payload, response, &mut handles)?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
-        Ok(length)
+        self.request_without_reply_handles(opcode, payload, response, &mut handles)
     }
 
     pub fn register_signal_thread(
