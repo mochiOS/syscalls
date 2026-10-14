@@ -6,9 +6,11 @@ pub(super) fn deliver(cause: u64, address: usize, context: &mut UContext) -> Res
     let info = mochios_posix_client::signal_context::SigInfo::memory_fault(cause, address)
         .map_err(|_| EINVAL)?;
     let signal = info.si_signo as u32;
+    let (_, control) = register_current_thread().ok_or(EAGAIN)?;
     let client = posix_client().map_err(map_posix_client_error)?;
     loop {
-        let epoch = FORK_EPOCH.load(Ordering::Acquire);
+        let mut preparation = Preparation::new(control)?;
+        let epoch = preparation.epoch;
         let received = client
             .fault_signal_delivery(signal)
             .map_err(map_posix_client_error);
@@ -21,8 +23,12 @@ pub(super) fn deliver(cause: u64, address: usize, context: &mut UContext) -> Res
             return Err(EIO);
         }
         if fault.disposition == posix_protocol::SIGNAL_DISPOSITION_CAUGHT {
-            let dispatched = dispatch_signal(fault.signal, Some(info), context, true);
+            let dispatched =
+                dispatch_signal(fault.signal, Some(info), context, true, &mut preparation);
             if FORK_EPOCH.load(Ordering::Acquire) != epoch {
+                if !preparation.started() {
+                    continue;
+                }
                 // The copied handler may repair its child context, but cannot
                 // consume the parent's still-authenticated fault delivery.
                 return dispatched

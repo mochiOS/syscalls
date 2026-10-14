@@ -1,6 +1,6 @@
 use super::*;
 use mochios_posix_client::{
-    signal_context::{REG_RSP, Stack},
+    signal_context::{Stack, REG_RSP},
     signal_stack as stack,
 };
 
@@ -46,18 +46,31 @@ struct Invocation<'a> {
     context: &'a mut UContext,
     mask: u64,
     result: Result<(), c_int>,
+    preparation: &'a mut Preparation,
 }
 
 unsafe extern "C" fn call(argument: *mut c_void) {
     let invocation = unsafe { &mut *argument.cast::<Invocation<'_>>() };
+    if !invocation.preparation.begin() {
+        return;
+    }
     // Unblock only after physically entering the selected stack. A nested
     // delivery will then see a valid interrupted RSP, never a half-switch.
-    invocation.result = service_signal_mask(
-        invocation.control,
-        posix_protocol::SIGNAL_MASK_SET,
-        invocation.mask,
-    )
-    .map(|_| ());
+    loop {
+        let epoch = FORK_EPOCH.load(Ordering::Acquire);
+        let restored = service_signal_mask(
+            invocation.control,
+            posix_protocol::SIGNAL_MASK_SET,
+            invocation.mask,
+        );
+        // The handler frame has committed. If a nested handler forks while
+        // unmasking, establish its mask in the child, not from a copied reply.
+        if FORK_EPOCH.load(Ordering::Acquire) != epoch {
+            continue;
+        }
+        invocation.result = restored.map(|_| ());
+        break;
+    }
     if invocation.result.is_err() {
         return;
     }
@@ -85,6 +98,7 @@ pub(super) fn invoke(
     info: Option<&mut SigInfo>,
     context: &mut UContext,
     native: bool,
+    preparation: &mut Preparation,
 ) -> Result<(), c_int> {
     // No mutex can be held by a thread interrupted by its own callback.
     // Mask shared POSIX state while selecting a coherent local configuration.
@@ -111,6 +125,7 @@ pub(super) fn invoke(
         context,
         mask,
         result: Ok(()),
+        preparation,
     };
     let argument = (&mut invocation as *mut Invocation<'_>).cast();
     unsafe {

@@ -19,6 +19,8 @@ mod thread_cleanup;
 mod fault_signal;
 mod signal_delivery;
 mod signal_stack;
+mod signal_preparation;
+use signal_preparation::Preparation;
 
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_void};
@@ -6844,6 +6846,7 @@ fn dispatch_signal(
     fault_info: Option<SigInfo>,
     context: &mut UContext,
     native: bool,
+    preparation: &mut Preparation,
 ) -> Result<c_int, c_int> {
     let signal = delivery.signal as c_int;
     if signal <= 0 || signal > posix_protocol::SIGNAL_MAX as c_int {
@@ -6872,10 +6875,7 @@ fn dispatch_signal(
             } else {
                 None
             };
-            let (_, control) = match register_current_thread() {
-                Some(current) => current,
-                None => return Err(EAGAIN),
-            };
+            let control = preparation.control;
             let current_signal =
                 mochios_posix_client::signal::signal_bit(signal as u32).unwrap_or(0);
             let previous = service_signal_mask(
@@ -6901,7 +6901,9 @@ fn dispatch_signal(
                     .fetch_add(1, Ordering::Release);
             }
             let saved_errno = unsafe { *__errno() };
-            let invoked = signal_stack::invoke(control, action, signal, info.as_mut(), context, native);
+            let invoked = signal_stack::invoke(
+                control, action, signal, info.as_mut(), context, native, preparation,
+            );
             set_errno(saved_errno);
             if let Err(error) = invoked {
                 service_signal_mask(control, posix_protocol::SIGNAL_MASK_SET, previous)?;
@@ -6970,9 +6972,10 @@ fn drain_pending_signals() -> Result<(), c_int> {
 }
 
 fn drain_pending_signals_with_context(context: &mut UContext, native: bool) -> Result<(), c_int> {
-    register_current_thread().ok_or(EAGAIN)?;
+    let (_, control) = register_current_thread().ok_or(EAGAIN)?;
     loop {
-        let epoch = FORK_EPOCH.load(Ordering::Acquire);
+        let mut preparation = Preparation::new(control)?;
+        let epoch = preparation.epoch;
         let received = posix_client()
             .map_err(map_posix_client_error)
             .and_then(|client| {
@@ -6990,11 +6993,13 @@ fn drain_pending_signals_with_context(context: &mut UContext, native: bool) -> R
         if signal == 0 {
             return Ok(());
         }
-        let dispatched = dispatch_signal(delivery, None, context, native);
+        let dispatched = dispatch_signal(delivery, None, context, native, &mut preparation);
         if FORK_EPOCH.load(Ordering::Acquire) != epoch {
             // A fork child resumes the copied handler, not its parent's
             // service-owned delivery. Only the original process may finish it.
-            dispatched?;
+            if preparation.started() {
+                dispatched?;
+            }
             continue;
         }
         let finished = match dispatched {
