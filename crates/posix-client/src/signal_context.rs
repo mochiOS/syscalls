@@ -10,6 +10,12 @@ pub const SEGV_MAPERR: i32 = 0x100;
 pub const SEGV_ACCERR: i32 = 0x101;
 pub const BUS_ADRERR: i32 = 0x101;
 pub const BUS_OBJERR: i32 = 0x102;
+pub const CLD_EXITED: i32 = 0x100;
+pub const CLD_KILLED: i32 = 0x101;
+pub const CLD_DUMPED: i32 = 0x102;
+pub const CLD_TRAPPED: i32 = 0x103;
+pub const CLD_STOPPED: i32 = 0x104;
+pub const CLD_CONTINUED: i32 = 0x105;
 pub const REG_R8: usize = 0;
 pub const REG_R9: usize = 1;
 pub const REG_R10: usize = 2;
@@ -76,8 +82,8 @@ impl SigInfo {
     }
 
     /// Origin fields come from the authenticated delivery, not request bytes.
-    /// Child status and fault metadata need their dedicated constructors;
-    /// never manufacture them from a generic source tag.
+    /// Child status must be present in the recorded notification; fault
+    /// metadata needs its dedicated constructor, never a fabricated default.
     pub fn from_origin(
         signal: u32,
         origin: protocol::signal_origin::Origin,
@@ -86,6 +92,11 @@ impl SigInfo {
             return Err(InfoError::InvalidSignal);
         }
         let mut result = Self::empty(signal, SI_USER);
+        if origin.source == protocol::signal_origin::CHILD && origin.child.event == 0 {
+            return Err(InfoError::MissingDetail);
+        }
+        protocol::signal_origin::encode(origin, &mut [0; protocol::signal_origin::LEN])
+            .map_err(|_| InfoError::InvalidOrigin)?;
         match origin.source {
             protocol::signal_origin::USER if origin.process_id != 0 => {
                 result.si_pid =
@@ -95,7 +106,25 @@ impl SigInfo {
             protocol::signal_origin::SYSTEM if origin.process_id == 0 && origin.real_uid == 0 => {
                 result.si_code = SI_KERNEL;
             }
-            protocol::signal_origin::CHILD | protocol::signal_origin::FAULT => {
+            protocol::signal_origin::CHILD => {
+                if signal != protocol::SIGNAL_CHLD {
+                    return Err(InfoError::InvalidSignal);
+                }
+                result.si_code = match origin.child.event {
+                    protocol::signal_origin::EXITED => CLD_EXITED,
+                    protocol::signal_origin::KILLED => CLD_KILLED,
+                    protocol::signal_origin::DUMPED => CLD_DUMPED,
+                    protocol::signal_origin::TRAPPED => CLD_TRAPPED,
+                    protocol::signal_origin::STOPPED => CLD_STOPPED,
+                    protocol::signal_origin::CONTINUED => CLD_CONTINUED,
+                    _ => return Err(InfoError::MissingDetail),
+                };
+                result.si_pid =
+                    i32::try_from(origin.process_id).map_err(|_| InfoError::Overflow)?;
+                result.si_uid = u16::try_from(origin.real_uid).map_err(|_| InfoError::Overflow)?;
+                result.si_status = origin.child.status as i32;
+            }
+            protocol::signal_origin::FAULT => {
                 return Err(InfoError::MissingDetail);
             }
             _ => return Err(InfoError::InvalidOrigin),

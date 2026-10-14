@@ -254,7 +254,8 @@ pub const OP_SOCKET_CONNECT: u16 = 82;
 pub const OP_SIGNAL_THREAD_FAULT: u16 = 83;
 /// SignalDelivery request; reads provenance only for a delivery owned by the
 /// authenticated calling thread. Does not consume the completion token.
-pub const OP_SIGNAL_DELIVERY_ORIGIN: u16 = 84;
+/// Returns signal_origin::Origin including the retained child event/status.
+pub const OP_SIGNAL_DELIVERY_ORIGIN: u16 = 85;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

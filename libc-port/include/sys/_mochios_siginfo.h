@@ -21,5 +21,11 @@ typedef struct {
 #define BUS_ADRALN 0x100
 #define BUS_ADRERR 0x101
 #define BUS_OBJERR 0x102
+#define CLD_EXITED 0x100
+#define CLD_KILLED 0x101
+#define CLD_DUMPED 0x102
+#define CLD_TRAPPED 0x103
+#define CLD_STOPPED 0x104
+#define CLD_CONTINUED 0x105
 
 #endif
