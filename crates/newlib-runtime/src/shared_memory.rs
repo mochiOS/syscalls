@@ -80,6 +80,44 @@ pub(super) fn truncate(entry: FdEntry, length: u64) -> Result<(), c_int> {
     Ok(())
 }
 
+pub(super) fn get_status_flags(entry: FdEntry) -> Result<c_int, c_int> {
+    let mut bytes = [0; 4];
+    let length = syscall_errno(syscall::raw_syscall6(
+        syscall::SyscallNumber::HandleControl,
+        entry.handle.lower_handle,
+        wire::CONTROL_GET_FLAGS,
+        0,
+        0,
+        bytes.as_mut_ptr() as u64,
+        bytes.len() as u64,
+    ))?;
+    if length != 4 {
+        return Err(EIO);
+    }
+    let flags = u32::from_le_bytes(bytes);
+    if flags & !(posix_protocol::OPEN_APPEND | posix_protocol::OPEN_NONBLOCK) != 0 {
+        return Err(EIO);
+    }
+    Ok((entry.handle.open_flags & 3) | newlib_mutable_status_flags(flags))
+}
+
+pub(super) fn set_status_flags(entry: FdEntry, flags: c_int) -> Result<(), c_int> {
+    let bytes = posix_mutable_status_flags(flags).to_le_bytes();
+    let length = syscall_errno(syscall::raw_syscall6(
+        syscall::SyscallNumber::HandleControl,
+        entry.handle.lower_handle,
+        wire::CONTROL_SET_FLAGS,
+        bytes.as_ptr() as u64,
+        bytes.len() as u64,
+        0,
+        0,
+    ))?;
+    if length != 0 {
+        return Err(EIO);
+    }
+    Ok(())
+}
+
 pub(super) struct MappingBacking(pub u32);
 impl Drop for MappingBacking {
     fn drop(&mut self) {

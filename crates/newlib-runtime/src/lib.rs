@@ -4262,7 +4262,7 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
             }
             F_GETFD => Ok(entry.descriptor_flags as c_int),
             F_GETFL if entry.handle.kind == FdKind::ObjectSharedMemory =>
-                Ok(entry.handle.open_flags & 0x3),
+                shared_memory::get_status_flags(entry),
             F_SETFD => {
                 state
                     .fds
@@ -4305,9 +4305,8 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
             F_GETFL => Ok(entry.handle.open_flags),
             F_SETFL => {
                 if entry.handle.kind == FdKind::ObjectSharedMemory {
-                    // Shared status flags must not be written into one FD's
-                    // local copy. Provider controls will implement them.
-                    return Err(ENOTSUP);
+                    shared_memory::set_status_flags(entry, arg)?;
+                    return Ok(0);
                 }
                 if matches!(
                     entry.handle.kind,

@@ -15,6 +15,10 @@ pub const TRUNCATE: u32 = 8;
 /// RESIZE: exactly eight input bytes (little-endian u64), no output bytes.
 pub const CONTROL_LENGTH: u64 = u64::from_le_bytes(*b"SHMLEN01");
 pub const CONTROL_RESIZE: u64 = u64::from_le_bytes(*b"SHMSIZ01");
+/// GET_FLAGS: empty input, four output bytes. SET_FLAGS: four input bytes,
+/// empty output. Flags are POSIX protocol OPEN_APPEND / OPEN_NONBLOCK bits.
+pub const CONTROL_GET_FLAGS: u64 = u64::from_le_bytes(*b"SHMFGT01");
+pub const CONTROL_SET_FLAGS: u64 = u64::from_le_bytes(*b"SHMFST01");
 
 pub fn descriptor_rights(read_write: bool) -> u64 {
     mnu_abi::HANDLE_RIGHT_READ
