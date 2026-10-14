@@ -556,7 +556,7 @@ fn query_control(
     Ok(count as usize)
 }
 
-unsafe fn socket_name(
+pub(super) unsafe fn socket_name(
     fd: c_int,
     address: *mut c_void,
     length: *mut u32,

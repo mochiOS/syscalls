@@ -1,0 +1,351 @@
+//! C recvmsg adapter. Ancillary authority stays in explicit IPC attachments;
+//! descriptor numbers and C pointers never leave this process.
+use super::*;
+use mochios_posix_client::{fd::FdReservations, socket_control as control, socket_transfer};
+use mochios_posix_protocol::socket_transfer as wire;
+
+const MSG_CTRUNC: c_int = 0x8;
+const MSG_TRUNC: c_int = 0x20;
+const MSG_CMSG_CLOEXEC: c_int = 0x4000_0000;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(super) struct Message {
+    name: *mut c_void,
+    name_length: u32,
+    vectors: *const IoVecMut,
+    vector_count: usize,
+    control: *mut c_void,
+    control_length: usize,
+    flags: c_int,
+}
+
+#[derive(Clone, Copy)]
+struct Vector {
+    base: *mut u8,
+    length: usize,
+}
+
+struct OwnedHandle(u32);
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        close_object_handle(self.0);
+    }
+}
+
+struct Incoming {
+    reservation: FdReservations,
+    entries: [Option<FdEntry>; control::MAX_RIGHTS],
+    count: usize,
+}
+impl Drop for Incoming {
+    fn drop(&mut self) {
+        state().fds.cancel_group(&self.reservation);
+        for entry in self.entries.iter().flatten() {
+            close_object_handle(entry.handle.lower_handle as u32);
+        }
+    }
+}
+
+unsafe fn scatter(vectors: &[Vector], ram: u32, copied: usize) -> Result<(), c_int> {
+    let mut offset = 0;
+    for vector in vectors {
+        let length = vector.length.min(copied - offset);
+        if length != 0 {
+            let count = syscall_errno(syscall::raw_syscall4(
+                syscall::SyscallNumber::HandleReadAt,
+                ram as u64,
+                vector.base as u64,
+                length as u64,
+                offset as u64,
+            ))?;
+            if count != length as u64 {
+                return Err(EFAULT);
+            }
+            offset += length;
+        }
+        if offset == copied {
+            break;
+        }
+    }
+    Ok(())
+}
+
+unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize, c_int> {
+    if output.is_null() {
+        return Err(EFAULT);
+    }
+    // As for readv, C metadata must be readable. Snapshot it once so concurrent
+    // caller edits cannot change lengths after validation or record consumption.
+    let mut message = unsafe { output.read_unaligned() };
+    if message.vector_count > mochios_posix_client::io_vector::IOV_MAX {
+        return Err(EINVAL);
+    }
+    if (message.vector_count != 0 && message.vectors.is_null())
+        || (message.control_length != 0 && message.control.is_null())
+    {
+        return Err(EFAULT);
+    }
+    let mut vectors = [Vector {
+        base: ptr::null_mut(),
+        length: 0,
+    }; 1024];
+    for (index, vector) in vectors[..message.vector_count].iter_mut().enumerate() {
+        let input = unsafe { message.vectors.add(index).read_unaligned() };
+        *vector = Vector {
+            base: input.iov_base.cast(),
+            length: input.iov_len,
+        };
+        if (vector.base as usize).checked_add(vector.length).is_none() {
+            return Err(EFAULT);
+        }
+    }
+    let vectors = &vectors[..message.vector_count];
+    let total = mochios_posix_client::io_vector::validate(message.vector_count as i32, |index| {
+        (vectors[index].base.is_null(), vectors[index].length)
+    })
+    .map_err(vector_errno)?;
+    let entry = with_fd_entry(fd)?;
+    if !entry.handle.kind.is_socket() {
+        return Err(mochios_posix_client::newlib_errno::from_status(-88));
+    }
+    let options = mochios_posix_client::socket::message_options(
+        flags & !(MSG_TRUNC | MSG_CMSG_CLOEXEC),
+        false,
+    )
+    .map_err(|_| mochios_posix_client::newlib_errno::EOPNOTSUPP)?;
+    if !socket::is_datagram(entry)? {
+        // Stream ancillary markers are implemented separately, never silently
+        // dropped by treating a byte stream as an ancillary-free datagram.
+        if message.control_length != 0 {
+            return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
+        }
+        let mut peer = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
+        let mut required = peer.len() as u32;
+        if !message.name.is_null() {
+            unsafe { socket::socket_name(fd, peer.as_mut_ptr().cast(), &mut required, true) }?;
+        }
+        let mut buffer = VectorBuffer::new(total)?;
+        let bytes = buffer.bytes();
+        let count = socket::message_entry(
+            entry,
+            bytes.as_mut_ptr() as u64,
+            bytes.len(),
+            flags & !MSG_CMSG_CLOEXEC,
+            false,
+        )? as usize;
+        let mut offset = 0;
+        for vector in vectors {
+            let size = vector.length.min(count - offset);
+            if size != 0 {
+                unsafe { ptr::copy_nonoverlapping(bytes.as_ptr().add(offset), vector.base, size) };
+                offset += size;
+            }
+            if offset == count {
+                break;
+            }
+        }
+        if !message.name.is_null() {
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    peer.as_ptr(),
+                    message.name.cast(),
+                    (message.name_length as usize).min(required as usize),
+                )
+            };
+            message.name_length = required;
+        }
+        message.control_length = 0;
+        message.flags = 0;
+        unsafe { output.write_unaligned(message) };
+        return Ok(count as isize);
+    }
+    if options.peek {
+        return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
+    }
+    let capacity = message.control_length.saturating_sub(control::HEADER_LEN) / 4;
+    let maximum = capacity.min(control::MAX_RIGHTS);
+    let length = total.min(posix_protocol::socket_record::MAX_RECORD_SIZE);
+    let raw = syscall_errno(syscall::raw_syscall2(
+        syscall::SyscallNumber::MemoryObjectCreate,
+        ((length.max(1) + 4095) & !4095) as u64,
+        0,
+    ))?;
+    let ram = OwnedHandle(u32::try_from(raw).map_err(|_| EIO)?);
+    let ram_rights = syscall_errno(syscall::raw_syscall1(
+        syscall::SyscallNumber::HandleRightsGet,
+        raw,
+    ))?;
+    let transport = socket_record::endpoint()?;
+    let (_, thread) = register_current_thread().ok_or(EAGAIN)?;
+    let caught = thread.nonrestart_signal_generation.load(Ordering::Acquire);
+    let mut wait = socket::SocketWait::new(entry, syscall::HANDLE_SIGNAL_READABLE)?;
+    let mut response = [0; wire::MAX_RECEIVE_REPLY_LEN];
+    let (received, mut incoming) = loop {
+        if io_cancellation_requested(thread)
+            || thread.nonrestart_signal_generation.load(Ordering::Acquire) != caught
+        {
+            return Err(EINTR);
+        }
+        let limit = if maximum == 0 { 0 } else { process_fd_limit()? };
+        let incoming = Incoming {
+            reservation: state()
+                .fds
+                .reserve_up_to(0, limit, maximum)
+                .map_err(|_| EMFILE)?,
+            entries: [None; control::MAX_RIGHTS],
+            count: 0,
+        };
+        let result = socket_transfer::receive(
+            &transport,
+            ObjectHandleAttachment {
+                handle: entry.handle.lower_handle as u32,
+                rights: entry.rights,
+            },
+            ObjectHandleAttachment {
+                handle: ram.0,
+                rights: ram_rights,
+            },
+            0,
+            length as u32,
+            incoming.reservation.len() as u16,
+            &mut response,
+            close_object_handle,
+        )
+        .map_err(map_posix_client_error);
+        match result {
+            Ok(received) => break (received, incoming),
+            Err(EAGAIN) if !options.dont_wait && !handle_is_nonblocking(entry)? => {
+                // Do not monopolize the local FD table while waiting for data.
+                drop(incoming);
+                wait_for_handle_capacity(
+                    entry,
+                    syscall::HANDLE_SIGNAL_READABLE,
+                    thread,
+                    caught,
+                    0,
+                    wait.deadline(entry)?,
+                )?;
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let _receipt = received.receipt.map(|receipt| OwnedHandle(receipt.handle));
+    if let Some(receipt) = received.receipt {
+        while incoming.count < received.message.available_rights as usize {
+            let remaining = received.message.available_rights as usize - incoming.count;
+            let batch = socket_transfer::deliver(
+                &transport,
+                receipt,
+                incoming.count as u16,
+                remaining.min(4) as u16,
+                close_object_handle,
+            )
+            .map_err(map_posix_client_error)?;
+            if batch
+                .files
+                .iter()
+                .flatten()
+                .any(|file| fd_kind_from_inherited(file.metadata.kind).is_none())
+            {
+                for file in batch.files.into_iter().flatten() {
+                    close_object_handle(file.object.handle);
+                }
+                return Err(EIO);
+            }
+            // Every dispatch kind is now validated before ownership is moved.
+            for file in batch.files.into_iter().flatten() {
+                let kind = fd_kind_from_inherited(file.metadata.kind).unwrap();
+                let mut entry = object_entry(
+                    file.object.handle as u64,
+                    file.object.rights,
+                    kind,
+                    file.metadata.open_flags as c_int,
+                );
+                entry.descriptor_flags = if flags & MSG_CMSG_CLOEXEC != 0 {
+                    FD_CLOEXEC as u32
+                } else {
+                    0
+                };
+                incoming.entries[incoming.count] = Some(entry);
+                incoming.count += 1;
+            }
+        }
+    }
+    unsafe { scatter(vectors, ram.0, received.message.copied as usize) }?;
+    let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
+    let required =
+        mochios_posix_client::socket::encode_sockaddr(received.message.source, &mut native)
+            .map_err(|_| EIO)?;
+    if !message.name.is_null() {
+        unsafe {
+            ptr::copy_nonoverlapping(
+                native.as_ptr(),
+                message.name.cast(),
+                (message.name_length as usize).min(required),
+            )
+        };
+        message.name_length = required as u32;
+    }
+    let entries = core::array::from_fn::<_, { control::MAX_RIGHTS }, _>(|index| {
+        incoming.entries[index].unwrap_or(entry)
+    });
+    let mut descriptors = [0; control::MAX_RIGHTS];
+    state()
+        .fds
+        .commit_group(
+            &incoming.reservation,
+            &entries[..incoming.count],
+            &mut descriptors,
+        )
+        .map_err(|_| EIO)?;
+    // Entries now belong to the table, not the rollback guard.
+    incoming.entries.fill(None);
+    let mut ancillary = [0; control::HEADER_LEN + 4 * (control::MAX_RIGHTS + 1)];
+    let bound = message.control_length.min(ancillary.len());
+    let encoded = control::encode_rights(&descriptors[..incoming.count], &mut ancillary[..bound]);
+    let encoded = match encoded {
+        Ok(encoded) => encoded,
+        Err(_) => {
+            let mut state = state();
+            for &fd in &descriptors[..incoming.count] {
+                let _ = close_fd_entry(&mut state.fds, fd);
+            }
+            return Err(EIO);
+        }
+    };
+    if encoded.length != 0 {
+        unsafe {
+            ptr::copy_nonoverlapping(ancillary.as_ptr(), message.control.cast(), encoded.length)
+        };
+    }
+    message.control_length = encoded.length;
+    message.flags = if received.message.length > received.message.copied {
+        MSG_TRUNC
+    } else {
+        0
+    } | if received.message.total_rights as usize > incoming.count {
+        MSG_CTRUNC
+    } else {
+        0
+    };
+    unsafe { output.write_unaligned(message) };
+    Ok(if flags & MSG_TRUNC != 0 {
+        received.message.length
+    } else {
+        received.message.copied
+    } as isize)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn recvmsg(fd: c_int, message: *mut Message, flags: c_int) -> isize {
+    pthread_testcancel();
+    let result = unsafe { receive(fd, message, flags) };
+    let result = result_with_errno(result, -1);
+    // An empty datagram may still have committed received FDs. Like accept,
+    // never hide committed ownership behind a late cancellation check.
+    if result < 0 {
+        pthread_testcancel();
+    }
+    result
+}

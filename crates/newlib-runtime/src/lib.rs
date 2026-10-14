@@ -15,6 +15,7 @@ mod named_semaphore;
 mod shared_memory;
 mod socket;
 mod socket_record;
+mod socket_message;
 mod stdio_cancellation;
 mod thread_cleanup;
 mod fault_signal;

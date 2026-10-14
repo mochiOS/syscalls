@@ -5,7 +5,7 @@ use mochios_posix_protocol::socket_record as wire;
 
 static ENDPOINT: RuntimeMutex<Option<u32>> = RuntimeMutex::new(None);
 
-fn endpoint() -> Result<SyscallEndpointTransport, c_int> {
+pub(super) fn endpoint() -> Result<SyscallEndpointTransport, c_int> {
     let mut cached = ENDPOINT.lock();
     let handle = match *cached {
         Some(handle) => handle,
