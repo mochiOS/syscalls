@@ -31,6 +31,10 @@ pub enum Request {
         count: u16,
         metadata: [Option<InheritedFdMetadata>; BATCH_SIZE],
     },
+    /// Attaches transaction CONTROL and RAM READ|MAP. Length is bound at Begin.
+    Commit {
+        offset: u64,
+    },
 }
 
 fn valid_metadata(info: InheritedFdMetadata) -> bool {
@@ -137,6 +141,23 @@ pub fn decode(input: &[u8]) -> Result<Request, Error> {
                 metadata,
             })
         }
+        3 => {
+            if input.len() != HEADER_LEN {
+                return Err(InvalidLength.into());
+            }
+            Ok(Request::Commit {
+                offset: u64::from_le_bytes(input[8..16].try_into().unwrap()),
+            })
+        }
         _ => Err(Error::UnknownOperation),
     }
+}
+
+pub fn commit(offset: u64) -> [u8; HEADER_LEN] {
+    let mut out = [0; HEADER_LEN];
+    out[..4].copy_from_slice(&MAGIC);
+    out[4..6].copy_from_slice(&1u16.to_le_bytes());
+    out[6..8].copy_from_slice(&3u16.to_le_bytes());
+    out[8..16].copy_from_slice(&offset.to_le_bytes());
+    out
 }
