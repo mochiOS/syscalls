@@ -3342,7 +3342,14 @@ fn wait_for_handle_since(
     control: &ThreadControl,
     caught: u64,
 ) -> Result<u64, c_int> {
-    wait_for_handle_capacity(entry, interests, control, caught, 0)
+    wait_for_handle_capacity(
+        entry,
+        interests,
+        control,
+        caught,
+        0,
+        syscall::HANDLE_WAIT_INFINITE,
+    )
 }
 
 fn wait_for_handle_capacity(
@@ -3351,6 +3358,7 @@ fn wait_for_handle_capacity(
     control: &ThreadControl,
     caught: u64,
     minimum_write_bytes: u32,
+    deadline: u64,
 ) -> Result<u64, c_int> {
     let mut item = syscall::HandleWaitItem {
         handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
@@ -3372,7 +3380,7 @@ fn wait_for_handle_capacity(
                 syscall::SyscallNumber::HandleWaitManyGuarded,
                 (&mut item as *mut syscall::HandleWaitItem) as u64,
                 1,
-                syscall::HANDLE_WAIT_INFINITE,
+                deadline,
                 (&guard as *const mnu_abi::HandleWaitGuard) as u64,
             )) {
                 Ok(_) => Ok(true),
@@ -3380,14 +3388,24 @@ fn wait_for_handle_capacity(
                 Err(error) => Err(error),
             }
         },
-        || Ok(false),
+        || {
+            if deadline == syscall::HANDLE_WAIT_INFINITE {
+                Ok(false)
+            } else {
+                monotonic_nanoseconds().map(|now| now >= deadline)
+            }
+        },
     )
     .map_err(|error| match error {
         mochios_posix_client::multiplex::WaitError::Interrupted
         | mochios_posix_client::multiplex::WaitError::Cancelled => EINTR,
         mochios_posix_client::multiplex::WaitError::Io(error) => error,
     })?;
-    Ok(item.observed)
+    if item.observed == 0 && deadline != syscall::HANDLE_WAIT_INFINITE {
+        Err(EAGAIN)
+    } else {
+        Ok(item.observed)
+    }
 }
 
 fn stream_io<T>(
@@ -3426,6 +3444,29 @@ fn stream_io_since_mode<T>(
     caught: u64,
     minimum_write_bytes: u32,
     force_nonblocking: bool,
+    operation: impl FnMut() -> Result<T, c_int>,
+) -> Result<T, c_int> {
+    let mut wait = socket::ReceiveWait::new(entry, interests)?;
+    stream_io_since_wait(
+        entry,
+        interests,
+        control,
+        caught,
+        minimum_write_bytes,
+        force_nonblocking,
+        &mut wait,
+        operation,
+    )
+}
+
+fn stream_io_since_wait<T>(
+    entry: FdEntry,
+    interests: u64,
+    control: &ThreadControl,
+    caught: u64,
+    minimum_write_bytes: u32,
+    force_nonblocking: bool,
+    wait: &mut socket::ReceiveWait,
     mut operation: impl FnMut() -> Result<T, c_int>,
 ) -> Result<T, c_int> {
     loop {
@@ -3441,7 +3482,14 @@ fn stream_io_since_mode<T>(
             Err(EAGAIN) if !force_nonblocking && !handle_is_nonblocking(entry)? => {
                 // Preserve the generation from before the attempt, including
                 // across retries and successful prefixes of a large write.
-                wait_for_handle_capacity(entry, interests, control, caught, minimum_write_bytes)?;
+                wait_for_handle_capacity(
+                    entry,
+                    interests,
+                    control,
+                    caught,
+                    minimum_write_bytes,
+                    wait.deadline(entry)?,
+                )?;
             }
             result => return result,
         }

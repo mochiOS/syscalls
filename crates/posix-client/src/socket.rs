@@ -11,6 +11,27 @@ pub const MSG_WAITALL: i32 = 0x100;
 pub const MSG_NOSIGNAL: i32 = 0x4000;
 pub const MAX_SOCKADDR_LEN: usize = 110;
 
+/// timeval is decoded at libc's boundary; only a duration enters the wire.
+pub fn receive_timeout_nanoseconds(seconds: i64, microseconds: i64) -> Result<u64, i32> {
+    if seconds < 0 || !(0..1_000_000).contains(&microseconds) {
+        return Err(-22);
+    }
+    (seconds as u64)
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(microseconds as u64 * 1000))
+        .ok_or(-22)
+}
+
+/// Keep one absolute deadline across short reads, spurious wakes and retries.
+/// u64::MAX remains reserved for the native infinite-wait marker.
+pub fn receive_deadline(started: u64, duration: u64) -> u64 {
+    if duration == 0 {
+        u64::MAX
+    } else {
+        started.saturating_add(duration).min(u64::MAX - 1)
+    }
+}
+
 /// Query options currently supplied by the socket Provider. C ABI option
 /// numbers stay on this side of HandleControl's userspace wire tags.
 pub fn newlib_getsockopt_tag(level: i32, option: i32) -> Result<u64, i32> {
