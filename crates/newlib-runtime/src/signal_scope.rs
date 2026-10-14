@@ -14,6 +14,7 @@ pub(super) struct Scope {
     previous: usize,
     previous_id: u64,
     active: bool,
+    retired: bool,
     completed: bool,
     _pin: PhantomPinned,
     _thread_bound: PhantomData<*mut ()>,
@@ -51,6 +52,7 @@ impl Scope {
             previous: 0,
             previous_id: 0,
             active: false,
+            retired: false,
             completed: false,
             _pin: PhantomPinned,
             _thread_bound: PhantomData,
@@ -60,7 +62,10 @@ impl Scope {
     pub(super) fn activate(self: Pin<&mut Self>) -> Result<(), c_int> {
         // Only fields are changed; the pinned record is never moved.
         let scope = unsafe { self.get_unchecked_mut() };
-        if scope.active || scope.control.native_delivery_defer.load(Ordering::Acquire) == 0 {
+        if scope.active
+            || scope.retired
+            || scope.control.native_delivery_defer.load(Ordering::Acquire) == 0
+        {
             return Err(EINVAL);
         }
         scope.previous = scope.control.active_signal_scope.load(Ordering::Acquire);
@@ -94,6 +99,29 @@ impl Scope {
                     .map_err(map_posix_client_error)
             })
     }
+
+    fn retire(self: Pin<&mut Self>) -> Result<(), c_int> {
+        let scope = unsafe { self.get_unchecked_mut() };
+        if !scope.active
+            || scope.control.native_delivery_defer.load(Ordering::Acquire) == 0
+            || scope.control.active_signal_scope.load(Ordering::Acquire)
+                != scope as *mut Self as usize
+            || scope.control.active_signal_scope_id.load(Ordering::Acquire) != scope.id
+        {
+            return Err(EINVAL);
+        }
+        scope.active = false;
+        scope.retired = true;
+        scope
+            .control
+            .active_signal_scope_id
+            .store(scope.previous_id, Ordering::Relaxed);
+        scope
+            .control
+            .active_signal_scope
+            .store(scope.previous, Ordering::Release);
+        Ok(())
+    }
 }
 
 impl Drop for Scope {
@@ -101,18 +129,73 @@ impl Drop for Scope {
         if !self.active {
             return;
         }
-        if self.control.native_delivery_defer.load(Ordering::Acquire) == 0
-            || self.control.active_signal_scope.load(Ordering::Acquire)
-                != self as *mut Self as usize
-            || self.control.active_signal_scope_id.load(Ordering::Acquire) != self.id
-        {
-            process_exit(EINVAL);
-        }
-        self.control
-            .active_signal_scope_id
-            .store(self.previous_id, Ordering::Relaxed);
-        self.control
-            .active_signal_scope
-            .store(self.previous, Ordering::Release);
+        // Drop never moves a record whose address has been published.
+        unsafe { Pin::new_unchecked(self) }
+            .retire()
+            .unwrap_or_else(|error| process_exit(error));
     }
+}
+
+/// Verify a saved scope identity using only the current thread's live chain.
+/// Zero denotes the continuation outside every handler, never a raw pointer.
+///
+/// # Safety
+/// The caller must be the owning thread and hold its native delivery guard.
+/// Every published scope must still be pinned and live. Arbitrary jump-buffer
+/// addresses must not be used as chain links.
+pub(super) unsafe fn validate_target(control: &ThreadControl, target: u64) -> Result<(), c_int> {
+    if control.native_delivery_defer.load(Ordering::Acquire) == 0 {
+        return Err(EINVAL);
+    }
+    let mut pointer = control.active_signal_scope.load(Ordering::Acquire);
+    let mut id = control.active_signal_scope_id.load(Ordering::Acquire);
+    loop {
+        if pointer == 0 {
+            return if id == 0 && target == 0 {
+                Ok(())
+            } else {
+                Err(EINVAL)
+            };
+        }
+        let scope = unsafe { &*(pointer as *const Scope) };
+        if id == 0
+            || scope.id != id
+            || !scope.active
+            || scope.retired
+            || !core::ptr::eq(scope.control, control)
+            || scope.previous_id >= id
+            || (scope.previous == 0) != (scope.previous_id == 0)
+        {
+            return Err(EINVAL);
+        }
+        if id == target {
+            return Ok(());
+        }
+        pointer = scope.previous;
+        id = scope.previous_id;
+    }
+}
+
+/// Finish and unlink only the deliveries abandoned by a nonlocal jump.
+/// Validate the entire path first, so a stale target consumes no deliveries.
+///
+/// # Safety
+/// The requirements of `validate_target` apply. After success the caller must
+/// not return through an abandoned handler or use its invocation references.
+/// On a completion error the caller must fail closed, not retry the jump: the
+/// service may already have consumed the request. Parent-epoch tokens copied
+/// by fork are never acknowledged in the child.
+pub(super) unsafe fn unwind_to(control: &ThreadControl, target: u64) -> Result<(), c_int> {
+    unsafe { validate_target(control, target) }?;
+    while control.active_signal_scope_id.load(Ordering::Acquire) != target {
+        let pointer = control.active_signal_scope.load(Ordering::Acquire);
+        // Validation above established provenance and lifetime. Each retirement
+        // restores the next validated link while asynchronous delivery is held.
+        let mut scope = unsafe { Pin::new_unchecked(&mut *(pointer as *mut Scope)) };
+        if !scope.completed {
+            scope.as_mut().complete()?;
+        }
+        scope.retire()?;
+    }
+    Ok(())
 }
