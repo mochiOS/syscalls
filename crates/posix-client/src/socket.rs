@@ -164,6 +164,43 @@ pub fn poll_events(bits: u32, events: i16) -> i16 {
 }
 
 impl<T: ObjectTransport> Client<T> {
+    /// Return ownership of one unconnected socket Handle, never a hidden pair.
+    pub fn open_socket(
+        &self,
+        create: wire::Create,
+        mut close: impl FnMut(T::Handle),
+    ) -> Result<ObjectHandleAttachment<T::Handle>, ClientError<T::Error>>
+    where
+        T::Handle: Eq,
+    {
+        let mut payload = [0; wire::CREATE_LEN];
+        create.encode(&mut payload).map_err(ClientError::Protocol)?;
+        let mut handles = ObjectHandles::new();
+        let outcome = self.request_with_handles(
+            protocol::OP_SOCKET_CREATE,
+            0,
+            &payload,
+            &mut [],
+            &mut handles,
+        );
+        if matches!(outcome, Ok(0)) && handles.len() == 1 {
+            let received = handles.get(0).unwrap();
+            if received.rights == wire::descriptor_rights() {
+                return Ok(received);
+            }
+        }
+        for (index, received) in handles.iter().enumerate() {
+            if !handles
+                .iter()
+                .take(index)
+                .any(|earlier| earlier.handle == received.handle)
+            {
+                close(received.handle);
+            }
+        }
+        Err(outcome.err().unwrap_or(ClientError::MismatchedResponse))
+    }
+
     /// Returns ownership of two receiver-local Handles. The caller must reserve
     /// both local FD slots before requesting resources and close both Handles
     /// if installation fails. `close` releases every attachment on failed or

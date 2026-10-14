@@ -5,6 +5,36 @@ use super::*;
 use mochios_posix_protocol::socket as wire;
 
 struct PendingPair([FdReservation; 2]);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int {
+    let result = (|| {
+        let (create, cloexec) = mochios_posix_client::socket::newlib_create(domain, kind, protocol)
+            .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
+        let limit = process_fd_limit()?;
+        let pending = PendingFdReservation(state().fds.reserve_from(0, limit).map_err(|_| EMFILE)?);
+        let opened = posix_client()
+            .map_err(map_posix_client_error)?
+            .open_socket(create, close_object_handle)
+            .map_err(map_posix_client_error)?;
+        let flags = 2 | if cloexec { O_CLOEXEC } else { 0 };
+        let entry = object_entry(
+            u64::from(opened.handle),
+            opened.rights,
+            FdKind::ObjectSocket,
+            flags,
+        );
+        let result = state().fds.commit_reservation(&pending.0, entry);
+        match result {
+            Ok(fd) => Ok(fd),
+            Err(_) => {
+                close_object_handle(opened.handle);
+                Err(EIO)
+            }
+        }
+    })();
+    result_with_errno(result, -1)
+}
 impl Drop for PendingPair {
     fn drop(&mut self) {
         let mut state = state();
