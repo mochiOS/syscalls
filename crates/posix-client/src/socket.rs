@@ -11,6 +11,27 @@ pub const MSG_WAITALL: i32 = 0x100;
 pub const MSG_NOSIGNAL: i32 = 0x4000;
 pub const MAX_SOCKADDR_LEN: usize = 110;
 
+/// Read-only options currently supplied by the socket Provider. C ABI option
+/// numbers stay on this side of HandleControl's userspace wire tags.
+pub fn newlib_getsockopt_tag(level: i32, option: i32) -> Result<u64, i32> {
+    match (level, option) {
+        (1, 3) => Ok(wire::CONTROL_KIND),       // SOL_SOCKET / SO_TYPE
+        (1, 30) => Ok(wire::CONTROL_ACCEPTING), // SOL_SOCKET / SO_ACCEPTCONN
+        _ => Err(-92),
+    }
+}
+
+pub fn newlib_getsockopt_value(tag: u64, bytes: &[u8]) -> Result<i32, i32> {
+    let value = u32::from_le_bytes(bytes.try_into().map_err(|_| -5)?);
+    match (tag, value) {
+        (wire::CONTROL_KIND, 1) => Ok(1), // Stream
+        (wire::CONTROL_KIND, 2) => Ok(2), // Datagram
+        (wire::CONTROL_KIND, 3) => Ok(5), // SequencedPacket
+        (wire::CONTROL_ACCEPTING, 0 | 1) => Ok(value as i32),
+        _ => Err(-5),
+    }
+}
+
 /// Pending owns one received notification reference, not a local FD. Wait on
 /// its native READABLE signal, query CONTROL_CONNECT_RESULT, and close on every
 /// exit path. Dropping the final reference cancels an uncommitted attempt.

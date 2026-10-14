@@ -6,6 +6,47 @@ use mochios_posix_protocol::socket as wire;
 
 struct PendingPair([FdReservation; 2]);
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getsockopt(
+    fd: c_int,
+    level: c_int,
+    option: c_int,
+    value: *mut c_void,
+    length: *mut u32,
+) -> c_int {
+    let result = (|| {
+        let entry = with_fd_entry(fd)?;
+        if entry.handle.kind != FdKind::ObjectSocket {
+            return Err(mochios_posix_client::newlib_errno::from_status(-88));
+        }
+        let tag = mochios_posix_client::socket::newlib_getsockopt_tag(level, option)
+            .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
+        if length.is_null() {
+            return Err(EFAULT);
+        }
+        let capacity = unsafe { length.read() };
+        if capacity > i32::MAX as u32 {
+            return Err(EINVAL);
+        }
+        let count = (capacity as usize).min(core::mem::size_of::<c_int>());
+        if count != 0 && value.is_null() {
+            return Err(EFAULT);
+        }
+        let mut response = [0; 4];
+        control(entry, tag, &[], &mut response)?;
+        let decoded = mochios_posix_client::socket::newlib_getsockopt_value(tag, &response)
+            .map_err(|_| EIO)?;
+        unsafe {
+            if count != 0 {
+                ptr::copy_nonoverlapping(decoded.to_ne_bytes().as_ptr(), value.cast::<u8>(), count);
+            }
+            length.write(count as u32);
+        }
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
 struct PendingConnection(u32);
 impl Drop for PendingConnection {
     fn drop(&mut self) {

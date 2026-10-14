@@ -108,6 +108,10 @@ pub const CONTROL_LOCAL_ADDRESS: u64 = u64::from_le_bytes(*b"SOPLOC01");
 pub const CONTROL_PEER_ADDRESS: u64 = u64::from_le_bytes(*b"SOPPER01");
 pub const CONTROL_BIND: u64 = u64::from_le_bytes(*b"SOPBND01");
 pub const CONTROL_LISTEN: u64 = u64::from_le_bytes(*b"SOPLSN01");
+/// Empty input; one u32 Kind tag, not a libc SOCK_* value.
+pub const CONTROL_KIND: u64 = u64::from_le_bytes(*b"SOPKND01");
+/// Empty input; one u32 boolean reflecting the shared listener state.
+pub const CONTROL_ACCEPTING: u64 = u64::from_le_bytes(*b"SOPACC01");
 pub const SHUTDOWN_READ: u32 = 0;
 pub const SHUTDOWN_WRITE: u32 = 1;
 pub const SHUTDOWN_BOTH: u32 = 2;
