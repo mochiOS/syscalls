@@ -11,6 +11,52 @@ pub const MSG_WAITALL: i32 = 0x100;
 pub const MSG_NOSIGNAL: i32 = 0x4000;
 pub const MAX_SOCKADDR_LEN: usize = 110;
 
+/// Decode the C ABI without casting potentially unaligned bytes to sockaddr.
+/// UNIX abstract names are binary; pathname terminators and IP padding are not
+/// transmitted. Path traversal and authorization belong to the service layer.
+pub fn decode_sockaddr(input: &[u8]) -> Result<wire::Address<'_>, i32> {
+    let family = input.get(..2).ok_or(-22)?;
+    match u16::from_le_bytes(family.try_into().unwrap()) {
+        1 => {
+            if input.len() > MAX_SOCKADDR_LEN {
+                return Err(-22);
+            }
+            let name = &input[2..];
+            if name.is_empty() {
+                return Ok(wire::Address::UnixUnnamed);
+            }
+            if name[0] == 0 {
+                return Ok(wire::Address::UnixAbstract(&name[1..]));
+            }
+            let length = name
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(name.len());
+            if length > wire::MAX_UNIX_NAME_BYTES {
+                return Err(-36);
+            }
+            Ok(wire::Address::UnixPath(&name[..length]))
+        }
+        2 => {
+            let bytes = input.get(..16).ok_or(-22)?;
+            Ok(wire::Address::Ipv4 {
+                address: bytes[4..8].try_into().unwrap(),
+                port: u16::from_be_bytes(bytes[2..4].try_into().unwrap()),
+            })
+        }
+        10 => {
+            let bytes = input.get(..28).ok_or(-22)?;
+            Ok(wire::Address::Ipv6 {
+                address: bytes[8..24].try_into().unwrap(),
+                port: u16::from_be_bytes(bytes[2..4].try_into().unwrap()),
+                flow_info: u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
+                scope_id: u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+            })
+        }
+        _ => Err(-97),
+    }
+}
+
 /// Serialize mochiOS's C sockaddr layout; wire tags, port encoding and padding
 /// are independent of this ABI. The caller performs any output truncation.
 pub fn encode_sockaddr(address: wire::Address<'_>, output: &mut [u8]) -> Result<usize, i32> {
