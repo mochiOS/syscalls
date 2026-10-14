@@ -6,6 +6,72 @@ use mochios_posix_protocol::socket as wire;
 
 struct PendingPair([FdReservation; 2]);
 
+struct PendingConnection(u32);
+impl Drop for PendingConnection {
+    fn drop(&mut self) {
+        close_object_handle(self.0);
+    }
+}
+
+unsafe fn connect_io(fd: c_int, address: *const c_void, length: u32) -> Result<c_int, c_int> {
+    let entry = with_fd_entry(fd)?;
+    if entry.handle.kind != FdKind::ObjectSocket {
+        return Err(mochios_posix_client::newlib_errno::from_status(-88));
+    }
+    if address.is_null() {
+        return Err(EFAULT);
+    }
+    if length as usize > mochios_posix_client::socket::MAX_SOCKADDR_LEN {
+        return Err(EINVAL);
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(address.cast::<u8>(), length as usize) };
+    let address = mochios_posix_client::socket::decode_sockaddr(bytes)
+        .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
+    let (_, thread) = register_current_thread().ok_or(EAGAIN)?;
+    let caught = thread.nonrestart_signal_generation.load(Ordering::Acquire);
+    let result = posix_client()
+        .map_err(map_posix_client_error)?
+        .connect_socket(
+            mochios_posix_client::ObjectHandleAttachment {
+                handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+                rights: entry.rights,
+            },
+            address,
+            close_object_handle,
+        )
+        .map_err(map_posix_client_error)?;
+    let mochios_posix_client::socket::ConnectStarted::Pending(job) = result else {
+        return Ok(0);
+    };
+    let _pending = PendingConnection(job.handle);
+    let notification = object_entry(u64::from(job.handle), job.rights, FdKind::ObjectSocket, 2);
+    loop {
+        match control(notification, wire::CONTROL_CONNECT_RESULT, &[], &mut []) {
+            Ok(()) => return Ok(0), // Ownership/connection is already committed.
+            Err(EAGAIN) => {
+                wait_for_handle_since(
+                    notification,
+                    syscall::HANDLE_SIGNAL_READABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
+                    thread,
+                    caught,
+                )?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn connect(fd: c_int, address: *const c_void, length: u32) -> c_int {
+    pthread_testcancel();
+    let result = unsafe { connect_io(fd, address, length) };
+    let value = result_with_errno(result, -1);
+    if value < 0 {
+        pthread_testcancel();
+    }
+    value
+}
+
 unsafe fn accept_io(
     fd: c_int,
     address: *mut c_void,

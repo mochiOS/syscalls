@@ -40,6 +40,7 @@ int socketpair(int domain, int type, int protocol, int sv[2]);
 int socket(int domain, int type, int protocol);
 int bind(int socket, const struct sockaddr *address, socklen_t length);
 int listen(int socket, int backlog);
+int connect(int socket, const struct sockaddr *address, socklen_t length);
 int accept(int socket, struct sockaddr *address, socklen_t *length);
 int accept4(int socket, struct sockaddr *address, socklen_t *length, int flags);
 int shutdown(int socket, int how);
