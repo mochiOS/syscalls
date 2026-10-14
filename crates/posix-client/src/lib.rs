@@ -1059,6 +1059,9 @@ impl<T: ObjectTransport> Client<T> {
         protocol::decode_session_info(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    /// Transfers one newly owned Handle to the caller. Failed or malformed
+    /// replies are drained without closing the borrowed base or retrying:
+    /// a failed response may follow an already completed creation.
     pub fn open_at(
         &self,
         base: OpenAtBase<T::Handle>,
@@ -1088,17 +1091,26 @@ impl<T: ObjectTransport> Client<T> {
                 .push(directory)
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
-        self.request_with_handles(
+        let borrowed = handles.clone();
+        let result = self.request_with_handles(
             protocol::OP_OPEN_AT,
             0,
             &payload[..payload_len],
             &mut [],
             &mut handles,
-        )?;
-        if handles.len() != 1 {
-            return Err(ClientError::MismatchedResponse);
+        );
+        if result.is_ok()
+            && handles.len() == 1
+            && let Some(opened) = handles.get(0)
+            && opened.handle != T::Handle::default()
+            && !borrowed.iter().any(|source| source.handle == opened.handle)
+        {
+            handles.clear();
+            return Ok(opened);
         }
-        handles.get(0).ok_or(ClientError::MismatchedResponse)
+        self.discard_received_handles(&mut handles, &borrowed);
+        result?;
+        Err(ClientError::MismatchedResponse)
     }
 
     pub fn stat_at(
@@ -1760,6 +1772,19 @@ impl<T: ObjectTransport> Client<T> {
         let borrowed = handles.clone();
         let result = self.request_with_handles(opcode, 0, payload, response, handles);
         let unexpected = !handles.is_empty();
+        self.discard_received_handles(handles, &borrowed);
+        let length = result?;
+        if unexpected {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(length)
+    }
+
+    fn discard_received_handles(
+        &self,
+        handles: &mut ObjectHandles<T::Handle>,
+        borrowed: &ObjectHandles<T::Handle>,
+    ) {
         for (index, attached) in handles.iter().enumerate() {
             if attached.handle != T::Handle::default()
                 && !borrowed.iter().any(|source| source.handle == attached.handle)
@@ -1772,11 +1797,6 @@ impl<T: ObjectTransport> Client<T> {
             }
         }
         handles.clear();
-        let length = result?;
-        if unexpected {
-            return Err(ClientError::MismatchedResponse);
-        }
-        Ok(length)
     }
 
     pub fn request_with_handles(
