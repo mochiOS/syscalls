@@ -810,3 +810,58 @@ pub extern "C" fn recv(fd: c_int, buffer: *mut c_void, length: usize, flags: c_i
         -1,
     ))
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn sendto(
+    fd: c_int,
+    buffer: *const c_void,
+    length: usize,
+    flags: c_int,
+    _address: *const c_void,
+    _address_length: u32,
+) -> isize {
+    // All currently supported sockets are connection-mode streams. POSIX
+    // ignores the destination here: never resolve it or change the peer.
+    // Connectionless support must select a record-aware send path instead.
+    send(fd, buffer, length, flags)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn recvfrom(
+    fd: c_int,
+    buffer: *mut c_void,
+    length: usize,
+    flags: c_int,
+    address: *mut c_void,
+    address_length: *mut u32,
+) -> isize {
+    pthread_testcancel();
+    if address.is_null() {
+        // With no requested address, address_length is not accessed.
+        return recv(fd, buffer, length, flags);
+    }
+    if address_length.is_null() {
+        return result_with_errno(Err(EFAULT), -1);
+    }
+    let capacity = unsafe { address_length.read() } as usize;
+    let mut peer = [0u8; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
+    let mut required = peer.len() as u32;
+    // A stream's peer cannot change after connection. Snapshot it before
+    // consuming bytes, but publish it only on success (including EOF).
+    // Datagrams need the source returned atomically with the received record.
+    if let Err(error) = unsafe { socket_name(fd, peer.as_mut_ptr().cast(), &mut required, true) } {
+        return result_with_errno(Err(error), -1);
+    }
+    let count = recv(fd, buffer, length, flags);
+    if count >= 0 {
+        unsafe {
+            ptr::copy_nonoverlapping(
+                peer.as_ptr(),
+                address.cast::<u8>(),
+                capacity.min(required as usize),
+            );
+            address_length.write(required);
+        }
+    }
+    count
+}

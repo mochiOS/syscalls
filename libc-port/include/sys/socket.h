@@ -56,6 +56,10 @@ int accept4(int socket, struct sockaddr *address, socklen_t *length, int flags);
 int shutdown(int socket, int how);
 ssize_t send(int socket, const void *buffer, size_t length, int flags);
 ssize_t recv(int socket, void *buffer, size_t length, int flags);
+ssize_t sendto(int socket, const void *buffer, size_t length, int flags,
+               const struct sockaddr *address, socklen_t address_length);
+ssize_t recvfrom(int socket, void *buffer, size_t length, int flags,
+                 struct sockaddr *address, socklen_t *address_length);
 int getsockname(int socket, struct sockaddr *address, socklen_t *length);
 int getpeername(int socket, struct sockaddr *address, socklen_t *length);
 #ifdef __cplusplus
