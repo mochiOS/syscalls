@@ -4,6 +4,7 @@ pub const SIGNAL_SET_MASK: i32 = 0;
 pub const SIGNAL_BLOCK: i32 = 1;
 pub const SIGNAL_UNBLOCK: i32 = 2;
 pub const SA_RESTART: i32 = 0x1000_0000;
+pub const SA_SIGINFO: i32 = 4;
 // NSIG in the current newlib target ABI includes signal zero.
 pub const NEWLIB_SIGNAL_COUNT: i32 = 32;
 

@@ -175,6 +175,45 @@ pub struct MachineContext {
     pub fpregs: [u8; 512],
 }
 
+impl MachineContext {
+    /// Checks a synchronous userspace continuation against the CPU's original
+    /// MXCSR capability mask. Native upcall return is also independently
+    /// validated by mnu; this protects the userspace FXRSTOR path.
+    pub fn checked_return(&self, original: &Self) -> Option<Self> {
+        const REQUIRED: u64 = (1 << 1) | (1 << 9);
+        const ALLOWED: u64 = REQUIRED
+            | 1
+            | (1 << 2)
+            | (1 << 4)
+            | (1 << 6)
+            | (1 << 7)
+            | (1 << 8)
+            | (1 << 10)
+            | (1 << 11)
+            | (1 << 16)
+            | (1 << 18)
+            | (1 << 21);
+        if self.gregs[REG_RIP] == 0
+            || self.gregs[REG_RIP] >> 47 != 0
+            || self.gregs[REG_RSP] < 16
+            || self.gregs[REG_RSP] >> 47 != 0
+            || self.gregs[REG_EFL] & REQUIRED != REQUIRED
+            || self.gregs[REG_EFL] & !ALLOWED != 0
+        {
+            return None;
+        }
+        let mask = u32::from_le_bytes(original.fpregs[28..32].try_into().ok()?);
+        let mask = if mask == 0 { 0xffbf } else { mask };
+        let mxcsr = u32::from_le_bytes(self.fpregs[24..28].try_into().ok()?);
+        if mxcsr & !mask != 0 {
+            return None;
+        }
+        let mut selected = *self;
+        selected.fpregs[28..32].copy_from_slice(&mask.to_le_bytes());
+        Some(selected)
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UContext {

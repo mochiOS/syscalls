@@ -25,6 +25,11 @@ unless ($text =~ /#include <sys\/_mochios_siginfo\.h>/) {
     my $replaced = ($text =~ s/($legacy)/#if defined(__mochios__)\n#include <sys\/_mochios_siginfo.h>\n#else\n$1\n#endif/s);
     $replaced == 1 or die "unsupported newlib siginfo declaration in $path\n";
 }
+unless ($text =~ /#include <sys\/_mochios_sigaction\.h>/) {
+    my $legacy = qr/struct sigaction\s*\{\s*_sig_func_ptr sa_handler;\s*sigset_t sa_mask;\s*int sa_flags;\s*\};/;
+    my $replaced = ($text =~ s/($legacy)/#if defined(__mochios__)\n#include <sys\/_mochios_sigaction.h>\n#else\n$1\n#endif/s);
+    $replaced == 1 or die "unsupported newlib sigaction declaration in $path\n";
+}
 unless ($text =~ /^#define SA_RESTART 0x10000000$/m) {
     $text .= "\n/* mochiOS userspace signal restart policy. */\n" .
         "#if defined(__mochios__) && !defined(SA_RESTART)\n" .
