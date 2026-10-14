@@ -705,9 +705,7 @@ pub(super) fn message_entry(
     if length != 0 && buffer == 0 {
         return Err(EFAULT);
     }
-    if length == 0 && !sending {
-        return Ok(0);
-    }
+    let empty_receive = length == 0 && !sending;
     let (_, thread) = register_current_thread().ok_or(EAGAIN)?;
     let caught = thread.nonrestart_signal_generation.load(Ordering::Acquire);
     let operation = if sending {
@@ -721,8 +719,15 @@ pub(super) fn message_entry(
         syscall::HANDLE_SIGNAL_READABLE
     };
     let mut wait = SocketWait::new(entry, interests)?;
+    // recv(0) still waits for data/EOF, unlike read(0). Inspect one byte into
+    // private storage without consuming bytes or ancillary references.
+    let mut probe = 0u8;
     let mut io = |offset: usize, remaining: usize| {
-        let address = buffer.checked_add(offset as u64).ok_or(EFAULT)?;
+        let address = if empty_receive {
+            (&mut probe as *mut u8) as u64
+        } else {
+            buffer.checked_add(offset as u64).ok_or(EFAULT)?
+        };
         let result = stream_io_since_wait(
             entry,
             interests,
@@ -732,7 +737,7 @@ pub(super) fn message_entry(
             options.dont_wait,
             &mut wait,
             || {
-                let result = if options.peek {
+                let result = if options.peek || empty_receive {
                     syscall::raw_syscall4(
                         syscall::SyscallNumber::HandleReadAt,
                         entry.handle.lower_handle,
@@ -756,7 +761,12 @@ pub(super) fn message_entry(
         }
         result
     };
-    if sending {
+    if empty_receive {
+        match io(0, 1)? {
+            0 | 1 => Ok(0),
+            _ => Err(EIO),
+        }
+    } else if sending {
         let count = io(0, length)?;
         if count > length {
             return Err(EIO);
