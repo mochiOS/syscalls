@@ -6843,13 +6843,13 @@ extern "C" fn posix_signal_upcall(
     payload: u64,
     token: u64,
     kind: u64,
-    _address: u64,
+    address: u64,
     _cpu_error: u64,
     _instruction: u64,
     cause: u64,
 ) -> ! {
     if kind == syscall::THREAD_UPCALL_KIND_EXCEPTION {
-        if payload != 14 || fault_signal::deliver(cause).is_err() {
+        if payload != 14 || fault_signal::deliver(cause, address as usize).is_err() {
             process_exit(127);
         }
     } else {

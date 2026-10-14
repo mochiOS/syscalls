@@ -20,6 +20,7 @@ pub mod process_image;
 pub mod process_creation;
 pub mod random;
 pub mod signal;
+pub mod signal_context;
 #[cfg(target_arch = "x86_64")]
 pub mod snapshot;
 pub mod spawn;

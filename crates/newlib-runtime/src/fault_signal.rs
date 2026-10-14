@@ -1,30 +1,11 @@
 use super::*;
 
-fn signal_for_cause(cause: u64) -> Result<u32, c_int> {
-    use syscall::MemoryFaultCause;
-    match cause {
-        value
-            if value == MemoryFaultCause::Unmapped as u64
-                || value == MemoryFaultCause::AccessDenied as u64
-                || value == MemoryFaultCause::Unresolved as u64 =>
-        {
-            Ok(posix_protocol::SIGNAL_SEGV)
-        }
-        value
-            if value == MemoryFaultCause::OutsideBacking as u64
-                || value == MemoryFaultCause::BackingFailure as u64
-                || value == MemoryFaultCause::ResourceUnavailable as u64 =>
-        {
-            Ok(posix_protocol::SIGNAL_BUS)
-        }
-        _ => Err(EINVAL),
-    }
-}
-
 /// This runs on the native per-thread exception stack. Kernel-owned context
 /// restoration retries the original instruction only after a handler returns.
-pub(super) fn deliver(cause: u64) -> Result<(), c_int> {
-    let signal = signal_for_cause(cause)?;
+pub(super) fn deliver(cause: u64, address: usize) -> Result<(), c_int> {
+    let info = mochios_posix_client::signal_context::SigInfo::memory_fault(cause, address)
+        .map_err(|_| EINVAL)?;
+    let signal = info.si_signo as u32;
     let client = posix_client().map_err(map_posix_client_error)?;
     let fault = client
         .fault_signal_delivery(signal)
