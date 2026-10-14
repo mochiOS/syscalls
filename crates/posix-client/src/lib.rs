@@ -34,6 +34,7 @@ pub mod pthread_spin;
 pub mod semaphore;
 pub mod named_semaphore;
 pub mod shared_memory;
+pub mod socket;
 pub mod pthread_cond;
 pub mod thread;
 pub mod time;
