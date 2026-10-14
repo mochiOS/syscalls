@@ -3,6 +3,10 @@ use mochios_posix_client::atfork::{Callback, Handlers, Registry};
 
 static REGISTRY: RuntimeMutex<Registry> = RuntimeMutex::new(Registry::new());
 
+pub(super) fn freeze_registry() -> RuntimeMutexGuard<'static, Registry> {
+    REGISTRY.lock()
+}
+
 pub(super) struct AllocatorGuard {
     _delivery: Option<mochios_posix_client::upcall_guard::Guard<'static>>,
 }
@@ -29,6 +33,12 @@ pub extern "C" fn pthread_atfork(
     parent: Option<Callback>,
     child: Option<Callback>,
 ) -> c_int {
+    // Never wait for malloc while holding REGISTRY: clone acquires the
+    // allocator before freezing this registry, including posix_spawn's clone.
+    let allocation = unsafe { malloc(Registry::registration_layout().size()) }.cast::<u8>();
+    if allocation.is_null() {
+        return ENOMEM;
+    }
     let result = unsafe {
         REGISTRY.lock().register(
             Handlers {
@@ -36,20 +46,21 @@ pub extern "C" fn pthread_atfork(
                 parent,
                 child,
             },
-            |layout| malloc(layout.size()).cast::<u8>(),
+            |_| allocation,
         )
     };
-    if result.is_ok() { 0 } else { ENOMEM }
+    if result.is_ok() {
+        0
+    } else {
+        unsafe { free(allocation.cast()) };
+        ENOMEM
+    }
 }
 
 pub(super) fn run(fork: impl FnOnce() -> Result<c_int, c_int>) -> Result<c_int, c_int> {
     let handlers = REGISTRY.lock().snapshot();
     unsafe { handlers.prepare() };
-    // Keep registration out of the clone point, so the child cannot inherit
-    // this registry locked by a vanished thread. No handler runs under it.
-    let guard = REGISTRY.lock();
     let result = fork();
-    drop(guard);
     if matches!(result, Ok(0)) {
         unsafe { handlers.child() };
     } else {

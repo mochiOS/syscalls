@@ -28,6 +28,12 @@ pub struct Registry {
 unsafe impl Send for Registry {}
 
 impl Registry {
+    /// Storage needed for one registration. Allocate before acquiring an
+    /// external registry mutex to avoid registry/allocator lock inversion.
+    pub fn registration_layout() -> Layout {
+        Layout::new::<Node>()
+    }
+
     pub const fn new() -> Self {
         Self {
             first: ptr::null_mut(),
@@ -49,7 +55,7 @@ impl Registry {
         allocate: impl FnOnce(Layout) -> *mut u8,
     ) -> Result<(), ()> {
         let count = self.count.checked_add(1).ok_or(())?;
-        let node = allocate(Layout::new::<Node>()).cast::<Node>();
+        let node = allocate(Self::registration_layout()).cast::<Node>();
         if node.is_null() {
             return Err(());
         }

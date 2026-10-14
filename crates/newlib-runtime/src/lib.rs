@@ -2855,6 +2855,9 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     // malloc can enter _sbrk and acquire STATE. Stabilize its arena first, not
     // after taking STATE, and retain the caller's existing recursion depth.
     let allocator_guard = atfork::freeze_allocator();
+    // Freeze only after the allocator, on the shared fork/spawn path. User
+    // callbacks run outside this scope and registration allocates before it.
+    let registry_guard = atfork::freeze_registry();
     // Acquire runtime-owned state in dependency order before STATE. Signal
     // disposition updates hold UPDATE before ACTIONS; endpoint initialization
     // may perform IPC but never runs while STATE is held. Both processes must
@@ -2945,6 +2948,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     drop(actions_guard);
     drop(update_guard);
     drop(socket_guard);
+    drop(registry_guard);
     drop(allocator_guard);
     if image == 0 {
         // Fork's numeric slot labels are temporary transfer metadata, not exec
