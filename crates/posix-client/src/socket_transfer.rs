@@ -140,9 +140,10 @@ fn status<T: ObjectTransport>(
     transport: &T,
     request: &[u8],
     handles: &mut ObjectHandles<T::Handle>,
-    expected: u32,
+    minimum: u32,
+    maximum: u32,
     mut close: impl FnMut(T::Handle),
-) -> Result<(), ClientError<T::Error>>
+) -> Result<u32, ClientError<T::Error>>
 where
     T::Handle: Default + Eq,
 {
@@ -164,10 +165,10 @@ where
     if value < 0 {
         return Err(ClientError::Remote(value));
     }
-    if value as u32 != expected {
+    if (value as u32) < minimum || value as u32 > maximum {
         return Err(ClientError::MismatchedResponse);
     }
-    Ok(())
+    Ok(value as u32)
 }
 
 /// Append one ordered batch. Borrowed sources must stay alive through this
@@ -211,11 +212,14 @@ where
         &request[..count],
         &mut handles,
         offset as u32 + files.len() as u32,
+        offset as u32 + files.len() as u32,
         close,
     )
+    .map(|_| ())
 }
 
-/// Commit data plus staged references once. Only an explicit remote EAGAIN
+/// Commit a complete datagram plus staged references once. For a byte stream
+/// use commit_prefix instead. Only an explicit remote EAGAIN
 /// permits retrying this same job; a transport failure is ambiguous and must
 /// abort. The source RAM is borrowed and only READ|MAP is attached.
 pub fn commit<T: ObjectTransport>(
@@ -226,6 +230,26 @@ pub fn commit<T: ObjectTransport>(
     length: u32,
     close: impl FnMut(T::Handle),
 ) -> Result<(), ClientError<T::Error>>
+where
+    T::Handle: Default + Eq,
+{
+    let count = commit_prefix(transport, job, buffer, offset, length, close)?;
+    if count != length {
+        return Err(ClientError::MismatchedResponse);
+    }
+    Ok(())
+}
+
+/// A byte-stream send may commit a nonempty prefix. Its rights are transferred
+/// with that prefix, not retained for resending the unwritten tail.
+pub fn commit_prefix<T: ObjectTransport>(
+    transport: &T,
+    job: Handle<T::Handle>,
+    buffer: Handle<T::Handle>,
+    offset: u64,
+    length: u32,
+    close: impl FnMut(T::Handle),
+) -> Result<u32, ClientError<T::Error>>
 where
     T::Handle: Default + Eq,
 {
@@ -248,6 +272,7 @@ where
         transport,
         &wire::commit(offset),
         &mut handles,
+        u32::from(length != 0),
         length,
         close,
     )

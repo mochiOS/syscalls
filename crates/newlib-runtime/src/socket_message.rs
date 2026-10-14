@@ -147,11 +147,8 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
         }
         return socket::message_entry(entry, bytes.as_ptr() as u64, bytes.len(), flags, true);
     }
-    if !socket::is_datagram(entry)? {
-        // Stream ancillary markers require atomic byte-boundary handling.
-        return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
-    }
-    if total > posix_protocol::socket_record::MAX_RECORD_SIZE {
+    let datagram = socket::is_datagram(entry)?;
+    if total > wire::MAX_PAYLOAD_LEN as usize {
         return Err(mochios_posix_client::newlib_errno::from_status(-90));
     }
     let raw = syscall_errno(syscall::raw_syscall2(
@@ -189,7 +186,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
         rights: entry.rights,
     };
     let mut address = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
-    let route = if message.name.is_null() {
+    let route = if message.name.is_null() || !datagram {
         None
     } else {
         let length = message.name_length as usize;
@@ -273,18 +270,34 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
         {
             return Err(EINTR);
         }
-        match socket_transfer::commit(
-            &transport,
-            job.0,
-            ObjectHandleAttachment {
-                handle: ram.0,
-                rights: ram_rights,
-            },
-            0,
-            total as u32,
-            close_object_handle,
-        ) {
-            Ok(()) => return Ok(total as isize),
+        let result = if datagram {
+            socket_transfer::commit(
+                &transport,
+                job.0,
+                ObjectHandleAttachment {
+                    handle: ram.0,
+                    rights: ram_rights,
+                },
+                0,
+                total as u32,
+                close_object_handle,
+            )
+            .map(|_| total as u32)
+        } else {
+            socket_transfer::commit_prefix(
+                &transport,
+                job.0,
+                ObjectHandleAttachment {
+                    handle: ram.0,
+                    rights: ram_rights,
+                },
+                0,
+                total as u32,
+                close_object_handle,
+            )
+        };
+        match result {
+            Ok(count) => return Ok(count as isize),
             Err(PosixClientError::Remote(-11))
                 if !options.dont_wait && !handle_is_nonblocking(entry)? =>
             {
@@ -304,7 +317,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
                 let notification = mochios_posix_client::socket_record::wait_send(
                     &transport,
                     source,
-                    total,
+                    if datagram { total } else { 1 },
                     close_object_handle,
                 )
                 .map_err(map_posix_client_error)?;
@@ -324,7 +337,13 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
                     wait.deadline(entry)?,
                 )?;
             }
-            Err(error) => return Err(map_posix_client_error(error)),
+            Err(error) => {
+                let error = map_posix_client_error(error);
+                if !datagram && !options.no_signal && error == EPIPE {
+                    generate_thread_signal(posix_protocol::SIGNAL_PIPE)?;
+                }
+                return Err(error);
+            }
         }
     }
 }
