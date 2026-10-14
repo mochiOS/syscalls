@@ -63,52 +63,33 @@ unsafe extern "C" fn __mochios_sigsetjmp_prepare(buffer: *mut JumpBuffer, save_m
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct Mapping {
-    base: usize,
-    size: usize,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Transition {
+pub(super) struct Transition {
     buffer: JumpBuffer,
     value: c_int,
     depth: u32,
     defer: *const AtomicU32,
-    mapping_size: usize,
-    count: usize,
+    chain: signal_delivery::RetiredChain,
 }
 
 unsafe extern "C" fn finish_jump(argument: *mut c_void) -> ! {
     // We are on the destination stack, below its red zone. Copy all jump data
-    // before freeing either orphan callback storage or the staging mapping.
-    let task = unsafe { argument.cast::<Transition>().read_volatile() };
-    let mappings = unsafe {
-        argument
-            .cast::<u8>()
-            .add(core::mem::size_of::<Transition>())
-            .cast::<Mapping>()
-    };
-    for index in 0..task.count {
-        let mapping = unsafe { mappings.add(index).read() };
+    // before freeing its host record. No allocation is needed even when fork
+    // has left an arbitrarily long ancestry of private callback stacks.
+    let mut task = unsafe { argument.cast::<Transition>().read_volatile() };
+    loop {
+        let frame = unsafe { task.chain.next() }.unwrap_or_else(|error| process_exit(error));
+        let Some(frame) = frame else {
+            break;
+        };
         if syscall_errno(syscall::raw_syscall2(
             syscall::SyscallNumber::MemoryUnmap,
-            mapping.base as u64,
-            mapping.size as u64,
+            frame.stack as u64,
+            frame.size as u64,
         ))
         .is_err()
         {
             process_exit(127);
         }
-    }
-    if syscall_errno(syscall::raw_syscall2(
-        syscall::SyscallNumber::MemoryUnmap,
-        argument as u64,
-        task.mapping_size as u64,
-    ))
-    .is_err()
-    {
-        process_exit(127);
     }
     unsafe { __mochios_sigjump_restore(&task.buffer, task.value, task.defer, task.depth) }
 }
@@ -121,7 +102,7 @@ enum NativeDestination<'a> {
         depth: u32,
     },
     Cleanup {
-        workspace: usize,
+        transition: *mut Transition,
     },
 }
 
@@ -156,9 +137,9 @@ fn leave_native(token: u64, top: usize, destination: NativeDestination<'_>) -> !
             saved.registers.rdx = defer as u64;
             saved.registers.rcx = u64::from(depth);
         }
-        NativeDestination::Cleanup { workspace } => {
+        NativeDestination::Cleanup { transition } => {
             saved.instruction = finish_jump as *const () as u64;
-            saved.argument = workspace as u64;
+            saved.argument = transition as u64;
             unsafe {
                 ((top - 8) as *mut u64).write(0);
             }
@@ -205,12 +186,12 @@ unsafe extern "C" fn siglongjmp(buffer: *const JumpBuffer, value: c_int) -> ! {
         unsafe { signal_scope::validate_target(control, buffer.scope) }?;
         let owner = native_process_id().map_err(|error| map_kernel_errno(error.raw()))?;
         let top = (buffer.registers[6] as usize - 128) & !15;
-        let mut count = 0usize;
+        let mut has_orphans = false;
         let mut token = None;
         unsafe {
             signal_delivery::visit_abandoned(control, buffer.native, |frame| {
                 if frame.owner == owner {
-                    if token.replace(frame.token).is_some() {
+                    if token.replace(frame.token).is_some() || has_orphans {
                         return Err(EINVAL);
                     }
                 } else {
@@ -221,12 +202,12 @@ unsafe extern "C" fn siglongjmp(buffer: *const JumpBuffer, value: c_int) -> ! {
                     {
                         return Err(EINVAL);
                     }
-                    count = count.checked_add(1).ok_or(EOVERFLOW)?;
+                    has_orphans = true;
                 }
                 Ok(())
             })
         }?;
-        if count == 0 {
+        if !has_orphans {
             // Ordinary jumps (including native handler escape) cannot depend
             // on allocation succeeding. No orphan mapping needs reclamation.
             unsafe { prepare_jump(control, &buffer) }?;
@@ -247,61 +228,23 @@ unsafe extern "C" fn siglongjmp(buffer: *const JumpBuffer, value: c_int) -> ! {
             }
             unsafe { __mochios_sigjump_restore(&buffer, value, defer, depth) }
         }
-        let size = count
-            .checked_mul(core::mem::size_of::<Mapping>())
-            .and_then(|bytes| bytes.checked_add(core::mem::size_of::<Transition>()))
-            .and_then(|bytes| align_up(bytes, PAGE_SIZE))
-            .ok_or(EOVERFLOW)?;
-        // Direct anonymous VM: no malloc/stdio lock, and no fixed ancestry cap.
-        let workspace = syscall_errno(syscall::raw_syscall6(
-            syscall::SyscallNumber::MemoryMap,
-            0,
-            size as u64,
-            NATIVE_READ_WRITE,
-            0,
-            0,
-            0,
-        ))? as usize;
-        let mappings = (workspace + core::mem::size_of::<Transition>()) as *mut Mapping;
-        let mut index = 0;
-        unsafe {
-            signal_delivery::visit_abandoned(control, buffer.native, |frame| {
-                if frame.owner != owner {
-                    if index >= count {
-                        return Err(EINVAL);
-                    }
-                    mappings.add(index).write(Mapping {
-                        base: frame.stack,
-                        size: frame.size,
-                    });
-                    index += 1;
-                }
-                Ok(())
-            })
-        }?;
-        if index != count {
-            return Err(EINVAL);
-        }
-        unsafe {
-            (workspace as *mut Transition).write(Transition {
+        let transition = unsafe {
+            signal_delivery::stage_jump(control, buffer.native, owner, |chain| Transition {
                 buffer,
                 value,
                 depth: buffer.defer_depth as u32,
                 defer: &control.native_delivery_defer,
-                mapping_size: size,
-                count,
-            });
-        }
+                chain,
+            })
+        }?;
         unsafe { prepare_jump(control, &buffer) }?;
         // No Rust-owned resource may survive the jump. The assembly reopens
         // delivery only after restoring the destination RSP and all saved data.
         core::mem::forget(guard);
         if let Some(token) = token {
-            leave_native(token, top, NativeDestination::Cleanup { workspace });
+            leave_native(token, top, NativeDestination::Cleanup { transition });
         }
-        unsafe {
-            mochios_posix_client::signal_stack::enter_on(top, finish_jump, workspace as *mut c_void)
-        }
+        unsafe { mochios_posix_client::signal_stack::enter_on(top, finish_jump, transition.cast()) }
     })();
     match result {
         Err(error) => process_exit(error),

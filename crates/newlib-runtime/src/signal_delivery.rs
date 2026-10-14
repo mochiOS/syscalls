@@ -20,6 +20,7 @@ pub(super) struct NativeFrame {
     size: usize,
     active: bool,
     retired: bool,
+    jump: core::mem::MaybeUninit<signal_jump::Transition>,
     _pin: PhantomPinned,
     _thread_bound: PhantomData<*mut ()>,
 }
@@ -54,6 +55,7 @@ impl NativeFrame {
             size: control.signal_upcall_stack_size.load(Ordering::Acquire),
             active: false,
             retired: false,
+            jump: core::mem::MaybeUninit::uninit(),
             _pin: PhantomPinned,
             _thread_bound: PhantomData,
         })
@@ -219,6 +221,123 @@ pub(super) unsafe fn retire_to(control: &ThreadControl, target: u64) -> Result<(
         frame.deactivate()?;
     }
     Ok(())
+}
+
+/// A detached chain still owns its private callback storage until the jump
+/// continuation reads each link and then unmaps that link's orphan stack.
+#[derive(Clone, Copy)]
+pub(super) struct RetiredChain {
+    control: &'static ThreadControl,
+    pointer: usize,
+    id: u64,
+    target: u64,
+    _thread_bound: PhantomData<*mut ()>,
+}
+
+impl RetiredChain {
+    /// # Safety
+    /// Run on the owning thread with delivery deferred, after `retire_to` and
+    /// a switch away from every orphan stack. Unread links must remain mapped.
+    /// The cursor advances before returning metadata, allowing the caller to
+    /// unmap that record without reading it again. Never unmap a retained link.
+    pub(super) unsafe fn next(&mut self) -> Result<Option<AbandonedFrame>, c_int> {
+        if self.control.native_delivery_defer.load(Ordering::Acquire) == 0 {
+            return Err(EINVAL);
+        }
+        if self.id == self.target {
+            return if (self.pointer == 0) == (self.id == 0) {
+                Ok(None)
+            } else {
+                Err(EINVAL)
+            };
+        }
+        if self.pointer == 0 || self.id == 0 {
+            return Err(EINVAL);
+        }
+        let frame = unsafe { &*(self.pointer as *const NativeFrame) };
+        if frame.id != self.id
+            || frame.active
+            || !frame.retired
+            || !core::ptr::eq(frame.control, self.control)
+            || frame.previous_id >= self.id
+            || (frame.previous == 0) != (frame.previous_id == 0)
+        {
+            return Err(EINVAL);
+        }
+        let result = AbandonedFrame {
+            owner: frame.owner,
+            token: frame.token,
+            stack: frame.stack,
+            size: frame.size,
+        };
+        self.pointer = frame.previous;
+        self.id = frame.previous_id;
+        Ok(Some(result))
+    }
+}
+
+/// Stage a jump in already-owned private storage, not a newly allocated map.
+/// This slot is outside the application's destination stack/red zone, and
+/// outside the current upcall stack that a synchronous fault may reuse.
+///
+/// # Safety
+/// The requirements of `visit_abandoned` apply. The callback must only build
+/// the transition value, without changing the chain. After staging, the caller
+/// must retire this prefix and switch stacks without returning through it.
+/// Materialize the transition on the destination stack before freeing its host
+/// record. The slot is per-frame, not shared with nested native callbacks.
+/// `owner` must be the current native process identity, not a saved parent ID.
+pub(super) unsafe fn stage_jump(
+    control: &'static ThreadControl,
+    target: u64,
+    owner: u64,
+    make: impl FnOnce(RetiredChain) -> signal_jump::Transition,
+) -> Result<*mut signal_jump::Transition, c_int> {
+    let mut orphan_seen = false;
+    let mut owned_seen = false;
+    unsafe {
+        walk_to(control, target, |frame| {
+            if frame.owner != owner {
+                orphan_seen = true;
+            } else {
+                if orphan_seen || owned_seen {
+                    return Err(EINVAL);
+                }
+                owned_seen = true;
+            }
+            Ok(())
+        })
+    }?;
+    let mut pointer = control.active_native_signal_frame.load(Ordering::Acquire);
+    let mut id = control
+        .active_native_signal_frame_id
+        .load(Ordering::Acquire);
+    // Returning the one current callback permits the kernel to reuse its
+    // registered stack, so neither task storage nor the cursor may name it.
+    while pointer != 0 && id != target {
+        let frame = unsafe { &*(pointer as *const NativeFrame) };
+        if frame.owner != owner {
+            break;
+        }
+        pointer = frame.previous;
+        id = frame.previous_id;
+    }
+    if pointer == 0 || id == target {
+        return Err(EINVAL);
+    }
+    let task = make(RetiredChain {
+        control,
+        pointer,
+        id,
+        target,
+        _thread_bound: PhantomData,
+    });
+    let slot = unsafe { core::ptr::addr_of_mut!((*(pointer as *mut NativeFrame)).jump) };
+    let slot = slot.cast::<signal_jump::Transition>();
+    unsafe {
+        slot.write(task);
+    }
+    Ok(slot)
 }
 
 fn context(machine: MachineContext) -> UContext {
