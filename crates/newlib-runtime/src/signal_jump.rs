@@ -183,6 +183,11 @@ unsafe extern "C" fn siglongjmp(buffer: *const JumpBuffer, value: c_int) -> ! {
             return Err(EINVAL);
         }
         let guard = Guard::enter(&control.native_delivery_defer).ok_or(EOVERFLOW)?;
+        // This function cannot return. Transfer responsibility for reopening
+        // delivery to the final assembly before any fallible bookkeeping.
+        // An error must keep callbacks deferred until process_exit, even when
+        // a service completion has already consumed part of the old chain.
+        core::mem::forget(guard);
         unsafe { signal_scope::validate_target(control, buffer.scope) }?;
         let owner = native_process_id().map_err(|error| map_kernel_errno(error.raw()))?;
         let top = (buffer.registers[6] as usize - 128) & !15;
@@ -211,7 +216,6 @@ unsafe extern "C" fn siglongjmp(buffer: *const JumpBuffer, value: c_int) -> ! {
             // Ordinary jumps (including native handler escape) cannot depend
             // on allocation succeeding. No orphan mapping needs reclamation.
             unsafe { prepare_jump(control, &buffer) }?;
-            core::mem::forget(guard);
             let defer = &control.native_delivery_defer;
             let depth = buffer.defer_depth as u32;
             if let Some(token) = token {
@@ -238,9 +242,6 @@ unsafe extern "C" fn siglongjmp(buffer: *const JumpBuffer, value: c_int) -> ! {
             })
         }?;
         unsafe { prepare_jump(control, &buffer) }?;
-        // No Rust-owned resource may survive the jump. The assembly reopens
-        // delivery only after restoring the destination RSP and all saved data.
-        core::mem::forget(guard);
         if let Some(token) = token {
             leave_native(token, top, NativeDestination::Cleanup { transition });
         }
