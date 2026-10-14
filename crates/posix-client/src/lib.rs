@@ -854,16 +854,12 @@ impl<T: ObjectTransport> Client<T> {
         handles
             .push(thread)
             .map_err(|_| ClientError::RequestTooLarge)?;
-        self.request_with_handles(
+        self.request_without_reply_handles(
             protocol::OP_SIGNAL_THREAD_REGISTER,
-            0,
             &[],
             &mut [],
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         Ok(())
     }
 
@@ -885,16 +881,12 @@ impl<T: ObjectTransport> Client<T> {
         handles
             .push(thread)
             .map_err(|_| ClientError::RequestTooLarge)?;
-        self.request_with_handles(
+        self.request_without_reply_handles(
             protocol::OP_SIGNAL_THREAD_SEND,
-            0,
             &request,
             &mut [],
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         Ok(())
     }
 
@@ -908,10 +900,7 @@ impl<T: ObjectTransport> Client<T> {
         handles
             .push(process)
             .map_err(|_| ClientError::RequestTooLarge)?;
-        self.request_with_handles(protocol::OP_PROCESS_FORKED, 0, &[], &mut [], &mut handles)?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
+        self.request_without_reply_handles(protocol::OP_PROCESS_FORKED, &[], &mut [], &mut handles)?;
         Ok(())
     }
 
@@ -931,16 +920,12 @@ impl<T: ObjectTransport> Client<T> {
         handles
             .push(process)
             .map_err(|_| ClientError::RequestTooLarge)?;
-        self.request_with_handles(
+        self.request_without_reply_handles(
             protocol::OP_PROCESS_INITIALIZE,
-            0,
             &payload[..length],
             &mut [],
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         Ok(())
     }
 
@@ -959,16 +944,12 @@ impl<T: ObjectTransport> Client<T> {
         handles
             .push(process)
             .map_err(|_| ClientError::RequestTooLarge)?;
-        self.request_with_handles(
+        self.request_without_reply_handles(
             protocol::OP_PROCESS_SPAWNED,
-            0,
             &payload[..length],
             &mut [],
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         Ok(())
     }
 
@@ -988,10 +969,7 @@ impl<T: ObjectTransport> Client<T> {
         handles
             .push(child)
             .map_err(|_| ClientError::RequestTooLarge)?;
-        self.request_with_handles(protocol::OP_PROCESS_LAUNCHED, 0, &[], &mut [], &mut handles)?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
+        self.request_without_reply_handles(protocol::OP_PROCESS_LAUNCHED, &[], &mut [], &mut handles)?;
         Ok(())
     }
 
@@ -1007,16 +985,12 @@ impl<T: ObjectTransport> Client<T> {
         handles
             .push(child)
             .map_err(|_| ClientError::RequestTooLarge)?;
-        self.request_with_handles(
+        self.request_without_reply_handles(
             protocol::OP_PROCESS_LAUNCH_ABORT,
-            0,
             &[],
             &mut [],
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         Ok(())
     }
 
@@ -1051,10 +1025,7 @@ impl<T: ObjectTransport> Client<T> {
         handles
             .push(root)
             .map_err(|_| ClientError::RequestTooLarge)?;
-        self.request_with_handles(opcode, 0, &[], &mut [], &mut handles)?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
+        self.request_without_reply_handles(opcode, &[], &mut [], &mut handles)?;
         Ok(())
     }
 
@@ -1069,16 +1040,12 @@ impl<T: ObjectTransport> Client<T> {
             .push(process)
             .map_err(|_| ClientError::RequestTooLarge)?;
         let mut response = [0; protocol::SESSION_INFO_LEN];
-        let length = self.request_with_handles(
+        let length = self.request_without_reply_handles(
             protocol::OP_PROCESS_SESSION_INFO,
-            0,
             &[],
             &mut response,
             &mut handles,
         )?;
-        if !handles.is_empty() {
-            return Err(ClientError::MismatchedResponse);
-        }
         protocol::decode_session_info(&response[..length]).map_err(ClientError::Protocol)
     }
 
