@@ -92,6 +92,10 @@ pub const OP_LINK_AT: u16 = 37;
 /// Handle with DUPLICATE | TRANSFER rights, not byte I/O or mapping rights.
 /// Only explicitly delegated filesystem-control holders may supply credentials.
 pub const OP_CREATE_SOCKET_AT: u16 = 38;
+/// Resolves an existing socket inode, checks search/write permission, and
+/// returns NodeStatus plus a retained metadata-only Handle. Uses SOCKET_AT
+/// root/base flags; credentials require the delegated control endpoint.
+pub const OP_OPEN_SOCKET_AT: u16 = 39;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const OPEN_STATUS_APPEND: u32 = 1 << 0;
