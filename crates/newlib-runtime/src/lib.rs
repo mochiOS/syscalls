@@ -1444,10 +1444,6 @@ fn set_errno(value: c_int) {
     }
 }
 
-fn truncate_u16(value: u64) -> u16 {
-    core::cmp::min(value, u16::MAX as u64) as u16
-}
-
 fn special_stat(file_type: u32) -> NewlibStat {
     NewlibStat {
         st_dev: 0,
@@ -1484,15 +1480,15 @@ fn pty_stat() -> NewlibStat {
     special_stat(0o020000)
 }
 
-fn translate_posix_stat(status: &PosixFileStatus) -> NewlibStat {
-    NewlibStat {
-        st_dev: truncate_u16(status.device),
-        st_ino: truncate_u16(status.inode),
+fn translate_posix_stat(status: &PosixFileStatus) -> Result<NewlibStat, c_int> {
+    Ok(NewlibStat {
+        st_dev: u16::try_from(status.device).map_err(|_| EOVERFLOW)?,
+        st_ino: u16::try_from(status.inode).map_err(|_| EOVERFLOW)?,
         st_mode: status.mode,
-        st_nlink: truncate_u16(status.link_count as u64),
-        st_uid: truncate_u16(status.uid as u64),
-        st_gid: truncate_u16(status.gid as u64),
-        st_rdev: truncate_u16(status.special_device),
+        st_nlink: u16::try_from(status.link_count).map_err(|_| EOVERFLOW)?,
+        st_uid: u16::try_from(status.uid).map_err(|_| EOVERFLOW)?,
+        st_gid: u16::try_from(status.gid).map_err(|_| EOVERFLOW)?,
+        st_rdev: u16::try_from(status.special_device).map_err(|_| EOVERFLOW)?,
         st_size: status.size,
         st_atim: NewlibTimespec {
             tv_sec: status.access_time_seconds,
@@ -1509,7 +1505,7 @@ fn translate_posix_stat(status: &PosixFileStatus) -> NewlibStat {
         st_blksize: status.block_size,
         st_blocks: status.blocks,
         st_spare4: [0; 2],
-    }
+    })
 }
 
 fn map_kernel_errno(raw: i64) -> c_int {
@@ -5536,7 +5532,8 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
                     rights: entry.rights,
                 })
                 .map_err(map_posix_client_error)?;
-            unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), translate_posix_stat(&status)) };
+            let translated = translate_posix_stat(&status)?;
+            unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), translated) };
             return Ok(0);
         }
         if matches!(
@@ -5576,7 +5573,7 @@ fn stat_with_flags(path: *const c_char, stat_buf: *mut c_void, flags: u64) -> c_
         let status = client
             .stat_at(StatAtBase::ProcessCwd, flags, path)
             .map_err(map_posix_client_error)?;
-        let translated = translate_posix_stat(&status);
+        let translated = translate_posix_stat(&status)?;
         unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), translated) };
         Ok(0)
     })();

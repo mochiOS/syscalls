@@ -95,19 +95,7 @@ pub(super) fn stat(entry: FdEntry) -> Result<NewlibStat, c_int> {
         return Err(EIO);
     }
     let status = posix_protocol::decode_file_status(&bytes).map_err(|_| EIO)?;
-    // This SDK's struct stat uses 16-bit identity fields. Never silently clamp
-    // a valid service identity into a different C-visible owner or inode.
-    for value in [
-        status.device,
-        status.inode,
-        status.link_count as u64,
-        status.uid as u64,
-        status.gid as u64,
-        status.special_device,
-    ] {
-        u16::try_from(value).map_err(|_| EOVERFLOW)?;
-    }
-    Ok(translate_posix_stat(&status))
+    translate_posix_stat(&status)
 }
 
 pub(super) fn get_status_flags(entry: FdEntry) -> Result<c_int, c_int> {
