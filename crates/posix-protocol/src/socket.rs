@@ -118,6 +118,10 @@ pub const CONTROL_TAKE_ERROR: u64 = u64::from_le_bytes(*b"SOPERR01");
 pub const CONTROL_GET_RECEIVE_CAPACITY: u64 = u64::from_le_bytes(*b"SORCGT01");
 /// u32 requested receive queue limit, empty output. Service applies its bounds.
 pub const CONTROL_SET_RECEIVE_CAPACITY: u64 = u64::from_le_bytes(*b"SORCST01");
+/// Shared per-description send limit. Empty query returns one u32; setter
+/// accepts one u32. These are userspace Provider tags, not native socket ABI.
+pub const CONTROL_GET_SEND_CAPACITY: u64 = u64::from_le_bytes(*b"SOSCGT01");
+pub const CONTROL_SET_SEND_CAPACITY: u64 = u64::from_le_bytes(*b"SOSCST01");
 pub const SHUTDOWN_READ: u32 = 0;
 pub const SHUTDOWN_WRITE: u32 = 1;
 pub const SHUTDOWN_BOTH: u32 = 2;

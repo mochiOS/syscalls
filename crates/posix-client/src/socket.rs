@@ -17,6 +17,7 @@ pub fn newlib_getsockopt_tag(level: i32, option: i32) -> Result<u64, i32> {
     match (level, option) {
         (1, 3) => Ok(wire::CONTROL_KIND),       // SOL_SOCKET / SO_TYPE
         (1, 4) => Ok(wire::CONTROL_TAKE_ERROR), // SOL_SOCKET / SO_ERROR
+        (1, 7) => Ok(wire::CONTROL_GET_SEND_CAPACITY), // SOL_SOCKET / SO_SNDBUF
         (1, 8) => Ok(wire::CONTROL_GET_RECEIVE_CAPACITY), // SOL_SOCKET / SO_RCVBUF
         (1, 30) => Ok(wire::CONTROL_ACCEPTING), // SOL_SOCKET / SO_ACCEPTCONN
         _ => Err(-92),
@@ -31,6 +32,7 @@ pub fn newlib_getsockopt_value(tag: u64, bytes: &[u8]) -> Result<i32, i32> {
         (wire::CONTROL_KIND, 3) => Ok(5), // SequencedPacket
         (wire::CONTROL_ACCEPTING, 0 | 1) => Ok(value as i32),
         (wire::CONTROL_GET_RECEIVE_CAPACITY, 1..=0x7fff_ffff) => Ok(value as i32),
+        (wire::CONTROL_GET_SEND_CAPACITY, 1..=0x7fff_ffff) => Ok(value as i32),
         (wire::CONTROL_TAKE_ERROR, 0) => Ok(0),
         (wire::CONTROL_TAKE_ERROR, 1..=0x7fff_ffff) => {
             Ok(crate::newlib_errno::from_status(i64::from(value)))
@@ -41,6 +43,11 @@ pub fn newlib_getsockopt_value(tag: u64, bytes: &[u8]) -> Result<i32, i32> {
 
 pub fn newlib_setsockopt(level: i32, option: i32, value: i32) -> Result<(u64, [u8; 4]), i32> {
     match (level, option) {
+        (1, 7) if value >= 0 => Ok((
+            wire::CONTROL_SET_SEND_CAPACITY,
+            (value as u32).to_le_bytes(),
+        )),
+        (1, 7) => Err(-22),
         (1, 8) if value >= 0 => Ok((
             wire::CONTROL_SET_RECEIVE_CAPACITY,
             (value as u32).to_le_bytes(),

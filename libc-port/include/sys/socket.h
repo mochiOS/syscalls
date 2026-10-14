@@ -27,6 +27,7 @@ struct sockaddr {
 #define SOL_SOCKET 1
 #define SO_TYPE 3
 #define SO_ERROR 4
+#define SO_SNDBUF 7
 #define SO_RCVBUF 8
 #define SO_ACCEPTCONN 30
 #define SHUT_RD 0
