@@ -365,6 +365,7 @@ impl<T: ObjectTransport> Client<T> {
                 rights,
             })
             .map_err(|_| ClientError::RequestTooLarge)?;
+        let borrowed = handles.clone();
         let result = self.request_with_handles(
             protocol::OP_SOCKET_RECEIVE_WAIT,
             0,
@@ -381,16 +382,7 @@ impl<T: ObjectTransport> Client<T> {
                 return Ok(job);
             }
         }
-        for (index, received) in handles.iter().enumerate() {
-            if received.handle != T::Handle::default()
-                && !handles
-                    .iter()
-                    .take(index)
-                    .any(|old| old.handle == received.handle)
-            {
-                close(received.handle);
-            }
-        }
+        crate::drain_received_handles(&mut handles, &borrowed, &mut close);
         Err(result.err().unwrap_or(ClientError::MismatchedResponse))
     }
 
@@ -421,6 +413,7 @@ impl<T: ObjectTransport> Client<T> {
             })
             .map_err(|_| ClientError::RequestTooLarge)?;
         let mut reply = [0; wire::CONNECT_REPLY_LEN];
+        let borrowed = handles.clone();
         let result = self.request_with_handles(
             protocol::OP_SOCKET_CONNECT,
             0,
@@ -447,16 +440,7 @@ impl<T: ObjectTransport> Client<T> {
         }
         // Transport replaced borrowed outgoing authority with owned received
         // references, including on errors. Reclaim malformed replies once.
-        for (index, received) in handles.iter().enumerate() {
-            if received.handle != T::Handle::default()
-                && !handles
-                    .iter()
-                    .take(index)
-                    .any(|old| old.handle == received.handle)
-            {
-                close(received.handle);
-            }
-        }
+        crate::drain_received_handles(&mut handles, &borrowed, &mut close);
         Err(result.err().unwrap_or(ClientError::MismatchedResponse))
     }
 
@@ -487,6 +471,7 @@ impl<T: ObjectTransport> Client<T> {
             })
             .map_err(|_| ClientError::RequestTooLarge)?;
         let mut address = [0; wire::MAX_ADDRESS_LEN];
+        let borrowed = handles.clone();
         let result = self.request_with_handles(
             protocol::OP_SOCKET_ACCEPT,
             0,
@@ -511,16 +496,7 @@ impl<T: ObjectTransport> Client<T> {
         }
         // ObjectTransport replaces borrowed outgoing attachments with owned
         // reply references even on failure. Never close the source listener.
-        for (index, received) in handles.iter().enumerate() {
-            if received.handle != T::Handle::default()
-                && !handles
-                    .iter()
-                    .take(index)
-                    .any(|old| old.handle == received.handle)
-            {
-                close(received.handle);
-            }
-        }
+        crate::drain_received_handles(&mut handles, &borrowed, &mut close);
         Err(result.err().unwrap_or(ClientError::MismatchedResponse))
     }
 
@@ -536,6 +512,7 @@ impl<T: ObjectTransport> Client<T> {
         let mut payload = [0; wire::CREATE_LEN];
         create.encode(&mut payload).map_err(ClientError::Protocol)?;
         let mut handles = ObjectHandles::new();
+        let borrowed = handles.clone();
         let outcome = self.request_with_handles(
             protocol::OP_SOCKET_CREATE,
             0,
@@ -545,26 +522,20 @@ impl<T: ObjectTransport> Client<T> {
         );
         if matches!(outcome, Ok(0)) && handles.len() == 1 {
             let received = handles.get(0).unwrap();
-            if received.rights == wire::descriptor_rights() {
+            if received.handle != T::Handle::default()
+                && received.rights == wire::descriptor_rights()
+            {
                 return Ok(received);
             }
         }
-        for (index, received) in handles.iter().enumerate() {
-            if !handles
-                .iter()
-                .take(index)
-                .any(|earlier| earlier.handle == received.handle)
-            {
-                close(received.handle);
-            }
-        }
+        crate::drain_received_handles(&mut handles, &borrowed, &mut close);
         Err(outcome.err().unwrap_or(ClientError::MismatchedResponse))
     }
 
     /// Returns ownership of two receiver-local Handles. The caller must reserve
     /// both local FD slots before requesting resources and close both Handles
-    /// if installation fails. `close` releases every attachment on failed or
-    /// malformed replies, including owned attachments returned on transport errors.
+    /// if installation fails. `close` releases distinct valid owned attachments
+    /// on failed or malformed replies, including transport errors.
     pub fn socket_pair(
         &self,
         create: wire::Create,
@@ -576,12 +547,15 @@ impl<T: ObjectTransport> Client<T> {
         let mut payload = [0; wire::CREATE_LEN];
         create.encode(&mut payload).map_err(ClientError::Protocol)?;
         let mut handles = ObjectHandles::new();
+        let borrowed = handles.clone();
         let outcome =
             self.request_with_handles(protocol::OP_SOCKET_PAIR, 0, &payload, &mut [], &mut handles);
         if matches!(outcome, Ok(0)) && handles.len() == 2 {
             let first = handles.get(0).unwrap();
             let second = handles.get(1).unwrap();
-            if first.rights == wire::descriptor_rights()
+            if first.handle != T::Handle::default()
+                && second.handle != T::Handle::default()
+                && first.rights == wire::descriptor_rights()
                 && second.rights == wire::descriptor_rights()
                 && first.handle != second.handle
             {
@@ -590,15 +564,7 @@ impl<T: ObjectTransport> Client<T> {
         }
         // ObjectTransport guarantees each returned entry owns a received
         // reference, never a borrowed outgoing Handle (this request has none).
-        for (index, received) in handles.iter().enumerate() {
-            if !handles
-                .iter()
-                .take(index)
-                .any(|earlier| earlier.handle == received.handle)
-            {
-                close(received.handle);
-            }
-        }
+        crate::drain_received_handles(&mut handles, &borrowed, &mut close);
         Err(outcome.err().unwrap_or(ClientError::MismatchedResponse))
     }
 }
