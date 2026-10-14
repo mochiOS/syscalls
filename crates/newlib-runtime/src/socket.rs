@@ -153,3 +153,95 @@ pub(super) fn stat(entry: FdEntry) -> Result<NewlibStat, c_int> {
     let status = posix_protocol::decode_file_status(&bytes).map_err(|_| EIO)?;
     translate_posix_stat(&status)
 }
+
+fn message_io(
+    fd: c_int,
+    buffer: u64,
+    length: usize,
+    flags: c_int,
+    sending: bool,
+) -> Result<isize, c_int> {
+    let entry = with_fd_entry(fd)?;
+    if entry.handle.kind != FdKind::ObjectSocket {
+        return Err(mochios_posix_client::newlib_errno::from_status(-88));
+    }
+    let options = mochios_posix_client::socket::message_options(flags, sending)
+        .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
+    if length > isize::MAX as usize {
+        return Err(EINVAL);
+    }
+    if length != 0 && buffer == 0 {
+        return Err(EFAULT);
+    }
+    if length == 0 {
+        return Ok(0);
+    }
+    let (_, thread) = register_current_thread().ok_or(EAGAIN)?;
+    let caught = thread.nonrestart_signal_generation.load(Ordering::Acquire);
+    let operation = if sending {
+        syscall::SyscallNumber::HandleWrite
+    } else {
+        syscall::SyscallNumber::HandleRead
+    };
+    let interests = if sending {
+        syscall::HANDLE_SIGNAL_WRITABLE
+    } else {
+        syscall::HANDLE_SIGNAL_READABLE
+    };
+    let io = |offset: usize, remaining: usize| {
+        let address = buffer.checked_add(offset as u64).ok_or(EFAULT)?;
+        let result = stream_io_since_mode(
+            entry,
+            interests,
+            thread,
+            caught,
+            0,
+            options.dont_wait,
+            || {
+                syscall_errno(syscall::raw_syscall3(
+                    operation,
+                    entry.handle.lower_handle,
+                    address,
+                    remaining as u64,
+                ))
+                .and_then(|count| usize::try_from(count).map_err(|_| EIO))
+            },
+        );
+        if sending && !options.no_signal && matches!(result, Err(EPIPE)) {
+            generate_thread_signal(posix_protocol::SIGNAL_PIPE)?;
+        }
+        result
+    };
+    if sending {
+        let count = io(0, length)?;
+        if count > length {
+            return Err(EIO);
+        }
+        Ok(count as isize)
+    } else {
+        mochios_posix_client::socket::receive(length, options.wait_all, io)
+            .map(|count| count as isize)
+            .map_err(|error| match error {
+                mochios_posix_client::socket::ReceiveError::InvalidResult => EIO,
+                mochios_posix_client::socket::ReceiveError::Io(error) => error,
+            })
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn send(fd: c_int, buffer: *const c_void, length: usize, flags: c_int) -> isize {
+    pthread_testcancel();
+    finish_io_cancellation(result_with_errno(
+        message_io(fd, buffer as u64, length, flags, true),
+        -1,
+    ))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn recv(fd: c_int, buffer: *mut c_void, length: usize, flags: c_int) -> isize {
+    pthread_testcancel();
+    finish_io_cancellation(result_with_errno(
+        message_io(fd, buffer as u64, length, flags, false),
+        -1,
+    ))
+}

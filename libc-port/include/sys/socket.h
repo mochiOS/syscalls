@@ -26,12 +26,19 @@ struct sockaddr {
 #define SHUT_RD 0
 #define SHUT_WR 1
 #define SHUT_RDWR 2
+#define MSG_OOB 0x1
+#define MSG_PEEK 0x2
+#define MSG_DONTWAIT 0x40
+#define MSG_WAITALL 0x100
+#define MSG_NOSIGNAL 0x4000
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 int socketpair(int domain, int type, int protocol, int sv[2]);
 int shutdown(int socket, int how);
+ssize_t send(int socket, const void *buffer, size_t length, int flags);
+ssize_t recv(int socket, void *buffer, size_t length, int flags);
 #ifdef __cplusplus
 }
 #endif

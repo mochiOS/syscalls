@@ -3406,6 +3406,26 @@ fn stream_io_since<T>(
     control: &ThreadControl,
     caught: u64,
     minimum_write_bytes: u32,
+    operation: impl FnMut() -> Result<T, c_int>,
+) -> Result<T, c_int> {
+    stream_io_since_mode(
+        entry,
+        interests,
+        control,
+        caught,
+        minimum_write_bytes,
+        false,
+        operation,
+    )
+}
+
+fn stream_io_since_mode<T>(
+    entry: FdEntry,
+    interests: u64,
+    control: &ThreadControl,
+    caught: u64,
+    minimum_write_bytes: u32,
+    force_nonblocking: bool,
     mut operation: impl FnMut() -> Result<T, c_int>,
 ) -> Result<T, c_int> {
     loop {
@@ -3418,7 +3438,7 @@ fn stream_io_since<T>(
             return Err(EINTR);
         }
         match operation() {
-            Err(EAGAIN) if !handle_is_nonblocking(entry)? => {
+            Err(EAGAIN) if !force_nonblocking && !handle_is_nonblocking(entry)? => {
                 // Preserve the generation from before the attempt, including
                 // across retries and successful prefixes of a large write.
                 wait_for_handle_capacity(entry, interests, control, caught, minimum_write_bytes)?;
