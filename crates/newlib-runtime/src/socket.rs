@@ -6,6 +6,116 @@ use mochios_posix_protocol::socket as wire;
 
 struct PendingPair([FdReservation; 2]);
 
+unsafe fn accept_io(
+    fd: c_int,
+    address: *mut c_void,
+    length: *mut u32,
+    flags: c_int,
+) -> Result<c_int, c_int> {
+    if flags
+        & !(mochios_posix_client::socket::SOCK_NONBLOCK
+            | mochios_posix_client::socket::SOCK_CLOEXEC)
+        != 0
+    {
+        return Err(EINVAL);
+    }
+    let entry = with_fd_entry(fd)?;
+    if entry.handle.kind != FdKind::ObjectSocket {
+        return Err(mochios_posix_client::newlib_errno::from_status(-88));
+    }
+    if !address.is_null() && length.is_null() {
+        return Err(EFAULT);
+    }
+    let capacity = if address.is_null() {
+        0
+    } else {
+        (unsafe { length.read() }) as usize
+    };
+    let limit = process_fd_limit()?;
+    let pending = PendingFdReservation(state().fds.reserve_from(0, limit).map_err(|_| EMFILE)?);
+    let client = posix_client().map_err(map_posix_client_error)?;
+    let accepted = stream_io(entry, syscall::HANDLE_SIGNAL_READABLE, || {
+        client
+            .accept_socket(
+                mochios_posix_client::ObjectHandleAttachment {
+                    handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+                    rights: entry.rights,
+                },
+                wire::Accept {
+                    options: if flags & mochios_posix_client::socket::SOCK_NONBLOCK != 0 {
+                        wire::NONBLOCKING
+                    } else {
+                        0
+                    },
+                },
+                close_object_handle,
+            )
+            .map_err(map_posix_client_error)
+    })?;
+    let prepared = (|| {
+        if !address.is_null() {
+            let peer = accepted.peer_address().map_err(|_| EIO)?;
+            let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
+            let required = mochios_posix_client::socket::encode_sockaddr(peer, &mut native)
+                .map_err(|_| EIO)?;
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    native.as_ptr(),
+                    address.cast::<u8>(),
+                    capacity.min(required),
+                );
+                length.write(required as u32);
+            }
+        }
+        let local_flags = 2 | if flags & mochios_posix_client::socket::SOCK_CLOEXEC != 0 {
+            O_CLOEXEC
+        } else {
+            0
+        };
+        let entry = object_entry(
+            u64::from(accepted.socket.handle),
+            accepted.socket.rights,
+            FdKind::ObjectSocket,
+            local_flags,
+        );
+        state()
+            .fds
+            .commit_reservation(&pending.0, entry)
+            .map_err(|_| EIO)
+    })();
+    if prepared.is_err() {
+        close_object_handle(accepted.socket.handle);
+    }
+    prepared
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn accept(fd: c_int, address: *mut c_void, length: *mut u32) -> c_int {
+    pthread_testcancel();
+    finish_accept(unsafe { accept_io(fd, address, length, 0) })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn accept4(
+    fd: c_int,
+    address: *mut c_void,
+    length: *mut u32,
+    flags: c_int,
+) -> c_int {
+    pthread_testcancel();
+    finish_accept(unsafe { accept_io(fd, address, length, flags) })
+}
+
+fn finish_accept(result: Result<c_int, c_int>) -> c_int {
+    let value = result_with_errno(result, -1);
+    // A successfully installed FD (including fd 0) is committed ownership.
+    // On interruption, reservations/received handles were cleaned up first.
+    if value < 0 {
+        pthread_testcancel();
+    }
+    value
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn listen(fd: c_int, backlog: c_int) -> c_int {
     let result = (|| {
