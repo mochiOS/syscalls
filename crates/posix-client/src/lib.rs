@@ -114,6 +114,9 @@ pub trait ObjectTransport: Transport {
 
     /// Performs one request while replacing outgoing attachments with the
     /// receiver-local handles attached to the response.
+    /// Outgoing Handles are borrowed. On every return, including errors,
+    /// `handles` contains only owned received Handles (or is empty), never the
+    /// borrowed outgoing entries. Callers may therefore clean up failed replies.
     fn call_with_handles(
         &self,
         request: &[u8],
@@ -1648,6 +1651,7 @@ impl<T: ObjectTransport> Client<T> {
         handles: &mut ObjectHandles<T::Handle>,
     ) -> Result<usize, ClientError<T::Error>> {
         if payload.len() > protocol::MAX_CONTROL_PAYLOAD_LEN {
+            handles.clear();
             return Err(ClientError::RequestTooLarge);
         }
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
@@ -1663,7 +1667,10 @@ impl<T: ObjectTransport> Client<T> {
             payload,
             &mut request_bytes,
         )
-        .map_err(ClientError::Protocol)?;
+        .map_err(|error| {
+            handles.clear();
+            ClientError::Protocol(error)
+        })?;
 
         let mut response_bytes = [0u8; protocol::CONTROL_MESSAGE_LEN];
         let response_len = self
@@ -1754,6 +1761,7 @@ impl ObjectTransport for EndpointTransport {
             native.handles[index].handle = attachment.handle;
             native.handles[index].rights = attachment.rights;
         }
+        handles.clear();
         let received = mochi_user_platform::ipc::call_object_handles(
             self.endpoint,
             request,
@@ -1893,6 +1901,7 @@ impl ObjectTransport for SyscallEndpointTransport {
             native.handles[index].handle = attachment.handle;
             native.handles[index].rights = attachment.rights;
         }
+        handles.clear();
         let received = mochi_user_syscall::call6(
             mochi_user_syscall::SyscallNumber::IpcCallObjectHandles,
             self.endpoint as u64,
