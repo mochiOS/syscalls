@@ -705,7 +705,7 @@ pub(super) fn message_entry(
     if length != 0 && buffer == 0 {
         return Err(EFAULT);
     }
-    if length == 0 {
+    if length == 0 && !sending {
         return Ok(0);
     }
     let (_, thread) = register_current_thread().ok_or(EAGAIN)?;
