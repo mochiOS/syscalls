@@ -6,6 +6,45 @@ use super::ProtocolError;
 
 pub const CREATE_LEN: usize = 16;
 pub const NONBLOCKING: u32 = 1;
+pub const ACCEPT_LEN: usize = 8;
+
+/// Options apply to the new socket description. Listener blocking behavior
+/// and descriptor-local CLOEXEC are not copied into this request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Accept {
+    pub options: u32,
+}
+impl Accept {
+    pub fn encode(self, output: &mut [u8]) -> Result<usize, ProtocolError> {
+        if self.options & !NONBLOCKING != 0 {
+            return Err(ProtocolError::InvalidLength);
+        }
+        if output.len() < ACCEPT_LEN {
+            return Err(ProtocolError::BufferTooSmall);
+        }
+        output[..ACCEPT_LEN].fill(0);
+        output[..4].copy_from_slice(&self.options.to_le_bytes());
+        Ok(ACCEPT_LEN)
+    }
+    pub fn decode(input: &[u8]) -> Result<Self, ProtocolError> {
+        if input.len() != ACCEPT_LEN || input[4..] != [0; 4] {
+            return Err(ProtocolError::InvalidLength);
+        }
+        let options = u32::from_le_bytes(
+            input[..4]
+                .try_into()
+                .map_err(|_| ProtocolError::InvalidLength)?,
+        );
+        if options & !NONBLOCKING != 0 {
+            return Err(ProtocolError::InvalidLength);
+        }
+        Ok(Self { options })
+    }
+}
+
+pub const fn accept_listener_rights() -> u64 {
+    mnu_abi::HANDLE_RIGHT_CONTROL | mnu_abi::HANDLE_RIGHT_TRANSFER
+}
 /// Userspace control tags carried by generic HandleControl, not mnu opcodes.
 pub const CONTROL_GET_OPTIONS: u64 = u64::from_le_bytes(*b"SOPOGT01");
 pub const CONTROL_SET_OPTIONS: u64 = u64::from_le_bytes(*b"SOPOST01");

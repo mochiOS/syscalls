@@ -11,6 +11,21 @@ pub const MSG_WAITALL: i32 = 0x100;
 pub const MSG_NOSIGNAL: i32 = 0x4000;
 pub const MAX_SOCKADDR_LEN: usize = 110;
 
+/// One received socket reference plus validated, owned peer-address bytes.
+/// The caller reserves a local FD before requesting this resource and releases
+/// `socket.handle` if FD installation fails. No FD number enters the protocol.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Accepted<H> {
+    pub socket: ObjectHandleAttachment<H>,
+    address: [u8; wire::MAX_ADDRESS_LEN],
+    address_len: usize,
+}
+impl<H> Accepted<H> {
+    pub fn peer_address(&self) -> Result<wire::Address<'_>, protocol::ProtocolError> {
+        wire::Address::decode(&self.address[..self.address_len])
+    }
+}
+
 /// Decode the C ABI without casting potentially unaligned bytes to sockaddr.
 /// UNIX abstract names are binary; pathname terminators and IP padding are not
 /// transmitted. Path traversal and authorization belong to the service layer.
@@ -210,6 +225,70 @@ pub fn poll_events(bits: u32, events: i16) -> i16 {
 }
 
 impl<T: ObjectTransport> Client<T> {
+    /// Nonblocking queue operation. The native listener's WAIT authority is
+    /// used separately by libc for a blocking accept, cancellation and EINTR.
+    pub fn accept_socket(
+        &self,
+        listener: ObjectHandleAttachment<T::Handle>,
+        request: wire::Accept,
+        mut close: impl FnMut(T::Handle),
+    ) -> Result<Accepted<T::Handle>, ClientError<T::Error>>
+    where
+        T::Handle: Eq + Default,
+    {
+        let required = wire::accept_listener_rights();
+        if listener.handle == T::Handle::default() || listener.rights & required != required {
+            return Err(ClientError::Remote(-13));
+        }
+        let mut payload = [0; wire::ACCEPT_LEN];
+        request
+            .encode(&mut payload)
+            .map_err(ClientError::Protocol)?;
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(ObjectHandleAttachment {
+                handle: listener.handle,
+                rights: required,
+            })
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        let mut address = [0; wire::MAX_ADDRESS_LEN];
+        let result = self.request_with_handles(
+            protocol::OP_SOCKET_ACCEPT,
+            0,
+            &payload,
+            &mut address,
+            &mut handles,
+        );
+        if let Ok(length) = result {
+            if wire::Address::decode(&address[..length]).is_ok() && handles.len() == 1 {
+                let received = handles.get(0).unwrap();
+                if received.handle != T::Handle::default()
+                    && received.handle != listener.handle
+                    && received.rights == wire::descriptor_rights()
+                {
+                    return Ok(Accepted {
+                        socket: received,
+                        address,
+                        address_len: length,
+                    });
+                }
+            }
+        }
+        // ObjectTransport replaces borrowed outgoing attachments with owned
+        // reply references even on failure. Never close the source listener.
+        for (index, received) in handles.iter().enumerate() {
+            if received.handle != T::Handle::default()
+                && !handles
+                    .iter()
+                    .take(index)
+                    .any(|old| old.handle == received.handle)
+            {
+                close(received.handle);
+            }
+        }
+        Err(result.err().unwrap_or(ClientError::MismatchedResponse))
+    }
+
     /// Return ownership of one unconnected socket Handle, never a hidden pair.
     pub fn open_socket(
         &self,

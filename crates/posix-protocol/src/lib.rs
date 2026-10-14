@@ -239,6 +239,10 @@ pub const OP_SHARED_MEMORY_UNLINK: u16 = 77;
 pub const OP_SHARED_MEMORY_BACKING: u16 = 78;
 pub const OP_SOCKET_CREATE: u16 = 79;
 pub const OP_SOCKET_PAIR: u16 = 80;
+/// Accept one queued connection from exactly one attached listener Handle.
+/// Request carries socket::Accept; success carries peer Address and one new
+/// socket Handle. Empty queue returns EAGAIN; waiting remains client-side.
+pub const OP_SOCKET_ACCEPT: u16 = 81;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
