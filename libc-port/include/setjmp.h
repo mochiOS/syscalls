@@ -4,18 +4,19 @@
 #include <_ansi.h>
 #include <sys/cdefs.h>
 #include <machine/setjmp.h>
-#include <stdint.h>
 
 _BEGIN_STD_C
 void longjmp(jmp_buf, int) __dead2;
 int setjmp(jmp_buf) __returns_twice;
 
 #if __POSIX_VISIBLE
-/* x86-64 registers plus thread-local continuation/mask metadata. Opaque to
-   applications; unlike jmp_buf this also records live handler ancestry. */
-typedef uint64_t sigjmp_buf[15];
+/* Both environments retain handler ancestry. Plain setjmp/_setjmp use
+   System V semantics: they do not save or restore the signal mask. */
+typedef jmp_buf sigjmp_buf;
 int sigsetjmp(sigjmp_buf, int) __returns_twice;
 void siglongjmp(sigjmp_buf, int) __dead2;
+int _setjmp(jmp_buf) __returns_twice;
+void _longjmp(jmp_buf, int) __dead2;
 #endif
 _END_STD_C
 

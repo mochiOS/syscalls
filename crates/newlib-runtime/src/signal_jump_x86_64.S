@@ -1,4 +1,25 @@
 .text
+.global setjmp
+.global _setjmp
+.type setjmp,@function
+.type _setjmp,@function
+setjmp:
+_setjmp:
+    xor esi, esi
+    jmp sigsetjmp
+.size setjmp, .-setjmp
+.size _setjmp, .-_setjmp
+
+.global longjmp
+.global _longjmp
+.type longjmp,@function
+.type _longjmp,@function
+longjmp:
+_longjmp:
+    jmp siglongjmp
+.size longjmp, .-longjmp
+.size _longjmp, .-_longjmp
+
 .global sigsetjmp
 .type sigsetjmp,@function
 sigsetjmp:

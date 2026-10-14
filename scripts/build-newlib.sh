@@ -171,12 +171,19 @@ else
 	echo "[cache] reuse newlib SDK sysroot"
 fi
 cp -a "$USER_ROOT/libc-port/include/." "$SDK/sysroot/include/"
-# raise/_raise_r are provided by the runtime with thread-directed delivery.
-# Remove only the generic newlib implementation from the published SDK copy;
-# the supplied/source sysroot is unchanged. Skip unchanged cached archives.
-if x86_64-elf-ar t "$SDK/sysroot/lib/libc.a" | grep -Fx 'libc_a-raise.o' >/dev/null; then
-    x86_64-elf-ar d "$SDK/sysroot/lib/libc.a" libc_a-raise.o
-fi
+# Signal delivery and nonlocal jumps are owned by the runtime. In particular,
+# the generic eight-word setjmp backend cannot initialize our handler ancestry.
+# Retire these objects only from the published copy, never the input sysroot.
+for runtime_library in libc.a libg.a; do
+    runtime_archive="$SDK/sysroot/lib/$runtime_library"
+    [[ -f "$runtime_archive" ]] || continue
+    # ar may replace its output inode: do not rely on libg being a hard link.
+    for runtime_member in libc_a-raise.o libc_a-setjmp.o; do
+        if x86_64-elf-ar t "$runtime_archive" | grep -Fx "$runtime_member" >/dev/null; then
+            x86_64-elf-ar d "$runtime_archive" "$runtime_member"
+        fi
+    done
+done
 perl "$USER_ROOT/scripts/fix-newlib-signal-header.pl" "$SDK/sysroot/include/sys/signal.h"
 
 "$SDK/bin/mochios-cc" -O2 "$USER_ROOT/libc-port/tests/hello.c" -o "$OUT_ROOT/hello/hello.elf"
