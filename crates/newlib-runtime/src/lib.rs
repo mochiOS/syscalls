@@ -233,6 +233,9 @@ struct ThreadControl {
     state: AtomicU32,
     generation: AtomicU32,
     native_id: AtomicU64,
+    // Private newlib locks retain their calling thread's identity across fork.
+    // This is never an identity for process-shared pthread synchronization.
+    newlib_lock_identity: AtomicU64,
     native_handle: AtomicU32,
     thread_local_base: AtomicU64,
     start: AtomicUsize,
@@ -277,6 +280,7 @@ impl ThreadControl {
             state: AtomicU32::new(THREAD_FREE),
             generation: AtomicU32::new(0),
             native_id: AtomicU64::new(0),
+            newlib_lock_identity: AtomicU64::new(0),
             native_handle: AtomicU32::new(0),
             thread_local_base: AtomicU64::new(0),
             start: AtomicUsize::new(0),
@@ -949,6 +953,15 @@ fn native_thread_id() -> Result<u64, syscall::SysError> {
     syscall::execution::identity().map(|identity| identity.thread_id)
 }
 
+fn newlib_lock_identity() -> u64 {
+    current_thread_control()
+        .map(|(_, control)| control.newlib_lock_identity.load(Ordering::Relaxed))
+        .filter(|identity| *identity != 0)
+        // Bootstrap may use newlib before a ThreadControl is registered. Its
+        // subsequent registration seeds the same identity, without allocation.
+        .unwrap_or_else(|| native_thread_id().unwrap_or_else(|_| process_exit(127)))
+}
+
 fn native_mutex_wait(state: &AtomicU32, expected: u32) {
     if mochios_posix_client::synchronization::wait_u32(
         state,
@@ -1051,6 +1064,7 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
         );
         control.generation.store(generation, Ordering::Release);
         control.native_id.store(0, Ordering::Relaxed);
+        control.newlib_lock_identity.store(0, Ordering::Relaxed);
         control.native_handle.store(0, Ordering::Relaxed);
         control.start.store(0, Ordering::Relaxed);
         control.argument.store(0, Ordering::Relaxed);
@@ -1154,6 +1168,7 @@ fn release_thread_control(control: &ThreadControl) {
         );
     }
     control.native_id.store(0, Ordering::Relaxed);
+    control.newlib_lock_identity.store(0, Ordering::Relaxed);
     control.thread_local_base.store(0, Ordering::Relaxed);
     control.start.store(0, Ordering::Relaxed);
     control.argument.store(0, Ordering::Relaxed);
@@ -1258,6 +1273,7 @@ fn register_current_thread() -> Option<(Pthread, &'static ThreadControl)> {
     let native_id = native_thread_id().ok()?;
     let (token, control) = reserve_thread_control()?;
     control.native_id.store(native_id, Ordering::Relaxed);
+    control.newlib_lock_identity.store(native_id, Ordering::Relaxed);
     control.state.store(THREAD_RUNNING, Ordering::Release);
     if allocate_thread_reent(control).is_err() {
         control.state.store(THREAD_REAPING, Ordering::Relaxed);
@@ -1279,6 +1295,7 @@ fn register_initial_thread() -> Option<(Pthread, &'static ThreadControl)> {
     let native_id = native_thread_id().ok()?;
     let (token, control) = reserve_thread_control()?;
     control.native_id.store(native_id, Ordering::Relaxed);
+    control.newlib_lock_identity.store(native_id, Ordering::Relaxed);
     // The current initial-runtime TCB ABI places its own base in its first
     // word. Other runtime-created threads explicitly use a zero TLS base.
     let tls_base: u64;
@@ -1489,6 +1506,7 @@ unsafe extern "C" fn pthread_start_trampoline(argument: *mut c_void) -> ! {
     let control = unsafe { &*argument.cast::<ThreadControl>() };
     let native_id = native_thread_id().unwrap_or_else(|_| process_exit(127));
     control.native_id.store(native_id, Ordering::Relaxed);
+    control.newlib_lock_identity.store(native_id, Ordering::Relaxed);
     if setup_signal_delivery(control).is_err() {
         process_exit(127);
     }
@@ -9346,7 +9364,7 @@ pub extern "C" fn __retarget_lock_acquire_recursive(lock: *mut LockOpaque) {
     let Some(lock_ref) = (unsafe { lock.as_ref() }) else {
         process_exit(127);
     };
-    let thread_id = native_thread_id().unwrap_or_else(|_| process_exit(127));
+    let thread_id = newlib_lock_identity();
     if lock_ref.owner.load(Ordering::Acquire) == thread_id {
         if lock_ref.depth.fetch_add(1, Ordering::Relaxed) == u32::MAX {
             process_exit(127);
@@ -9371,7 +9389,7 @@ pub extern "C" fn __retarget_lock_try_acquire_recursive(lock: *mut LockOpaque) -
     let Some(lock_ref) = (unsafe { lock.as_ref() }) else {
         return 0;
     };
-    let thread_id = native_thread_id().unwrap_or_else(|_| process_exit(127));
+    let thread_id = newlib_lock_identity();
     if lock_ref.owner.load(Ordering::Acquire) == thread_id {
         if lock_ref.depth.fetch_add(1, Ordering::Relaxed) == u32::MAX {
             process_exit(127);
@@ -9399,7 +9417,7 @@ pub extern "C" fn __retarget_lock_release_recursive(lock: *mut LockOpaque) {
     let Some(lock_ref) = (unsafe { lock.as_ref() }) else {
         process_exit(127);
     };
-    let thread_id = native_thread_id().unwrap_or_else(|_| process_exit(127));
+    let thread_id = newlib_lock_identity();
     if lock_ref.owner.load(Ordering::Acquire) != thread_id {
         process_exit(127);
     }
