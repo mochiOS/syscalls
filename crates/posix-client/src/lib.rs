@@ -655,8 +655,32 @@ impl<T: Transport> Client<T> {
         if payload.len() > protocol::MAX_CONTROL_PAYLOAD_LEN {
             return Err(ClientError::RequestTooLarge);
         }
+        // Signal control and other fixed-size RPCs must fit a minimum signal
+        // stack without allocating or taking the process allocator's lock.
+        const SMALL: usize = 256;
+        if payload.len() <= SMALL - protocol::HEADER_LEN
+            && response_payload.len() <= SMALL - protocol::HEADER_LEN
+        {
+            self.request_frame::<SMALL>(opcode, flags, payload, response_payload)
+        } else {
+            self.request_frame::<{ protocol::CONTROL_MESSAGE_LEN }>(
+                opcode, flags, payload, response_payload,
+            )
+        }
+    }
+
+    // Keep both concrete buffer sizes in separate frames. Inlining a large
+    // branch would reserve the path-sized buffers even for an eight-byte RPC.
+    #[inline(never)]
+    fn request_frame<const SIZE: usize>(
+        &self,
+        opcode: u16,
+        flags: u32,
+        payload: &[u8],
+        response_payload: &mut [u8],
+    ) -> Result<usize, ClientError<T::Error>> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let mut request_bytes = [0u8; protocol::CONTROL_MESSAGE_LEN];
+        let mut request_bytes = [0u8; SIZE];
         let request_len = protocol::encode(
             protocol::Header {
                 opcode,
@@ -670,7 +694,7 @@ impl<T: Transport> Client<T> {
         )
         .map_err(ClientError::Protocol)?;
 
-        let mut response_bytes = [0u8; protocol::CONTROL_MESSAGE_LEN];
+        let mut response_bytes = [0u8; SIZE];
         let response_len = self
             .transport
             .call(&request_bytes[..request_len], &mut response_bytes)
