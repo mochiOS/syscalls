@@ -99,6 +99,25 @@ pub struct FdReservation {
     generation: u64,
 }
 
+/// Slots reserved for one ancillary receive. Not inherited by a fork snapshot.
+/// Use only with the issuing table, and explicitly commit or cancel every group.
+#[derive(Debug)]
+pub struct FdReservations {
+    indices: [usize; DEFAULT_FD_LIMIT],
+    count: usize,
+    generation: u64,
+}
+
+impl FdReservations {
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+}
+
 #[derive(Debug)]
 pub struct FdTable<H> {
     entries: [Option<Entry<H>>; DEFAULT_FD_LIMIT],
@@ -226,6 +245,92 @@ impl<H: Copy> FdTable<H> {
         }
         self.reservations[reservation.index] = 0;
         true
+    }
+
+    /// Reserve up to `maximum` lowest free slots below the supplied FD limit.
+    /// Exhaustion returns a shorter (possibly empty) group so recvmsg can discard
+    /// excess rights with MSG_CTRUNC. No allocation or remote operation occurs.
+    /// Serialize table access, including commit/cancel, but release the lock for IPC.
+    pub fn reserve_up_to(
+        &mut self,
+        minimum: i32,
+        limit: i32,
+        maximum: usize,
+    ) -> Result<FdReservations, FdError<core::convert::Infallible>> {
+        if minimum < 0
+            || minimum > limit
+            || limit as usize > DEFAULT_FD_LIMIT
+            || maximum > DEFAULT_FD_LIMIT
+        {
+            return Err(FdError::InvalidDescriptor);
+        }
+        let mut group = FdReservations {
+            indices: [0; DEFAULT_FD_LIMIT],
+            count: 0,
+            generation: 0,
+        };
+        for index in (minimum as usize..limit as usize)
+            .filter(|index| self.is_free(*index))
+            .take(maximum)
+        {
+            group.indices[group.count] = index;
+            group.count += 1;
+        }
+        if group.is_empty() {
+            return Ok(group);
+        }
+        group.generation = self
+            .next_reservation
+            .checked_add(1)
+            .ok_or(FdError::InvalidDescriptor)?;
+        self.next_reservation = group.generation;
+        for &index in &group.indices[..group.count] {
+            self.reservations[index] = group.generation;
+        }
+        Ok(group)
+    }
+
+    /// Atomically publish a received prefix and release unused reserved slots.
+    /// On error the table and output are unchanged: the caller still owns every
+    /// Handle and must close them and cancel the group. On success ownership of
+    /// the entries passes to the table; only output[..entries.len()] is written.
+    /// Rights and descriptor flags are preserved, never widened here. In
+    /// particular MSG_CMSG_CLOEXEC is receiver policy, not sender metadata.
+    pub fn commit_group(
+        &mut self,
+        group: &FdReservations,
+        entries: &[Entry<H>],
+        output: &mut [i32],
+    ) -> Result<(), FdError<core::convert::Infallible>> {
+        if entries.len() > group.count
+            || output.len() < entries.len()
+            || group.indices[..group.count].iter().any(|&index| {
+                self.reservations[index] != group.generation || self.entries[index].is_some()
+            })
+        {
+            return Err(FdError::InvalidDescriptor);
+        }
+        for (position, &index) in group.indices[..group.count].iter().enumerate() {
+            self.reservations[index] = 0;
+            if let Some(entry) = entries.get(position) {
+                self.entries[index] = Some(*entry);
+                output[position] = index as i32;
+            }
+        }
+        Ok(())
+    }
+
+    /// Release only slots still belonging to this group, never a reused slot.
+    /// Does not close Handles: uncommitted received Handles belong to the caller.
+    pub fn cancel_group(&mut self, group: &FdReservations) -> usize {
+        let mut released = 0;
+        for &index in &group.indices[..group.count] {
+            if self.reservations[index] == group.generation && self.entries[index].is_none() {
+                self.reservations[index] = 0;
+                released += 1;
+            }
+        }
+        released
     }
 
     /// After address-space cloning, other threads' pending opens do not survive.
