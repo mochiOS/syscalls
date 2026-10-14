@@ -3446,7 +3446,7 @@ fn stream_io_since_mode<T>(
     force_nonblocking: bool,
     operation: impl FnMut() -> Result<T, c_int>,
 ) -> Result<T, c_int> {
-    let mut wait = socket::ReceiveWait::new(entry, interests)?;
+    let mut wait = socket::SocketWait::new(entry, interests)?;
     stream_io_since_wait(
         entry,
         interests,
@@ -3466,7 +3466,7 @@ fn stream_io_since_wait<T>(
     caught: u64,
     minimum_write_bytes: u32,
     force_nonblocking: bool,
-    wait: &mut socket::ReceiveWait,
+    wait: &mut socket::SocketWait,
     mut operation: impl FnMut() -> Result<T, c_int>,
 ) -> Result<T, c_int> {
     loop {

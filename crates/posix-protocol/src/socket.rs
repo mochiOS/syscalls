@@ -126,6 +126,8 @@ pub const CONTROL_SET_SEND_CAPACITY: u64 = u64::from_le_bytes(*b"SOSCST01");
 /// socket policy: the client applies this shared description setting to waits.
 pub const CONTROL_GET_RECEIVE_TIMEOUT: u64 = u64::from_le_bytes(*b"SORTGT01");
 pub const CONTROL_SET_RECEIVE_TIMEOUT: u64 = u64::from_le_bytes(*b"SORTST01");
+pub const CONTROL_GET_SEND_TIMEOUT: u64 = u64::from_le_bytes(*b"SOSTGT01");
+pub const CONTROL_SET_SEND_TIMEOUT: u64 = u64::from_le_bytes(*b"SOSTST01");
 pub const SHUTDOWN_READ: u32 = 0;
 pub const SHUTDOWN_WRITE: u32 = 1;
 pub const SHUTDOWN_BOTH: u32 = 2;

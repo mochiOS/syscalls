@@ -6,17 +6,25 @@ use mochios_posix_protocol::socket as wire;
 
 struct PendingPair([FdReservation; 2]);
 
-pub(super) struct ReceiveWait {
-    started: Option<u64>,
+pub(super) struct SocketWait {
+    started: Option<(u64, u64)>,
     deadline: Option<u64>,
 }
-impl ReceiveWait {
+impl SocketWait {
     pub(super) fn new(entry: FdEntry, interests: u64) -> Result<Self, c_int> {
         Ok(Self {
             started: if entry.handle.kind == FdKind::ObjectSocket
-                && interests & syscall::HANDLE_SIGNAL_READABLE != 0
+                && interests & (syscall::HANDLE_SIGNAL_READABLE | syscall::HANDLE_SIGNAL_WRITABLE)
+                    != 0
             {
-                Some(monotonic_nanoseconds()?)
+                Some((
+                    monotonic_nanoseconds()?,
+                    if interests & syscall::HANDLE_SIGNAL_READABLE != 0 {
+                        wire::CONTROL_GET_RECEIVE_TIMEOUT
+                    } else {
+                        wire::CONTROL_GET_SEND_TIMEOUT
+                    },
+                ))
             } else {
                 None
             },
@@ -24,16 +32,16 @@ impl ReceiveWait {
         })
     }
     pub(super) fn deadline(&mut self, entry: FdEntry) -> Result<u64, c_int> {
-        let Some(started) = self.started else {
+        let Some((started, tag)) = self.started else {
             return Ok(syscall::HANDLE_WAIT_INFINITE);
         };
         if let Some(deadline) = self.deadline {
             return Ok(deadline);
         }
         let mut bytes = [0; 8];
-        control(entry, wire::CONTROL_GET_RECEIVE_TIMEOUT, &[], &mut bytes)?;
+        control(entry, tag, &[], &mut bytes)?;
         let deadline =
-            mochios_posix_client::socket::receive_deadline(started, u64::from_le_bytes(bytes));
+            mochios_posix_client::socket::socket_deadline(started, u64::from_le_bytes(bytes));
         self.deadline = Some(deadline);
         Ok(deadline)
     }
@@ -52,7 +60,7 @@ pub unsafe extern "C" fn setsockopt(
         if entry.handle.kind != FdKind::ObjectSocket {
             return Err(mochios_posix_client::newlib_errno::from_status(-88));
         }
-        if level == 1 && option == 20 {
+        if level == 1 && matches!(option, 20 | 21) {
             if length < core::mem::size_of::<Timeval>() as u32 {
                 return Err(EINVAL);
             }
@@ -60,14 +68,18 @@ pub unsafe extern "C" fn setsockopt(
                 return Err(EFAULT);
             }
             let timeout = unsafe { value.cast::<Timeval>().read_unaligned() };
-            let duration = mochios_posix_client::socket::receive_timeout_nanoseconds(
+            let duration = mochios_posix_client::socket::socket_timeout_nanoseconds(
                 timeout.tv_sec,
                 timeout.tv_usec,
             )
             .map_err(|_| EINVAL)?;
             control(
                 entry,
-                wire::CONTROL_SET_RECEIVE_TIMEOUT,
+                if option == 20 {
+                    wire::CONTROL_SET_RECEIVE_TIMEOUT
+                } else {
+                    wire::CONTROL_SET_SEND_TIMEOUT
+                },
                 &duration.to_le_bytes(),
                 &mut [],
             )?;
@@ -108,7 +120,7 @@ pub unsafe extern "C" fn getsockopt(
         if entry.handle.kind != FdKind::ObjectSocket {
             return Err(mochios_posix_client::newlib_errno::from_status(-88));
         }
-        if level == 1 && option == 20 {
+        if level == 1 && matches!(option, 20 | 21) {
             if length.is_null() {
                 return Err(EFAULT);
             }
@@ -121,7 +133,16 @@ pub unsafe extern "C" fn getsockopt(
                 return Err(EFAULT);
             }
             let mut bytes = [0; 8];
-            control(entry, wire::CONTROL_GET_RECEIVE_TIMEOUT, &[], &mut bytes)?;
+            control(
+                entry,
+                if option == 20 {
+                    wire::CONTROL_GET_RECEIVE_TIMEOUT
+                } else {
+                    wire::CONTROL_GET_SEND_TIMEOUT
+                },
+                &[],
+                &mut bytes,
+            )?;
             let duration = u64::from_le_bytes(bytes);
             if duration % 1000 != 0 {
                 return Err(EIO);
@@ -651,7 +672,7 @@ fn message_io(
     } else {
         syscall::HANDLE_SIGNAL_READABLE
     };
-    let mut wait = ReceiveWait::new(entry, interests)?;
+    let mut wait = SocketWait::new(entry, interests)?;
     let mut io = |offset: usize, remaining: usize| {
         let address = buffer.checked_add(offset as u64).ok_or(EFAULT)?;
         let result = stream_io_since_wait(

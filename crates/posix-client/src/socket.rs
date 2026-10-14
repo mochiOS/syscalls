@@ -12,7 +12,7 @@ pub const MSG_NOSIGNAL: i32 = 0x4000;
 pub const MAX_SOCKADDR_LEN: usize = 110;
 
 /// timeval is decoded at libc's boundary; only a duration enters the wire.
-pub fn receive_timeout_nanoseconds(seconds: i64, microseconds: i64) -> Result<u64, i32> {
+pub fn socket_timeout_nanoseconds(seconds: i64, microseconds: i64) -> Result<u64, i32> {
     if seconds < 0 || !(0..1_000_000).contains(&microseconds) {
         return Err(-22);
     }
@@ -24,7 +24,7 @@ pub fn receive_timeout_nanoseconds(seconds: i64, microseconds: i64) -> Result<u6
 
 /// Keep one absolute deadline across short reads, spurious wakes and retries.
 /// u64::MAX remains reserved for the native infinite-wait marker.
-pub fn receive_deadline(started: u64, duration: u64) -> u64 {
+pub fn socket_deadline(started: u64, duration: u64) -> u64 {
     if duration == 0 {
         u64::MAX
     } else {
