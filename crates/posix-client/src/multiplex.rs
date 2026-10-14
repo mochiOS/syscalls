@@ -1,3 +1,12 @@
+/// Normal byte IO signals do not imply priority or band-specific data.
+/// These are libc poll flags, never native kernel interest bits.
+pub const NORMAL_READ_EVENTS: i16 = 0x0001 | 0x0040;
+pub const NORMAL_WRITE_EVENTS: i16 = 0x0004;
+
+pub const fn immediate_file_events(requested: i16) -> i16 {
+    requested & (NORMAL_READ_EVENTS | NORMAL_WRITE_EVENTS)
+}
+
 /// Counts selected bits across all three POSIX `select` result sets.
 /// A descriptor selected in multiple sets contributes once per set, not once
 /// per descriptor. The caller has already excluded bits above `nfds`.

@@ -801,15 +801,9 @@ struct PollFd {
     revents: i16,
 }
 
-const POLLIN: i16 = 0x0001;
-const POLLPRI: i16 = 0x0002;
-const POLLOUT: i16 = 0x0004;
 const POLLERR: i16 = 0x0008;
 const POLLHUP: i16 = 0x0010;
 const POLLNVAL: i16 = 0x0020;
-const POLLRDNORM: i16 = 0x0040;
-const POLLRDBAND: i16 = 0x0080;
-const POLLWRBAND: i16 = 0x0100;
 
 #[derive(Clone, Copy)]
 struct SpawnSnapshot {
@@ -4715,8 +4709,8 @@ fn poll_with_deadline(
             return Err(EFAULT);
         }
 
-        const READ_EVENTS: i16 = POLLIN | POLLPRI | POLLRDNORM | POLLRDBAND;
-        const WRITE_EVENTS: i16 = POLLOUT | POLLWRBAND;
+        const READ_EVENTS: i16 = mochios_posix_client::multiplex::NORMAL_READ_EVENTS;
+        const WRITE_EVENTS: i16 = mochios_posix_client::multiplex::NORMAL_WRITE_EVENTS;
         let mut pollfds = [PollFd::default(); MAX_FDS];
         let mut items = [syscall::HandleWaitItem::default(); MAX_FDS];
         let mut item_pollfds = [0usize; MAX_FDS];
@@ -4763,7 +4757,8 @@ fn poll_with_deadline(
                     item_count += 1;
                 }
                 _ => {
-                    pollfds[index].revents = pollfds[index].events & (READ_EVENTS | WRITE_EVENTS);
+                    pollfds[index].revents =
+                        mochios_posix_client::multiplex::immediate_file_events(pollfds[index].events);
                     immediately_ready |= pollfds[index].revents != 0;
                 }
             }
