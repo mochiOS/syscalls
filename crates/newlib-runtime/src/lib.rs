@@ -13,6 +13,7 @@ mod pthread_time;
 mod semaphore;
 mod named_semaphore;
 mod shared_memory;
+mod socket;
 mod stdio_cancellation;
 mod thread_cleanup;
 
@@ -373,6 +374,7 @@ enum FdKind {
     ObjectStreamWrite = 8,
     ObjectPty = 9,
     ObjectSharedMemory = 10,
+    ObjectSocket = 11,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -470,6 +472,7 @@ fn inherited_fd_kind(kind: FdKind) -> Option<u8> {
         FdKind::ObjectStreamWrite => Some(posix_protocol::INHERITED_FD_KIND_STREAM_WRITE),
         FdKind::ObjectPty => Some(posix_protocol::INHERITED_FD_KIND_PTY),
         FdKind::ObjectSharedMemory => Some(posix_protocol::INHERITED_FD_KIND_SHARED_MEMORY),
+        FdKind::ObjectSocket => Some(posix_protocol::INHERITED_FD_KIND_SOCKET),
     }
 }
 
@@ -484,6 +487,7 @@ fn fd_kind_from_inherited(kind: u8) -> Option<FdKind> {
         posix_protocol::INHERITED_FD_KIND_STREAM_WRITE => Some(FdKind::ObjectStreamWrite),
         posix_protocol::INHERITED_FD_KIND_PTY => Some(FdKind::ObjectPty),
         posix_protocol::INHERITED_FD_KIND_SHARED_MEMORY => Some(FdKind::ObjectSharedMemory),
+        posix_protocol::INHERITED_FD_KIND_SOCKET => Some(FdKind::ObjectSocket),
         _ => None,
     }
 }
@@ -3316,6 +3320,9 @@ fn allocate_fd_entry(
 }
 
 fn handle_is_nonblocking(entry: FdEntry) -> Result<bool, c_int> {
+    if entry.handle.kind == FdKind::ObjectSocket {
+        return Ok(socket::get_status_flags(entry)? & O_NONBLOCK != 0);
+    }
     let options = syscall_errno(syscall::raw_syscall1(
         syscall::SyscallNumber::HandleOptionsGet,
         entry.handle.lower_handle,
@@ -3477,6 +3484,20 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
             buffer as u64,
             length as u64,
         ))?,
+        FdKind::ObjectSocket => {
+            let result = stream_io(entry, syscall::HANDLE_SIGNAL_WRITABLE, || {
+                syscall_errno(syscall::raw_syscall3(
+                    syscall::SyscallNumber::HandleWrite,
+                    entry.handle.lower_handle,
+                    buffer as u64,
+                    length as u64,
+                ))
+            });
+            if matches!(result, Err(EPIPE)) {
+                generate_thread_signal(posix_protocol::SIGNAL_PIPE)?;
+            }
+            result?
+        }
         FdKind::ObjectStreamWrite => {
             let (_, control) = register_current_thread().ok_or(EAGAIN)?;
             let caught = control.nonrestart_signal_generation.load(Ordering::Acquire);
@@ -3568,6 +3589,18 @@ fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<is
             buffer as u64,
             length as u64,
         ))?,
+        FdKind::ObjectSocket => stream_io(
+            entry,
+            syscall::HANDLE_SIGNAL_READABLE,
+            || {
+                syscall_errno(syscall::raw_syscall3(
+                    syscall::SyscallNumber::HandleRead,
+                    entry.handle.lower_handle,
+                    buffer as u64,
+                    length as u64,
+                ))
+            },
+        )?,
         FdKind::ObjectStreamRead => stream_io(
             entry,
             syscall::HANDLE_SIGNAL_READABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
@@ -4251,6 +4284,9 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
                 duplicate_fd_from(&mut state.fds, fd, Some(arg), cmd == F_DUPFD_CLOEXEC)
             }
             F_GETFD => Ok(entry.descriptor_flags as c_int),
+            F_GETFL if entry.handle.kind == FdKind::ObjectSocket => {
+                socket::get_status_flags(entry)
+            }
             F_GETFL if entry.handle.kind == FdKind::ObjectSharedMemory =>
                 shared_memory::get_status_flags(entry),
             F_SETFD => {
@@ -4294,6 +4330,10 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
             }
             F_GETFL => Ok(entry.handle.open_flags),
             F_SETFL => {
+                if entry.handle.kind == FdKind::ObjectSocket {
+                    socket::set_status_flags(entry, arg)?;
+                    return Ok(0);
+                }
                 if entry.handle.kind == FdKind::ObjectSharedMemory {
                     shared_memory::set_status_flags(entry, arg)?;
                     return Ok(0);
@@ -4596,8 +4636,12 @@ fn select_with_deadline(
                         ready_read |= requested_read & mask;
                     }
                 }
-                FdKind::ObjectPty => {
-                    let mut interests = syscall::HANDLE_SIGNAL_PEER_CLOSED;
+                FdKind::ObjectPty | FdKind::ObjectSocket => {
+                    let mut interests = if entry.handle.kind == FdKind::ObjectSocket {
+                        0
+                    } else {
+                        syscall::HANDLE_SIGNAL_PEER_CLOSED
+                    };
                     if requested_read & mask != 0 {
                         interests |= syscall::HANDLE_SIGNAL_READABLE;
                     }
@@ -4730,6 +4774,26 @@ fn poll_with_deadline(
                 continue;
             };
             match entry.handle.kind {
+                FdKind::ObjectSocket => {
+                    pollfds[index].revents = socket::poll_events(entry, pollfds[index].events)?;
+                    immediately_ready |= pollfds[index].revents != 0;
+                    let mut interests = syscall::HANDLE_SIGNAL_PEER_CLOSED;
+                    if pollfds[index].events & READ_EVENTS != 0 {
+                        interests |= syscall::HANDLE_SIGNAL_READABLE;
+                    }
+                    if pollfds[index].events & WRITE_EVENTS != 0 {
+                        interests |= syscall::HANDLE_SIGNAL_WRITABLE;
+                    }
+                    items[item_count] = syscall::HandleWaitItem {
+                        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+                        minimum_write_bytes: 0,
+                        interests,
+                        observed: 0,
+                    };
+                    item_pollfds[item_count] = index;
+                    item_kinds[item_count] = entry.handle.kind;
+                    item_count += 1;
+                }
                 FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite | FdKind::ObjectPty => {
                     let mut interests = syscall::HANDLE_SIGNAL_PEER_CLOSED;
                     if matches!(
@@ -4772,6 +4836,13 @@ fn poll_with_deadline(
         wait_for_multiplex(&mut items[..item_count], wait_deadline, control, caught)?;
         for item_index in 0..item_count {
             let poll_index = item_pollfds[item_index];
+            if item_kinds[item_index] == FdKind::ObjectSocket {
+                pollfds[poll_index].revents = socket::poll_events(
+                    with_fd_entry(pollfds[poll_index].fd)?,
+                    pollfds[poll_index].events,
+                )?;
+                continue;
+            }
             let observed = items[item_index].observed;
             if observed & syscall::HANDLE_SIGNAL_READABLE != 0 {
                 pollfds[poll_index].revents |= pollfds[poll_index].events & READ_EVENTS;
@@ -5514,6 +5585,9 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
             let status = shared_memory::stat(entry)?;
             unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), status) };
             return Ok(0);
+        }
+        if entry.handle.kind == FdKind::ObjectSocket {
+            return Err(ENOTSUP);
         }
         if matches!(
             entry.handle.kind,

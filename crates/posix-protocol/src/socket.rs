@@ -18,6 +18,7 @@ pub const READY_READ: u32 = 1;
 pub const READY_WRITE: u32 = 2;
 pub const READ_CLOSED: u32 = 4;
 pub const WRITE_CLOSED: u32 = 8;
+pub const WRITE_ERROR: u32 = 16;
 
 /// No seek/map authority: a socket description is a duplex byte stream.
 pub const fn descriptor_rights() -> u64 {

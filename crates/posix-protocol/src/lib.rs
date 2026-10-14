@@ -36,6 +36,7 @@ pub const INHERITED_FD_KIND_STREAM_READ: u8 = 7;
 pub const INHERITED_FD_KIND_STREAM_WRITE: u8 = 8;
 pub const INHERITED_FD_KIND_PTY: u8 = 9;
 pub const INHERITED_FD_KIND_SHARED_MEMORY: u8 = 10;
+pub const INHERITED_FD_KIND_SOCKET: u8 = 11;
 pub const INHERITED_FD_DESCRIPTOR_CLOEXEC: u8 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +72,7 @@ const fn valid_inherited_fd_kind(kind: u8) -> bool {
             | INHERITED_FD_KIND_STREAM_WRITE
             | INHERITED_FD_KIND_PTY
             | INHERITED_FD_KIND_SHARED_MEMORY
+            | INHERITED_FD_KIND_SOCKET
     )
 }
 
@@ -86,6 +88,7 @@ pub const fn inherited_fd_kind_requires_handle(kind: u8) -> Option<bool> {
             | INHERITED_FD_KIND_STREAM_WRITE
             | INHERITED_FD_KIND_PTY
             | INHERITED_FD_KIND_SHARED_MEMORY
+            | INHERITED_FD_KIND_SOCKET
     ))
 }
 
