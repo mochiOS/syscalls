@@ -39,6 +39,8 @@ int socketpair(int domain, int type, int protocol, int sv[2]);
 int shutdown(int socket, int how);
 ssize_t send(int socket, const void *buffer, size_t length, int flags);
 ssize_t recv(int socket, void *buffer, size_t length, int flags);
+int getsockname(int socket, struct sockaddr *address, socklen_t *length);
+int getpeername(int socket, struct sockaddr *address, socklen_t *length);
 #ifdef __cplusplus
 }
 #endif

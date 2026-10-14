@@ -9,6 +9,46 @@ pub const SOCK_CLOEXEC: i32 = 0x80000;
 pub const MSG_DONTWAIT: i32 = 0x40;
 pub const MSG_WAITALL: i32 = 0x100;
 pub const MSG_NOSIGNAL: i32 = 0x4000;
+pub const MAX_SOCKADDR_LEN: usize = 110;
+
+/// Serialize mochiOS's C sockaddr layout; wire tags, port encoding and padding
+/// are independent of this ABI. The caller performs any output truncation.
+pub fn encode_sockaddr(address: wire::Address<'_>, output: &mut [u8]) -> Result<usize, i32> {
+    let mut validated = [0; wire::MAX_ADDRESS_LEN];
+    address.encode(&mut validated).map_err(|_| -22)?;
+    let (family, length): (u16, usize) = match address {
+        wire::Address::UnixUnnamed => (1, 2),
+        wire::Address::UnixPath(name) | wire::Address::UnixAbstract(name) => (1, 3 + name.len()),
+        wire::Address::Ipv4 { .. } => (2, 16),
+        wire::Address::Ipv6 { .. } => (10, 28),
+    };
+    if output.len() < length {
+        return Err(-22);
+    }
+    output[..length].fill(0);
+    output[..2].copy_from_slice(&family.to_le_bytes());
+    match address {
+        wire::Address::UnixUnnamed => (),
+        wire::Address::UnixPath(name) => output[2..2 + name.len()].copy_from_slice(name),
+        wire::Address::UnixAbstract(name) => output[3..length].copy_from_slice(name),
+        wire::Address::Ipv4 { address, port } => {
+            output[2..4].copy_from_slice(&port.to_be_bytes());
+            output[4..8].copy_from_slice(&address);
+        }
+        wire::Address::Ipv6 {
+            address,
+            port,
+            flow_info,
+            scope_id,
+        } => {
+            output[2..4].copy_from_slice(&port.to_be_bytes());
+            output[4..8].copy_from_slice(&flow_info.to_be_bytes());
+            output[8..24].copy_from_slice(&address);
+            output[24..28].copy_from_slice(&scope_id.to_le_bytes());
+        }
+    }
+    Ok(length)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MessageOptions {

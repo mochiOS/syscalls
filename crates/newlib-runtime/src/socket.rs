@@ -70,6 +70,19 @@ pub unsafe extern "C" fn socketpair(
 }
 
 fn control(entry: FdEntry, tag: u64, input: &[u8], output: &mut [u8]) -> Result<(), c_int> {
+    let count = query_control(entry, tag, input, output)?;
+    if count != output.len() {
+        return Err(EIO);
+    }
+    Ok(())
+}
+
+fn query_control(
+    entry: FdEntry,
+    tag: u64,
+    input: &[u8],
+    output: &mut [u8],
+) -> Result<usize, c_int> {
     let count = syscall_errno(syscall::raw_syscall6(
         syscall::SyscallNumber::HandleControl,
         entry.handle.lower_handle,
@@ -79,10 +92,56 @@ fn control(entry: FdEntry, tag: u64, input: &[u8], output: &mut [u8]) -> Result<
         output.as_mut_ptr() as u64,
         output.len() as u64,
     ))?;
-    if count as usize != output.len() {
+    if count as usize > output.len() {
         return Err(EIO);
     }
-    Ok(())
+    Ok(count as usize)
+}
+
+unsafe fn socket_name(
+    fd: c_int,
+    address: *mut c_void,
+    length: *mut u32,
+    peer: bool,
+) -> Result<c_int, c_int> {
+    let entry = with_fd_entry(fd)?;
+    if entry.handle.kind != FdKind::ObjectSocket {
+        return Err(mochios_posix_client::newlib_errno::from_status(-88));
+    }
+    if address.is_null() || length.is_null() {
+        return Err(EFAULT);
+    }
+    let capacity = unsafe { length.read() } as usize;
+    let mut encoded = [0; wire::MAX_ADDRESS_LEN];
+    let tag = if peer {
+        wire::CONTROL_PEER_ADDRESS
+    } else {
+        wire::CONTROL_LOCAL_ADDRESS
+    };
+    let count = query_control(entry, tag, &[], &mut encoded)?;
+    let decoded = wire::Address::decode(&encoded[..count]).map_err(|_| EIO)?;
+    let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
+    let required =
+        mochios_posix_client::socket::encode_sockaddr(decoded, &mut native).map_err(|_| EIO)?;
+    unsafe {
+        ptr::copy_nonoverlapping(
+            native.as_ptr(),
+            address.cast::<u8>(),
+            capacity.min(required),
+        );
+        length.write(required as u32);
+    }
+    Ok(0)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getsockname(fd: c_int, address: *mut c_void, length: *mut u32) -> c_int {
+    result_with_errno(unsafe { socket_name(fd, address, length, false) }, -1)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpeername(fd: c_int, address: *mut c_void, length: *mut u32) -> c_int {
+    result_with_errno(unsafe { socket_name(fd, address, length, true) }, -1)
 }
 
 #[unsafe(no_mangle)]
