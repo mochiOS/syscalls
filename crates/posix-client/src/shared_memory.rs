@@ -1,7 +1,10 @@
 //! Named RAM control operations; mapped data and extent changes use native
 //! Handle operations without routing frequent accesses through the service.
 
-use crate::{Client, ClientError, ObjectHandleAttachment, ObjectHandles, ObjectTransport};
+use crate::{
+    Client, ClientError, ObjectHandleAttachment, ObjectHandles, ObjectTransport,
+    drain_received_handles,
+};
 use mochios_posix_protocol::{self as protocol, shared_memory as wire};
 
 pub fn rights(read_write: bool) -> u64 {
@@ -44,6 +47,8 @@ impl<T: ObjectTransport> Client<T> {
     /// Borrow an explicitly attached descriptor and receive a new attenuated
     /// RAM Handle for native mapping. The returned Handle must be closed after
     /// MemoryMap; the mapping retains its own backing reference.
+    /// Failed replies close distinct newly received Handles, never the borrowed
+    /// descriptor, and do not replay the operation.
     pub fn shared_memory_backing(
         &self,
         descriptor: ObjectHandleAttachment<T::Handle>,
@@ -58,7 +63,7 @@ impl<T: ObjectTransport> Client<T> {
             } else {
                 0
             };
-        if descriptor.rights & required != required {
+        if descriptor.handle == T::Handle::default() || descriptor.rights & required != required {
             return Err(ClientError::Remote(-13));
         }
         let mut handles = ObjectHandles::new();
@@ -68,6 +73,7 @@ impl<T: ObjectTransport> Client<T> {
                 rights: required,
             })
             .map_err(|_| ClientError::RequestTooLarge)?;
+        let borrowed = handles.clone();
         let outcome = self.request_with_handles(
             protocol::OP_SHARED_MEMORY_BACKING,
             0,
@@ -77,18 +83,19 @@ impl<T: ObjectTransport> Client<T> {
         );
         if matches!(outcome, Ok(0)) && handles.len() == 1 {
             let received = handles.get(0).unwrap();
-            if received.rights == wire::mapping_rights(writable) {
+            if received.handle != T::Handle::default()
+                && received.handle != descriptor.handle
+                && received.rights == wire::mapping_rights(writable)
+            {
                 return Ok(received);
             }
         }
-        for received in handles.iter() {
-            close(received.handle);
-        }
+        drain_received_handles(&mut handles, &borrowed, &mut close);
         Err(outcome.err().unwrap_or(ClientError::MismatchedResponse))
     }
 
-    /// Returns ownership of one receiver-local Handle. `close` releases every
-    /// unexpected attachment, including malformed or unsuccessful replies.
+    /// Returns ownership of one valid receiver-local Handle. `close` releases
+    /// distinct owned unexpected attachments, including failed replies.
     pub fn open_shared_memory(
         &self,
         request: wire::Open<'_>,
@@ -106,13 +113,13 @@ impl<T: ObjectTransport> Client<T> {
         );
         if matches!(outcome, Ok(0)) && handles.len() == 1 {
             let received = handles.get(0).unwrap();
-            if received.rights == rights(request.options & wire::READ_WRITE != 0) {
+            if received.handle != T::Handle::default()
+                && received.rights == rights(request.options & wire::READ_WRITE != 0)
+            {
                 return Ok(received);
             }
         }
-        for received in handles.iter() {
-            close(received.handle);
-        }
+        drain_received_handles(&mut handles, &ObjectHandles::new(), &mut close);
         Err(outcome.err().unwrap_or(ClientError::MismatchedResponse))
     }
 
@@ -134,9 +141,7 @@ impl<T: ObjectTransport> Client<T> {
         if matches!(outcome, Ok(0)) && handles.is_empty() {
             return Ok(());
         }
-        for received in handles.iter() {
-            close(received.handle);
-        }
+        drain_received_handles(&mut handles, &ObjectHandles::new(), &mut close);
         Err(outcome.err().unwrap_or(ClientError::MismatchedResponse))
     }
 }

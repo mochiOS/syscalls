@@ -117,6 +117,25 @@ impl<H: Copy> Default for ObjectHandles<H> {
     }
 }
 
+fn drain_received_handles<H: Copy + Default + Eq>(
+    handles: &mut ObjectHandles<H>,
+    borrowed: &ObjectHandles<H>,
+    mut close: impl FnMut(H),
+) {
+    for (index, attached) in handles.iter().enumerate() {
+        if attached.handle != H::default()
+            && !borrowed.iter().any(|source| source.handle == attached.handle)
+            && !handles
+                .iter()
+                .take(index)
+                .any(|old| old.handle == attached.handle)
+        {
+            close(attached.handle);
+        }
+    }
+    handles.clear();
+}
+
 pub trait ObjectTransport: Transport {
     /// Default denotes an invalid Handle, never an owned resource.
     type Handle: Copy + Default + Eq;
@@ -1785,18 +1804,9 @@ impl<T: ObjectTransport> Client<T> {
         handles: &mut ObjectHandles<T::Handle>,
         borrowed: &ObjectHandles<T::Handle>,
     ) {
-        for (index, attached) in handles.iter().enumerate() {
-            if attached.handle != T::Handle::default()
-                && !borrowed.iter().any(|source| source.handle == attached.handle)
-                && !handles
-                    .iter()
-                    .take(index)
-                    .any(|old| old.handle == attached.handle)
-            {
-                self.transport.close_received_handle(attached.handle);
-            }
-        }
-        handles.clear();
+        drain_received_handles(handles, borrowed, |handle| {
+            self.transport.close_received_handle(handle)
+        });
     }
 
     pub fn request_with_handles(
