@@ -13,8 +13,8 @@ extern crate std;
 
 #[cfg(all(feature = "runtime", feature = "std"))]
 compile_error!("features `runtime` and `std` are mutually exclusive");
-#[cfg(not(any(feature = "runtime", feature = "std")))]
-compile_error!("either feature `runtime` or `std` must be enabled");
+// With neither startup feature, the embedding program supplies its allocator
+// and panic handler. Native Handle/IPC helpers do not require a runtime.
 
 use core::fmt::{self, Write};
 
@@ -26,7 +26,7 @@ pub use mochi_user_syscall as syscall;
 #[cfg(feature = "runtime")]
 use runtime as runtime_support;
 
-#[cfg(feature = "std")]
+#[cfg(not(feature = "runtime"))]
 mod runtime_support {
     use super::syscall;
 
