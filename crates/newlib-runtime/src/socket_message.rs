@@ -429,7 +429,8 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
     if !entry.handle.kind.is_socket() {
         return Err(mochios_posix_client::newlib_errno::from_status(-88));
     }
-    let wait_all = !socket::is_datagram(entry)? && flags & MSG_WAITALL != 0 && flags & MSG_PEEK == 0;
+    let wait_all =
+        !socket::is_datagram(entry)? && flags & MSG_WAITALL != 0 && flags & MSG_PEEK == 0;
     let (_, thread) = register_current_thread().ok_or(EAGAIN)?;
     let mut call = ReceiveCall {
         entry,
@@ -449,7 +450,11 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
                 &mut part,
                 &vectors[head..],
                 total - copied,
-                if wait_all { flags & !MSG_WAITALL } else { flags },
+                if wait_all {
+                    flags & !MSG_WAITALL
+                } else {
+                    flags
+                },
             )
         };
         let count = match result {
@@ -502,7 +507,7 @@ unsafe fn receive_once(
     )
     .map_err(|_| mochios_posix_client::newlib_errno::EOPNOTSUPP)?;
     let datagram = socket::is_datagram(entry)?;
-    if !datagram && options.peek && message.control_length == 0 {
+    if !datagram && options.peek && options.wait_all && message.control_length == 0 {
         let mut peer = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
         let mut required = peer.len() as u32;
         if !message.name.is_null() {
@@ -543,7 +548,10 @@ unsafe fn receive_once(
         *output = message;
         return Ok(count as isize);
     }
-    if options.peek {
+    // WAITALL peeks need one coherent snapshot across bounded IPC windows.
+    // Preserve the existing byte-only path above until that is implemented;
+    // do not silently downgrade a control-bearing WAITALL into a short peek.
+    if !datagram && options.peek && options.wait_all {
         return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
     }
     if !datagram && flags & MSG_TRUNC != 0 {
@@ -581,22 +589,37 @@ unsafe fn receive_once(
             entries: [None; control::MAX_RIGHTS],
             count: 0,
         };
-        let result = socket_transfer::receive(
-            &transport,
-            ObjectHandleAttachment {
-                handle: entry.handle.lower_handle as u32,
-                rights: entry.rights,
-            },
-            ObjectHandleAttachment {
-                handle: ram.0,
-                rights: ram_rights,
-            },
-            0,
-            length as u32,
-            incoming.reservation.len() as u16,
-            &mut response,
-            close_object_handle,
-        );
+        let source = ObjectHandleAttachment {
+            handle: entry.handle.lower_handle as u32,
+            rights: entry.rights,
+        };
+        let buffer = ObjectHandleAttachment {
+            handle: ram.0,
+            rights: ram_rights,
+        };
+        let result = if options.peek {
+            socket_transfer::peek(
+                &transport,
+                source,
+                buffer,
+                0,
+                length as u32,
+                incoming.reservation.len() as u16,
+                &mut response,
+                close_object_handle,
+            )
+        } else {
+            socket_transfer::receive(
+                &transport,
+                source,
+                buffer,
+                0,
+                length as u32,
+                incoming.reservation.len() as u16,
+                &mut response,
+                close_object_handle,
+            )
+        };
         match result {
             Ok(received) => break (received, incoming),
             Err(PosixClientError::Remote(-11))

@@ -290,12 +290,72 @@ pub fn receive<'a, T: ObjectTransport>(
     length: u32,
     maximum_rights: u16,
     response: &'a mut [u8],
-    mut close: impl FnMut(T::Handle),
+    close: impl FnMut(T::Handle),
 ) -> Result<Received<'a, T::Handle>, ClientError<T::Error>>
 where
     T::Handle: Default + Eq,
 {
-    let request = wire::receive(offset, length, maximum_rights).map_err(ClientError::Protocol)?;
+    receive_using(
+        transport,
+        socket,
+        buffer,
+        offset,
+        length,
+        maximum_rights,
+        response,
+        close,
+        false,
+    )
+}
+
+/// Peek data and obtain an independently owned receipt while preserving the
+/// queue. Closing or delivering this receipt never consumes the original data.
+pub fn peek<'a, T: ObjectTransport>(
+    transport: &T,
+    socket: Handle<T::Handle>,
+    buffer: Handle<T::Handle>,
+    offset: u64,
+    length: u32,
+    maximum_rights: u16,
+    response: &'a mut [u8],
+    close: impl FnMut(T::Handle),
+) -> Result<Received<'a, T::Handle>, ClientError<T::Error>>
+where
+    T::Handle: Default + Eq,
+{
+    receive_using(
+        transport,
+        socket,
+        buffer,
+        offset,
+        length,
+        maximum_rights,
+        response,
+        close,
+        true,
+    )
+}
+
+fn receive_using<'a, T: ObjectTransport>(
+    transport: &T,
+    socket: Handle<T::Handle>,
+    buffer: Handle<T::Handle>,
+    offset: u64,
+    length: u32,
+    maximum_rights: u16,
+    response: &'a mut [u8],
+    mut close: impl FnMut(T::Handle),
+    peek: bool,
+) -> Result<Received<'a, T::Handle>, ClientError<T::Error>>
+where
+    T::Handle: Default + Eq,
+{
+    let request = if peek {
+        wire::peek(offset, length, maximum_rights)
+    } else {
+        wire::receive(offset, length, maximum_rights)
+    }
+    .map_err(ClientError::Protocol)?;
     if socket.handle == buffer.handle || response.len() < wire::MAX_RECEIVE_REPLY_LEN {
         return Err(ClientError::MismatchedResponse);
     }
@@ -311,8 +371,12 @@ where
             .call_with_handles(&request, response, &mut handles)
             .map_err(ClientError::Transport)?;
         let bytes = reply(response, count, handles.len())?;
-        let message = wire::ReceiveReply::decode(length, maximum_rights, bytes)
-            .map_err(ClientError::Protocol)?;
+        let message = if peek {
+            wire::ReceiveReply::decode_peek(length, maximum_rights, bytes)
+        } else {
+            wire::ReceiveReply::decode(length, maximum_rights, bytes)
+        }
+        .map_err(ClientError::Protocol)?;
         let expected = usize::from(message.available_rights != 0);
         if handles.len() != expected {
             return Err(ClientError::MismatchedResponse);

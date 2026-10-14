@@ -1,5 +1,5 @@
 //! Ancillary messages. Authority is carried ONLY in IPC attachments: send
-//! staging attaches socket or prepared-route WRITE; consuming receive attaches socket READ.
+//! staging attaches socket or prepared-route WRITE; receive and peek attach socket READ.
 //! File batches require transaction CONTROL and transfer explicit references.
 //! Inline fields contain lengths, batch indices and FD dispatch metadata only.
 use crate::{InheritedFdMetadata, ProtocolError, socket::MAX_TRANSFERRED_DESCRIPTORS};
@@ -42,6 +42,12 @@ pub enum Request {
     },
     /// Socket READ plus RAM WRITE|MAP; consume a record or stream prefix.
     Receive {
+        offset: u64,
+        length: u32,
+        maximum_rights: u16,
+    },
+    /// Same authority as Receive; retain a receipt without consuming the queue.
+    Peek {
         offset: u64,
         length: u32,
         maximum_rights: u16,
@@ -116,7 +122,8 @@ pub fn decode(input: &[u8]) -> Result<Request, Error> {
     if input[4..6] != 1u16.to_le_bytes() {
         return Err(ProtocolError::UnsupportedVersion.into());
     }
-    match u16::from_le_bytes(input[6..8].try_into().unwrap()) {
+    let operation = u16::from_le_bytes(input[6..8].try_into().unwrap());
+    match operation {
         1 => {
             if input.len() != HEADER_LEN || input[14..16] != [0; 2] {
                 return Err(InvalidLength.into());
@@ -165,7 +172,7 @@ pub fn decode(input: &[u8]) -> Result<Request, Error> {
                 offset: u64::from_le_bytes(input[8..16].try_into().unwrap()),
             })
         }
-        4 => {
+        4 | 6 => {
             if input.len() != RECEIVE_REQUEST_LEN || input[22..].iter().any(|byte| *byte != 0) {
                 return Err(InvalidLength.into());
             }
@@ -173,10 +180,18 @@ pub fn decode(input: &[u8]) -> Result<Request, Error> {
             let length = u32::from_le_bytes(input[16..20].try_into().unwrap());
             let maximum_rights = u16::from_le_bytes(input[20..22].try_into().unwrap());
             receive(offset, length, maximum_rights)?;
-            Ok(Request::Receive {
-                offset,
-                length,
-                maximum_rights,
+            Ok(if operation == 6 {
+                Request::Peek {
+                    offset,
+                    length,
+                    maximum_rights,
+                }
+            } else {
+                Request::Receive {
+                    offset,
+                    length,
+                    maximum_rights,
+                }
             })
         }
         5 => {
@@ -235,6 +250,16 @@ pub fn deliver(offset: u16, maximum: u16) -> Result<[u8; HEADER_LEN], ProtocolEr
     Ok(out)
 }
 
+pub fn peek(
+    offset: u64,
+    length: u32,
+    maximum_rights: u16,
+) -> Result<[u8; RECEIVE_REQUEST_LEN], ProtocolError> {
+    let mut request = receive(offset, length, maximum_rights)?;
+    request[6..8].copy_from_slice(&6u16.to_le_bytes());
+    Ok(request)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReceiveReply<'a> {
     pub copied: u32,
@@ -264,6 +289,23 @@ impl<'a> ReceiveReply<'a> {
         Ok(())
     }
     pub fn encode(self, length: u32, maximum: u16, out: &mut [u8]) -> Result<usize, ProtocolError> {
+        self.encode_using(length, maximum, out, 4)
+    }
+    pub fn encode_peek(
+        self,
+        length: u32,
+        maximum: u16,
+        out: &mut [u8],
+    ) -> Result<usize, ProtocolError> {
+        self.encode_using(length, maximum, out, 6)
+    }
+    fn encode_using(
+        self,
+        length: u32,
+        maximum: u16,
+        out: &mut [u8],
+        operation: u16,
+    ) -> Result<usize, ProtocolError> {
         self.validate(length, maximum)?;
         let mut source = [0; crate::socket::MAX_ADDRESS_LEN];
         let count = self.source.encode(&mut source)?;
@@ -274,7 +316,7 @@ impl<'a> ReceiveReply<'a> {
         out[..total].fill(0);
         out[..4].copy_from_slice(b"SCMR");
         out[4..6].copy_from_slice(&1u16.to_le_bytes());
-        out[6..8].copy_from_slice(&4u16.to_le_bytes());
+        out[6..8].copy_from_slice(&operation.to_le_bytes());
         out[8..12].copy_from_slice(&self.copied.to_le_bytes());
         out[12..16].copy_from_slice(&self.length.to_le_bytes());
         out[16..18].copy_from_slice(&self.total_rights.to_le_bytes());
@@ -284,10 +326,21 @@ impl<'a> ReceiveReply<'a> {
         Ok(total)
     }
     pub fn decode(length: u32, maximum: u16, input: &'a [u8]) -> Result<Self, ProtocolError> {
+        Self::decode_using(length, maximum, input, 4)
+    }
+    pub fn decode_peek(length: u32, maximum: u16, input: &'a [u8]) -> Result<Self, ProtocolError> {
+        Self::decode_using(length, maximum, input, 6)
+    }
+    fn decode_using(
+        length: u32,
+        maximum: u16,
+        input: &'a [u8],
+        operation: u16,
+    ) -> Result<Self, ProtocolError> {
         if input.len() < RECEIVE_REPLY_HEADER_LEN || input[22..24] != [0; 2] {
             return Err(ProtocolError::InvalidLength);
         }
-        reply_prefix(input, 4)?;
+        reply_prefix(input, operation)?;
         let count = u16::from_le_bytes(input[20..22].try_into().unwrap()) as usize;
         if input.len() != RECEIVE_REPLY_HEADER_LEN + count {
             return Err(ProtocolError::InvalidLength);
