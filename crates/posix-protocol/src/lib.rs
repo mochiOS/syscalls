@@ -229,6 +229,7 @@ pub const OP_SEMAPHORE_OPEN: u16 = 74;
 pub const OP_SEMAPHORE_UNLINK: u16 = 75;
 pub const OP_SHARED_MEMORY_OPEN: u16 = 76;
 pub const OP_SHARED_MEMORY_UNLINK: u16 = 77;
+pub const OP_SHARED_MEMORY_BACKING: u16 = 78;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

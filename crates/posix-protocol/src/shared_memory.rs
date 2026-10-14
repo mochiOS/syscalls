@@ -16,6 +16,31 @@ pub const TRUNCATE: u32 = 8;
 pub const CONTROL_LENGTH: u64 = u64::from_le_bytes(*b"SHMLEN01");
 pub const CONTROL_RESIZE: u64 = u64::from_le_bytes(*b"SHMSIZ01");
 
+pub fn descriptor_rights(read_write: bool) -> u64 {
+    mnu_abi::HANDLE_RIGHT_READ
+        | mnu_abi::HANDLE_RIGHT_SEEK
+        | mnu_abi::HANDLE_RIGHT_CONTROL
+        | mnu_abi::HANDLE_RIGHT_DUPLICATE
+        | mnu_abi::HANDLE_RIGHT_TRANSFER
+        | if read_write {
+            mnu_abi::HANDLE_RIGHT_WRITE
+        } else {
+            0
+        }
+}
+
+pub fn mapping_rights(writable: bool) -> u64 {
+    mnu_abi::HANDLE_RIGHT_READ
+        | mnu_abi::HANDLE_RIGHT_MAP
+        | mnu_abi::HANDLE_RIGHT_DUPLICATE
+        | mnu_abi::HANDLE_RIGHT_TRANSFER
+        | if writable {
+            mnu_abi::HANDLE_RIGHT_WRITE
+        } else {
+            0
+        }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Open<'a> {
     pub options: u32,

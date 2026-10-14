@@ -5,15 +5,7 @@ use crate::{Client, ClientError, ObjectHandleAttachment, ObjectHandles, ObjectTr
 use mochios_posix_protocol::{self as protocol, shared_memory as wire};
 
 pub fn rights(read_write: bool) -> u64 {
-    mnu_abi::HANDLE_RIGHT_READ
-        | mnu_abi::HANDLE_RIGHT_MAP
-        | mnu_abi::HANDLE_RIGHT_DUPLICATE
-        | mnu_abi::HANDLE_RIGHT_TRANSFER
-        | if read_write {
-            mnu_abi::HANDLE_RIGHT_WRITE | mnu_abi::HANDLE_RIGHT_CONTROL
-        } else {
-            0
-        }
+    wire::descriptor_rights(read_write)
 }
 
 impl<T: ObjectTransport> Client<T> {

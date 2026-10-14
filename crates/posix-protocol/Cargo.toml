@@ -4,5 +4,8 @@ version.workspace = true
 edition.workspace = true
 license = "Apache-2.0"
 
+[dependencies]
+mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
+
 [lib]
 path = "src/lib.rs"
