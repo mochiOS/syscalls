@@ -1,5 +1,6 @@
-//! Direct socket-worker record transport. Exactly two IPC attachments carry
-//! socket and RAM-buffer authority; inline fields contain no PID, FD, handle
+//! Direct socket-worker record transport. Data calls attach socket and RAM
+//! authority; WaitSend attaches only WRITE socket authority and returns an
+//! owned WAIT notification. Inline fields contain no PID, FD, handle
 //! number or address-space pointer. Sender identity/delivery flags come from
 //! the kernel. This envelope is separate from chunked native stream I/O.
 
@@ -19,6 +20,7 @@ const VERSION: u16 = 1;
 pub enum Operation {
     Send = 1,
     Receive = 2,
+    WaitSend = 3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,7 +35,8 @@ impl Request {
     pub fn validate(self) -> Result<(), ProtocolError> {
         if self.length as usize > MAX_RECORD_SIZE
             || self.offset.checked_add(u64::from(self.length)).is_none()
-            || self.operation == Operation::Send && self.peek
+            || self.operation != Operation::Receive && self.peek
+            || self.operation == Operation::WaitSend && self.offset != 0
         {
             return Err(ProtocolError::InvalidLength);
         }
@@ -76,7 +79,7 @@ impl Request {
     /// The sender must separately possess TRANSFER to attach these references.
     pub const fn socket_rights(self) -> u64 {
         match self.operation {
-            Operation::Send => mnu_abi::HANDLE_RIGHT_WRITE,
+            Operation::Send | Operation::WaitSend => mnu_abi::HANDLE_RIGHT_WRITE,
             Operation::Receive => mnu_abi::HANDLE_RIGHT_READ,
         }
     }
@@ -84,10 +87,14 @@ impl Request {
     /// MAP permits MemoryObjectLength to verify RAM type and live bounds;
     /// positioned RAM I/O then needs only the relevant data access right.
     pub const fn buffer_rights(self) -> u64 {
+        if matches!(self.operation, Operation::WaitSend) {
+            return 0;
+        }
         mnu_abi::HANDLE_RIGHT_MAP
             | match self.operation {
                 Operation::Send => mnu_abi::HANDLE_RIGHT_READ,
                 Operation::Receive => mnu_abi::HANDLE_RIGHT_WRITE,
+                Operation::WaitSend => 0,
             }
     }
 }
@@ -184,6 +191,7 @@ fn operation(input: &[u8]) -> Result<Operation, ProtocolError> {
     match u16::from_le_bytes(input[6..8].try_into().unwrap()) {
         1 => Ok(Operation::Send),
         2 => Ok(Operation::Receive),
+        3 => Ok(Operation::WaitSend),
         _ => Err(ProtocolError::InvalidLength),
     }
 }

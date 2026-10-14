@@ -14,6 +14,7 @@ mod semaphore;
 mod named_semaphore;
 mod shared_memory;
 mod socket;
+mod socket_record;
 mod stdio_cancellation;
 mod thread_cleanup;
 mod fault_signal;
@@ -402,6 +403,13 @@ enum FdKind {
     ObjectPty = 9,
     ObjectSharedMemory = 10,
     ObjectSocket = 11,
+    ObjectDatagram = 12,
+}
+
+impl FdKind {
+    const fn is_socket(self) -> bool {
+        matches!(self, Self::ObjectSocket | Self::ObjectDatagram)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -500,6 +508,7 @@ fn inherited_fd_kind(kind: FdKind) -> Option<u8> {
         FdKind::ObjectPty => Some(posix_protocol::INHERITED_FD_KIND_PTY),
         FdKind::ObjectSharedMemory => Some(posix_protocol::INHERITED_FD_KIND_SHARED_MEMORY),
         FdKind::ObjectSocket => Some(posix_protocol::INHERITED_FD_KIND_SOCKET),
+        FdKind::ObjectDatagram => Some(posix_protocol::INHERITED_FD_KIND_DATAGRAM),
     }
 }
 
@@ -515,6 +524,7 @@ fn fd_kind_from_inherited(kind: u8) -> Option<FdKind> {
         posix_protocol::INHERITED_FD_KIND_PTY => Some(FdKind::ObjectPty),
         posix_protocol::INHERITED_FD_KIND_SHARED_MEMORY => Some(FdKind::ObjectSharedMemory),
         posix_protocol::INHERITED_FD_KIND_SOCKET => Some(FdKind::ObjectSocket),
+        posix_protocol::INHERITED_FD_KIND_DATAGRAM => Some(FdKind::ObjectDatagram),
         _ => None,
     }
 }
@@ -3397,7 +3407,7 @@ fn allocate_fd_entry(
 }
 
 fn handle_is_nonblocking(entry: FdEntry) -> Result<bool, c_int> {
-    if entry.handle.kind == FdKind::ObjectSocket {
+    if entry.handle.kind.is_socket() {
         return Ok(socket::get_status_flags(entry)? & O_NONBLOCK != 0);
     }
     let options = syscall_errno(syscall::raw_syscall1(
@@ -3615,6 +3625,9 @@ pub extern "C" fn __mochios_stdio_cancel_leave() {
 }
 
 fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result<isize, c_int> {
+    if entry.handle.kind.is_socket() {
+        return socket::message_entry(entry, buffer as u64, length, 0, true);
+    }
     if matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSharedMemory)
         && !mochios_posix_client::fd::access_allows_write(entry.handle.open_flags as u32)
     {
@@ -3629,20 +3642,6 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
             buffer as u64,
             length as u64,
         ))?,
-        FdKind::ObjectSocket => {
-            let result = stream_io(entry, syscall::HANDLE_SIGNAL_WRITABLE, || {
-                syscall_errno(syscall::raw_syscall3(
-                    syscall::SyscallNumber::HandleWrite,
-                    entry.handle.lower_handle,
-                    buffer as u64,
-                    length as u64,
-                ))
-            });
-            if matches!(result, Err(EPIPE)) {
-                generate_thread_signal(posix_protocol::SIGNAL_PIPE)?;
-            }
-            result?
-        }
         FdKind::ObjectStreamWrite => {
             let (_, control) = register_current_thread().ok_or(EAGAIN)?;
             let caught = control.nonrestart_signal_generation.load(Ordering::Acquire);
@@ -3726,6 +3725,9 @@ fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<is
     if length == 0 {
         return Ok(0);
     }
+    if entry.handle.kind.is_socket() {
+        return socket::message_entry(entry, buffer as u64, length, 0, false);
+    }
     let read = match entry.handle.kind {
         FdKind::Stdin => return Err(EBADF),
         FdKind::ObjectFile | FdKind::ObjectSharedMemory => syscall_errno(syscall::raw_syscall3(
@@ -3734,18 +3736,6 @@ fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<is
             buffer as u64,
             length as u64,
         ))?,
-        FdKind::ObjectSocket => stream_io(
-            entry,
-            syscall::HANDLE_SIGNAL_READABLE,
-            || {
-                syscall_errno(syscall::raw_syscall3(
-                    syscall::SyscallNumber::HandleRead,
-                    entry.handle.lower_handle,
-                    buffer as u64,
-                    length as u64,
-                ))
-            },
-        )?,
         FdKind::ObjectStreamRead => stream_io(
             entry,
             syscall::HANDLE_SIGNAL_READABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
@@ -4429,7 +4419,7 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
                 duplicate_fd_from(&mut state.fds, fd, Some(arg), cmd == F_DUPFD_CLOEXEC)
             }
             F_GETFD => Ok(entry.descriptor_flags as c_int),
-            F_GETFL if entry.handle.kind == FdKind::ObjectSocket => {
+            F_GETFL if entry.handle.kind.is_socket() => {
                 socket::get_status_flags(entry)
             }
             F_GETFL if entry.handle.kind == FdKind::ObjectSharedMemory =>
@@ -4475,7 +4465,7 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
             }
             F_GETFL => Ok(entry.handle.open_flags),
             F_SETFL => {
-                if entry.handle.kind == FdKind::ObjectSocket {
+                if entry.handle.kind.is_socket() {
                     socket::set_status_flags(entry, arg)?;
                     return Ok(0);
                 }
@@ -4781,8 +4771,8 @@ fn select_with_deadline(
                         ready_read |= requested_read & mask;
                     }
                 }
-                FdKind::ObjectPty | FdKind::ObjectSocket => {
-                    let mut interests = if entry.handle.kind == FdKind::ObjectSocket {
+                FdKind::ObjectPty | FdKind::ObjectSocket | FdKind::ObjectDatagram => {
+                    let mut interests = if entry.handle.kind.is_socket() {
                         0
                     } else {
                         syscall::HANDLE_SIGNAL_PEER_CLOSED
@@ -4919,7 +4909,7 @@ fn poll_with_deadline(
                 continue;
             };
             match entry.handle.kind {
-                FdKind::ObjectSocket => {
+                FdKind::ObjectSocket | FdKind::ObjectDatagram => {
                     pollfds[index].revents = socket::poll_events(entry, pollfds[index].events)?;
                     immediately_ready |= pollfds[index].revents != 0;
                     let mut interests = syscall::HANDLE_SIGNAL_PEER_CLOSED;
@@ -4981,7 +4971,7 @@ fn poll_with_deadline(
         wait_for_multiplex(&mut items[..item_count], wait_deadline, control, caught)?;
         for item_index in 0..item_count {
             let poll_index = item_pollfds[item_index];
-            if item_kinds[item_index] == FdKind::ObjectSocket {
+            if item_kinds[item_index].is_socket() {
                 pollfds[poll_index].revents = socket::poll_events(
                     with_fd_entry(pollfds[poll_index].fd)?,
                     pollfds[poll_index].events,
@@ -5731,7 +5721,7 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
             unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), status) };
             return Ok(0);
         }
-        if entry.handle.kind == FdKind::ObjectSocket {
+        if entry.handle.kind.is_socket() {
             let status = socket::stat(entry)?;
             unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), status) };
             return Ok(0);

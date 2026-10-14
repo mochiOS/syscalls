@@ -13,7 +13,7 @@ pub(super) struct SocketWait {
 impl SocketWait {
     pub(super) fn new(entry: FdEntry, interests: u64) -> Result<Self, c_int> {
         Ok(Self {
-            started: if entry.handle.kind == FdKind::ObjectSocket
+            started: if entry.handle.kind.is_socket()
                 && interests & (syscall::HANDLE_SIGNAL_READABLE | syscall::HANDLE_SIGNAL_WRITABLE)
                     != 0
             {
@@ -57,7 +57,7 @@ pub unsafe extern "C" fn setsockopt(
 ) -> c_int {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if entry.handle.kind != FdKind::ObjectSocket {
+        if !entry.handle.kind.is_socket() {
             return Err(mochios_posix_client::newlib_errno::from_status(-88));
         }
         if level == 1 && matches!(option, 20 | 21) {
@@ -117,7 +117,7 @@ pub unsafe extern "C" fn getsockopt(
 ) -> c_int {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if entry.handle.kind != FdKind::ObjectSocket {
+        if !entry.handle.kind.is_socket() {
             return Err(mochios_posix_client::newlib_errno::from_status(-88));
         }
         if level == 1 && matches!(option, 20 | 21) {
@@ -186,7 +186,7 @@ pub unsafe extern "C" fn getsockopt(
     result_with_errno(result, -1)
 }
 
-struct PendingSocketJob(u32);
+pub(super) struct PendingSocketJob(pub(super) u32);
 impl Drop for PendingSocketJob {
     fn drop(&mut self) {
         close_object_handle(self.0);
@@ -195,7 +195,7 @@ impl Drop for PendingSocketJob {
 
 unsafe fn connect_io(fd: c_int, address: *const c_void, length: u32) -> Result<c_int, c_int> {
     let entry = with_fd_entry(fd)?;
-    if entry.handle.kind != FdKind::ObjectSocket {
+    if !entry.handle.kind.is_socket() {
         return Err(mochios_posix_client::newlib_errno::from_status(-88));
     }
     if address.is_null() {
@@ -278,7 +278,7 @@ unsafe fn accept_io(
         return Err(EINVAL);
     }
     let entry = with_fd_entry(fd)?;
-    if entry.handle.kind != FdKind::ObjectSocket {
+    if !entry.handle.kind.is_socket() {
         return Err(mochios_posix_client::newlib_errno::from_status(-88));
     }
     if !address.is_null() && length.is_null() {
@@ -378,7 +378,7 @@ fn finish_accept(result: Result<c_int, c_int>) -> c_int {
 pub extern "C" fn listen(fd: c_int, backlog: c_int) -> c_int {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if entry.handle.kind != FdKind::ObjectSocket {
+        if !entry.handle.kind.is_socket() {
             return Err(mochios_posix_client::newlib_errno::from_status(-88));
         }
         control(
@@ -396,7 +396,7 @@ pub extern "C" fn listen(fd: c_int, backlog: c_int) -> c_int {
 pub unsafe extern "C" fn bind(fd: c_int, address: *const c_void, length: u32) -> c_int {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if entry.handle.kind != FdKind::ObjectSocket {
+        if !entry.handle.kind.is_socket() {
             return Err(mochios_posix_client::newlib_errno::from_status(-88));
         }
         if address.is_null() {
@@ -421,11 +421,6 @@ pub extern "C" fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int {
     let result = (|| {
         let (create, cloexec) = mochios_posix_client::socket::newlib_create(domain, kind, protocol)
             .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
-        // Keep the C API disabled until its record-aware data path is wired;
-        // ordinary native stream I/O must never split a datagram into chunks.
-        if create.kind == wire::Kind::Datagram {
-            return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
-        }
         let limit = process_fd_limit()?;
         let pending = PendingFdReservation(state().fds.reserve_from(0, limit).map_err(|_| EMFILE)?);
         let opened = posix_client()
@@ -436,7 +431,11 @@ pub extern "C" fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int {
         let entry = object_entry(
             u64::from(opened.handle),
             opened.rights,
-            FdKind::ObjectSocket,
+            if create.kind == wire::Kind::Datagram {
+                FdKind::ObjectDatagram
+            } else {
+                FdKind::ObjectSocket
+            },
             flags,
         );
         let result = state().fds.commit_reservation(&pending.0, entry);
@@ -472,9 +471,6 @@ pub unsafe extern "C" fn socketpair(
         }
         let (create, cloexec) = mochios_posix_client::socket::newlib_create(domain, kind, protocol)
             .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
-        if create.kind == wire::Kind::Datagram {
-            return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
-        }
         let limit = process_fd_limit()?;
         let pending = PendingPair(
             state()
@@ -491,7 +487,11 @@ pub unsafe extern "C" fn socketpair(
             object_entry(
                 u64::from(opened.handle),
                 opened.rights,
-                FdKind::ObjectSocket,
+                if create.kind == wire::Kind::Datagram {
+                    FdKind::ObjectDatagram
+                } else {
+                    FdKind::ObjectSocket
+                },
                 flags,
             )
         });
@@ -553,7 +553,7 @@ unsafe fn socket_name(
     peer: bool,
 ) -> Result<c_int, c_int> {
     let entry = with_fd_entry(fd)?;
-    if entry.handle.kind != FdKind::ObjectSocket {
+    if !entry.handle.kind.is_socket() {
         return Err(mochios_posix_client::newlib_errno::from_status(-88));
     }
     if address.is_null() || length.is_null() {
@@ -596,7 +596,7 @@ pub unsafe extern "C" fn getpeername(fd: c_int, address: *mut c_void, length: *m
 pub extern "C" fn shutdown(fd: c_int, how: c_int) -> c_int {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if entry.handle.kind != FdKind::ObjectSocket {
+        if !entry.handle.kind.is_socket() {
             return Err(mochios_posix_client::newlib_errno::from_status(-88));
         }
         if !(0..=2).contains(&how) {
@@ -713,8 +713,26 @@ fn message_io(
     sending: bool,
 ) -> Result<isize, c_int> {
     let entry = with_fd_entry(fd)?;
-    if entry.handle.kind != FdKind::ObjectSocket {
+    message_entry(entry, buffer, length, flags, sending)
+}
+
+pub(super) fn is_datagram(entry: FdEntry) -> Result<bool, c_int> {
+    Ok(entry.handle.kind == FdKind::ObjectDatagram)
+}
+
+pub(super) fn message_entry(
+    entry: FdEntry,
+    buffer: u64,
+    length: usize,
+    flags: c_int,
+    sending: bool,
+) -> Result<isize, c_int> {
+    if !entry.handle.kind.is_socket() {
         return Err(mochios_posix_client::newlib_errno::from_status(-88));
+    }
+    if is_datagram(entry)? {
+        return super::socket_record::io(entry, buffer, length, flags, sending)
+            .map(|record| record.count);
     }
     let options = mochios_posix_client::socket::message_options(flags, sending)
         .map_err(|_| mochios_posix_client::newlib_errno::EOPNOTSUPP)?;
@@ -819,6 +837,65 @@ pub extern "C" fn recv(fd: c_int, buffer: *mut c_void, length: usize, flags: c_i
     ))
 }
 
+fn destination_supported(fd: c_int, address: *const c_void) -> Result<(), c_int> {
+    if !address.is_null() {
+        let entry = with_fd_entry(fd)?;
+        if !entry.handle.kind.is_socket() {
+            return Err(mochios_posix_client::newlib_errno::from_status(-88));
+        }
+        if is_datagram(entry)? {
+            return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
+        }
+    }
+    Ok(())
+}
+
+unsafe fn receive_record_address(
+    fd: c_int,
+    buffer: *mut c_void,
+    length: usize,
+    flags: c_int,
+    address: *mut c_void,
+    address_length: *mut u32,
+) -> Option<isize> {
+    let result = (|| {
+        let entry = with_fd_entry(fd)?;
+        if !entry.handle.kind.is_socket() || !is_datagram(entry)? {
+            return Ok(None);
+        }
+        let capacity = if address.is_null() {
+            0
+        } else {
+            if address_length.is_null() {
+                return Err(EFAULT);
+            }
+            unsafe { address_length.read() as usize }
+        };
+        let record = super::socket_record::io(entry, buffer as u64, length, flags, false)?;
+        if !address.is_null() {
+            let source =
+                wire::Address::decode(&record.source[..record.source_length]).map_err(|_| EIO)?;
+            let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
+            let required = mochios_posix_client::socket::encode_sockaddr(source, &mut native)
+                .map_err(|_| EIO)?;
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    native.as_ptr(),
+                    address.cast::<u8>(),
+                    capacity.min(required),
+                );
+                address_length.write(required as u32);
+            }
+        }
+        Ok(Some(record.count))
+    })();
+    match result {
+        Ok(None) => None,
+        Ok(Some(count)) => Some(count),
+        Err(error) => Some(finish_io_cancellation(result_with_errno(Err(error), -1))),
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn sendto(
     fd: c_int,
@@ -828,9 +905,11 @@ pub extern "C" fn sendto(
     _address: *const c_void,
     _address_length: u32,
 ) -> isize {
-    // All currently supported sockets are connection-mode streams. POSIX
-    // ignores the destination here: never resolve it or change the peer.
-    // Connectionless support must select a record-aware send path instead.
+    // Stream destinations are ignored. Datagram destinations must not be
+    // silently ignored: explicit-address routing is a separate service path.
+    if let Err(error) = destination_supported(fd, _address) {
+        return result_with_errno(Err(error), -1);
+    }
     send(fd, buffer, length, flags)
 }
 
@@ -844,6 +923,11 @@ pub unsafe extern "C" fn recvfrom(
     address_length: *mut u32,
 ) -> isize {
     pthread_testcancel();
+    if let Some(result) =
+        unsafe { receive_record_address(fd, buffer, length, flags, address, address_length) }
+    {
+        return result;
+    }
     if address.is_null() {
         // With no requested address, address_length is not accessed.
         return recv(fd, buffer, length, flags);

@@ -37,6 +37,7 @@ struct sockaddr {
 #define SHUT_RDWR 2
 #define MSG_OOB 0x1
 #define MSG_PEEK 0x2
+#define MSG_TRUNC 0x20
 #define MSG_DONTWAIT 0x40
 #define MSG_WAITALL 0x100
 #define MSG_NOSIGNAL 0x4000
