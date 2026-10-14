@@ -7,6 +7,30 @@ use mochios_posix_protocol::socket as wire;
 struct PendingPair([FdReservation; 2]);
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn bind(fd: c_int, address: *const c_void, length: u32) -> c_int {
+    let result = (|| {
+        let entry = with_fd_entry(fd)?;
+        if entry.handle.kind != FdKind::ObjectSocket {
+            return Err(mochios_posix_client::newlib_errno::from_status(-88));
+        }
+        if address.is_null() {
+            return Err(EFAULT);
+        }
+        if length as usize > mochios_posix_client::socket::MAX_SOCKADDR_LEN {
+            return Err(EINVAL);
+        }
+        let bytes = unsafe { core::slice::from_raw_parts(address.cast::<u8>(), length as usize) };
+        let decoded = mochios_posix_client::socket::decode_sockaddr(bytes)
+            .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
+        let mut encoded = [0; wire::MAX_ADDRESS_LEN];
+        let count = decoded.encode(&mut encoded).map_err(|_| EINVAL)?;
+        control(entry, wire::CONTROL_BIND, &encoded[..count], &mut [])?;
+        Ok(0)
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int {
     let result = (|| {
         let (create, cloexec) = mochios_posix_client::socket::newlib_create(domain, kind, protocol)

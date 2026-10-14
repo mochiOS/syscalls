@@ -14,6 +14,7 @@ pub const CONTROL_READINESS: u64 = u64::from_le_bytes(*b"SOPRDY01");
 pub const CONTROL_STAT: u64 = u64::from_le_bytes(*b"SOPSTA01");
 pub const CONTROL_LOCAL_ADDRESS: u64 = u64::from_le_bytes(*b"SOPLOC01");
 pub const CONTROL_PEER_ADDRESS: u64 = u64::from_le_bytes(*b"SOPPER01");
+pub const CONTROL_BIND: u64 = u64::from_le_bytes(*b"SOPBND01");
 pub const SHUTDOWN_READ: u32 = 0;
 pub const SHUTDOWN_WRITE: u32 = 1;
 pub const SHUTDOWN_BOTH: u32 = 2;

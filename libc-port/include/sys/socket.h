@@ -37,6 +37,7 @@ extern "C" {
 #endif
 int socketpair(int domain, int type, int protocol, int sv[2]);
 int socket(int domain, int type, int protocol);
+int bind(int socket, const struct sockaddr *address, socklen_t length);
 int shutdown(int socket, int how);
 ssize_t send(int socket, const void *buffer, size_t length, int flags);
 ssize_t recv(int socket, void *buffer, size_t length, int flags);
