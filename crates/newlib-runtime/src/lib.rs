@@ -2864,6 +2864,18 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     // malloc can enter _sbrk and acquire STATE. Stabilize its arena first, not
     // after taking STATE, and retain the caller's existing recursion depth.
     let allocator_guard = atfork::freeze_allocator();
+    // VM capture can quiesce native siblings, but POSIX Handle-table/FD
+    // inheritance is not yet a coherent snapshot across live pthreads. Keep
+    // this temporary policy here, not in the kernel's generic VM primitive.
+    if THREADS.iter().any(|other| {
+        !ptr::eq(other, thread_control)
+            && matches!(
+                other.state.load(Ordering::Acquire),
+                THREAD_STARTING | THREAD_RUNNING
+            )
+    }) {
+        return Err(EAGAIN);
+    }
     // Freeze only after the allocator, on the shared fork/spawn path. User
     // callbacks run outside this scope and registration allocates before it.
     let registry_guard = atfork::freeze_registry();
