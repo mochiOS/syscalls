@@ -25,6 +25,7 @@ pub mod signal_context;
 pub mod snapshot;
 pub mod signal_checkpoint;
 pub mod signal_stack;
+pub mod upcall_guard;
 pub mod spawn;
 pub mod stream;
 #[cfg(feature = "syscall-endpoint")]

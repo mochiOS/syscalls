@@ -250,6 +250,7 @@ struct ThreadControl {
     signal_upcall_stack: AtomicUsize,
     signal_upcall_stack_size: AtomicUsize,
     active_native_signal_frame: AtomicUsize,
+    native_delivery_defer: AtomicU32,
     alternate_stack: mochios_posix_client::signal_stack::AlternateStack,
     specific_values: [AtomicUsize; mochios_posix_client::thread::MAX_THREAD_KEYS],
     specific_generations: [AtomicU32; mochios_posix_client::thread::MAX_THREAD_KEYS],
@@ -288,6 +289,7 @@ impl ThreadControl {
             signal_upcall_stack: AtomicUsize::new(0),
             signal_upcall_stack_size: AtomicUsize::new(0),
             active_native_signal_frame: AtomicUsize::new(0),
+            native_delivery_defer: AtomicU32::new(0),
             alternate_stack: mochios_posix_client::signal_stack::AlternateStack::new(),
             specific_values: [const { AtomicUsize::new(0) };
                 mochios_posix_client::thread::MAX_THREAD_KEYS],
@@ -659,8 +661,12 @@ impl<T> RuntimeMutex<T> {
     }
 
     fn lock(&self) -> RuntimeMutexGuard<'_, T> {
+        let delivery = defer_native_delivery();
         native_mutex_acquire(&self.state);
-        RuntimeMutexGuard { mutex: self }
+        RuntimeMutexGuard {
+            mutex: self,
+            _delivery: delivery,
+        }
     }
 }
 
@@ -669,6 +675,7 @@ unsafe impl<T: Send> Sync for RuntimeMutex<T> {}
 
 struct RuntimeMutexGuard<'a, T> {
     mutex: &'a RuntimeMutex<T>,
+    _delivery: Option<mochios_posix_client::upcall_guard::Guard<'static>>,
 }
 
 impl<T> Deref for RuntimeMutexGuard<'_, T> {
@@ -708,6 +715,7 @@ impl<T> RuntimeOnce<T> {
         if self.state.load(Ordering::Acquire) == 2 {
             return Ok(unsafe { (&*self.value.get()).assume_init_ref() });
         }
+        let _delivery = defer_native_delivery();
         if self
             .state
             .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
@@ -879,6 +887,13 @@ fn state() -> RuntimeMutexGuard<'static, RuntimeState> {
     STATE.lock()
 }
 
+fn defer_native_delivery() -> Option<mochios_posix_client::upcall_guard::Guard<'static>> {
+    current_thread_control().map(|(_, control)| {
+        mochios_posix_client::upcall_guard::Guard::enter(&control.native_delivery_defer)
+            .unwrap_or_else(|| process_exit(EOVERFLOW))
+    })
+}
+
 fn posix_client()
 -> Result<&'static PosixClient<SyscallEndpointTransport>, PosixClientError<syscall::SysError>> {
     POSIX_CLIENT.get_or_try_init(PosixClient::from_syscall_launch_context)
@@ -1037,6 +1052,7 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
         control.signal_upcall_stack.store(0, Ordering::Relaxed);
         control.signal_upcall_stack_size.store(0, Ordering::Relaxed);
         control.active_native_signal_frame.store(0, Ordering::Relaxed);
+        control.native_delivery_defer.store(0, Ordering::Relaxed);
         control.alternate_stack.reset();
         for value in &control.specific_values {
             value.store(0, Ordering::Relaxed);
@@ -1264,7 +1280,8 @@ fn setup_signal_delivery(control: &ThreadControl) -> Result<(), c_int> {
         stack_base: stack as u64,
         stack_size: SIGNAL_UPCALL_STACK_SIZE as u64,
         flags: syscall::THREAD_UPCALL_EXCEPTIONS,
-        reserved: [0; 4],
+        defer_word: control.native_delivery_defer.as_ptr() as u64,
+        reserved: [0; 3],
     };
     let install = syscall_errno(syscall::raw_syscall2(
         syscall::SyscallNumber::ThreadUpcallInstall,

@@ -53,6 +53,11 @@ fn context(machine: MachineContext) -> UContext {
 }
 
 pub(super) fn drain() -> Result<(), c_int> {
+    if current_thread_control()
+        .is_some_and(|(_, control)| control.native_delivery_defer.load(Ordering::Acquire) != 0)
+    {
+        return Ok(());
+    }
     unsafe extern "C" fn deliver(machine: *mut MachineContext, result: *mut c_void) {
         let mut frame = context(unsafe { machine.read() });
         let delivered = drain_pending_signals_with_context(&mut frame, false);
