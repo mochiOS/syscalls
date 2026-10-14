@@ -47,12 +47,21 @@ struct Invocation<'a> {
     mask: u64,
     result: Result<(), c_int>,
     preparation: &'a mut Preparation,
+    scope: core::pin::Pin<&'a mut signal_scope::Scope>,
 }
 
 unsafe extern "C" fn call(argument: *mut c_void) {
     let invocation = unsafe { &mut *argument.cast::<Invocation<'_>>() };
-    if !invocation.preparation.begin() {
-        return;
+    match invocation
+        .preparation
+        .begin_with(|| invocation.scope.as_mut().activate())
+    {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            invocation.result = Err(error);
+            return;
+        }
     }
     // Unblock only after physically entering the selected stack. A nested
     // delivery will then see a valid interrupted RSP, never a half-switch.
@@ -72,6 +81,7 @@ unsafe extern "C" fn call(argument: *mut c_void) {
         break;
     }
     if invocation.result.is_err() {
+        let _ = invocation.preparation.finish();
         return;
     }
     if let Some(info) = invocation.info.as_deref_mut() {
@@ -89,6 +99,7 @@ unsafe extern "C" fn call(argument: *mut c_void) {
             unsafe { core::mem::transmute(invocation.action.handler) };
         unsafe { function(invocation.signal) };
     }
+    invocation.result = invocation.preparation.finish();
 }
 
 pub(super) fn invoke(
@@ -99,6 +110,7 @@ pub(super) fn invoke(
     context: &mut UContext,
     native: bool,
     preparation: &mut Preparation,
+    scope: core::pin::Pin<&mut signal_scope::Scope>,
 ) -> Result<(), c_int> {
     // No mutex can be held by a thread interrupted by its own callback.
     // Mask shared POSIX state while selecting a coherent local configuration.
@@ -126,6 +138,7 @@ pub(super) fn invoke(
         mask,
         result: Ok(()),
         preparation,
+        scope,
     };
     let argument = (&mut invocation as *mut Invocation<'_>).cast();
     unsafe {

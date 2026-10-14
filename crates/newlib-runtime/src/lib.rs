@@ -20,6 +20,7 @@ mod fault_signal;
 mod signal_delivery;
 mod signal_stack;
 mod signal_preparation;
+mod signal_scope;
 use signal_preparation::Preparation;
 
 use core::cell::UnsafeCell;
@@ -253,6 +254,9 @@ struct ThreadControl {
     signal_upcall_stack_size: AtomicUsize,
     active_native_signal_frame: AtomicUsize,
     native_delivery_defer: AtomicU32,
+    active_signal_scope: AtomicUsize,
+    active_signal_scope_id: AtomicU64,
+    next_signal_scope_id: AtomicU64,
     alternate_stack: mochios_posix_client::signal_stack::AlternateStack,
     specific_values: [AtomicUsize; mochios_posix_client::thread::MAX_THREAD_KEYS],
     specific_generations: [AtomicU32; mochios_posix_client::thread::MAX_THREAD_KEYS],
@@ -292,6 +296,9 @@ impl ThreadControl {
             signal_upcall_stack_size: AtomicUsize::new(0),
             active_native_signal_frame: AtomicUsize::new(0),
             native_delivery_defer: AtomicU32::new(0),
+            active_signal_scope: AtomicUsize::new(0),
+            active_signal_scope_id: AtomicU64::new(0),
+            next_signal_scope_id: AtomicU64::new(1),
             alternate_stack: mochios_posix_client::signal_stack::AlternateStack::new(),
             specific_values: [const { AtomicUsize::new(0) };
                 mochios_posix_client::thread::MAX_THREAD_KEYS],
@@ -1058,6 +1065,9 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
         control.signal_upcall_stack_size.store(0, Ordering::Relaxed);
         control.active_native_signal_frame.store(0, Ordering::Relaxed);
         control.native_delivery_defer.store(0, Ordering::Relaxed);
+        control.active_signal_scope.store(0, Ordering::Relaxed);
+        control.active_signal_scope_id.store(0, Ordering::Relaxed);
+        control.next_signal_scope_id.store(1, Ordering::Relaxed);
         control.alternate_stack.reset();
         for value in &control.specific_values {
             value.store(0, Ordering::Relaxed);
@@ -1075,6 +1085,8 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
 }
 
 fn release_thread_control(control: &ThreadControl) {
+    control.active_signal_scope.store(0, Ordering::Relaxed);
+    control.active_signal_scope_id.store(0, Ordering::Relaxed);
     let handle = control.native_handle.swap(0, Ordering::AcqRel);
     if handle != 0 {
         let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, u64::from(handle));
@@ -6847,6 +6859,7 @@ fn dispatch_signal(
     context: &mut UContext,
     native: bool,
     preparation: &mut Preparation,
+    scope: core::pin::Pin<&mut signal_scope::Scope>,
 ) -> Result<c_int, c_int> {
     let signal = delivery.signal as c_int;
     if signal <= 0 || signal > posix_protocol::SIGNAL_MAX as c_int {
@@ -6902,7 +6915,7 @@ fn dispatch_signal(
             }
             let saved_errno = unsafe { *__errno() };
             let invoked = signal_stack::invoke(
-                control, action, signal, info.as_mut(), context, native, preparation,
+                control, action, signal, info.as_mut(), context, native, preparation, scope,
             );
             set_errno(saved_errno);
             if let Err(error) = invoked {
@@ -6993,7 +7006,10 @@ fn drain_pending_signals_with_context(context: &mut UContext, native: bool) -> R
         if signal == 0 {
             return Ok(());
         }
-        let dispatched = dispatch_signal(delivery, None, context, native, &mut preparation);
+        let mut scope = core::pin::pin!(signal_scope::Scope::new(control, delivery, epoch)?);
+        let dispatched = dispatch_signal(
+            delivery, None, context, native, &mut preparation, scope.as_mut(),
+        );
         if FORK_EPOCH.load(Ordering::Acquire) != epoch {
             // A fork child resumes the copied handler, not its parent's
             // service-owned delivery. Only the original process may finish it.
@@ -7003,22 +7019,10 @@ fn drain_pending_signals_with_context(context: &mut UContext, native: bool) -> R
             continue;
         }
         let finished = match dispatched {
-            Ok(0 | 3) => posix_client()
-                .map_err(map_posix_client_error)
-                .and_then(|client| {
-                    client
-                        .complete_signal_delivery(delivery)
-                        .map_err(map_posix_client_error)
-                }),
+            Ok(0 | 3) => scope.as_mut().complete(),
             Ok(1) => apply_default_signal_action(delivery),
             result => {
-                let _ = posix_client()
-                    .map_err(map_posix_client_error)
-                    .and_then(|client| {
-                        client
-                            .complete_signal_delivery(delivery)
-                            .map_err(map_posix_client_error)
-                    });
+                let _ = scope.as_mut().complete();
                 Err(result.err().unwrap_or(EINVAL))
             }
         };

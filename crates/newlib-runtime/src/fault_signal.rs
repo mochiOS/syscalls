@@ -22,9 +22,16 @@ pub(super) fn deliver(cause: u64, address: usize, context: &mut UContext) -> Res
         if fault.signal.signal != signal {
             return Err(EIO);
         }
+        let mut scope = core::pin::pin!(signal_scope::Scope::new(control, fault.signal, epoch)?);
         if fault.disposition == posix_protocol::SIGNAL_DISPOSITION_CAUGHT {
-            let dispatched =
-                dispatch_signal(fault.signal, Some(info), context, true, &mut preparation);
+            let dispatched = dispatch_signal(
+                fault.signal,
+                Some(info),
+                context,
+                true,
+                &mut preparation,
+                scope.as_mut(),
+            );
             if FORK_EPOCH.load(Ordering::Acquire) != epoch {
                 if !preparation.started() {
                     continue;
@@ -36,9 +43,7 @@ pub(super) fn deliver(cause: u64, address: usize, context: &mut UContext) -> Res
             }
             match dispatched {
                 Ok(0) => {
-                    let finished = client
-                        .complete_signal_delivery(fault.signal)
-                        .map_err(map_posix_client_error);
+                    let finished = scope.as_mut().complete();
                     // The repaired context is already copied. A child must not
                     // inherit a parent's completion error or complete it again.
                     return if FORK_EPOCH.load(Ordering::Acquire) != epoch {
@@ -51,7 +56,7 @@ pub(super) fn deliver(cause: u64, address: usize, context: &mut UContext) -> Res
                 // Never retry an unrepaired synchronous fault under SIG_IGN.
                 Ok(1 | 3) => {}
                 result => {
-                    let _ = client.complete_signal_delivery(fault.signal);
+                    let _ = scope.as_mut().complete();
                     if FORK_EPOCH.load(Ordering::Acquire) != epoch {
                         continue;
                     }
