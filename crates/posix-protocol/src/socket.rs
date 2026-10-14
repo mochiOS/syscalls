@@ -6,6 +6,28 @@ use super::ProtocolError;
 
 pub const CREATE_LEN: usize = 16;
 pub const NONBLOCKING: u32 = 1;
+/// Userspace control tags carried by generic HandleControl, not mnu opcodes.
+pub const CONTROL_GET_OPTIONS: u64 = u64::from_le_bytes(*b"SOPOGT01");
+pub const CONTROL_SET_OPTIONS: u64 = u64::from_le_bytes(*b"SOPOST01");
+pub const CONTROL_SHUTDOWN: u64 = u64::from_le_bytes(*b"SOPSHD01");
+pub const CONTROL_READINESS: u64 = u64::from_le_bytes(*b"SOPRDY01");
+pub const SHUTDOWN_READ: u32 = 0;
+pub const SHUTDOWN_WRITE: u32 = 1;
+pub const SHUTDOWN_BOTH: u32 = 2;
+pub const READY_READ: u32 = 1;
+pub const READY_WRITE: u32 = 2;
+pub const READ_CLOSED: u32 = 4;
+pub const WRITE_CLOSED: u32 = 8;
+
+/// No seek/map authority: a socket description is a duplex byte stream.
+pub const fn descriptor_rights() -> u64 {
+    mnu_abi::HANDLE_RIGHT_READ
+        | mnu_abi::HANDLE_RIGHT_WRITE
+        | mnu_abi::HANDLE_RIGHT_CONTROL
+        | mnu_abi::HANDLE_RIGHT_WAIT
+        | mnu_abi::HANDLE_RIGHT_DUPLICATE
+        | mnu_abi::HANDLE_RIGHT_TRANSFER
+}
 pub const ADDRESS_HEADER_LEN: usize = 8;
 /// Space for a NUL terminator (pathname) or namespace prefix (abstract) remains
 /// in the libc sockaddr_un. Neither is included in the serialized name bytes.
