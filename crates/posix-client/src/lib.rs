@@ -23,6 +23,7 @@ pub mod signal;
 pub mod signal_context;
 #[cfg(target_arch = "x86_64")]
 pub mod snapshot;
+pub mod signal_checkpoint;
 pub mod spawn;
 pub mod stream;
 #[cfg(feature = "syscall-endpoint")]
