@@ -1,6 +1,7 @@
 #![no_std]
 
 mod child_cleanup;
+mod handle_capture;
 mod atfork;
 mod thread_lifecycle;
 mod credentials;
@@ -2864,9 +2865,9 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     // malloc can enter _sbrk and acquire STATE. Stabilize its arena first, not
     // after taking STATE, and retain the caller's existing recursion depth.
     let allocator_guard = atfork::freeze_allocator();
-    // VM capture can quiesce native siblings, but POSIX Handle-table/FD
-    // inheritance is not yet a coherent snapshot across live pthreads. Keep
-    // this temporary policy here, not in the kernel's generic VM primitive.
+    // VM capture and pinned Handle grants do not yet freeze service-owned
+    // POSIX state or safely discard sibling libc state. Keep this temporary
+    // live-pthread policy here, not in the kernel's generic VM primitive.
     if THREADS.iter().any(|other| {
         !ptr::eq(other, thread_control)
             && matches!(
@@ -2896,12 +2897,9 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     }
     let identity = unsafe { c_bytes(guard.executable) };
     let identity = core::str::from_utf8(identity).map_err(|_| EINVAL)?;
+    let mut capture = handle_capture::Capture::new()?;
     let mut records = [mnu_abi::HandleInfo::default(); mnu_abi::process_create::MAX_HANDLES];
-    let count = syscall_errno(syscall::raw_syscall2(
-        syscall::SyscallNumber::HandleTableRead,
-        records.as_mut_ptr() as u64,
-        records.len() as u64,
-    ))? as usize;
+    let count = capture.records(&mut records)?;
     let mut grants = [mnu_abi::process_create::HandleGrant {
         key: 0,
         source: 0,
@@ -2924,7 +2922,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         .find(|grant| u64::from(grant.source) == control)
         .ok_or(EBADF)?;
     endpoint.key = posix_protocol::CONTROL_HANDLE_KEY;
-    let mut metadata = [0u8; mnu_abi::process_create::HEADER_LEN
+    let mut metadata = [0u8; mnu_abi::process_create::CAPTURE_HEADER_LEN
         + mnu_abi::process_create::MAX_IDENTITY_BYTES
         + mnu_abi::process_create::MAX_LABEL_BYTES
         + mnu_abi::process_create::CONTEXT_LEN
@@ -2935,7 +2933,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         ..Default::default()
     };
     // Validate metadata capacity and grants before creating a detached image.
-    mnu_abi::process_create::encode_context(
+    let length = mnu_abi::process_create::encode_context(
         identity,
         "fork-child",
         &context,
@@ -2944,6 +2942,8 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         &mut metadata,
     )
     .map_err(|_| EINVAL)?;
+    mnu_abi::process_create::attach_handle_capture(&mut metadata, length, capture.handle())
+        .map_err(|_| EINVAL)?;
     authorize_clone_path(identity)?;
     let image = unsafe {
         mochios_posix_client::snapshot::capture_native(
@@ -2952,6 +2952,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         )
     };
     if image == 0 {
+        capture.disarm_child();
         if FORK_EPOCH
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| epoch.checked_add(1))
             .is_err()
@@ -3023,6 +3024,9 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
             &mut metadata,
         )
         .map_err(|_| EINVAL)?;
+        let length =
+            mnu_abi::process_create::attach_handle_capture(&mut metadata, length, capture.handle())
+                .map_err(|_| EINVAL)?;
         syscall_errno(syscall::raw_syscall3(
             syscall::SyscallNumber::ProcessCreate,
             u64::from(image),
@@ -3031,6 +3035,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         ))
     })();
     close_object_handle(image);
+    drop(capture);
     let handle = created?;
     let handle = match u32::try_from(handle) {
         Ok(handle) => handle,
