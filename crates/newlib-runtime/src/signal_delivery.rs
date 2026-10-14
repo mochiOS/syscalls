@@ -19,7 +19,7 @@ fn context(machine: MachineContext) -> UContext {
 pub(super) fn drain() -> Result<(), c_int> {
     unsafe extern "C" fn deliver(machine: *mut MachineContext, result: *mut c_void) {
         let mut frame = context(unsafe { machine.read() });
-        let delivered = drain_pending_signals_with_context(&mut frame);
+        let delivered = drain_pending_signals_with_context(&mut frame, false);
         unsafe {
             if delivered.is_ok() {
                 machine.write(frame.uc_mcontext);

@@ -15,7 +15,7 @@ pub(super) fn deliver(cause: u64, address: usize, context: &mut UContext) -> Res
         return Err(EIO);
     }
     if fault.disposition == posix_protocol::SIGNAL_DISPOSITION_CAUGHT {
-        match dispatch_signal(fault.signal, Some(info), context) {
+        match dispatch_signal(fault.signal, Some(info), context, true) {
             Ok(0) => {
                 return client
                     .complete_signal_delivery(fault.signal)

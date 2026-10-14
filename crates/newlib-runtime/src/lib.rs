@@ -18,6 +18,7 @@ mod stdio_cancellation;
 mod thread_cleanup;
 mod fault_signal;
 mod signal_delivery;
+mod signal_stack;
 
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_void};
@@ -81,6 +82,7 @@ const SA_NOCLDSTOP: c_int = 1;
 const SA_NOCLDWAIT: c_int = 2;
 const SA_RESTART: c_int = mochios_posix_client::signal::SA_RESTART;
 const SA_SIGINFO: c_int = mochios_posix_client::signal::SA_SIGINFO;
+const SA_ONSTACK: c_int = mochios_posix_client::signal_stack::SA_ONSTACK;
 const SPAWN_FAIL_EXIT_STATUS: c_int = 127;
 const DIR_BUFFER_SIZE: usize = 4096;
 const DIRENT_NAME_MAX: usize = 256;
@@ -247,6 +249,7 @@ struct ThreadControl {
     restart_signal_generation: AtomicU64,
     signal_upcall_stack: AtomicUsize,
     signal_upcall_stack_size: AtomicUsize,
+    alternate_stack: mochios_posix_client::signal_stack::AlternateStack,
     specific_values: [AtomicUsize; mochios_posix_client::thread::MAX_THREAD_KEYS],
     specific_generations: [AtomicU32; mochios_posix_client::thread::MAX_THREAD_KEYS],
     specific_destructors_running: AtomicU32,
@@ -283,6 +286,7 @@ impl ThreadControl {
             restart_signal_generation: AtomicU64::new(0),
             signal_upcall_stack: AtomicUsize::new(0),
             signal_upcall_stack_size: AtomicUsize::new(0),
+            alternate_stack: mochios_posix_client::signal_stack::AlternateStack::new(),
             specific_values: [const { AtomicUsize::new(0) };
                 mochios_posix_client::thread::MAX_THREAD_KEYS],
             specific_generations: [const { AtomicU32::new(0) };
@@ -1030,6 +1034,7 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
         control.restart_signal_generation.store(0, Ordering::Relaxed);
         control.signal_upcall_stack.store(0, Ordering::Relaxed);
         control.signal_upcall_stack_size.store(0, Ordering::Relaxed);
+        control.alternate_stack.reset();
         for value in &control.specific_values {
             value.store(0, Ordering::Relaxed);
         }
@@ -6473,7 +6478,7 @@ pub unsafe extern "C" fn sigaction(
         return 0;
     }
     let mut replacement = unsafe { action.read() };
-    if replacement.sa_flags & !(SA_NOCLDSTOP | SA_NOCLDWAIT | SA_RESTART | SA_SIGINFO) != 0
+    if replacement.sa_flags & !(SA_NOCLDSTOP | SA_NOCLDWAIT | SA_RESTART | SA_SIGINFO | SA_ONSTACK) != 0
         || (replacement.sa_flags & (SA_NOCLDSTOP | SA_NOCLDWAIT) != 0
             && signal != posix_protocol::SIGNAL_CHLD as c_int)
     {
@@ -6800,6 +6805,7 @@ fn dispatch_signal(
     delivery: posix_protocol::SignalDelivery,
     fault_info: Option<SigInfo>,
     context: &mut UContext,
+    native: bool,
 ) -> Result<c_int, c_int> {
     let signal = delivery.signal as c_int;
     if signal <= 0 || signal > posix_protocol::SIGNAL_MAX as c_int {
@@ -6810,7 +6816,7 @@ fn dispatch_signal(
         0 => Ok(1),
         usize::MAX => Ok(2),
         1 => Ok(3),
-        handler => {
+        _ => {
             let mut info = if action.sa_flags & SA_SIGINFO != 0 {
                 Some(match fault_info {
                     Some(info) => info,
@@ -6857,15 +6863,12 @@ fn dispatch_signal(
                     .fetch_add(1, Ordering::Release);
             }
             let saved_errno = unsafe { *__errno() };
-            if let Some(info) = info.as_mut() {
-                let function: unsafe extern "C" fn(c_int, *mut SigInfo, *mut c_void) =
-                    unsafe { core::mem::transmute(handler) };
-                unsafe { function(signal, info, (context as *mut UContext).cast()) };
-            } else {
-                let function: unsafe extern "C" fn(c_int) = unsafe { core::mem::transmute(handler) };
-                unsafe { function(signal) };
-            }
+            let invoked = signal_stack::invoke(control, action, signal, info.as_mut(), context, native);
             set_errno(saved_errno);
+            if let Err(error) = invoked {
+                service_signal_mask(control, posix_protocol::SIGNAL_MASK_SET, previous)?;
+                return Err(error);
+            }
             let selected = context.uc_mcontext.checked_return(&original);
             let restore_mask = if info.is_some() && selected.is_some() {
                 context.uc_sigmask
@@ -6928,7 +6931,7 @@ fn drain_pending_signals() -> Result<(), c_int> {
     signal_delivery::drain()
 }
 
-fn drain_pending_signals_with_context(context: &mut UContext) -> Result<(), c_int> {
+fn drain_pending_signals_with_context(context: &mut UContext, native: bool) -> Result<(), c_int> {
     register_current_thread().ok_or(EAGAIN)?;
     loop {
         let delivery = posix_client()
@@ -6939,7 +6942,7 @@ fn drain_pending_signals_with_context(context: &mut UContext) -> Result<(), c_in
         if signal == 0 {
             return Ok(());
         }
-        match dispatch_signal(delivery, None, context) {
+        match dispatch_signal(delivery, None, context, native) {
             Ok(0 | 3) => posix_client()
                 .map_err(map_posix_client_error)?
                 .complete_signal_delivery(delivery)
@@ -6973,7 +6976,7 @@ extern "C" fn posix_signal_upcall(
             process_exit(127);
         }
     } else {
-        if drain_pending_signals_with_context(&mut context).is_err() {
+        if drain_pending_signals_with_context(&mut context, true).is_err() {
             process_exit(127);
         }
     }
