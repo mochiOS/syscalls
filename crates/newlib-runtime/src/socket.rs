@@ -186,8 +186,8 @@ pub unsafe extern "C" fn getsockopt(
     result_with_errno(result, -1)
 }
 
-struct PendingConnection(u32);
-impl Drop for PendingConnection {
+struct PendingSocketJob(u32);
+impl Drop for PendingSocketJob {
     fn drop(&mut self) {
         close_object_handle(self.0);
     }
@@ -224,7 +224,7 @@ unsafe fn connect_io(fd: c_int, address: *const c_void, length: u32) -> Result<c
     let mochios_posix_client::socket::ConnectStarted::Pending(job) = result else {
         return Ok(0);
     };
-    let _pending = PendingConnection(job.handle);
+    let _pending = PendingSocketJob(job.handle);
     let notification = object_entry(u64::from(job.handle), job.rights, FdKind::ObjectSocket, 2);
     loop {
         match control(notification, wire::CONTROL_CONNECT_RESULT, &[], &mut []) {
@@ -650,6 +650,53 @@ pub(super) fn stat(entry: FdEntry) -> Result<NewlibStat, c_int> {
     translate_posix_stat(&status)
 }
 
+fn peek_since_wait(
+    entry: FdEntry,
+    thread: &ThreadControl,
+    caught: u64,
+    wait: &mut SocketWait,
+    dont_wait: bool,
+    offset: usize,
+    mut operation: impl FnMut() -> Result<usize, c_int>,
+) -> Result<usize, c_int> {
+    loop {
+        if io_cancellation_requested(thread)
+            || thread.nonrestart_signal_generation.load(Ordering::Acquire) != caught
+        {
+            return Err(EINTR);
+        }
+        match operation() {
+            Err(EAGAIN) if !dont_wait && !handle_is_nonblocking(entry)? => {
+                let job = posix_client()
+                    .map_err(map_posix_client_error)?
+                    .wait_socket_receive(
+                        ObjectHandleAttachment {
+                            handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+                            rights: entry.rights,
+                        },
+                        (offset as u64).checked_add(1).ok_or(EINVAL)?,
+                        close_object_handle,
+                    )
+                    .map_err(map_posix_client_error)?;
+                let _pending = PendingSocketJob(job.handle);
+                let notification =
+                    object_entry(u64::from(job.handle), job.rights, FdKind::ObjectSocket, 2);
+                // This Handle becomes ready on new bytes or a terminal result,
+                // not merely because the already-inspected prefix still exists.
+                wait_for_handle_capacity(
+                    notification,
+                    syscall::HANDLE_SIGNAL_READABLE,
+                    thread,
+                    caught,
+                    0,
+                    wait.deadline(entry)?,
+                )?;
+            }
+            result => return result,
+        }
+    }
+}
+
 fn message_io(
     fd: c_int,
     buffer: u64,
@@ -662,7 +709,7 @@ fn message_io(
         return Err(mochios_posix_client::newlib_errno::from_status(-88));
     }
     let options = mochios_posix_client::socket::message_options(flags, sending)
-        .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
+        .map_err(|_| mochios_posix_client::newlib_errno::EOPNOTSUPP)?;
     if length > isize::MAX as usize {
         return Err(EINVAL);
     }
@@ -687,6 +734,26 @@ fn message_io(
     let mut wait = SocketWait::new(entry, interests)?;
     let mut io = |offset: usize, remaining: usize| {
         let address = buffer.checked_add(offset as u64).ok_or(EFAULT)?;
+        if options.peek {
+            return peek_since_wait(
+                entry,
+                thread,
+                caught,
+                &mut wait,
+                options.dont_wait,
+                offset,
+                || {
+                    syscall_errno(syscall::raw_syscall4(
+                        syscall::SyscallNumber::HandleReadAt,
+                        entry.handle.lower_handle,
+                        address,
+                        remaining as u64,
+                        offset as u64,
+                    ))
+                    .and_then(|count| usize::try_from(count).map_err(|_| EIO))
+                },
+            );
+        }
         let result = stream_io_since_wait(
             entry,
             interests,

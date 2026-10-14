@@ -261,6 +261,10 @@ pub const OP_SIGNAL_THREAD_WAIT_INFO: u16 = 86;
 /// signal_wait timed request: mask, epoch and finite absolute monotonic ns.
 /// Success returns signal_wait::Accepted; expiry returns EAGAIN.
 pub const OP_SIGNAL_THREAD_TIMED_WAIT: u16 = 87;
+/// Exactly one READ|TRANSFER socket Handle and an unsigned u64 minimum queue
+/// length. Empty success payload and one WAIT|TRANSFER notification Handle.
+/// Registration is atomic with the queue check; final Handle release cancels.
+pub const OP_SOCKET_RECEIVE_WAIT: u16 = 88;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

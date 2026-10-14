@@ -7,6 +7,7 @@ use mochios_posix_protocol::{self as protocol, socket as wire};
 pub const SOCK_NONBLOCK: i32 = 0x800;
 pub const SOCK_CLOEXEC: i32 = 0x80000;
 pub const MSG_DONTWAIT: i32 = 0x40;
+pub const MSG_PEEK: i32 = 0x2;
 pub const MSG_WAITALL: i32 = 0x100;
 pub const MSG_NOSIGNAL: i32 = 0x4000;
 pub const MAX_SOCKADDR_LEN: usize = 110;
@@ -190,19 +191,26 @@ pub fn encode_sockaddr(address: wire::Address<'_>, output: &mut [u8]) -> Result<
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MessageOptions {
+    pub peek: bool,
     pub dont_wait: bool,
     pub wait_all: bool,
     pub no_signal: bool,
 }
 
-/// Unsupported semantics are rejected before consuming data. In particular,
-/// PEEK must never be approximated by destructive read or unrestricted control.
+/// Unsupported semantics are rejected before consuming data. PEEK selects
+/// native indexed inspection, never destructive read or unrestricted control.
 pub fn message_options(flags: i32, sending: bool) -> Result<MessageOptions, i32> {
-    let supported = MSG_DONTWAIT | if sending { MSG_NOSIGNAL } else { MSG_WAITALL };
+    let supported = MSG_DONTWAIT
+        | if sending {
+            MSG_NOSIGNAL
+        } else {
+            MSG_WAITALL | MSG_PEEK
+        };
     if flags & !supported != 0 {
         return Err(-95);
     }
     Ok(MessageOptions {
+        peek: flags & MSG_PEEK != 0,
         dont_wait: flags & MSG_DONTWAIT != 0,
         wait_all: flags & MSG_WAITALL != 0,
         no_signal: flags & MSG_NOSIGNAL != 0,
@@ -310,6 +318,61 @@ pub fn poll_events(bits: u32, events: i16) -> i16 {
 }
 
 impl<T: ObjectTransport> Client<T> {
+    /// Register a one-shot notification for additional receive bytes or a
+    /// terminal condition. Only explicitly attached READ authority is used.
+    /// Closing the returned Handle cancels the registration and its socket lease.
+    pub fn wait_socket_receive(
+        &self,
+        socket: ObjectHandleAttachment<T::Handle>,
+        minimum: u64,
+        mut close: impl FnMut(T::Handle),
+    ) -> Result<ObjectHandleAttachment<T::Handle>, ClientError<T::Error>>
+    where
+        T::Handle: Copy + Default + Eq,
+    {
+        let rights = wire::receive_wait_socket_rights();
+        if socket.handle == T::Handle::default() || socket.rights & rights != rights {
+            return Err(ClientError::Remote(-13));
+        }
+        if minimum == 0 {
+            return Err(ClientError::Remote(-22));
+        }
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(ObjectHandleAttachment {
+                handle: socket.handle,
+                rights,
+            })
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        let result = self.request_with_handles(
+            protocol::OP_SOCKET_RECEIVE_WAIT,
+            0,
+            &minimum.to_le_bytes(),
+            &mut [],
+            &mut handles,
+        );
+        if matches!(result, Ok(0)) && handles.len() == 1 {
+            let job = handles.get(0).unwrap();
+            if job.handle != T::Handle::default()
+                && job.handle != socket.handle
+                && job.rights == wire::receive_wait_job_rights()
+            {
+                return Ok(job);
+            }
+        }
+        for (index, received) in handles.iter().enumerate() {
+            if received.handle != T::Handle::default()
+                && !handles
+                    .iter()
+                    .take(index)
+                    .any(|old| old.handle == received.handle)
+            {
+                close(received.handle);
+            }
+        }
+        Err(result.err().unwrap_or(ClientError::MismatchedResponse))
+    }
+
     /// Attach explicit socket authority; never send a FD, PID, or object ID.
     /// Shared description flags decide whether a full backlog can wait.
     pub fn connect_socket(

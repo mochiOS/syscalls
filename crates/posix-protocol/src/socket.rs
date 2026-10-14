@@ -9,6 +9,14 @@ pub const NONBLOCKING: u32 = 1;
 pub const ACCEPT_LEN: usize = 8;
 pub const CONNECT_REPLY_LEN: usize = 8;
 
+pub const fn receive_wait_socket_rights() -> u64 {
+    mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_TRANSFER
+}
+
+pub const fn receive_wait_job_rights() -> u64 {
+    mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_TRANSFER
+}
+
 /// The reply contains no description/job identity. Authority to inspect or
 /// cancel a pending attempt is carried only by the attached job Handle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

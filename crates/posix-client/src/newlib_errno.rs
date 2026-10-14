@@ -27,6 +27,8 @@ pub const EDEADLK: i32 = 45;
 pub const ENAMETOOLONG: i32 = 91;
 pub const ENOSYS: i32 = 88;
 pub const ENOTSUP: i32 = 134;
+/// Socket-specific unsupported operation; distinct from generic ENOTSUP.
+pub const EOPNOTSUPP: i32 = 95;
 pub const EOVERFLOW: i32 = 139;
 
 /// Translate either a signed native/wire failure or its positive magnitude.
