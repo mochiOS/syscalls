@@ -884,6 +884,14 @@ pub mod handle {
         )
     }
 
+    /// Samples all strong references except this query's temporary reference.
+    /// Only the exact creating endpoint may query its own opaque object IDs.
+    /// Includes in-flight IPC/kernel references, not just process Handles;
+    /// the sample is conservative and does not pin or revoke any reference.
+    pub fn provider_object_reference_count(object_id: u64) -> SysResult<u64> {
+        syscall::call1(syscall::SyscallNumber::ProviderObjectReferenceCount, object_id)
+    }
+
     /// Updates generic readiness signals for an object owned by the caller's
     /// provider endpoint.
     pub fn signal_provider_object(object_id: u64, set: u64, clear: u64) -> SysResult<()> {
