@@ -837,17 +837,43 @@ pub extern "C" fn recv(fd: c_int, buffer: *mut c_void, length: usize, flags: c_i
     ))
 }
 
-fn destination_supported(fd: c_int, address: *const c_void) -> Result<(), c_int> {
-    if !address.is_null() {
+unsafe fn send_record_to(
+    fd: c_int,
+    buffer: *const c_void,
+    length: usize,
+    flags: c_int,
+    address: *const c_void,
+    address_length: u32,
+) -> Option<isize> {
+    if address.is_null() {
+        return None;
+    }
+    let result = (|| {
         let entry = with_fd_entry(fd)?;
         if !entry.handle.kind.is_socket() {
             return Err(mochios_posix_client::newlib_errno::from_status(-88));
         }
-        if is_datagram(entry)? {
+        if !is_datagram(entry)? {
+            return Ok(None);
+        }
+        if address_length as usize > mochios_posix_client::socket::MAX_SOCKADDR_LEN {
+            return Err(EINVAL);
+        }
+        let bytes =
+            unsafe { core::slice::from_raw_parts(address.cast::<u8>(), address_length as usize) };
+        let address = mochios_posix_client::socket::decode_sockaddr(bytes)
+            .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
+        if !matches!(address, wire::Address::UnixPath(_)) {
             return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
         }
+        super::socket_record::send_to(entry, buffer as u64, length, flags, address)
+            .map(|record| Some(record.count))
+    })();
+    match result {
+        Ok(None) => None,
+        Ok(Some(count)) => Some(count),
+        Err(error) => Some(finish_io_cancellation(result_with_errno(Err(error), -1))),
     }
-    Ok(())
 }
 
 unsafe fn receive_record_address(
@@ -902,13 +928,14 @@ pub extern "C" fn sendto(
     buffer: *const c_void,
     length: usize,
     flags: c_int,
-    _address: *const c_void,
-    _address_length: u32,
+    address: *const c_void,
+    address_length: u32,
 ) -> isize {
-    // Stream destinations are ignored. Datagram destinations must not be
-    // silently ignored: explicit-address routing is a separate service path.
-    if let Err(error) = destination_supported(fd, _address) {
-        return result_with_errno(Err(error), -1);
+    pthread_testcancel();
+    if let Some(result) =
+        unsafe { send_record_to(fd, buffer, length, flags, address, address_length) }
+    {
+        return result;
     }
     send(fd, buffer, length, flags)
 }

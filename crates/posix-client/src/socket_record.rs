@@ -148,3 +148,45 @@ where
         _ => ClientError::MismatchedResponse,
     })
 }
+
+/// Resolve one call's explicit destination without changing the socket's
+/// default peer. The owned route is WRITE/WAIT only and must be closed on all
+/// exits, including failed staging, timeout and cancellation.
+pub fn prepare_route<T: ObjectTransport>(
+    transport: &T,
+    socket: Handle<T::Handle>,
+    length: usize,
+    address: protocol::socket::Address<'_>,
+    mut close: impl FnMut(T::Handle),
+) -> Result<Handle<T::Handle>, ClientError<T::Error>>
+where
+    T::Handle: Default + Eq,
+{
+    let mut request = [0; protocol::socket_route::MAX_REQUEST_LEN];
+    let length = u32::try_from(length).map_err(|_| ClientError::Remote(-90))?;
+    let count = protocol::socket_route::encode(length, address, &mut request)
+        .map_err(ClientError::Protocol)?;
+    let mut handles = ObjectHandles::new();
+    attach::<T>(&mut handles, socket, mnu_abi::HANDLE_RIGHT_WRITE)?;
+    let mut response = [0; 4];
+    let result = transport
+        .call_with_handles(&request[..count], &mut response, &mut handles)
+        .map_err(ClientError::Transport);
+    if matches!(result, Ok(4)) && i32::from_le_bytes(response) == 0 && handles.len() == 1 {
+        let route = handles.get(0).unwrap();
+        if route.handle != T::Handle::default()
+            && route.handle != socket.handle
+            && route.rights == protocol::socket_route::RIGHTS
+        {
+            return Ok(route);
+        }
+    }
+    cleanup(&handles, &mut close);
+    Err(match result {
+        Err(error) => error,
+        Ok(4) if i32::from_le_bytes(response) < 0 && handles.is_empty() => {
+            ClientError::Remote(i32::from_le_bytes(response))
+        }
+        _ => ClientError::MismatchedResponse,
+    })
+}

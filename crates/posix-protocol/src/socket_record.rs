@@ -21,6 +21,7 @@ pub enum Operation {
     Send = 1,
     Receive = 2,
     WaitSend = 3,
+    SendRoute = 4,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,7 +80,9 @@ impl Request {
     /// The sender must separately possess TRANSFER to attach these references.
     pub const fn socket_rights(self) -> u64 {
         match self.operation {
-            Operation::Send | Operation::WaitSend => mnu_abi::HANDLE_RIGHT_WRITE,
+            Operation::Send | Operation::WaitSend | Operation::SendRoute => {
+                mnu_abi::HANDLE_RIGHT_WRITE
+            }
             Operation::Receive => mnu_abi::HANDLE_RIGHT_READ,
         }
     }
@@ -92,7 +95,7 @@ impl Request {
         }
         mnu_abi::HANDLE_RIGHT_MAP
             | match self.operation {
-                Operation::Send => mnu_abi::HANDLE_RIGHT_READ,
+                Operation::Send | Operation::SendRoute => mnu_abi::HANDLE_RIGHT_READ,
                 Operation::Receive => mnu_abi::HANDLE_RIGHT_WRITE,
                 Operation::WaitSend => 0,
             }
@@ -116,7 +119,7 @@ impl<'a> Reply<'a> {
             return Err(ProtocolError::InvalidLength);
         }
         match (request.operation, self.source) {
-            (Operation::Send, None)
+            (Operation::Send | Operation::SendRoute, None)
                 if self.copied == request.length && self.length == request.length =>
             {
                 Ok(())
@@ -192,6 +195,7 @@ fn operation(input: &[u8]) -> Result<Operation, ProtocolError> {
         1 => Ok(Operation::Send),
         2 => Ok(Operation::Receive),
         3 => Ok(Operation::WaitSend),
+        4 => Ok(Operation::SendRoute),
         _ => Err(ProtocolError::InvalidLength),
     }
 }

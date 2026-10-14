@@ -44,6 +44,52 @@ pub(super) fn io(
     flags: c_int,
     sending: bool,
 ) -> Result<ResultRecord, c_int> {
+    io_using(entry, buffer, length, flags, sending, None)
+}
+
+pub(super) fn send_to(
+    entry: FdEntry,
+    buffer: u64,
+    length: usize,
+    flags: c_int,
+    address: posix_protocol::socket::Address<'_>,
+) -> Result<ResultRecord, c_int> {
+    mochios_posix_client::socket::message_options(flags, true)
+        .map_err(|_| mochios_posix_client::newlib_errno::EOPNOTSUPP)?;
+    if length > isize::MAX as usize {
+        return Err(EINVAL);
+    }
+    if length > wire::MAX_RECORD_SIZE {
+        return Err(mochios_posix_client::newlib_errno::from_status(-90));
+    }
+    if length != 0 && buffer == 0 {
+        return Err(EFAULT);
+    }
+    let transport = endpoint()?;
+    let source = ObjectHandleAttachment {
+        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+        rights: entry.rights,
+    };
+    let route = mochios_posix_client::socket_record::prepare_route(
+        &transport,
+        source,
+        length,
+        address,
+        close_object_handle,
+    )
+    .map_err(map_posix_client_error)?;
+    let _pending = socket::PendingSocketJob(route.handle);
+    io_using(entry, buffer, length, flags, true, Some(route))
+}
+
+fn io_using(
+    entry: FdEntry,
+    buffer: u64,
+    length: usize,
+    flags: c_int,
+    sending: bool,
+    route: Option<ObjectHandleAttachment<u32>>,
+) -> Result<ResultRecord, c_int> {
     const MSG_TRUNC: c_int = 0x20;
     let truncate = !sending && flags & MSG_TRUNC != 0;
     let options = mochios_posix_client::socket::message_options(
@@ -98,7 +144,9 @@ pub(super) fn io(
         rights: entry.rights,
     };
     let request = wire::Request {
-        operation: if sending {
+        operation: if route.is_some() {
+            wire::Operation::SendRoute
+        } else if sending {
             wire::Operation::Send
         } else {
             wire::Operation::Receive
@@ -117,7 +165,7 @@ pub(super) fn io(
         match mochios_posix_client::socket_record::exchange(
             &transport,
             request,
-            socket,
+            route.unwrap_or(socket),
             ObjectHandleAttachment {
                 handle: ram.0,
                 rights,
@@ -129,7 +177,22 @@ pub(super) fn io(
         {
             Ok(reply) => break reply,
             Err(EAGAIN) if !options.dont_wait && !handle_is_nonblocking(entry)? => {
-                if sending {
+                if let Some(route) = route {
+                    let notification = object_entry(
+                        u64::from(route.handle),
+                        route.rights,
+                        FdKind::ObjectSocket,
+                        2,
+                    );
+                    wait_for_handle_capacity(
+                        notification,
+                        syscall::HANDLE_SIGNAL_WRITABLE,
+                        thread,
+                        caught,
+                        0,
+                        wait.deadline(entry)?,
+                    )?;
+                } else if sending {
                     let job = mochios_posix_client::socket_record::wait_send(
                         &transport,
                         socket,
