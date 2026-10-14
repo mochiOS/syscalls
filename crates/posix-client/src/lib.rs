@@ -1783,6 +1783,17 @@ impl<T: ObjectTransport> Client<T> {
         payload: &[u8],
         file: ObjectHandleAttachment<T::Handle>,
     ) -> Result<(), ClientError<T::Error>> {
+        let file = if let Some(required) = protocol::file_mutation_rights(opcode) {
+            if file.rights & required != required {
+                return Err(ClientError::Remote(-13));
+            }
+            ObjectHandleAttachment {
+                handle: file.handle,
+                rights: required,
+            }
+        } else {
+            file
+        };
         let mut handles = ObjectHandles::new();
         handles
             .push(file)

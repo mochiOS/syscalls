@@ -366,6 +366,17 @@ pub const CREDENTIAL_ID_UNCHANGED: u32 = u32::MAX;
 pub const FILE_LENGTH_PAYLOAD_LEN: usize = 8;
 pub const FILE_FLAGS_PAYLOAD_LEN: usize = 4;
 pub const FILE_FLAGS_UPDATE_PAYLOAD_LEN: usize = 8;
+
+/// Native authority required by file mutations, independently of POSIX UID or
+/// the original open mode. Rights must survive every forwarding boundary.
+pub const fn file_mutation_rights(opcode: u16) -> Option<u64> {
+    let right = match opcode {
+        OP_FTRUNCATE => mnu_abi::HANDLE_RIGHT_WRITE,
+        OP_FCHMOD | OP_FCHOWN | OP_FSETFL | OP_FUPDATEFL => mnu_abi::HANDLE_RIGHT_CONTROL,
+        _ => return None,
+    };
+    Some(right | mnu_abi::HANDLE_RIGHT_TRANSFER)
+}
 pub const FILE_OWNER_PAYLOAD_LEN: usize = 8;
 pub const OPEN_AT_HEADER_LEN: usize = 16;
 pub const STAT_AT_HEADER_LEN: usize = 12;

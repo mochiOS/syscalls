@@ -5667,6 +5667,9 @@ pub extern "C" fn _ftruncate(fd: c_int, length: i64) -> c_int {
         if entry.handle.kind != FdKind::ObjectFile {
             return Err(EBADF);
         }
+        if !mochios_posix_client::fd::access_allows_write(entry.handle.open_flags as u32) {
+            return Err(EINVAL);
+        }
         let client = posix_client().map_err(map_posix_client_error)?;
         client
             .ftruncate(
