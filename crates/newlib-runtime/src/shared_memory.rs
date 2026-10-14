@@ -80,6 +80,36 @@ pub(super) fn truncate(entry: FdEntry, length: u64) -> Result<(), c_int> {
     Ok(())
 }
 
+pub(super) fn stat(entry: FdEntry) -> Result<NewlibStat, c_int> {
+    let mut bytes = [0; posix_protocol::FILE_STATUS_LEN];
+    let length = syscall_errno(syscall::raw_syscall6(
+        syscall::SyscallNumber::HandleControl,
+        entry.handle.lower_handle,
+        wire::CONTROL_STAT,
+        0,
+        0,
+        bytes.as_mut_ptr() as u64,
+        bytes.len() as u64,
+    ))?;
+    if length as usize != bytes.len() {
+        return Err(EIO);
+    }
+    let status = posix_protocol::decode_file_status(&bytes).map_err(|_| EIO)?;
+    // This SDK's struct stat uses 16-bit identity fields. Never silently clamp
+    // a valid service identity into a different C-visible owner or inode.
+    for value in [
+        status.device,
+        status.inode,
+        status.link_count as u64,
+        status.uid as u64,
+        status.gid as u64,
+        status.special_device,
+    ] {
+        u16::try_from(value).map_err(|_| EOVERFLOW)?;
+    }
+    Ok(translate_posix_stat(&status))
+}
+
 pub(super) fn get_status_flags(entry: FdEntry) -> Result<c_int, c_int> {
     let mut bytes = [0; 4];
     let length = syscall_errno(syscall::raw_syscall6(

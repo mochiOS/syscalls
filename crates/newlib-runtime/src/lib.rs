@@ -5520,9 +5520,9 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
         if entry.handle.kind == FdKind::ObjectSharedMemory {
-            // Do not invent inode/owner/mode values from the calling process.
-            // Shared service-owned metadata is required for this operation.
-            return Err(ENOSYS);
+            let status = shared_memory::stat(entry)?;
+            unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), status) };
+            return Ok(0);
         }
         if matches!(
             entry.handle.kind,
