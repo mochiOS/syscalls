@@ -14,6 +14,7 @@ pub mod shared_memory;
 pub mod socket;
 pub mod fault_signal;
 pub mod signal_origin;
+pub mod signal_wait;
 
 /// Opaque LaunchContext key under which the POSIX control endpoint is passed.
 ///
@@ -228,9 +229,6 @@ pub const OP_WAIT_CHILD_GUARDED: u16 = 70;
 /// SignalSendRequest with selector zero and one WAIT|SIGNAL ThreadHandle.
 /// Sender and target identities are obtained from native metadata only.
 pub const OP_SIGNAL_THREAD_SEND: u16 = 71;
-/// SignalWaitRequest; accepts one blocked signal for the authenticated thread.
-/// EAGAIN is internal to deferred service processing, not a polling reply.
-pub const OP_SIGNAL_THREAD_WAIT: u16 = 72;
 /// Empty request. Returns CPU counts of children waited for by the caller;
 /// caller identity comes only from authenticated transport metadata.
 pub const OP_WAITED_CHILD_CPU_USAGE: u16 = 73;
@@ -256,6 +254,10 @@ pub const OP_SIGNAL_THREAD_FAULT: u16 = 83;
 /// authenticated calling thread. Does not consume the completion token.
 /// Returns signal_origin::Origin including the retained child event/status.
 pub const OP_SIGNAL_DELIVERY_ORIGIN: u16 = 85;
+/// SignalWaitRequest; atomically accepts one blocked signal and its provenance
+/// for the authenticated thread. Returns signal_wait::Accepted. EAGAIN stays
+/// internal to deferred service processing. The old number-only opcode is gone.
+pub const OP_SIGNAL_THREAD_WAIT_INFO: u16 = 86;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

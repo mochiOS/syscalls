@@ -6695,6 +6695,44 @@ pub unsafe extern "C" fn sigwait(set: *const u64, selected: *mut c_int) -> c_int
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn sigwaitinfo(
+    set: *const u64,
+    info: *mut mochios_posix_client::signal_context::SigInfo,
+) -> c_int {
+    let result = (|| {
+        if set.is_null() {
+            return Err(EFAULT);
+        }
+        register_current_thread().ok_or(EAGAIN)?;
+        let mask = unsafe { set.read() };
+        let client = posix_client().map_err(map_posix_client_error)?;
+        let epoch = client.thread_signal_epoch().map_err(map_posix_client_error)?;
+        let accepted = match client.wait_thread_signal_info_since(mask, epoch) {
+            Ok(accepted) => accepted,
+            Err(PosixClientError::Remote(posix_protocol::STATUS_EINTR)) => {
+                drain_pending_signals()?;
+                return Err(EINTR);
+            }
+            Err(error) => return Err(map_posix_client_error(error)),
+        };
+        let value = mochios_posix_client::signal_context::SigInfo::from_origin(
+            accepted.signal,
+            accepted.origin,
+        )
+        .map_err(|error| match error {
+            mochios_posix_client::signal_context::InfoError::Overflow => EOVERFLOW,
+            _ => EIO,
+        })?;
+        if !info.is_null() {
+            unsafe { info.write(value) };
+        }
+        Ok(accepted.signal as c_int)
+    })();
+    // Unlike sigwait, this API returns -1 and sets errno on interruption.
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn _signal_r(_reent: *mut c_void, signal: c_int, handler: usize) -> usize {
     let replacement = SignalAction {
         sa_flags: 0,
