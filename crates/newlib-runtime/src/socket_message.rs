@@ -445,7 +445,6 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
         let mut part = original;
         let result = unsafe {
             receive_once(
-                fd,
                 &mut call,
                 &mut part,
                 &vectors[head..],
@@ -492,7 +491,6 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
 }
 
 unsafe fn receive_once(
-    fd: c_int,
     call: &mut ReceiveCall<'_>,
     output: &mut Message,
     vectors: &[Vector],
@@ -507,53 +505,9 @@ unsafe fn receive_once(
     )
     .map_err(|_| mochios_posix_client::newlib_errno::EOPNOTSUPP)?;
     let datagram = socket::is_datagram(entry)?;
-    if !datagram && options.peek && options.wait_all && message.control_length == 0 {
-        let mut peer = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
-        let mut required = peer.len() as u32;
-        if !message.name.is_null() {
-            unsafe { socket::socket_name(fd, peer.as_mut_ptr().cast(), &mut required, true) }?;
-        }
-        let mut buffer = VectorBuffer::new(total)?;
-        let bytes = buffer.bytes();
-        let count = socket::message_entry(
-            entry,
-            bytes.as_mut_ptr() as u64,
-            bytes.len(),
-            flags & !MSG_CMSG_CLOEXEC,
-            false,
-        )? as usize;
-        let mut offset = 0;
-        for vector in vectors {
-            let size = vector.length.min(count - offset);
-            if size != 0 {
-                unsafe { ptr::copy_nonoverlapping(bytes.as_ptr().add(offset), vector.base, size) };
-                offset += size;
-            }
-            if offset == count {
-                break;
-            }
-        }
-        if !message.name.is_null() {
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    peer.as_ptr(),
-                    message.name.cast(),
-                    (message.name_length as usize).min(required as usize),
-                )
-            };
-            message.name_length = required;
-        }
-        message.control_length = 0;
-        message.flags = 0;
-        *output = message;
-        return Ok(count as isize);
-    }
-    // WAITALL peeks need one coherent snapshot across bounded IPC windows.
-    // Preserve the existing byte-only path above until that is implemented;
-    // do not silently downgrade a control-bearing WAITALL into a short peek.
-    if !datagram && options.peek && options.wait_all {
-        return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
-    }
+    // Like Linux UNIX streams, a peek returns the currently visible prefix
+    // even with WAITALL. Only an empty queue waits; repeated offset reads would
+    // combine different queue heads and bypass the first ancillary barrier.
     if !datagram && flags & MSG_TRUNC != 0 {
         return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
     }

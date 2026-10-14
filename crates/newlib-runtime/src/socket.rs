@@ -668,53 +668,6 @@ pub(super) fn stat(entry: FdEntry) -> Result<NewlibStat, c_int> {
     translate_posix_stat(&status)
 }
 
-fn peek_since_wait(
-    entry: FdEntry,
-    thread: &ThreadControl,
-    caught: u64,
-    wait: &mut SocketWait,
-    dont_wait: bool,
-    offset: usize,
-    mut operation: impl FnMut() -> Result<usize, c_int>,
-) -> Result<usize, c_int> {
-    loop {
-        if io_cancellation_requested(thread)
-            || thread.nonrestart_signal_generation.load(Ordering::Acquire) != caught
-        {
-            return Err(EINTR);
-        }
-        match operation() {
-            Err(EAGAIN) if !dont_wait && !handle_is_nonblocking(entry)? => {
-                let job = posix_client()
-                    .map_err(map_posix_client_error)?
-                    .wait_socket_receive(
-                        ObjectHandleAttachment {
-                            handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-                            rights: entry.rights,
-                        },
-                        (offset as u64).checked_add(1).ok_or(EINVAL)?,
-                        close_object_handle,
-                    )
-                    .map_err(map_posix_client_error)?;
-                let _pending = PendingSocketJob(job.handle);
-                let notification =
-                    object_entry(u64::from(job.handle), job.rights, FdKind::ObjectSocket, 2);
-                // This Handle becomes ready on new bytes or a terminal result,
-                // not merely because the already-inspected prefix still exists.
-                wait_for_handle_capacity(
-                    notification,
-                    syscall::HANDLE_SIGNAL_READABLE,
-                    thread,
-                    caught,
-                    0,
-                    wait.deadline(entry)?,
-                )?;
-            }
-            result => return result,
-        }
-    }
-}
-
 fn message_io(
     fd: c_int,
     buffer: u64,
@@ -770,26 +723,6 @@ pub(super) fn message_entry(
     let mut wait = SocketWait::new(entry, interests)?;
     let mut io = |offset: usize, remaining: usize| {
         let address = buffer.checked_add(offset as u64).ok_or(EFAULT)?;
-        if options.peek {
-            return peek_since_wait(
-                entry,
-                thread,
-                caught,
-                &mut wait,
-                options.dont_wait,
-                offset,
-                || {
-                    syscall_errno(syscall::raw_syscall4(
-                        syscall::SyscallNumber::HandleReadAt,
-                        entry.handle.lower_handle,
-                        address,
-                        remaining as u64,
-                        offset as u64,
-                    ))
-                    .and_then(|count| usize::try_from(count).map_err(|_| EIO))
-                },
-            );
-        }
         let result = stream_io_since_wait(
             entry,
             interests,
@@ -799,13 +732,23 @@ pub(super) fn message_entry(
             options.dont_wait,
             &mut wait,
             || {
-                syscall_errno(syscall::raw_syscall3(
-                    operation,
-                    entry.handle.lower_handle,
-                    address,
-                    remaining as u64,
-                ))
-                .and_then(|count| usize::try_from(count).map_err(|_| EIO))
+                let result = if options.peek {
+                    syscall::raw_syscall4(
+                        syscall::SyscallNumber::HandleReadAt,
+                        entry.handle.lower_handle,
+                        address,
+                        remaining as u64,
+                        0,
+                    )
+                } else {
+                    syscall::raw_syscall3(
+                        operation,
+                        entry.handle.lower_handle,
+                        address,
+                        remaining as u64,
+                    )
+                };
+                syscall_errno(result).and_then(|count| usize::try_from(count).map_err(|_| EIO))
             },
         );
         if sending && !options.no_signal && matches!(result, Err(EPIPE)) {
@@ -820,7 +763,10 @@ pub(super) fn message_entry(
         }
         Ok(count as isize)
     } else {
-        mochios_posix_client::socket::receive(length, options.wait_all, io)
+        // UNIX-stream PEEK returns one available prefix even with WAITALL.
+        // Repeating an offset inspection can cross an ancillary barrier or
+        // combine data from different queue heads after another reader runs.
+        mochios_posix_client::socket::receive(length, options.wait_all && !options.peek, io)
             .map(|count| count as isize)
             .map_err(|error| match error {
                 mochios_posix_client::socket::ReceiveError::InvalidResult => EIO,
