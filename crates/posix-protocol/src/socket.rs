@@ -60,6 +60,9 @@ pub const fn connect_job_rights() -> u64 {
 /// HandleControl with empty input/output. Pending returns EAGAIN; a completed
 /// attempt returns success or its stored error. Queries do not consume it.
 pub const CONTROL_CONNECT_RESULT: u64 = u64::from_le_bytes(*b"SOCRES01");
+/// Atomically expire an uncommitted attempt, or return its already committed
+/// result. Empty input/output; only an explicitly held job Handle authorizes it.
+pub const CONTROL_CONNECT_EXPIRE: u64 = u64::from_le_bytes(*b"SOCEXP01");
 
 /// Options apply to the new socket description. Listener blocking behavior
 /// and descriptor-local CLOEXEC are not copied into this request.

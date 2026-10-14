@@ -209,6 +209,7 @@ unsafe fn connect_io(fd: c_int, address: *const c_void, length: u32) -> Result<c
         .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
     let (_, thread) = register_current_thread().ok_or(EAGAIN)?;
     let caught = thread.nonrestart_signal_generation.load(Ordering::Acquire);
+    let mut wait = SocketWait::new(entry, syscall::HANDLE_SIGNAL_WRITABLE)?;
     let result = posix_client()
         .map_err(map_posix_client_error)?
         .connect_socket(
@@ -229,12 +230,23 @@ unsafe fn connect_io(fd: c_int, address: *const c_void, length: u32) -> Result<c
         match control(notification, wire::CONTROL_CONNECT_RESULT, &[], &mut []) {
             Ok(()) => return Ok(0), // Ownership/connection is already committed.
             Err(EAGAIN) => {
-                wait_for_handle_since(
+                match wait_for_handle_capacity(
                     notification,
                     syscall::HANDLE_SIGNAL_READABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
                     thread,
                     caught,
-                )?;
+                    0,
+                    wait.deadline(entry)?,
+                ) {
+                    Ok(_) => (),
+                    Err(EAGAIN) => {
+                        // Resolve the race at the owner of the connection
+                        // transaction before dropping its notification Handle.
+                        control(notification, wire::CONTROL_CONNECT_EXPIRE, &[], &mut [])?;
+                        return Ok(0);
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             Err(error) => return Err(error),
         }
