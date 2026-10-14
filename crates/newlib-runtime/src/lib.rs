@@ -253,6 +253,8 @@ struct ThreadControl {
     signal_upcall_stack: AtomicUsize,
     signal_upcall_stack_size: AtomicUsize,
     active_native_signal_frame: AtomicUsize,
+    active_native_signal_frame_id: AtomicU64,
+    next_native_signal_frame_id: AtomicU64,
     native_delivery_defer: AtomicU32,
     active_signal_scope: AtomicUsize,
     active_signal_scope_id: AtomicU64,
@@ -295,6 +297,8 @@ impl ThreadControl {
             signal_upcall_stack: AtomicUsize::new(0),
             signal_upcall_stack_size: AtomicUsize::new(0),
             active_native_signal_frame: AtomicUsize::new(0),
+            active_native_signal_frame_id: AtomicU64::new(0),
+            next_native_signal_frame_id: AtomicU64::new(1),
             native_delivery_defer: AtomicU32::new(0),
             active_signal_scope: AtomicUsize::new(0),
             active_signal_scope_id: AtomicU64::new(0),
@@ -1064,6 +1068,8 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
         control.signal_upcall_stack.store(0, Ordering::Relaxed);
         control.signal_upcall_stack_size.store(0, Ordering::Relaxed);
         control.active_native_signal_frame.store(0, Ordering::Relaxed);
+        control.active_native_signal_frame_id.store(0, Ordering::Relaxed);
+        control.next_native_signal_frame_id.store(1, Ordering::Relaxed);
         control.native_delivery_defer.store(0, Ordering::Relaxed);
         control.active_signal_scope.store(0, Ordering::Relaxed);
         control.active_signal_scope_id.store(0, Ordering::Relaxed);
@@ -1085,6 +1091,8 @@ fn reserve_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
 }
 
 fn release_thread_control(control: &ThreadControl) {
+    control.active_native_signal_frame.store(0, Ordering::Relaxed);
+    control.active_native_signal_frame_id.store(0, Ordering::Relaxed);
     control.active_signal_scope.store(0, Ordering::Relaxed);
     control.active_signal_scope_id.store(0, Ordering::Relaxed);
     let handle = control.native_handle.swap(0, Ordering::AcqRel);
@@ -7050,11 +7058,13 @@ extern "C" fn posix_signal_upcall(
     _instruction: u64,
     cause: u64,
 ) -> ! {
-    let mut native_frame = match signal_delivery::NativeFrame::new() {
+    let mut native_frame = core::pin::pin!(match signal_delivery::NativeFrame::new(token) {
         Ok(frame) => frame,
         Err(_) => process_exit(127),
-    };
-    native_frame.activate();
+    });
+    if native_frame.as_mut().activate().is_err() {
+        process_exit(127);
+    }
     let mut context = match signal_delivery::interrupted(token) {
         Ok(context) => context,
         Err(_) => process_exit(127),
@@ -7068,7 +7078,7 @@ extern "C" fn posix_signal_upcall(
             process_exit(127);
         }
     }
-    signal_delivery::resume(token, &context, &native_frame)
+    signal_delivery::resume(&context, native_frame.as_mut())
 }
 
 #[unsafe(no_mangle)]

@@ -1,4 +1,8 @@
 use super::*;
+use core::{
+    marker::{PhantomData, PhantomPinned},
+    pin::Pin,
+};
 use mochios_posix_client::signal_context::{MachineContext, Stack};
 
 /// A native callback's runtime frames remain live across a userspace VM clone.
@@ -8,27 +12,113 @@ use mochios_posix_client::signal_context::{MachineContext, Stack};
 pub(super) struct NativeFrame {
     control: &'static ThreadControl,
     owner: u64,
+    token: u64,
+    id: u64,
     previous: usize,
+    previous_id: u64,
     stack: usize,
     size: usize,
+    active: bool,
+    retired: bool,
+    _pin: PhantomPinned,
+    _thread_bound: PhantomData<*mut ()>,
 }
 
 impl NativeFrame {
-    pub(super) fn new() -> Result<Self, c_int> {
+    pub(super) fn new(token: u64) -> Result<Self, c_int> {
+        if token == 0 {
+            return Err(EINVAL);
+        }
         let (_, control) = current_thread_control().ok_or(EAGAIN)?;
+        let mut id = control.next_native_signal_frame_id.load(Ordering::Relaxed);
+        loop {
+            let next = id.checked_add(1).ok_or(EOVERFLOW)?;
+            match control.next_native_signal_frame_id.compare_exchange_weak(
+                id,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(current) => id = current,
+            }
+        }
         Ok(Self {
             control,
             owner: native_process_id().map_err(|error| map_kernel_errno(error.raw()))?,
-            previous: control.active_native_signal_frame.load(Ordering::Acquire),
+            token,
+            id,
+            previous: 0,
+            previous_id: 0,
             stack: control.signal_upcall_stack.load(Ordering::Acquire),
             size: control.signal_upcall_stack_size.load(Ordering::Acquire),
+            active: false,
+            retired: false,
+            _pin: PhantomPinned,
+            _thread_bound: PhantomData,
         })
     }
 
-    pub(super) fn activate(&mut self) {
-        self.control
+    pub(super) fn activate(self: Pin<&mut Self>) -> Result<(), c_int> {
+        // Publishing a stack address requires that it remain fixed until the
+        // frame is retired. Only the current thread may mutate this chain.
+        let frame = unsafe { self.get_unchecked_mut() };
+        let _guard =
+            mochios_posix_client::upcall_guard::Guard::enter(&frame.control.native_delivery_defer)
+                .ok_or(EOVERFLOW)?;
+        if frame.active || frame.retired {
+            return Err(EINVAL);
+        }
+        frame.previous = frame
+            .control
             .active_native_signal_frame
-            .store(self as *mut Self as usize, Ordering::Release);
+            .load(Ordering::Acquire);
+        frame.previous_id = frame
+            .control
+            .active_native_signal_frame_id
+            .load(Ordering::Acquire);
+        frame.active = true;
+        frame
+            .control
+            .active_native_signal_frame_id
+            .store(frame.id, Ordering::Relaxed);
+        frame
+            .control
+            .active_native_signal_frame
+            .store(frame as *mut Self as usize, Ordering::Release);
+        Ok(())
+    }
+
+    fn deactivate(self: Pin<&mut Self>) -> Result<(), c_int> {
+        let frame = unsafe { self.get_unchecked_mut() };
+        let _guard =
+            mochios_posix_client::upcall_guard::Guard::enter(&frame.control.native_delivery_defer)
+                .ok_or(EOVERFLOW)?;
+        if !frame.active
+            || frame
+                .control
+                .active_native_signal_frame
+                .load(Ordering::Acquire)
+                != frame as *mut Self as usize
+            || frame
+                .control
+                .active_native_signal_frame_id
+                .load(Ordering::Acquire)
+                != frame.id
+        {
+            return Err(EINVAL);
+        }
+        frame.active = false;
+        frame.retired = true;
+        frame
+            .control
+            .active_native_signal_frame_id
+            .store(frame.previous_id, Ordering::Relaxed);
+        frame
+            .control
+            .active_native_signal_frame
+            .store(frame.previous, Ordering::Release);
+        Ok(())
     }
 }
 
@@ -127,13 +217,14 @@ unsafe extern "C" fn finish_detached(argument: *mut c_void) -> ! {
     failed_resume(result)
 }
 
-pub(super) fn resume(token: u64, context: &UContext, frame: &NativeFrame) -> ! {
+pub(super) fn resume(context: &UContext, mut frame: Pin<&mut NativeFrame>) -> ! {
     let saved = context.native_snapshot();
     let owner = native_process_id().unwrap_or_else(|_| process_exit(127));
     frame
-        .control
-        .active_native_signal_frame
-        .store(frame.previous, Ordering::Release);
+        .as_mut()
+        .deactivate()
+        .unwrap_or_else(|error| process_exit(error));
+    let frame = frame.as_ref().get_ref();
     if owner != frame.owner {
         let top = (saved.stack_pointer as usize)
             .checked_sub(128)
@@ -161,7 +252,7 @@ pub(super) fn resume(token: u64, context: &UContext, frame: &NativeFrame) -> ! {
     }
     let result = syscall::raw_syscall3(
         syscall::SyscallNumber::ThreadUpcallReturnContext,
-        token,
+        frame.token,
         (&saved as *const mnu_abi::ThreadUpcallSnapshot) as u64,
         core::mem::size_of::<mnu_abi::ThreadUpcallSnapshot>() as u64,
     );
