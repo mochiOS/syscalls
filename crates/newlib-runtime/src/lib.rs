@@ -3951,7 +3951,7 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
                 mochios_posix_client::stream::WriteError::Io(errno) => errno,
             });
         }
-        FdKind::ObjectFile => {
+        FdKind::ObjectFile | FdKind::ObjectSharedMemory => {
             let limit = resource_policy::read(posix_protocol::RLIMIT_FSIZE)?;
             let result = if limit.soft == posix_protocol::RLIM_INFINITY {
                 syscall::raw_syscall3(
@@ -3977,7 +3977,7 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
             }
             syscall_errno(result)?
         }
-        FdKind::ObjectSpecial | FdKind::ObjectSharedMemory => syscall_errno(syscall::raw_syscall3(
+        FdKind::ObjectSpecial => syscall_errno(syscall::raw_syscall3(
             syscall::SyscallNumber::HandleWrite,
             entry.handle.lower_handle,
             buffer as u64,
@@ -4376,7 +4376,12 @@ fn positioned_file_io(
     if !allowed {
         return Err(EBADF);
     }
-    let length = if write && length != 0 && entry.handle.kind == FdKind::ObjectFile {
+    let length = if write
+        && length != 0
+        && matches!(
+            entry.handle.kind,
+            FdKind::ObjectFile | FdKind::ObjectSharedMemory
+        ) {
         let limit = resource_policy::read(posix_protocol::RLIMIT_FSIZE)?;
         match mochios_posix_client::file_size_limit::positioned_length(offset, length, limit.soft) {
             Some(length) => length,
