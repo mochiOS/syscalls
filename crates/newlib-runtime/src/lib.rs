@@ -6,6 +6,7 @@ mod fd_lease;
 mod callback_resources;
 mod file_mutation;
 mod file_metadata;
+mod io_resources;
 mod image_startup;
 mod handle_capture;
 mod fork_policy;
@@ -4183,10 +4184,10 @@ pub extern "C" fn _write(fd: c_int, buffer: *const c_void, length: usize) -> isi
         set_errno(EFAULT);
         return -1;
     }
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        syscall_write(*entry, buffer, length)
-    })();
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| syscall_write(**entry, buffer, length),
+    );
     record_stdio_io(&result);
     result_with_errno(result, -1)
 }
@@ -4277,34 +4278,37 @@ pub unsafe extern "C" fn writev(fd: c_int, iov: *const IoVec, iovcnt: c_int) -> 
             return -1;
         }
     };
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        let mut buffer = VectorBuffer::new(total)?;
-        mochios_posix_client::io_vector::write(
-            iovcnt as usize,
-            buffer.bytes(),
-            |index| unsafe { (*iov.add(index)).iov_len },
-            |index, bytes| {
-                let entry = unsafe { &*iov.add(index) };
-                // Safety: validated nonempty caller buffers and the temporary
-                // buffer do not overlap; copy only the transferred prefix.
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        entry.iov_base.cast::<u8>(), bytes.as_mut_ptr(), bytes.len(),
-                    )
-                };
-            },
-            |bytes| {
-                syscall_write(*entry, bytes.as_ptr().cast(), bytes.len())
-                    .and_then(|count| usize::try_from(count).map_err(|_| EIO))
-            },
-        )
-        .map(|count| count as isize)
-        .map_err(|error| match error {
-            mochios_posix_client::io_vector::TransferError::InvalidResult => EIO,
-            mochios_posix_client::io_vector::TransferError::Io(errno) => errno,
-        })
-    })();
+    let result = io_resources::with(
+        || Ok((with_fd_entry(fd)?, VectorBuffer::new(total)?)),
+        |(entry, buffer)| {
+            mochios_posix_client::io_vector::write(
+                iovcnt as usize,
+                buffer.bytes(),
+                |index| unsafe { (*iov.add(index)).iov_len },
+                |index, bytes| {
+                    let entry = unsafe { &*iov.add(index) };
+                    // Safety: validated nonempty caller buffers and the temporary
+                    // buffer do not overlap; copy only the transferred prefix.
+                    unsafe {
+                        ptr::copy_nonoverlapping(
+                            entry.iov_base.cast::<u8>(),
+                            bytes.as_mut_ptr(),
+                            bytes.len(),
+                        )
+                    };
+                },
+                |bytes| {
+                    syscall_write(**entry, bytes.as_ptr().cast(), bytes.len())
+                        .and_then(|count| usize::try_from(count).map_err(|_| EIO))
+                },
+            )
+            .map(|count| count as isize)
+            .map_err(|error| match error {
+                mochios_posix_client::io_vector::TransferError::InvalidResult => EIO,
+                mochios_posix_client::io_vector::TransferError::Io(errno) => errno,
+            })
+        },
+    );
     finish_io_cancellation(result_with_errno(result, -1))
 }
 
@@ -4314,10 +4318,10 @@ pub extern "C" fn _read(fd: c_int, buffer: *mut c_void, length: usize) -> isize 
         set_errno(EFAULT);
         return -1;
     }
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        syscall_read(*entry, buffer, length)
-    })();
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| syscall_read(**entry, buffer, length),
+    );
     record_stdio_io(&result);
     result_with_errno(result, -1)
 }
@@ -4335,7 +4339,19 @@ fn positioned_file_io(
     offset: i64,
     write: bool,
 ) -> Result<isize, c_int> {
-    let entry = with_fd_entry(fd)?;
+    io_resources::with(
+        || with_fd_entry(fd),
+        |entry| positioned_entry_io(**entry, buffer, length, offset, write),
+    )
+}
+
+fn positioned_entry_io(
+    entry: FdEntry,
+    buffer: *mut c_void,
+    length: usize,
+    offset: i64,
+    write: bool,
+) -> Result<isize, c_int> {
     let offset = mochios_posix_client::fd::positioned_offset(offset, length).ok_or(EINVAL)?;
     if length != 0 && buffer.is_null() {
         return Err(EFAULT);
@@ -4423,34 +4439,37 @@ pub unsafe extern "C" fn readv(fd: c_int, iov: *const IoVecMut, iovcnt: c_int) -
             return -1;
         }
     };
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        let mut buffer = VectorBuffer::new(total)?;
-        mochios_posix_client::io_vector::read(
-            iovcnt as usize,
-            buffer.bytes(),
-            |index| unsafe { (*iov.add(index)).iov_len },
-            |index, bytes| {
-                let entry = unsafe { &*iov.add(index) };
-                // Safety: validated nonempty caller buffers and the temporary
-                // buffer do not overlap; copy only the transferred prefix.
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        bytes.as_ptr(), entry.iov_base.cast::<u8>(), bytes.len(),
-                    )
-                };
-            },
-            |bytes| {
-                syscall_read(*entry, bytes.as_mut_ptr().cast(), bytes.len())
-                    .and_then(|count| usize::try_from(count).map_err(|_| EIO))
-            },
-        )
-        .map(|count| count as isize)
-        .map_err(|error| match error {
-            mochios_posix_client::io_vector::TransferError::InvalidResult => EIO,
-            mochios_posix_client::io_vector::TransferError::Io(errno) => errno,
-        })
-    })();
+    let result = io_resources::with(
+        || Ok((with_fd_entry(fd)?, VectorBuffer::new(total)?)),
+        |(entry, buffer)| {
+            mochios_posix_client::io_vector::read(
+                iovcnt as usize,
+                buffer.bytes(),
+                |index| unsafe { (*iov.add(index)).iov_len },
+                |index, bytes| {
+                    let entry = unsafe { &*iov.add(index) };
+                    // Safety: validated nonempty caller buffers and the temporary
+                    // buffer do not overlap; copy only the transferred prefix.
+                    unsafe {
+                        ptr::copy_nonoverlapping(
+                            bytes.as_ptr(),
+                            entry.iov_base.cast::<u8>(),
+                            bytes.len(),
+                        )
+                    };
+                },
+                |bytes| {
+                    syscall_read(**entry, bytes.as_mut_ptr().cast(), bytes.len())
+                        .and_then(|count| usize::try_from(count).map_err(|_| EIO))
+                },
+            )
+            .map(|count| count as isize)
+            .map_err(|error| match error {
+                mochios_posix_client::io_vector::TransferError::InvalidResult => EIO,
+                mochios_posix_client::io_vector::TransferError::Io(errno) => errno,
+            })
+        },
+    );
     finish_io_cancellation(result_with_errno(result, -1))
 }
 
