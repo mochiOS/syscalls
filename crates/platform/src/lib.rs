@@ -944,12 +944,97 @@ pub mod handle {
         old_length: u64,
         length: u64,
     ) -> SysResult<ProviderMemoryUpdate> {
-        let handle = decode(syscall::call4(
+        let handle = decode(syscall::call5(
             syscall::SyscallNumber::ProviderMemoryUpdateCreate,
             endpoint as u64,
             identity,
             old_length,
             length,
+            0,
+        )?)?;
+        Ok(ProviderMemoryUpdate { handle })
+    }
+
+    /// Owned, transferable FIFO position. This grants WAIT only (plus
+    /// TRANSFER), not permission to consume it or mutate external storage.
+    /// Dropping the final reference cancels the position without VM edits.
+    pub struct ProviderMemoryAdmission {
+        handle: Handle,
+    }
+
+    impl ProviderMemoryAdmission {
+        pub fn handle(&self) -> Handle {
+            self.handle
+        }
+        /// Transfer reference ownership to an IPC/Handle owner.
+        /// IPC copies references: the sender must close this raw reference
+        /// after sending, including when delivery fails.
+        pub fn into_handle(self) -> Handle {
+            let handle = self.handle;
+            core::mem::forget(self);
+            handle
+        }
+        /// Sleeps using generic native readiness, not service RPC or polling.
+        /// Upcall/endpoint-death errors are returned to the caller.
+        pub fn wait(&self) -> SysResult<()> {
+            wait_provider_memory_admission(self.handle)
+        }
+    }
+    impl Drop for ProviderMemoryAdmission {
+        fn drop(&mut self) {
+            let _ = close(self.handle);
+        }
+    }
+
+    /// Wait on a borrowed admission reference received by IPC. Ownership
+    /// stays with the receiver; readiness does not consume the queue position.
+    pub fn wait_provider_memory_admission(handle: Handle) -> SysResult<()> {
+        let mut items = [syscall::HandleWaitItem {
+            handle,
+            interests: mnu_abi::HANDLE_SIGNAL_READABLE | mnu_abi::HANDLE_SIGNAL_PEER_CLOSED,
+            ..Default::default()
+        }];
+        super::process::wait_many(&mut items, mnu_abi::HANDLE_WAIT_INFINITE)?;
+        if items[0].observed & mnu_abi::HANDLE_SIGNAL_READABLE != 0 {
+            Ok(())
+        } else {
+            Err(syscall::SysError::from_raw(syscall::EIO as i64))
+        }
+    }
+
+    /// Requires the endpoint owner's RECEIVE capability. The identity is
+    /// opaque, not a pathname or descriptor. Does not wait or perform I/O.
+    pub fn create_provider_memory_admission(
+        endpoint: Handle,
+        identity: u64,
+    ) -> SysResult<ProviderMemoryAdmission> {
+        let handle = decode(syscall::call2(
+            syscall::SyscallNumber::ProviderMemoryAdmissionCreate,
+            endpoint as u64,
+            identity,
+        )?)?;
+        Ok(ProviderMemoryAdmission { handle })
+    }
+
+    /// Consume a borrowed queue position using the original endpoint owner's
+    /// RECEIVE authority. The opaque ticket must name that exact backing.
+    /// Ownership of the Handle reference stays with the caller on all paths.
+    /// A failed preparation can consume the position; such a reference then
+    /// reports closed. Do not assume a failed call leaves a reusable position.
+    pub fn prepare_provider_memory_update_admitted(
+        endpoint: Handle,
+        identity: u64,
+        old_length: u64,
+        length: u64,
+        admission: Handle,
+    ) -> SysResult<ProviderMemoryUpdate> {
+        let handle = decode(syscall::call5(
+            syscall::SyscallNumber::ProviderMemoryUpdateCreate,
+            endpoint as u64,
+            identity,
+            old_length,
+            length,
+            admission as u64,
         )?)?;
         Ok(ProviderMemoryUpdate { handle })
     }
