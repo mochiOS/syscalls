@@ -2898,13 +2898,16 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     let client = posix_client().map_err(map_posix_client_error)?;
     let (_, thread_control) = current_thread_control().ok_or(ENOTSUP)?;
     service_signal_mask(thread_control, posix_protocol::SIGNAL_MASK_QUERY, 0)?;
-    let mut policy_guard = resource_policy::freeze_for_clone();
     // Do not snapshot a thread slot during publication/reclamation. Acquire
     // this before the allocator, which those operations may themselves use.
     let lifecycle_guard = thread_lifecycle::capture()?;
     // malloc can enter _sbrk and acquire STATE. Stabilize its arena first, not
     // after taking STATE, and retain the caller's existing recursion depth.
     let allocator_guard = atfork::freeze_allocator();
+    // Heap growth may consult the shared resource page while malloc is held.
+    // Discovery uses only fixed stack buffers/native mapping, never malloc.
+    // Keep allocator -> POLICY -> STATE order, not POLICY -> allocator.
+    let mut policy_guard = resource_policy::freeze_for_clone();
     // VM capture, pinned Handle grants and prepared POSIX policy do not yet
     // safely discard sibling libc state. Keep this temporary live-pthread
     // restriction here, not in the kernel's generic VM primitive.
@@ -3016,9 +3019,9 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     drop(update_guard);
     drop(socket_guard);
     drop(registry_guard);
+    drop(policy_guard);
     drop(allocator_guard);
     drop(lifecycle_guard);
-    drop(policy_guard);
     if image == 0 {
         // Fork's numeric slot labels are temporary transfer metadata, not exec
         // inheritance policy. Keep only the selected control endpoint key;
@@ -4571,8 +4574,8 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
         if fd < 0 || fd as usize >= MAX_FDS {
             return Err(EBADF);
         }
-        // Policy discovery may allocate and acquire STATE. Read it before
-        // locking the FD table; fork freezes POLICY before allocator/STATE.
+        // Read policy before locking the FD table. Fork uses
+        // allocator -> POLICY -> STATE; policy discovery itself never mallocs.
         let limit = if matches!(cmd, F_DUPFD | F_DUPFD_CLOEXEC) {
             with_fd_entry(fd)?;
             process_fd_limit()?

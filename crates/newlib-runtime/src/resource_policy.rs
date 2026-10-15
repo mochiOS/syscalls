@@ -103,8 +103,10 @@ pub(super) fn read(resource: u32) -> Result<posix_protocol::ResourceLimit, c_int
     }
 }
 
-/// Acquire before allocator/STATE: first discovery may allocate during IPC.
-/// This excludes transient Handles and incomplete initialization from fork.
+/// Acquire after allocator and before STATE. SyscallEndpointTransport and
+/// Client's control messages use fixed stack buffers; discovery must never
+/// allocate through libc. This excludes transient Handles and incomplete
+/// initialization from fork without deadlocking allocator-side policy reads.
 pub(super) fn freeze_for_clone() -> RuntimeMutexGuard<'static, Option<Mapping>> {
     POLICY.lock()
 }
