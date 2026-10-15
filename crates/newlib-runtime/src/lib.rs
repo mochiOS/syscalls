@@ -6067,15 +6067,7 @@ pub extern "C" fn truncate(path: *const c_char, length: i64) -> c_int {
         set_errno(EINVAL);
         return -1;
     }
-    result_with_errno(
-        (|| {
-            let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-            let client = posix_client().map_err(map_posix_client_error)?;
-            file_mutation(|| client.truncate_at(StatAtBase::ProcessCwd, path, length as u64))?;
-            Ok(0)
-        })(),
-        -1,
-    )
+    result_with_errno(file_mutation::truncate(path, length as u64), -1)
 }
 
 #[unsafe(no_mangle)]

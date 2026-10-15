@@ -153,3 +153,34 @@ pub(super) fn ftruncate(fd: c_int, length: u64) -> Result<c_int, c_int> {
     drain_pending_signals()?;
     result
 }
+
+pub(super) fn truncate(path: *const c_char, length: u64) -> Result<c_int, c_int> {
+    let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+    let native = delivery(control);
+    let client = posix_client().map_err(map_posix_client_error)?;
+    let prepared = {
+        // No application callback may mutate/free this buffer until encoding
+        // has finished. No borrowed string survives into the waiting loop.
+        let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+        client
+            .prepare_truncate_at(StatAtBase::ProcessCwd, path, length)
+            .map_err(map_posix_client_error)?
+    };
+    let mut scope = core::pin::pin!(callback_resources::Scope::new(
+        &control.callback_resources,
+        control.active_signal_scope_id.load(Ordering::Acquire),
+        Resources {
+            source: (),
+            callbacks: Some(callbacks(control)),
+        }
+    ));
+    unsafe { scope.as_mut().activate() };
+    drop(native);
+    let result = execute(control, client, &prepared, scope.as_mut()).map(|_| 0);
+    {
+        let _delivery = delivery(control);
+        unsafe { scope.as_mut().retire() };
+    }
+    drain_pending_signals()?;
+    result
+}
