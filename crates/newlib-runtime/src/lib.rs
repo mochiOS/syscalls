@@ -4406,15 +4406,20 @@ fn positioned_entry_io(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn pread(fd: c_int, buffer: *mut c_void, length: usize, offset: i64) -> isize {
-    result_with_errno(positioned_file_io(fd, buffer, length, offset, false), -1)
+    pthread_testcancel();
+    finish_io_cancellation(result_with_errno(
+        positioned_file_io(fd, buffer, length, offset, false),
+        -1,
+    ))
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn pwrite(fd: c_int, buffer: *const c_void, length: usize, offset: i64) -> isize {
-    result_with_errno(
+    pthread_testcancel();
+    finish_io_cancellation(result_with_errno(
         positioned_file_io(fd, buffer.cast_mut(), length, offset, true),
         -1,
-    )
+    ))
 }
 
 #[unsafe(no_mangle)]
