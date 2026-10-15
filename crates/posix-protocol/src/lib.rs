@@ -19,6 +19,7 @@ pub mod fault_signal;
 pub mod signal_origin;
 pub mod signal_wait;
 pub mod fork;
+pub mod resource_policy;
 
 /// Opaque LaunchContext key under which the POSIX control endpoint is passed.
 ///
