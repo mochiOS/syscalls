@@ -4,6 +4,7 @@ mod child_cleanup;
 mod child_startup;
 mod fd_lease;
 mod callback_resources;
+mod file_mutation;
 mod image_startup;
 mod handle_capture;
 mod fork_policy;
@@ -6026,30 +6027,7 @@ pub extern "C" fn _ftruncate(fd: c_int, length: i64) -> c_int {
         set_errno(EINVAL);
         return -1;
     }
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        if entry.handle.kind == FdKind::ObjectSharedMemory {
-            shared_memory::truncate(*entry, length as u64)?;
-            return Ok(0);
-        }
-        if !matches!(
-            entry.handle.kind,
-            FdKind::ObjectFile | FdKind::ObjectSpecial
-        ) {
-            return Err(EBADF);
-        }
-        if !mochios_posix_client::fd::access_allows_write(entry.handle.open_flags as u32) {
-            return Err(EINVAL);
-        }
-        let client = posix_client().map_err(map_posix_client_error)?;
-        let file = ObjectHandleAttachment {
-            handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-            rights: entry.rights,
-        };
-        file_mutation(|| client.ftruncate(file, length as u64))?;
-        Ok(0)
-    })();
-    result_with_errno(result, -1)
+    result_with_errno(file_mutation::ftruncate(fd, length as u64), -1)
 }
 
 #[unsafe(no_mangle)]
