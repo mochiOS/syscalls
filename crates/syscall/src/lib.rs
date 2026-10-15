@@ -5,6 +5,7 @@ extern crate std;
 
 use core::arch::asm;
 pub mod execution;
+pub mod memory;
 
 pub use mnu_abi::{
     ProcessorInfo,
