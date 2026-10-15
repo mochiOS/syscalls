@@ -2208,11 +2208,11 @@ fn retry_open_with_prompt(path: *const c_char, flags: c_int, mode: c_int) -> Res
         | CapabilityDecision::AllowForProcess
         | CapabilityDecision::AllowPersistently
         | CapabilityDecision::AllowAllUserGrantable => {
-            let fd = file_mutation::open(path, flags, mode)?;
+            let result = file_mutation::open(path, flags, mode);
             if decision == CapabilityDecision::AllowOnce {
                 drop_capability(capability);
             }
-            Ok(fd)
+            result
         }
         CapabilityDecision::Deny => Err(EACCES),
     }
@@ -4459,22 +4459,34 @@ pub extern "C" fn _open(path: *const c_char, flags: c_int, mode: c_int) -> c_int
         set_errno(EFAULT);
         return -1;
     }
-    let result = file_mutation::open(path, flags, mode);
-    match result {
-        Ok(fd) => fd,
+    let result = match file_mutation::open(path, flags, mode) {
         Err(errno) if errno == EACCES || errno == EPERM => {
-            result_with_errno(retry_open_with_prompt(path, flags, mode), -1)
+            retry_open_with_prompt(path, flags, mode)
         }
-        Err(errno) => {
-            set_errno(errno);
-            -1
+        result => result,
+    };
+    if matches!(result, Err(EINTR)) {
+        if let Some((_, control)) = current_thread_control() {
+            if io_cancellation_requested(control) {
+                control.stdio_scope.note_interruption();
+            }
         }
     }
+    // Internal newlib callers must finish FILE/list cleanup before exiting.
+    result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn open(path: *const c_char, flags: c_int, mode: c_int) -> c_int {
-    _open(path, flags, mode)
+    pthread_testcancel();
+    let result = _open(path, flags, mode);
+    if result < 0 {
+        // The internal operation has retired its Handle and FD reservation.
+        pthread_testcancel();
+    }
+    // A successfully published descriptor belongs to the caller. Do not hide
+    // it if completion won the race; retain cancellation for the next point.
+    result
 }
 
 #[unsafe(no_mangle)]

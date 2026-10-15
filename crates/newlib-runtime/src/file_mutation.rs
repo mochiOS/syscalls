@@ -220,6 +220,9 @@ fn open_in_slot(
 ) -> Result<c_int, c_int> {
     let (_, control) = register_current_thread().ok_or(EAGAIN)?;
     let native = delivery(control);
+    if target.is_none() && io_cancellation_requested(control) {
+        return Err(EINTR);
+    }
     let client = posix_client().map_err(map_posix_client_error)?;
     let options = posix_open_options(flags)?;
     let prepared = {
@@ -281,6 +284,9 @@ fn open_in_slot(
             }
             drain_pending_signals()?;
             let native = delivery(control);
+            if target.is_none() && io_cancellation_requested(control) {
+                return Err(EINTR);
+            }
             if control.callback_resources.notification_pending() {
                 drop(native);
                 continue;
