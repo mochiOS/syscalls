@@ -184,3 +184,96 @@ pub(super) fn truncate(path: *const c_char, length: u64) -> Result<c_int, c_int>
     drain_pending_signals()?;
     result
 }
+
+struct OpenResources {
+    reservation: PendingFdReservation,
+    opened: Option<ObjectHandleAttachment<u32>>,
+}
+
+impl Drop for OpenResources {
+    fn drop(&mut self) {
+        if let Some(opened) = self.opened.take() {
+            close_object_handle(opened.handle);
+        }
+        // The reservation's own destructor then cancels any uncommitted slot.
+    }
+}
+
+pub(super) fn open(path: *const c_char, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
+    let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+    let native = delivery(control);
+    let client = posix_client().map_err(map_posix_client_error)?;
+    let options = posix_open_options(flags)?;
+    let prepared = {
+        let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+        client
+            .prepare_open_at(OpenAtBase::ProcessCwd, options, mode as u32, path)
+            .map_err(map_posix_client_error)?
+    };
+    let limit = process_fd_limit()?;
+    let reservation = PendingFdReservation(state().fds.reserve_from(0, limit).map_err(|_| EMFILE)?);
+    let mut scope = core::pin::pin!(callback_resources::Scope::new(
+        &control.callback_resources,
+        control.active_signal_scope_id.load(Ordering::Acquire),
+        Resources {
+            source: OpenResources {
+                reservation,
+                opened: None
+            },
+            callbacks: Some(callbacks(control)),
+        }
+    ));
+    unsafe { scope.as_mut().activate() };
+    drop(native);
+    let mut completion_delivery = None;
+    let result = (|| {
+        let opened = execute(control, client, &prepared, scope.as_mut())?.ok_or(EIO)?;
+        // execute leaves callbacks deferred on success. Publish ownership
+        // before fstat; no C handler can escape with an untracked reply Handle.
+        scope.as_mut().resource_mut().unwrap().source.opened = Some(opened);
+        let status = client.fstat(opened).map_err(map_posix_client_error)?;
+        let kind = match status.mode & 0o170000 {
+            0o040000 => FdKind::ObjectDirectory,
+            0o100000 => FdKind::ObjectFile,
+            _ => FdKind::ObjectSpecial,
+        };
+        let entry = object_entry(u64::from(opened.handle), opened.rights, kind, flags);
+        // Dispatch while the result is still owned by the tracked scope,
+        // BEFORE publishing an FD that C has not yet received. A nonlocal
+        // escape here releases both the Handle and the reserved slot.
+        loop {
+            {
+                let _delivery = delivery(control);
+                scope.as_mut().resource_mut().unwrap().callbacks.take();
+            }
+            drain_pending_signals()?;
+            let native = delivery(control);
+            if control.callback_resources.notification_pending() {
+                drop(native);
+                continue;
+            }
+            completion_delivery = Some(native);
+            break;
+        }
+        // Keep native delivery closed through installation AND retirement.
+        // There must be no fallible C dispatch after ownership moves to the FD
+        // table: an error then would hide a successfully installed descriptor.
+        let installed = {
+            let source = &scope.as_ref().get_ref().resource().unwrap().source;
+            state().fds.commit_reservation(&source.reservation.0, entry)
+        };
+        let fd = installed.map_err(|_| EIO)?;
+        // Ownership moved to the FD table. Disarm cleanup before C can run.
+        scope.as_mut().resource_mut().unwrap().source.opened = None;
+        Ok(fd)
+    })();
+    {
+        let _delivery = delivery(control);
+        unsafe { scope.as_mut().retire() };
+    }
+    drop(completion_delivery);
+    if result.is_err() {
+        drain_pending_signals()?;
+    }
+    result
+}

@@ -2188,23 +2188,6 @@ impl Drop for PendingFdReservation {
     }
 }
 
-fn open_posix_object(path: &str, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
-    let limit = process_fd_limit()?;
-    let reservation = PendingFdReservation(state().fds.reserve_from(0, limit).map_err(|_| EMFILE)?);
-    // Do not hold STATE across filesystem IPC: other threads may allocate FDs,
-    // but cannot consume this open's reserved slot. Drop cancels on every error.
-    let entry = open_posix_entry(path, flags, mode)?;
-    let installed = state().fds.commit_reservation(&reservation.0, entry);
-    match installed {
-        Ok(fd) => Ok(fd),
-        Err(_) => {
-            let mut operations = RuntimeFdOps;
-            operations.close_handle(entry.handle);
-            Err(EIO)
-        }
-    }
-}
-
 fn open_posix_entry(path: &str, flags: c_int, mode: c_int) -> Result<FdEntry, c_int> {
     let client = posix_client().map_err(map_posix_client_error)?;
     let options = posix_open_options(flags)?;
@@ -2254,7 +2237,7 @@ fn retry_open_with_prompt(path: *const c_char, flags: c_int, mode: c_int) -> Res
         | CapabilityDecision::AllowForProcess
         | CapabilityDecision::AllowPersistently
         | CapabilityDecision::AllowAllUserGrantable => {
-            let fd = open_posix_object(path_str, flags, mode)?;
+            let fd = file_mutation::open(path, flags, mode)?;
             if decision == CapabilityDecision::AllowOnce {
                 drop_capability(capability);
             }
@@ -4517,10 +4500,7 @@ pub extern "C" fn _open(path: *const c_char, flags: c_int, mode: c_int) -> c_int
         set_errno(EFAULT);
         return -1;
     }
-    let result = (|| {
-        let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-        open_posix_object(path, flags, mode)
-    })();
+    let result = file_mutation::open(path, flags, mode);
     match result {
         Ok(fd) => fd,
         Err(errno) if errno == EACCES || errno == EPERM => {
