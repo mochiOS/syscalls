@@ -3798,7 +3798,33 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
                 mochios_posix_client::stream::WriteError::Io(errno) => errno,
             });
         }
-        FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectSharedMemory => syscall_errno(syscall::raw_syscall3(
+        FdKind::ObjectFile => {
+            let limit = resource_policy::read(posix_protocol::RLIMIT_FSIZE)?;
+            let result = if limit.soft == posix_protocol::RLIM_INFINITY {
+                syscall::raw_syscall3(
+                    syscall::SyscallNumber::HandleWrite,
+                    entry.handle.lower_handle,
+                    buffer as u64,
+                    length as u64,
+                )
+            } else {
+                syscall::raw_syscall4(
+                    syscall::SyscallNumber::HandleWriteBounded,
+                    entry.handle.lower_handle,
+                    buffer as u64,
+                    length as u64,
+                    limit.soft,
+                )
+            };
+            if limit.soft != posix_protocol::RLIM_INFINITY
+                && result.raw() == mnu_abi::provider::STATUS_BOUND_REACHED as u64
+            {
+                generate_thread_signal(posix_protocol::SIGNAL_XFSZ)?;
+                return Err(EFBIG);
+            }
+            syscall_errno(result)?
+        }
+        FdKind::ObjectSpecial | FdKind::ObjectSharedMemory => syscall_errno(syscall::raw_syscall3(
             syscall::SyscallNumber::HandleWrite,
             entry.handle.lower_handle,
             buffer as u64,
