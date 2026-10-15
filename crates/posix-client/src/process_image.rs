@@ -18,6 +18,10 @@ const AT_SECURE: u64 = 23;
 const AT_RANDOM: u64 = 25;
 const AT_EXECFN: u64 = 31;
 const AUXILIARY_VECTOR_ENTRIES: usize = 17;
+pub const AT_RESOURCE_POLICY: u64 = 0x6d00_0001;
+pub const AT_UPCALL_STACK: u64 = 0x6d00_0002;
+pub const AT_INITIAL_HEAP: u64 = 0x6d00_0003;
+pub const INITIAL_HEAP_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EncodeError {
@@ -102,6 +106,22 @@ pub fn encode_initial_stack(
     random: [u8; 16],
     output: &mut [u8],
 ) -> Result<usize, EncodeError> {
+    encode_initial_stack_with_aux(argv, envp, execfn, random, &[], output)
+}
+
+pub fn encode_initial_stack_with_aux(
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    execfn: &[u8],
+    random: [u8; 16],
+    auxiliary: &[(u64, u64)],
+    output: &mut [u8],
+) -> Result<usize, EncodeError> {
+    for (index, &(key, _)) in auxiliary.iter().enumerate() {
+        if key <= AT_EXECFN || auxiliary[..index].iter().any(|&(other, _)| other == key) {
+            return Err(EncodeError::InvalidText);
+        }
+    }
     if argv.is_empty() {
         return Err(EncodeError::EmptyArgumentVector);
     }
@@ -115,7 +135,13 @@ pub fn encode_initial_stack(
         .and_then(|value| value.checked_add(1))
         .and_then(|value| value.checked_add(envp.len()))
         .and_then(|value| value.checked_add(1))
-        .and_then(|value| value.checked_add(AUXILIARY_VECTOR_ENTRIES * 2))
+        .and_then(|value| {
+            auxiliary
+                .len()
+                .checked_add(AUXILIARY_VECTOR_ENTRIES)
+                .and_then(|count| count.checked_mul(2))
+                .and_then(|count| value.checked_add(count))
+        })
         .ok_or(EncodeError::ImageTooLarge)?;
     let pointer_bytes = pointer_words
         .checked_mul(8)
@@ -195,13 +221,14 @@ pub fn encode_initial_stack(
             random_offset as u64,
             Some(RelocationKind::StackAddress),
         ),
-        (
-            AT_EXECFN,
-            execfn_offset,
-            Some(RelocationKind::StackAddress),
-        ),
+        (AT_EXECFN, execfn_offset, Some(RelocationKind::StackAddress)),
         (AT_NULL, 0, None),
-    ] {
+    ]
+    .into_iter()
+    .filter(|&(key, _, _)| key != AT_NULL)
+    .chain(auxiliary.iter().map(|&(key, value)| (key, value, None)))
+    .chain(core::iter::once((AT_NULL, 0, None)))
+    {
         put_word(&mut stack, &mut cursor, key)?;
         match relocation {
             Some(kind) => put_relocated_word(

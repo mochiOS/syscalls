@@ -2,6 +2,7 @@
 
 mod child_cleanup;
 mod child_startup;
+mod image_startup;
 mod handle_capture;
 mod fork_policy;
 mod resource_policy;
@@ -114,7 +115,8 @@ const TCIOFLUSH: c_int = 2;
 const MAX_EXEC_VECTOR_ENTRIES: usize = 256;
 const MAX_STARTUP_IMAGE_BYTES: usize = mnu_abi::process_image::HEADER_LEN
     + mnu_abi::process_image::MAX_RELOCATIONS * mnu_abi::process_image::RELOCATION_LEN
-    + mnu_abi::process_image::MAX_STACK_BYTES;
+    + mnu_abi::process_image::MAX_STACK_BYTES
+    + mnu_abi::process_image::MAX_MAPPINGS * mnu_abi::process_image::MAPPING_LEN;
 
 type InitFn = unsafe extern "C" fn();
 type CLong = i64;
@@ -912,6 +914,9 @@ struct StackView {
     envp: *mut *mut c_char,
     stack_top: usize,
     executable: *const c_char,
+    resource_policy: u64,
+    upcall_stack: usize,
+    initial_heap: usize,
 }
 
 fn align_up(value: usize, align: usize) -> Option<usize> {
@@ -1711,9 +1716,24 @@ unsafe fn parse_stack(sp: *const usize) -> StackView {
     }
     let mut auxiliary = unsafe { cursor.add(1).cast::<usize>() };
     let mut executable = ptr::null();
+    let mut resource_policy = 0;
+    let mut upcall_stack = 0;
+    let mut initial_heap = 0;
     while unsafe { auxiliary.read() } != 0 {
         if unsafe { auxiliary.read() } == 31 {
             executable = unsafe { auxiliary.add(1).read() } as *const c_char;
+        }
+        match unsafe { auxiliary.read() } as u64 {
+            mochios_posix_client::process_image::AT_RESOURCE_POLICY => {
+                resource_policy = unsafe { auxiliary.add(1).read() } as u64;
+            }
+            mochios_posix_client::process_image::AT_UPCALL_STACK => {
+                upcall_stack = unsafe { auxiliary.add(1).read() };
+            }
+            mochios_posix_client::process_image::AT_INITIAL_HEAP => {
+                initial_heap = unsafe { auxiliary.add(1).read() };
+            }
+            _ => {}
         }
         auxiliary = unsafe { auxiliary.add(2) };
     }
@@ -1723,6 +1743,9 @@ unsafe fn parse_stack(sp: *const usize) -> StackView {
         envp,
         stack_top: sp as usize,
         executable,
+        resource_policy,
+        upcall_stack,
+        initial_heap,
     }
 }
 
@@ -2390,12 +2413,22 @@ unsafe fn initialize_runtime(stack: StackView) {
     let stack_limit = align_down(stack.stack_top, PAGE_SIZE).saturating_sub(PAGE_SIZE);
     state.heap = HeapState {
         initialized: true,
-        // Kernel owns the initial user heap placement. Delay heap bootstrap
-        // until _sbrk() so userland does not guess a virtual address.
-        base: 0,
-        current_break: 0,
-        mapped_end: 0,
-        reserved_end: 0,
+        // Exec supplies an already admitted initial arena. Other native
+        // launches leave zero and acquire placement lazily through _sbrk().
+        base: stack.initial_heap,
+        current_break: stack.initial_heap,
+        mapped_end: stack.initial_heap
+            + if stack.initial_heap == 0 {
+                0
+            } else {
+                mochios_posix_client::process_image::INITIAL_HEAP_BYTES as usize
+            },
+        reserved_end: stack.initial_heap
+            + if stack.initial_heap == 0 {
+                0
+            } else {
+                mochios_posix_client::process_image::INITIAL_HEAP_BYTES as usize
+            },
         pending_release: None,
         maximum_end: stack_limit,
         page_size: PAGE_SIZE,
@@ -2852,11 +2885,13 @@ fn replace_process_image(
         return Err(EIO);
     }
     let mut startup_image = [0u8; MAX_STARTUP_IMAGE_BYTES];
-    let startup_length = mochios_posix_client::process_image::encode_initial_stack(
+    let plan = image_startup::Plan::new(random)?;
+    let startup_length = mochios_posix_client::process_image::encode_initial_stack_with_aux(
         &arguments[..argument_count],
         &environment[..environment_count],
         path_bytes,
         random,
+        &plan.auxiliary(),
         &mut startup_image,
     )
     .map_err(|error| match error {
@@ -2865,6 +2900,12 @@ fn replace_process_image(
         mochios_posix_client::process_image::EncodeError::InvalidText => EINVAL,
         mochios_posix_client::process_image::EncodeError::Codec(_) => EIO,
     })?;
+    let startup_length = mnu_abi::process_image::attach_mappings(
+        &mut startup_image,
+        startup_length,
+        &plan.mappings(),
+    )
+    .map_err(|_| EIO)?;
 
     let byte_ceiling = address_space::snapshot()?.byte_ceiling();
     let client = posix_client().map_err(map_posix_client_error)?;
@@ -4101,6 +4142,9 @@ fn startup_failure(stage: &[u8], error: c_int) -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
     let stack = unsafe { parse_stack(initial_sp) };
+    if let Err(error) = resource_policy::adopt_initial(stack.resource_policy) {
+        startup_failure(b"newlib: initial resource policy failed: ", error);
+    }
     unsafe { initialize_runtime(stack) };
     match has_posix_environment() {
         Ok(false) => {}
@@ -4123,7 +4167,8 @@ pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
         Err(_) => process_exit(127),
     }
     let (_, initial_thread) = register_initial_thread().unwrap_or_else(|| process_exit(127));
-    if let Err(error) = setup_signal_delivery(initial_thread, None) {
+    let prepared_stack = (stack.upcall_stack != 0).then_some(stack.upcall_stack);
+    if let Err(error) = setup_signal_delivery(initial_thread, prepared_stack) {
         startup_failure(b"newlib: signal startup failed: ", error);
     }
     unsafe { __sinit(_impure_ptr) };

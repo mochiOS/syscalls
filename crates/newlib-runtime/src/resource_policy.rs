@@ -6,6 +6,25 @@ static POLICY: RuntimeMutex<Option<Mapping>> = RuntimeMutex::new(None);
 
 pub(super) struct Mapping(u64);
 
+/// Adopt the read-only region explicitly supplied in the initial VM plan.
+/// This runs before libc initialization can request heap or policy discovery.
+pub(super) fn adopt_initial(address: u64) -> Result<(), c_int> {
+    if address == 0 {
+        return Ok(());
+    }
+    if address % PAGE_SIZE as u64 != 0 {
+        return Err(EIO);
+    }
+    let mut guard = POLICY.lock();
+    if guard.is_some() {
+        return Err(EIO);
+    }
+    let mapping = Mapping(address);
+    mapping.policy().validate().map_err(policy_error)?;
+    *guard = Some(mapping);
+    Ok(())
+}
+
 impl Mapping {
     fn open() -> Result<Self, c_int> {
         let client = posix_client().map_err(map_posix_client_error)?;
