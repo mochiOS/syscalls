@@ -2832,6 +2832,7 @@ fn replace_process_image(
     let mut identity = [0u8; MAX_EXECUTABLE_PATH_LEN];
     let identity_length = absolute_exec_identity(path_bytes, &mut identity)?;
     let identity = &identity[..identity_length];
+    let identity_text = core::str::from_utf8(identity).map_err(|_| EINVAL)?;
     let mut arguments = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
     let mut environment = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
     let mut argument_count = unsafe { read_exec_vector(argv, &mut arguments) }?;
@@ -2864,6 +2865,7 @@ fn replace_process_image(
         mochios_posix_client::process_image::EncodeError::Codec(_) => EIO,
     })?;
 
+    let byte_ceiling = address_space::snapshot()?.byte_ceiling();
     let client = posix_client().map_err(map_posix_client_error)?;
     let opened = client
         .open_at(
@@ -2890,15 +2892,15 @@ fn replace_process_image(
         close_object_handle(opened.handle);
         return Err(error);
     }
-    let result = syscall_errno(syscall::raw_syscall5(
-        syscall::SyscallNumber::ProcessImageReplace,
-        u64::from(opened.handle),
-        identity.as_ptr() as u64,
-        identity.len() as u64,
-        startup_image.as_ptr() as u64,
-        startup_length as u64,
-    ))
-    .map(|_| ());
+    let result = match syscall::image::replace_bounded(
+        opened.handle,
+        identity_text,
+        &startup_image[..startup_length],
+        byte_ceiling,
+    ) {
+        Ok(never) => match never {},
+        Err(error) => Err(map_kernel_errno(error.raw())),
+    };
     close_object_handle(opened.handle);
     result
 }

@@ -12,6 +12,9 @@ impl Limit {
     pub(super) const fn is_finite(self) -> bool {
         self.0 != posix_protocol::RLIM_INFINITY
     }
+    pub(super) const fn byte_ceiling(self) -> u64 {
+        self.0
+    }
 
     /// Also used to bootstrap the policy page from an authenticated RPC before
     /// that page can be mapped. Never read POLICY while holding STATE.
