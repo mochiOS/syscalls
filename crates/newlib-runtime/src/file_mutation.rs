@@ -188,6 +188,7 @@ pub(super) fn truncate(path: *const c_char, length: u64) -> Result<c_int, c_int>
 struct OpenResources {
     reservation: PendingFdReservation,
     opened: Option<ObjectHandleAttachment<u32>>,
+    _directory: Option<fd_lease::Lease>,
 }
 
 impl Drop for OpenResources {
@@ -200,7 +201,16 @@ impl Drop for OpenResources {
 }
 
 pub(super) fn open(path: *const c_char, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
-    open_in_slot(path, flags, mode, None)
+    open_in_slot(-2, path, flags, mode, None)
+}
+
+pub(super) fn open_at(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: c_int,
+    mode: c_int,
+) -> Result<c_int, c_int> {
+    open_in_slot(dirfd, path, flags, mode, None)
 }
 
 pub(super) fn open_for_spawn(
@@ -209,10 +219,11 @@ pub(super) fn open_for_spawn(
     mode: c_int,
     fd: c_int,
 ) -> Result<c_int, c_int> {
-    open_in_slot(path, flags, mode, Some(fd))
+    open_in_slot(-2, path, flags, mode, Some(fd))
 }
 
 fn open_in_slot(
+    dirfd: c_int,
     path: *const c_char,
     flags: c_int,
     mode: c_int,
@@ -225,11 +236,25 @@ fn open_in_slot(
     }
     let client = posix_client().map_err(map_posix_client_error)?;
     let options = posix_open_options(flags)?;
-    let prepared = {
+    let (prepared, directory) = {
         let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-        client
-            .prepare_open_at(OpenAtBase::ProcessCwd, options, mode as u32, path)
-            .map_err(map_posix_client_error)?
+        // Invalid C pathnames are POSIX errors, not malformed wire replies.
+        if path.is_empty() {
+            return Err(ENOENT);
+        }
+        if path.len() > posix_protocol::MAX_PATH_LEN {
+            return Err(ENAMETOOLONG);
+        }
+        let (base, directory) = rename_posix_base(dirfd, path)?;
+        let base = match base {
+            StatAtBase::ProcessRoot => OpenAtBase::ProcessRoot,
+            StatAtBase::ProcessCwd => OpenAtBase::ProcessCwd,
+            StatAtBase::Directory(handle) => OpenAtBase::Directory(handle),
+        };
+        let prepared = client
+            .prepare_open_at(base, options, mode as u32, path)
+            .map_err(map_posix_client_error)?;
+        (prepared, directory)
     };
     let limit = process_fd_limit()?;
     let reservation = {
@@ -254,7 +279,8 @@ fn open_in_slot(
         Resources {
             source: OpenResources {
                 reservation,
-                opened: None
+                opened: None,
+                _directory: directory
             },
             callbacks: Some(callbacks(control)),
         }

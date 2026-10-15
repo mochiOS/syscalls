@@ -4490,6 +4490,22 @@ pub extern "C" fn open(path: *const c_char, flags: c_int, mode: c_int) -> c_int 
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn openat(dirfd: c_int, path: *const c_char, flags: c_int, mode: c_int) -> c_int {
+    pthread_testcancel();
+    if path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    // A directory Handle, never an expanded pathname or ambient grant, is
+    // captured and retained through queued admission and FD publication.
+    let result = result_with_errno(file_mutation::open_at(dirfd, path, flags, mode), -1);
+    if result < 0 {
+        pthread_testcancel();
+    }
+    result
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn _close(fd: c_int) -> c_int {
     let result = (|| {
         let mut state = state();
