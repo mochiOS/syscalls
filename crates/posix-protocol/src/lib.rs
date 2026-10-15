@@ -376,9 +376,16 @@ pub const STATUS_ENOSYS: i32 = -38;
 /// maximum object size. libc must generate SIGXFSZ and then report EFBIG.
 pub const STATUS_FILE_SIZE_LIMIT: i32 = -0x10001;
 /// OPEN_AT/FTRUNCATE/TRUNCATE_AT did not mutate anything because provider
-/// memory admission was busy. Only an empty, object-free reply permits
-/// replay. Transport errors and ordinary EAGAIN must never imply replay.
+/// memory admission was busy. Legacy replies are empty and object-free.
+/// MUTATION_ADMISSION requests require one WAIT|TRANSFER ticket instead.
+/// Transport errors and ordinary EAGAIN must never imply replay.
 pub const STATUS_MEMORY_ADMISSION_BUSY: i32 = -0x10002;
+/// Request nonblocking queued admission for OPEN_AT/FTRUNCATE/TRUNCATE_AT.
+/// Await the returned ticket outside the service and attach it on retry.
+pub const MUTATION_ADMISSION: u32 = 1 << 31;
+/// A borrowed admission ticket follows the operation's ordinary attachments.
+/// Only valid together with MUTATION_ADMISSION.
+pub const MUTATION_ADMISSION_ATTACHED: u32 = 1 << 30;
 
 pub const SESSION_INFO_LEN: usize = 20;
 pub const UMASK_PAYLOAD_LEN: usize = 4;
