@@ -3,6 +3,7 @@
 mod child_cleanup;
 mod child_startup;
 mod fd_lease;
+mod callback_resources;
 mod image_startup;
 mod handle_capture;
 mod fork_policy;
@@ -274,6 +275,7 @@ struct ThreadControl {
     next_native_signal_frame_id: AtomicU64,
     native_delivery_defer: AtomicU32,
     active_signal_scope: AtomicUsize,
+    callback_resources: callback_resources::Chain,
     active_signal_scope_id: AtomicU64,
     next_signal_scope_id: AtomicU64,
     alternate_stack: mochios_posix_client::signal_stack::AlternateStack,
@@ -319,6 +321,7 @@ impl ThreadControl {
             next_native_signal_frame_id: AtomicU64::new(1),
             native_delivery_defer: AtomicU32::new(0),
             active_signal_scope: AtomicUsize::new(0),
+            callback_resources: callback_resources::Chain::new(),
             active_signal_scope_id: AtomicU64::new(0),
             next_signal_scope_id: AtomicU64::new(1),
             alternate_stack: mochios_posix_client::signal_stack::AlternateStack::new(),
@@ -1150,6 +1153,10 @@ fn discard_fork_thread_control(control: &ThreadControl) {
 
 fn reclaim_thread_control(control: &ThreadControl, reason: ThreadReclamation) {
     let _reclamation = thread_lifecycle::mutate();
+    // Never follow a resource link after its owner's stack has been reclaimed.
+    if !control.callback_resources.reset_empty() {
+        process_exit(127);
+    }
     control.active_native_signal_frame.store(0, Ordering::Relaxed);
     control.active_native_signal_frame_id.store(0, Ordering::Relaxed);
     control.active_signal_scope.store(0, Ordering::Relaxed);
@@ -1520,8 +1527,20 @@ fn run_thread_specific_destructors(control: &ThreadControl) {
 fn finish_thread(control: &ThreadControl, result: *mut c_void) -> ! {
     // Exit/cancellation cleanup must not be interrupted by another pending
     // cancellation, including when a TLS destructor calls a cancellation point.
-    control.cancel_state.store(PTHREAD_CANCEL_DISABLE, Ordering::Release);
-    control.cancel_type.store(PTHREAD_CANCEL_DEFERRED, Ordering::Release);
+    control
+        .cancel_state
+        .store(PTHREAD_CANCEL_DISABLE, Ordering::Release);
+    control
+        .cancel_type
+        .store(PTHREAD_CANCEL_DEFERRED, Ordering::Release);
+    {
+        let _delivery =
+            mochios_posix_client::upcall_guard::Guard::enter(&control.native_delivery_defer)
+                .unwrap_or_else(|| process_exit(EOVERFLOW));
+        // ThreadExit does not unwind Rust frames. All runtime-owned scopes
+        // must be retired before application cleanup or stack reclamation.
+        unsafe { control.callback_resources.abandon_from(0) };
+    }
     unsafe { thread_cleanup::drain(&control.cleanup_head) };
     run_thread_specific_destructors(control);
     control.result.store(result as usize, Ordering::Relaxed);
@@ -7342,6 +7361,10 @@ fn drain_pending_signals() -> Result<(), c_int> {
 
 fn drain_pending_signals_with_context(context: &mut UContext, native: bool) -> Result<(), c_int> {
     let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+    if control.callback_resources.is_deferred() {
+        return Ok(());
+    }
+    control.callback_resources.take_notification();
     loop {
         let mut preparation = Preparation::new(control)?;
         let epoch = preparation.epoch;
@@ -7415,6 +7438,16 @@ extern "C" fn posix_signal_upcall(
         if payload != 14 || fault_signal::deliver(cause, address as usize, &mut context).is_err() {
             process_exit(127);
         }
+    } else if current_thread_control().is_some_and(|(_, control)| {
+        if control.callback_resources.record_notification() {
+            notify_thread_waiter(control);
+            true
+        } else {
+            false
+        }
+    }) {
+        // Keep the generic native notification responsive. The interrupted
+        // operation must release its owned wait position before C can run.
     } else {
         if drain_pending_signals_with_context(&mut context, true).is_err() {
             process_exit(127);

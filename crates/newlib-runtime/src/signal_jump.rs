@@ -158,6 +158,9 @@ fn leave_native(token: u64, top: usize, destination: NativeDestination<'_>) -> !
 unsafe fn prepare_jump(control: &ThreadControl, buffer: &JumpBuffer) -> Result<(), c_int> {
     // Both callers retain their delivery guard through the final transition.
     unsafe { signal_scope::unwind_to(control, buffer.scope) }?;
+    // The destination was validated before touching runtime ownership. The
+    // calling transition keeps native delivery deferred through final restore.
+    unsafe { control.callback_resources.abandon_from(buffer.scope) };
     if buffer.save_mask != 0 {
         service_signal_mask(control, posix_protocol::SIGNAL_MASK_SET, buffer.mask)?;
     }
