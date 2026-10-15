@@ -518,6 +518,7 @@ pub const SIGNAL_CONT: u32 = 19;
 pub const SIGNAL_CHLD: u32 = 20;
 pub const SIGNAL_TTIN: u32 = 21;
 pub const SIGNAL_TTOU: u32 = 22;
+pub const SIGNAL_XCPU: u32 = 24;
 pub const SIGNAL_XFSZ: u32 = 25;
 pub const SIGNAL_WINCH: u32 = 28;
 
