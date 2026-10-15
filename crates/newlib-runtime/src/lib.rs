@@ -3,6 +3,7 @@
 mod child_cleanup;
 mod handle_capture;
 mod fork_policy;
+mod resource_policy;
 mod atfork;
 mod thread_lifecycle;
 mod credentials;
@@ -2473,11 +2474,12 @@ fn duplicate_fd_entry(
     fds: &mut FdTable<FdObject>,
     old_fd: c_int,
     new_fd: c_int,
+    limit: c_int,
 ) -> Result<(), c_int> {
     if old_fd < 0 || new_fd < 0 || old_fd as usize >= MAX_FDS || new_fd as usize >= MAX_FDS {
         return Err(EBADF);
     }
-    if old_fd != new_fd && new_fd >= process_fd_limit()? {
+    if old_fd != new_fd && new_fd >= limit {
         return Err(EBADF);
     }
     let mut operations = RuntimeFdOps;
@@ -2552,8 +2554,14 @@ fn change_directory_entry(entry: FdEntry) -> Result<(), c_int> {
 }
 
 fn duplicate_live_fd(old_fd: c_int, new_fd: c_int) -> Result<c_int, c_int> {
+    with_fd_entry(old_fd)?;
+    let limit = if old_fd == new_fd {
+        MAX_FDS as c_int
+    } else {
+        process_fd_limit()?
+    };
     let mut state = state();
-    duplicate_fd_entry(&mut state.fds, old_fd, new_fd)?;
+    duplicate_fd_entry(&mut state.fds, old_fd, new_fd, limit)?;
     Ok(new_fd)
 }
 
@@ -2562,12 +2570,12 @@ fn duplicate_fd_from(
     fd: c_int,
     minimum: Option<c_int>,
     close_on_exec: bool,
+    limit: c_int,
 ) -> Result<c_int, c_int> {
     // Validate the source before the range, as with other descriptor APIs.
     if fd < 0 || fd as usize >= MAX_FDS || fds.get(fd).is_none() {
         return Err(EBADF);
     }
-    let limit = process_fd_limit()?;
     if minimum.is_some_and(|minimum| minimum < 0 || minimum >= limit) {
         return Err(EINVAL);
     }
@@ -2887,6 +2895,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     let client = posix_client().map_err(map_posix_client_error)?;
     let (_, thread_control) = current_thread_control().ok_or(ENOTSUP)?;
     service_signal_mask(thread_control, posix_protocol::SIGNAL_MASK_QUERY, 0)?;
+    let mut policy_guard = resource_policy::freeze_for_clone();
     // Do not snapshot a thread slot during publication/reclamation. Acquire
     // this before the allocator, which those operations may themselves use.
     let lifecycle_guard = thread_lifecycle::capture()?;
@@ -2985,6 +2994,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     if image == 0 {
         capture.disarm_child();
         preparation.disarm_child();
+        resource_policy::reset_child(&mut policy_guard);
         if FORK_EPOCH
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| epoch.checked_add(1))
             .is_err()
@@ -3005,6 +3015,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     drop(registry_guard);
     drop(allocator_guard);
     drop(lifecycle_guard);
+    drop(policy_guard);
     if image == 0 {
         // Fork's numeric slot labels are temporary transfer metadata, not exec
         // inheritance policy. Keep only the selected control endpoint key;
@@ -4500,7 +4511,12 @@ pub extern "C" fn fork() -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn dup(fd: c_int) -> c_int {
-    result_with_errno(duplicate_fd_from(&mut state().fds, fd, None, false), -1)
+    let result = (|| {
+        with_fd_entry(fd)?;
+        let limit = process_fd_limit()?;
+        duplicate_fd_from(&mut state().fds, fd, None, false, limit)
+    })();
+    result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
@@ -4514,11 +4530,19 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
         if fd < 0 || fd as usize >= MAX_FDS {
             return Err(EBADF);
         }
+        // Policy discovery may allocate and acquire STATE. Read it before
+        // locking the FD table; fork freezes POLICY before allocator/STATE.
+        let limit = if matches!(cmd, F_DUPFD | F_DUPFD_CLOEXEC) {
+            with_fd_entry(fd)?;
+            process_fd_limit()?
+        } else {
+            MAX_FDS as c_int
+        };
         let mut state = state();
         let entry = state.fds.get(fd).ok_or(EBADF)?;
         match cmd {
             F_DUPFD | F_DUPFD_CLOEXEC => {
-                duplicate_fd_from(&mut state.fds, fd, Some(arg), cmd == F_DUPFD_CLOEXEC)
+                duplicate_fd_from(&mut state.fds, fd, Some(arg), cmd == F_DUPFD_CLOEXEC, limit)
             }
             F_GETFD => Ok(entry.descriptor_flags as c_int),
             F_GETFL if entry.handle.kind.is_socket() => {
@@ -6429,13 +6453,7 @@ pub extern "C" fn sysconf(name: c_int) -> CLong {
 }
 
 fn process_fd_limit() -> Result<c_int, c_int> {
-    // Query the authoritative process policy when allocating descriptors,
-    // including changes made by another process through prlimit. Existing
-    // descriptor I/O remains native and does not consult the service.
-    let limit = posix_client()
-        .map_err(map_posix_client_error)?
-        .resource_limit(0, posix_protocol::RLIMIT_NOFILE, None)
-        .map_err(map_posix_client_error)?;
+    let limit = resource_policy::read(posix_protocol::RLIMIT_NOFILE)?;
     Ok(limit.soft.min(MAX_FDS as u64) as c_int)
 }
 
@@ -6446,6 +6464,12 @@ fn resource_limit_impl(
 ) -> Result<NewlibRlimit, c_int> {
     if resource < 0 {
         return Err(EINVAL);
+    }
+    if process_id == 0 && replacement.is_none() {
+        return resource_policy::read(resource as u32).map(|limit| NewlibRlimit {
+            rlim_cur: limit.soft,
+            rlim_max: limit.hard,
+        });
     }
     posix_client()
         .map_err(map_posix_client_error)?
