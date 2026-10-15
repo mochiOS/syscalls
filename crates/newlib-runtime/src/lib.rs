@@ -4,6 +4,8 @@ mod child_cleanup;
 mod handle_capture;
 mod fork_policy;
 mod resource_policy;
+mod heap;
+use heap::HeapState;
 mod atfork;
 mod thread_lifecycle;
 mod credentials;
@@ -543,17 +545,6 @@ fn fd_kind_from_inherited(kind: u8) -> Option<FdKind> {
     }
 }
 
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct HeapState {
-    initialized: bool,
-    base: usize,
-    current_break: usize,
-    mapped_end: usize,
-    maximum_end: usize,
-    page_size: usize,
-}
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct NewlibTimespec {
@@ -878,6 +869,8 @@ struct SpawnSnapshot {
 }
 
 unsafe extern "C" {
+    static __mochios_data_start: u8;
+    static __mochios_data_end: u8;
     static __preinit_array_start: InitFn;
     static __preinit_array_end: InitFn;
     static __init_array_start: InitFn;
@@ -6286,70 +6279,24 @@ pub extern "C" fn cfmakeraw(termios: *mut NewlibTermios) {
 #[unsafe(no_mangle)]
 pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
     let result = (|| {
-        let mut state = state();
-        let heap = &mut state.heap;
-        if !heap.initialized {
-            return Err(ENOMEM);
-        }
-        if heap.base == 0 {
-            if increment < 0 {
-                return Err(EINVAL);
-            }
-            // Keep independent mappings (notably pthread stacks) outside the
-            // contiguous arena required by newlib's sbrk-based allocator.
-            const HEAP_RESERVATION_BYTES: usize = 256 * 1024 * 1024;
-            let mapped = syscall_errno(syscall::raw_syscall6(
-                syscall::SyscallNumber::MemoryMap,
-                0,
-                HEAP_RESERVATION_BYTES as u64,
-                0,
-                0,
-                0,
-                0,
-            ))? as usize;
-            let mapped_end = mapped.checked_add(HEAP_RESERVATION_BYTES).ok_or(ENOMEM)?;
-            if mapped_end > heap.maximum_end {
-                let _ = syscall::raw_syscall2(
-                    syscall::SyscallNumber::MemoryUnmap,
-                    mapped as u64,
-                    HEAP_RESERVATION_BYTES as u64,
-                );
-                return Err(ENOMEM);
-            }
-            heap.base = mapped;
-            heap.current_break = mapped;
-            heap.mapped_end = mapped;
-            heap.maximum_end = mapped_end;
-        }
-        let old_break = heap.current_break;
-        let new_break = if increment >= 0 {
-            old_break.checked_add(increment as usize).ok_or(ENOMEM)?
+        // Read before STATE: discovery is allocation-free and may be called
+        // while libc owns its recursive allocator lock. Bootstrap processes
+        // without a POSIX endpoint remain subject to native Capability limits.
+        let data_limit = if increment > 0 && has_posix_environment()? {
+            resource_policy::read(posix_protocol::RLIMIT_DATA)?.soft
         } else {
-            old_break
-                .checked_sub(increment.unsigned_abs())
-                .ok_or(EINVAL)?
+            posix_protocol::RLIM_INFINITY
         };
-        if new_break < heap.base {
-            return Err(EINVAL);
-        }
-        if new_break > heap.maximum_end {
-            return Err(ENOMEM);
-        }
-        if new_break > heap.mapped_end {
-            let target_end = align_up(new_break, heap.page_size).ok_or(ENOMEM)?;
-            let map_len = target_end.checked_sub(heap.mapped_end).ok_or(ENOMEM)?;
-            if map_len != 0 {
-                syscall_errno(syscall::raw_syscall3(
-                    syscall::SyscallNumber::MemoryProtect,
-                    heap.mapped_end as u64,
-                    map_len as u64,
-                    NATIVE_READ_WRITE,
-                ))?;
-                heap.mapped_end = target_end;
-            }
-        }
-        heap.current_break = new_break;
-        Ok(old_break as *mut c_void)
+        // The matching SDK linker script defines the complete writable image
+        // span, including TLS templates, bss and alignment gaps. No dereference.
+        let image_data_bytes = (ptr::addr_of!(__mochios_data_end) as usize)
+            .checked_sub(ptr::addr_of!(__mochios_data_start) as usize)
+            .ok_or(ENOMEM)?;
+        let mut state = state();
+        state
+            .heap
+            .adjust(increment, image_data_bytes, data_limit)
+            .map(|old_break| old_break as *mut c_void)
     })();
     result_with_errno(result, (-1isize) as *mut c_void)
 }

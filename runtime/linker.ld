@@ -46,6 +46,7 @@ SECTIONS
     } :rodata
 
     .data : ALIGN(4K) {
+        HIDDEN(__mochios_data_start = .);
         *(.data .data.*)
     } :data
 
@@ -62,6 +63,7 @@ SECTIONS
         *(.bss .bss.*)
     } :data
 
+    HIDDEN(__mochios_data_end = .);
     _end = .;
 
     /DISCARD/ : {
