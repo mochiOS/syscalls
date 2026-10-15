@@ -172,7 +172,6 @@ pub const OP_CHMOD_AT: u16 = 24;
 pub const OP_CHOWN_AT: u16 = 25;
 pub const OP_FCHMOD: u16 = 26;
 pub const OP_FCHOWN: u16 = 27;
-pub const OP_PROCESS_FORKED: u16 = 28;
 pub const OP_WAIT_CHILD: u16 = 29;
 pub const OP_PROCESS_INFO: u16 = 30;
 pub const OP_SET_PROCESS_GROUP: u16 = 31;

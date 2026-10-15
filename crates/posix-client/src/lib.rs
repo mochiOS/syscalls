@@ -893,20 +893,6 @@ impl<T: ObjectTransport> Client<T> {
         Ok(())
     }
 
-    /// Registers a freshly cloned process as a POSIX child. Identity is
-    /// derived from the attached ProcessHandle, never from request bytes.
-    pub fn register_child(
-        &self,
-        process: ObjectHandleAttachment<T::Handle>,
-    ) -> Result<(), ClientError<T::Error>> {
-        let mut handles = ObjectHandles::new();
-        handles
-            .push(process)
-            .map_err(|_| ClientError::RequestTooLarge)?;
-        self.request_without_reply_handles(protocol::OP_PROCESS_FORKED, &[], &mut [], &mut handles)?;
-        Ok(())
-    }
-
     /// Initializes a running boot process through an explicit ProcessHandle.
     /// Only the inherited userspace bootstrap authority may make this request.
     pub fn initialize_process(

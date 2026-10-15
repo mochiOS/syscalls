@@ -2,6 +2,7 @@
 
 mod child_cleanup;
 mod handle_capture;
+mod fork_policy;
 mod atfork;
 mod thread_lifecycle;
 mod credentials;
@@ -2865,9 +2866,9 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     // malloc can enter _sbrk and acquire STATE. Stabilize its arena first, not
     // after taking STATE, and retain the caller's existing recursion depth.
     let allocator_guard = atfork::freeze_allocator();
-    // VM capture and pinned Handle grants do not yet freeze service-owned
-    // POSIX state or safely discard sibling libc state. Keep this temporary
-    // live-pthread policy here, not in the kernel's generic VM primitive.
+    // VM capture, pinned Handle grants and prepared POSIX policy do not yet
+    // safely discard sibling libc state. Keep this temporary live-pthread
+    // restriction here, not in the kernel's generic VM primitive.
     if THREADS.iter().any(|other| {
         !ptr::eq(other, thread_control)
             && matches!(
@@ -2887,6 +2888,9 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     let socket_guard = socket_record::freeze_for_clone();
     let update_guard = SIGNAL_ACTION_UPDATE.lock();
     let actions_guard = SIGNAL_ACTIONS.lock();
+    // Match copied handler state to service dispositions before capturing VM.
+    // Prepare before STATE so error cleanup never performs IPC under that lock.
+    let mut preparation = fork_policy::Preparation::new(client)?;
     // Keep the FD table stable across the address-space clone. Both parent and
     // child drop their private copy of this guard immediately after the native
     // clone returns, so the child never inherits a permanently locked STATE.
@@ -2953,6 +2957,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     };
     if image == 0 {
         capture.disarm_child();
+        preparation.disarm_child();
         if FORK_EPOCH
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| epoch.checked_add(1))
             .is_err()
@@ -3055,12 +3060,10 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         let process_id = status.process_id;
         c_int::try_from(process_id).map_err(|_| EOVERFLOW)?;
         registration_attempted = true;
-        client
-            .register_child(ObjectHandleAttachment {
-                handle,
-                rights: syscall::HANDLE_RIGHT_WAIT | syscall::HANDLE_RIGHT_SIGNAL,
-            })
-            .map_err(map_posix_client_error)?;
+        preparation.commit(ObjectHandleAttachment {
+            handle,
+            rights: syscall::HANDLE_RIGHT_WAIT | syscall::HANDLE_RIGHT_SIGNAL,
+        })?;
         syscall_errno(syscall::raw_syscall1(
             syscall::SyscallNumber::ProcessHandleResume,
             u64::from(handle),
