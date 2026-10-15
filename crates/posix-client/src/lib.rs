@@ -6,6 +6,7 @@ use mochios_posix_protocol as protocol;
 
 pub mod configuration;
 pub mod file_size_limit;
+pub mod file_admission;
 pub mod atfork;
 pub mod thread_lifecycle;
 pub mod accounting;
@@ -742,6 +743,9 @@ impl<T: Transport> Client<T> {
         if header.opcode != protocol::OP_STATUS || header.request_id != request_id {
             return Err(ClientError::MismatchedResponse);
         }
+        if header.status == protocol::STATUS_MEMORY_ADMISSION_BUSY {
+            return Err(ClientError::MismatchedResponse);
+        }
         if header.status != protocol::STATUS_OK {
             return Err(ClientError::Remote(header.status));
         }
@@ -1043,8 +1047,9 @@ impl<T: ObjectTransport> Client<T> {
     }
 
     /// Transfers one newly owned Handle to the caller. Failed or malformed
-    /// replies are drained without closing the borrowed base or retrying:
-    /// a failed response may follow an already completed creation.
+    /// replies are drained without closing the borrowed base or retrying here:
+    /// a failed response may follow an already completed creation. A caller
+    /// may use file_admission::retry for the explicit pre-mutation status only.
     pub fn open_at(
         &self,
         base: OpenAtBase<T::Handle>,
@@ -1836,6 +1841,17 @@ impl<T: ObjectTransport> Client<T> {
             .ok_or(ClientError::ResponseTooLarge)?;
         let (header, payload) = protocol::decode(response_bytes).map_err(ClientError::Protocol)?;
         if header.opcode != protocol::OP_STATUS || header.request_id != request_id {
+            return Err(ClientError::MismatchedResponse);
+        }
+        if header.status == protocol::STATUS_MEMORY_ADMISSION_BUSY
+            && (!matches!(
+                opcode,
+                protocol::OP_OPEN_AT | protocol::OP_FTRUNCATE | protocol::OP_TRUNCATE_AT
+            )
+                || header.flags != 0
+                || !payload.is_empty()
+                || !handles.is_empty())
+        {
             return Err(ClientError::MismatchedResponse);
         }
         if header.status != protocol::STATUS_OK {

@@ -2187,14 +2187,10 @@ fn open_posix_object(path: &str, flags: c_int, mode: c_int) -> Result<c_int, c_i
 
 fn open_posix_entry(path: &str, flags: c_int, mode: c_int) -> Result<FdEntry, c_int> {
     let client = posix_client().map_err(map_posix_client_error)?;
-    let opened = client
-        .open_at(
-            OpenAtBase::ProcessCwd,
-            posix_open_options(flags)?,
-            mode as u32,
-            path,
-        )
-        .map_err(map_posix_client_error)?;
+    let options = posix_open_options(flags)?;
+    let opened = file_mutation(|| {
+        client.open_at(OpenAtBase::ProcessCwd, options, mode as u32, path)
+    })?;
     let status = match client.fstat(opened) {
         Ok(status) => status,
         Err(error) => {
@@ -6027,13 +6023,11 @@ pub extern "C" fn _ftruncate(fd: c_int, length: i64) -> c_int {
             return Err(EINVAL);
         }
         let client = posix_client().map_err(map_posix_client_error)?;
-        finish_file_resize(client.ftruncate(
-                ObjectHandleAttachment {
-                    handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-                    rights: entry.rights,
-                },
-                length as u64,
-            ))?;
+        let file = ObjectHandleAttachment {
+            handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+            rights: entry.rights,
+        };
+        file_mutation(|| client.ftruncate(file, length as u64))?;
         Ok(0)
     })();
     result_with_errno(result, -1)
@@ -6044,15 +6038,25 @@ pub extern "C" fn ftruncate(fd: c_int, length: i64) -> c_int {
     _ftruncate(fd, length)
 }
 
-fn finish_file_resize(
-    result: Result<(), PosixClientError<syscall::SysError>>,
-) -> Result<(), c_int> {
-    match result {
-        Err(PosixClientError::Remote(posix_protocol::STATUS_FILE_SIZE_LIMIT)) => {
+fn file_mutation<T>(
+    operation: impl FnMut() -> Result<T, PosixClientError<syscall::SysError>>,
+) -> Result<T, c_int> {
+    use mochios_posix_client::file_admission::{Error, retry};
+    // Callers retain their FD lease or pending-open reservation, not STATE,
+    // across this loop. A handler may close/reuse an FD while we are waiting;
+    // it must not redirect the operation to a newly installed object.
+    match retry(operation, || {
+        drain_pending_signals()?;
+        syscall_errno(syscall::raw_syscall0(syscall::SyscallNumber::ThreadYield))?;
+        Ok::<(), c_int>(())
+    }) {
+        Err(Error::Operation(PosixClientError::Remote(posix_protocol::STATUS_FILE_SIZE_LIMIT))) => {
             generate_thread_signal(posix_protocol::SIGNAL_XFSZ)?;
             Err(EFBIG)
         }
-        other => other.map_err(map_posix_client_error),
+        Err(Error::Operation(error)) => Err(map_posix_client_error(error)),
+        Err(Error::Wait(error)) => Err(error),
+        Ok(value) => Ok(value),
     }
 }
 
@@ -6070,7 +6074,7 @@ pub extern "C" fn truncate(path: *const c_char, length: i64) -> c_int {
         (|| {
             let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
             let client = posix_client().map_err(map_posix_client_error)?;
-            finish_file_resize(client.truncate_at(StatAtBase::ProcessCwd, path, length as u64))?;
+            file_mutation(|| client.truncate_at(StatAtBase::ProcessCwd, path, length as u64))?;
             Ok(0)
         })(),
         -1,

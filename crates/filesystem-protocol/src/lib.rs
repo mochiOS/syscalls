@@ -150,6 +150,10 @@ pub const TRUNCATE_AT_FLAGS_ALL: u32 =
 /// Non-errno operation failure. No mutation occurred because a supplied
 /// growth ceiling was exceeded; the caller chooses its own policy response.
 pub const ERROR_GROWTH_LIMIT: i32 = 0x10000;
+/// Memory admission is temporarily busy BEFORE any namespace or storage
+/// mutation. Retrying is safe; ordinary EAGAIN (including publication or
+/// backend failures) does not carry this guarantee. Replies have no objects.
+pub const ERROR_MEMORY_ADMISSION_BUSY: i32 = 0x10002;
 
 pub const SYMLINK_AT_BASE_ATTACHED: u32 = 1 << 0;
 pub const SYMLINK_AT_ROOT_ATTACHED: u32 = 1 << 1;
