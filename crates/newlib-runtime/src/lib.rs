@@ -2188,35 +2188,6 @@ impl Drop for PendingFdReservation {
     }
 }
 
-fn open_posix_entry(path: &str, flags: c_int, mode: c_int) -> Result<FdEntry, c_int> {
-    let client = posix_client().map_err(map_posix_client_error)?;
-    let options = posix_open_options(flags)?;
-    let opened = file_mutation(|| {
-        client.open_at(OpenAtBase::ProcessCwd, options, mode as u32, path)
-    })?;
-    let status = match client.fstat(opened) {
-        Ok(status) => status,
-        Err(error) => {
-            let _ = syscall_errno(syscall::raw_syscall1(
-                syscall::SyscallNumber::HandleClose,
-                u64::from(opened.handle),
-            ));
-            return Err(map_posix_client_error(error));
-        }
-    };
-    let kind = match status.mode & 0o170000 {
-        0o040000 => FdKind::ObjectDirectory,
-        0o100000 => FdKind::ObjectFile,
-        _ => FdKind::ObjectSpecial,
-    };
-    Ok(object_entry(
-        u64::from(opened.handle),
-        opened.rights,
-        kind,
-        flags,
-    ))
-}
-
 fn retry_open_with_prompt(path: *const c_char, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
     let path_bytes = unsafe { c_bytes(path) };
     let path_str = core::str::from_utf8(path_bytes).map_err(|_| EACCES)?;
@@ -2561,11 +2532,7 @@ fn duplicate_fd_entry(
     Ok(())
 }
 
-fn duplicate_spawn_fd_entry(
-    fds: &mut FdTable<FdObject>,
-    old_fd: c_int,
-    new_fd: c_int,
-) -> Result<(), c_int> {
+fn duplicate_spawn_fd_entry(old_fd: c_int, new_fd: c_int) -> Result<(), c_int> {
     if old_fd < 0 || new_fd < 0 || old_fd as usize >= MAX_FDS || new_fd as usize >= MAX_FDS {
         return Err(EBADF);
     }
@@ -2573,32 +2540,10 @@ fn duplicate_spawn_fd_entry(
         return Err(EBADF);
     }
     let mut operations = RuntimeFdOps;
-    fds.duplicate_for_spawn(old_fd, new_fd, &mut operations)
+    state()
+        .fds
+        .duplicate_for_spawn(old_fd, new_fd, &mut operations)
         .map_err(map_fd_error)?;
-    Ok(())
-}
-
-fn install_spawn_open_entry(
-    fds: &mut FdTable<FdObject>,
-    fd: c_int,
-    entry: FdEntry,
-) -> Result<(), c_int> {
-    let mut operations = RuntimeFdOps;
-    let limit = match process_fd_limit() {
-        Ok(limit) => limit,
-        Err(errno) => {
-            operations.close_handle(entry.handle);
-            return Err(errno);
-        }
-    };
-    if fd < 0 || fd >= limit {
-        operations.close_handle(entry.handle);
-        return Err(EBADF);
-    }
-    if let Err(error) = fds.install_at(fd, entry, &mut operations) {
-        operations.close_handle(entry.handle);
-        return Err(map_fd_error(error));
-    }
     Ok(())
 }
 
@@ -2606,11 +2551,6 @@ fn change_directory_path(path: &str) -> Result<(), c_int> {
     let (base, _base_lease) = rename_posix_base(-2, path)?;
     let client = posix_client().map_err(map_posix_client_error)?;
     client.chdir_at(base, path).map_err(map_posix_client_error)
-}
-
-fn change_directory_fd(fds: &FdTable<FdObject>, fd: c_int) -> Result<(), c_int> {
-    let entry = fds.get(fd).ok_or(EBADF)?;
-    change_directory_entry(entry)
 }
 
 fn change_directory_entry(entry: FdEntry) -> Result<(), c_int> {
@@ -2665,10 +2605,7 @@ fn duplicate_fd_from(
     })
 }
 
-fn apply_spawn_file_actions(
-    fds: &mut FdTable<FdObject>,
-    actions: *const c_void,
-) -> Result<(), c_int> {
+fn apply_spawn_file_actions(actions: *const c_void) -> Result<(), c_int> {
     if actions.is_null() {
         return Ok(());
     }
@@ -2686,12 +2623,12 @@ fn apply_spawn_file_actions(
         match entry.fae_action {
             FAE_CLOSE => {
                 let mut operations = RuntimeFdOps;
-                fds.close_for_spawn(entry.fae_fildes, &mut operations);
+                state().fds.close_for_spawn(entry.fae_fildes, &mut operations);
             }
             FAE_DUP2 => {
                 // Safety: the active union field is determined by fae_action.
                 let new_fd = unsafe { entry.fae_data.dup2.newfildes };
-                duplicate_spawn_fd_entry(fds, entry.fae_fildes, new_fd)?;
+                duplicate_spawn_fd_entry(entry.fae_fildes, new_fd)?;
             }
             FAE_OPEN => {
                 // Safety: the active union field is determined by fae_action.
@@ -2702,10 +2639,9 @@ fn apply_spawn_file_actions(
                 if open.path.is_null() {
                     return Err(EFAULT);
                 }
-                let path =
-                    core::str::from_utf8(unsafe { c_bytes(open.path) }).map_err(|_| EINVAL)?;
-                let opened = open_posix_entry(path, open.oflag, open.mode as c_int)?;
-                install_spawn_open_entry(fds, entry.fae_fildes, opened)?;
+                file_mutation::open_for_spawn(
+                    open.path, open.oflag, open.mode as c_int, entry.fae_fildes,
+                )?;
             }
             FAE_CHDIR => {
                 // Safety: the active union field is determined by fae_action.
@@ -2719,7 +2655,9 @@ fn apply_spawn_file_actions(
             FAE_FCHDIR => {
                 // Safety: the active union field is determined by fae_action.
                 let fd = unsafe { entry.fae_data.dirfd };
-                change_directory_fd(fds, fd)?;
+                let _delivery = defer_native_delivery();
+                let directory = with_fd_entry(fd)?;
+                change_directory_entry(*directory)?;
             }
             _ => return Err(EINVAL),
         }
@@ -2963,8 +2901,29 @@ fn execve_with_launch_context(
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> Result<(), c_int> {
-    let (fds, _leases) = clone_current_fd_table()?;
-    replace_process_image(path, argv, envp, &fds)
+    let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+    let delivery = mochios_posix_client::upcall_guard::Guard::enter(&control.native_delivery_defer)
+        .ok_or(EOVERFLOW)?;
+    let captured = clone_current_fd_table()?;
+    let mut scope = core::pin::pin!(callback_resources::Scope::new(
+        &control.callback_resources,
+        control.active_signal_scope_id.load(Ordering::Acquire),
+        captured
+    ));
+    // Keep snapshot leases tracked if a signal abandons the exec preparation.
+    unsafe { scope.as_mut().activate() };
+    drop(delivery);
+    let result = replace_process_image(
+        path,
+        argv,
+        envp,
+        &scope.as_ref().get_ref().resource().unwrap().0,
+    );
+    let _delivery =
+        mochios_posix_client::upcall_guard::Guard::enter(&control.native_delivery_defer)
+            .unwrap_or_else(|| process_exit(EOVERFLOW));
+    unsafe { scope.as_mut().retire() };
+    result
 }
 
 #[inline(never)]
@@ -6013,28 +5972,6 @@ pub extern "C" fn _ftruncate(fd: c_int, length: i64) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn ftruncate(fd: c_int, length: i64) -> c_int {
     _ftruncate(fd, length)
-}
-
-fn file_mutation<T>(
-    operation: impl FnMut() -> Result<T, PosixClientError<syscall::SysError>>,
-) -> Result<T, c_int> {
-    use mochios_posix_client::file_admission::{Error, retry};
-    // Callers retain their FD lease or pending-open reservation, not STATE,
-    // across this loop. A handler may close/reuse an FD while we are waiting;
-    // it must not redirect the operation to a newly installed object.
-    match retry(operation, || {
-        drain_pending_signals()?;
-        syscall_errno(syscall::raw_syscall0(syscall::SyscallNumber::ThreadYield))?;
-        Ok::<(), c_int>(())
-    }) {
-        Err(Error::Operation(PosixClientError::Remote(posix_protocol::STATUS_FILE_SIZE_LIMIT))) => {
-            generate_thread_signal(posix_protocol::SIGNAL_XFSZ)?;
-            Err(EFBIG)
-        }
-        Err(Error::Operation(error)) => Err(map_posix_client_error(error)),
-        Err(Error::Wait(error)) => Err(error),
-        Ok(value) => Ok(value),
-    }
 }
 
 #[unsafe(no_mangle)]
@@ -9528,7 +9465,7 @@ pub extern "C" fn _posix_spawn(
         Err(errno_value) => return errno_value,
     };
 
-    let (child_pid, mut desired_fds, process_handle) = match clone_registered_process() {
+    let (child_pid, desired_fds, process_handle) = match clone_registered_process() {
         Ok(value) => value,
         Err(errno_value) => {
             close_object_handle(status_stream.read);
@@ -9539,15 +9476,18 @@ pub extern "C" fn _posix_spawn(
 
     if child_pid == 0 {
         close_object_handle(status_stream.read);
+        // This child's normal FD table is authoritative for file actions and
+        // any signal-handler reentry. The snapshot holds the same inherited
+        // references; it is metadata, not a second native Handle owner.
+        state().fds = desired_fds;
         if let Err(errno_value) = apply_spawn_attributes(attributes) {
             report_spawn_error(status_stream.write, errno_value);
         }
-        if let Err(errno_value) = apply_spawn_file_actions(&mut desired_fds, snapshot.file_actions)
-        {
+        if let Err(errno_value) = apply_spawn_file_actions(snapshot.file_actions) {
             report_spawn_error(status_stream.write, errno_value);
         }
         if let Err(errno_value) =
-            replace_process_image(snapshot.path, snapshot.argv, snapshot.envp, &desired_fds)
+            execve_with_launch_context(snapshot.path, snapshot.argv, snapshot.envp)
         {
             report_spawn_error(status_stream.write, errno_value);
         }

@@ -200,6 +200,24 @@ impl Drop for OpenResources {
 }
 
 pub(super) fn open(path: *const c_char, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
+    open_in_slot(path, flags, mode, None)
+}
+
+pub(super) fn open_for_spawn(
+    path: *const c_char,
+    flags: c_int,
+    mode: c_int,
+    fd: c_int,
+) -> Result<c_int, c_int> {
+    open_in_slot(path, flags, mode, Some(fd))
+}
+
+fn open_in_slot(
+    path: *const c_char,
+    flags: c_int,
+    mode: c_int,
+    target: Option<c_int>,
+) -> Result<c_int, c_int> {
     let (_, control) = register_current_thread().ok_or(EAGAIN)?;
     let native = delivery(control);
     let client = posix_client().map_err(map_posix_client_error)?;
@@ -211,7 +229,22 @@ pub(super) fn open(path: *const c_char, flags: c_int, mode: c_int) -> Result<c_i
             .map_err(map_posix_client_error)?
     };
     let limit = process_fd_limit()?;
-    let reservation = PendingFdReservation(state().fds.reserve_from(0, limit).map_err(|_| EMFILE)?);
+    let reservation = {
+        let mut state = state();
+        let (minimum, limit) = match target {
+            Some(fd) => {
+                if fd < 0 || fd >= limit {
+                    return Err(EBADF);
+                }
+                // A spawn open action closes the target before opening, even
+                // on failure. Reserve that exact slot, not a temporary FD.
+                state.fds.close_for_spawn(fd, &mut RuntimeFdOps);
+                (fd, fd + 1)
+            }
+            None => (0, limit),
+        };
+        PendingFdReservation(state.fds.reserve_from(minimum, limit).map_err(|_| EMFILE)?)
+    };
     let mut scope = core::pin::pin!(callback_resources::Scope::new(
         &control.callback_resources,
         control.active_signal_scope_id.load(Ordering::Acquire),
