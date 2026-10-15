@@ -5,6 +5,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use mochios_posix_protocol as protocol;
 
 pub mod configuration;
+pub mod file_size_limit;
 pub mod atfork;
 pub mod thread_lifecycle;
 pub mod accounting;

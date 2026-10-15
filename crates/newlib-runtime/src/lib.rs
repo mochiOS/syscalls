@@ -41,7 +41,6 @@ use core::ptr;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use mochi_user_syscall as syscall;
-use mochios_posix_client::signal_context::{SigInfo, UContext};
 use mochios_capability_protocol::{
     AUTHORIZE_EXEC_OPCODE, CAPABILITY_PERSISTENT_QUERY_OPCODE, CAPABILITY_PROMPT_OPCODE,
     CapabilityClass, CapabilityDecision, CapabilityExecutableIdentity, CapabilityPromptRequest,
@@ -53,10 +52,11 @@ use mochios_posix_client::fd::{
     LaunchFdDescription, LaunchFdError, restore_launch_context, stage_launch_context,
 };
 use mochios_posix_client::newlib_errno::{
-    E2BIG, EACCES, EAGAIN, EBADF, EBUSY, ECHILD, EDEADLK, EEXIST, EFAULT, EINTR, EINVAL, EIO, EISDIR,
-    EMFILE, ENAMETOOLONG, ENOENT, ENOMEM, ENOSYS, ENOTDIR, ENOTSUP, ENOTTY, EOVERFLOW, EPERM, EPIPE,
-    ERANGE, ESPIPE, ESRCH,
+    E2BIG, EACCES, EAGAIN, EBADF, EBUSY, ECHILD, EDEADLK, EEXIST, EFAULT, EFBIG, EINTR, EINVAL,
+    EIO, EISDIR, EMFILE, ENAMETOOLONG, ENOENT, ENOMEM, ENOSYS, ENOTDIR, ENOTSUP, ENOTTY, EOVERFLOW,
+    EPERM, EPIPE, ERANGE, ESPIPE, ESRCH,
 };
+use mochios_posix_client::signal_context::{SigInfo, UContext};
 use mochios_posix_client::{
     Client as PosixClient, ClientError as PosixClientError, StatAtBase, SyscallEndpointTransport,
 };
@@ -415,6 +415,7 @@ enum FdKind {
     ObjectSharedMemory = 10,
     ObjectSocket = 11,
     ObjectDatagram = 12,
+    ObjectSpecial = 13,
 }
 
 impl FdKind {
@@ -520,6 +521,7 @@ fn inherited_fd_kind(kind: FdKind) -> Option<u8> {
         FdKind::ObjectSharedMemory => Some(posix_protocol::INHERITED_FD_KIND_SHARED_MEMORY),
         FdKind::ObjectSocket => Some(posix_protocol::INHERITED_FD_KIND_SOCKET),
         FdKind::ObjectDatagram => Some(posix_protocol::INHERITED_FD_KIND_DATAGRAM),
+        FdKind::ObjectSpecial => Some(posix_protocol::INHERITED_FD_KIND_SPECIAL),
     }
 }
 
@@ -536,6 +538,7 @@ fn fd_kind_from_inherited(kind: u8) -> Option<FdKind> {
         posix_protocol::INHERITED_FD_KIND_SHARED_MEMORY => Some(FdKind::ObjectSharedMemory),
         posix_protocol::INHERITED_FD_KIND_SOCKET => Some(FdKind::ObjectSocket),
         posix_protocol::INHERITED_FD_KIND_DATAGRAM => Some(FdKind::ObjectDatagram),
+        posix_protocol::INHERITED_FD_KIND_SPECIAL => Some(FdKind::ObjectSpecial),
         _ => None,
     }
 }
@@ -2162,10 +2165,10 @@ fn open_posix_entry(path: &str, flags: c_int, mode: c_int) -> Result<FdEntry, c_
             return Err(map_posix_client_error(error));
         }
     };
-    let kind = if status.mode & 0o170000 == 0o040000 {
-        FdKind::ObjectDirectory
-    } else {
-        FdKind::ObjectFile
+    let kind = match status.mode & 0o170000 {
+        0o040000 => FdKind::ObjectDirectory,
+        0o100000 => FdKind::ObjectFile,
+        _ => FdKind::ObjectSpecial,
     };
     Ok(object_entry(
         u64::from(opened.handle),
@@ -3739,7 +3742,7 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
     if entry.handle.kind.is_socket() {
         return socket::message_entry(entry, buffer as u64, length, 0, true);
     }
-    if matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSharedMemory)
+    if matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectSharedMemory)
         && !mochios_posix_client::fd::access_allows_write(entry.handle.open_flags as u32)
     {
         return Err(EBADF);
@@ -3795,7 +3798,7 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
                 mochios_posix_client::stream::WriteError::Io(errno) => errno,
             });
         }
-        FdKind::ObjectFile | FdKind::ObjectSharedMemory => syscall_errno(syscall::raw_syscall3(
+        FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectSharedMemory => syscall_errno(syscall::raw_syscall3(
             syscall::SyscallNumber::HandleWrite,
             entry.handle.lower_handle,
             buffer as u64,
@@ -3828,7 +3831,7 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
 }
 
 fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<isize, c_int> {
-    if matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSharedMemory)
+    if matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectSharedMemory)
         && !mochios_posix_client::fd::access_allows_read(entry.handle.open_flags as u32)
     {
         return Err(EBADF);
@@ -3841,7 +3844,7 @@ fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<is
     }
     let read = match entry.handle.kind {
         FdKind::Stdin => return Err(EBADF),
-        FdKind::ObjectFile | FdKind::ObjectSharedMemory => syscall_errno(syscall::raw_syscall3(
+        FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectSharedMemory => syscall_errno(syscall::raw_syscall3(
             syscall::SyscallNumber::HandleRead,
             entry.handle.lower_handle,
             buffer as u64,
@@ -4178,7 +4181,7 @@ fn positioned_file_io(
         return Err(EFAULT);
     }
     match entry.handle.kind {
-        FdKind::ObjectFile | FdKind::ObjectSharedMemory => {}
+        FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectSharedMemory => {}
         FdKind::ObjectDirectory => return Err(EISDIR),
         _ => return Err(ESPIPE),
     }
@@ -4190,6 +4193,18 @@ fn positioned_file_io(
     if !allowed {
         return Err(EBADF);
     }
+    let length = if write && length != 0 && entry.handle.kind == FdKind::ObjectFile {
+        let limit = resource_policy::read(posix_protocol::RLIMIT_FSIZE)?;
+        match mochios_posix_client::file_size_limit::positioned_length(offset, length, limit.soft) {
+            Some(length) => length,
+            None => {
+                generate_thread_signal(posix_protocol::SIGNAL_XFSZ)?;
+                return Err(EFBIG);
+            }
+        }
+    } else {
+        length
+    };
     let operation = if write {
         syscall::SyscallNumber::HandleWriteAt
     } else {
@@ -4560,7 +4575,7 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
             F_GETFL
                 if matches!(
                     entry.handle.kind,
-                    FdKind::ObjectFile | FdKind::ObjectDirectory
+                    FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
                 ) =>
             {
                 let client = posix_client().map_err(map_posix_client_error)?;
@@ -4601,7 +4616,7 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
                 }
                 if matches!(
                     entry.handle.kind,
-                    FdKind::ObjectFile | FdKind::ObjectDirectory
+                    FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
                 ) {
                     let client = posix_client().map_err(map_posix_client_error)?;
                     client
@@ -5469,7 +5484,7 @@ pub extern "C" fn fchmod(fd: c_int, mode: u32) -> c_int {
         let entry = with_fd_entry(fd)?;
         if !matches!(
             entry.handle.kind,
-            FdKind::ObjectFile | FdKind::ObjectDirectory
+            FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
         ) {
             return Err(EBADF);
         }
@@ -5550,7 +5565,7 @@ pub extern "C" fn fchown(fd: c_int, uid: u32, gid: u32) -> c_int {
         let entry = with_fd_entry(fd)?;
         if !matches!(
             entry.handle.kind,
-            FdKind::ObjectFile | FdKind::ObjectDirectory
+            FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
         ) {
             return Err(EBADF);
         }
@@ -5718,7 +5733,10 @@ pub extern "C" fn readdir(dirp: *mut c_void) -> *mut NewlibDirent {
 pub extern "C" fn _lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if !matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSharedMemory) {
+        if !matches!(
+            entry.handle.kind,
+            FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectSharedMemory
+        ) {
             return Err(ESPIPE);
         }
         let basis = match whence {
@@ -5752,7 +5770,7 @@ fn sync_file_descriptor(fd: c_int) -> Result<c_int, c_int> {
     let entry = with_fd_entry(fd)?;
     if !matches!(
         entry.handle.kind,
-        FdKind::ObjectFile | FdKind::ObjectDirectory
+        FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
     ) {
         return Err(EBADF);
     }
@@ -5788,7 +5806,10 @@ pub extern "C" fn _ftruncate(fd: c_int, length: i64) -> c_int {
             shared_memory::truncate(entry, length as u64)?;
             return Ok(0);
         }
-        if entry.handle.kind != FdKind::ObjectFile {
+        if !matches!(
+            entry.handle.kind,
+            FdKind::ObjectFile | FdKind::ObjectSpecial
+        ) {
             return Err(EBADF);
         }
         if !mochios_posix_client::fd::access_allows_write(entry.handle.open_flags as u32) {
@@ -5857,7 +5878,7 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
         }
         if matches!(
             entry.handle.kind,
-            FdKind::ObjectFile | FdKind::ObjectDirectory
+            FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
         ) {
             let handle = u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?;
             let client = posix_client().map_err(map_posix_client_error)?;
@@ -6330,7 +6351,7 @@ pub extern "C" fn mmap(
                 shared_backing = Some(shared_memory::mapping(entry, writable)?);
                 u64::from(shared_backing.as_ref().unwrap().0)
             } else {
-                if entry.handle.kind != FdKind::ObjectFile {
+                if !matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSpecial) {
                     return Err(EACCES);
                 }
                 let mut required = syscall::HANDLE_RIGHT_MAP | syscall::HANDLE_RIGHT_READ;

@@ -46,6 +46,9 @@ pub const INHERITED_FD_KIND_PTY: u8 = 9;
 pub const INHERITED_FD_KIND_SHARED_MEMORY: u8 = 10;
 pub const INHERITED_FD_KIND_SOCKET: u8 = 11;
 pub const INHERITED_FD_KIND_DATAGRAM: u8 = 12;
+/// Non-regular provider file (for example a character device). Keep this
+/// distinction across exec and SCM_RIGHTS; resource file limits exclude it.
+pub const INHERITED_FD_KIND_SPECIAL: u8 = 13;
 pub const INHERITED_FD_DESCRIPTOR_CLOEXEC: u8 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +86,7 @@ const fn valid_inherited_fd_kind(kind: u8) -> bool {
             | INHERITED_FD_KIND_SHARED_MEMORY
             | INHERITED_FD_KIND_SOCKET
             | INHERITED_FD_KIND_DATAGRAM
+            | INHERITED_FD_KIND_SPECIAL
     )
 }
 
@@ -100,6 +104,7 @@ pub const fn inherited_fd_kind_requires_handle(kind: u8) -> Option<bool> {
             | INHERITED_FD_KIND_SHARED_MEMORY
             | INHERITED_FD_KIND_SOCKET
             | INHERITED_FD_KIND_DATAGRAM
+            | INHERITED_FD_KIND_SPECIAL
     ))
 }
 
@@ -499,6 +504,7 @@ pub const SIGNAL_CONT: u32 = 19;
 pub const SIGNAL_CHLD: u32 = 20;
 pub const SIGNAL_TTIN: u32 = 21;
 pub const SIGNAL_TTOU: u32 = 22;
+pub const SIGNAL_XFSZ: u32 = 25;
 pub const SIGNAL_WINCH: u32 = 28;
 
 /// Provider control codes understood by POSIX pseudo-terminal objects.
