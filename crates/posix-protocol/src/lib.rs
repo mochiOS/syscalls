@@ -18,6 +18,7 @@ pub mod socket_transfer;
 pub mod fault_signal;
 pub mod signal_origin;
 pub mod signal_wait;
+pub mod fork;
 
 /// Opaque LaunchContext key under which the POSIX control endpoint is passed.
 ///
@@ -278,6 +279,13 @@ pub const OP_SOCKET_RECORD_ENDPOINT: u16 = 89;
 /// Atomically updates selected mutable flags of one explicitly attached OFD.
 /// Requires CONTROL|TRANSFER. FILE_FLAGS_UPDATE_PAYLOAD_LEN input; empty reply.
 pub const OP_FUPDATEFL: u16 = 90;
+/// Empty request and no objects; returns one owner-scoped fork preparation token.
+pub const OP_FORK_PREPARE: u16 = 91;
+/// One token and one WAIT|SIGNAL ProcessHandle. The creator keeps the child
+/// stopped until its prepared POSIX state is installed successfully.
+pub const OP_FORK_COMMIT: u16 = 92;
+/// One token, no objects. Cancels only the authenticated sender's preparation.
+pub const OP_FORK_CANCEL: u16 = 93;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
