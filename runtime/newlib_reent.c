@@ -24,6 +24,16 @@ void __mochios_reent_destroy(void *storage) {
     _reclaim_reent(storage);
 }
 
+/* Only for quiescent, already-exited sibling reents copied by fork. Reclaim
+ * private caches without closing/flushing inherited FILEs or invoking a
+ * user-installed cleanup callback. This is not safe for interrupted live libc
+ * operations whose private cache structures may be mid-update. */
+void __mochios_reent_discard(void *storage) {
+    struct _reent *reent = storage;
+    _REENT_CLEANUP(reent) = NULL;
+    _reclaim_reent(reent);
+}
+
 /* Newlib's default raise uses process-wide kill(getpid(), sig). Retarget it
  * to the authenticated calling-thread path, including reentrant callers. */
 int _raise_r(struct _reent *reent, int signal) {

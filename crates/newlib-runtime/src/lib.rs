@@ -891,6 +891,7 @@ unsafe extern "C" {
     fn __mochios_reent_size() -> usize;
     fn __mochios_reent_initialize(storage: *mut c_void);
     fn __mochios_reent_destroy(storage: *mut c_void);
+    fn __mochios_reent_discard(storage: *mut c_void);
     fn malloc(size: usize) -> *mut c_void;
     fn free(ptr: *mut c_void);
     fn memalign(alignment: usize, size: usize) -> *mut c_void;
@@ -1124,7 +1125,28 @@ fn reserve_thread_control()
     None
 }
 
+enum ThreadReclamation {
+    ThreadExit,
+    ForkChild,
+}
+
 fn release_thread_control(control: &ThreadControl) {
+    reclaim_thread_control(control, ThreadReclamation::ThreadExit);
+}
+
+fn discard_fork_thread_control(control: &ThreadControl) {
+    // A live sibling may have private libc caches mid-update. Keep refusing
+    // multithreaded fork until that case has a separate safe reclamation path.
+    if !matches!(
+        control.state.load(Ordering::Acquire),
+        THREAD_EXITED | THREAD_REAPING
+    ) {
+        process_exit(127);
+    }
+    reclaim_thread_control(control, ThreadReclamation::ForkChild);
+}
+
+fn reclaim_thread_control(control: &ThreadControl, reason: ThreadReclamation) {
     let _reclamation = thread_lifecycle::mutate();
     control.active_native_signal_frame.store(0, Ordering::Relaxed);
     control.active_native_signal_frame_id.store(0, Ordering::Relaxed);
@@ -1146,14 +1168,19 @@ fn release_thread_control(control: &ThreadControl) {
     let reent = control.reent.swap(0, Ordering::Relaxed);
     let reent_mapping_size = control.reent_mapping_size.swap(0, Ordering::Relaxed);
     if reent != 0 && reent_mapping_size != 0 {
-        // Reclamation is internal to join/detach/startup cleanup, not an
-        // application stdio cancellation point. Do not abandon its owned TCB
-        // and mappings if reent cleanup happens to flush a stream.
+        // Normal reent destruction may flush streams. Internal reclamation
+        // must not abandon its owned TCB/mappings at a cancellation point;
+        // fork-child discard suppresses those callbacks entirely.
         let caller = current_thread_control();
         let previous = caller.map(|(_, caller)| {
             caller.cancel_state.swap(PTHREAD_CANCEL_DISABLE, Ordering::AcqRel)
         });
-        unsafe { __mochios_reent_destroy(reent as *mut c_void) };
+        unsafe {
+            match reason {
+                ThreadReclamation::ThreadExit => __mochios_reent_destroy(reent as *mut c_void),
+                ThreadReclamation::ForkChild => __mochios_reent_discard(reent as *mut c_void),
+            }
+        }
         if let (Some((_, caller)), Some(previous)) = (caller, previous) {
             caller.cancel_state.store(previous, Ordering::Release);
         }
@@ -2996,7 +3023,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         for other in &THREADS {
             if !ptr::eq(other, thread_control) && other.state.load(Ordering::Acquire) != THREAD_FREE
             {
-                release_thread_control(other);
+                discard_fork_thread_control(other);
             }
         }
         let old_stack = thread_control.signal_upcall_stack.load(Ordering::Relaxed);
