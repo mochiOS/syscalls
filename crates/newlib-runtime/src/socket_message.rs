@@ -94,7 +94,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
     if !entry.handle.kind.is_socket() {
         return Err(mochios_posix_client::newlib_errno::from_status(-88));
     }
-    if socket::is_datagram(entry)? && total > posix_protocol::socket_record::MAX_RECORD_SIZE {
+    if socket::is_datagram(*entry)? && total > posix_protocol::socket_record::MAX_RECORD_SIZE {
         return Err(mochios_posix_client::newlib_errno::from_status(-90));
     }
     // Snapshot the complete control chain before lookup or staging. The codec
@@ -136,7 +136,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
                 break;
             }
         }
-        if !message.name.is_null() && socket::is_datagram(entry)? {
+        if !message.name.is_null() && socket::is_datagram(*entry)? {
             if message.name_length as usize > mochios_posix_client::socket::MAX_SOCKADDR_LEN {
                 return Err(EINVAL);
             }
@@ -146,7 +146,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
             let address = mochios_posix_client::socket::decode_sockaddr(address)
                 .map_err(|status| mochios_posix_client::newlib_errno::from_status(status as i64))?;
             return socket_record::send_to(
-                entry,
+                *entry,
                 bytes.as_ptr() as u64,
                 bytes.len(),
                 flags,
@@ -154,9 +154,9 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
             )
             .map(|record| record.count);
         }
-        return socket::message_entry(entry, bytes.as_ptr() as u64, bytes.len(), flags, true);
+        return socket::message_entry(*entry, bytes.as_ptr() as u64, bytes.len(), flags, true);
     }
-    let datagram = socket::is_datagram(entry)?;
+    let datagram = socket::is_datagram(*entry)?;
     if total > wire::MAX_PAYLOAD_LEN as usize {
         return Err(mochios_posix_client::newlib_errno::from_status(-90));
     }
@@ -189,7 +189,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
     let transport = socket_record::endpoint()?;
     let (_, thread) = register_current_thread().ok_or(EAGAIN)?;
     let caught = thread.nonrestart_signal_generation.load(Ordering::Acquire);
-    let mut wait = socket::SocketWait::new(entry, syscall::HANDLE_SIGNAL_WRITABLE)?;
+    let mut wait = socket::SocketWait::new(*entry, syscall::HANDLE_SIGNAL_WRITABLE)?;
     let source = ObjectHandleAttachment {
         handle: entry.handle.lower_handle as u32,
         rights: entry.rights,
@@ -220,7 +220,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
         // Only bounded worker calls happen here, never capacity waits. Once
         // appended, independent server-owned references survive sender close.
         let state = state();
-        if state.fds.get(fd) != Some(entry) {
+        if state.fds.get(fd) != Some(*entry) {
             return Err(EBADF);
         }
         for &descriptor in &descriptors[..count] {
@@ -308,7 +308,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
         match result {
             Ok(count) => return Ok(count as isize),
             Err(PosixClientError::Remote(-11))
-                if !options.dont_wait && !handle_is_nonblocking(entry)? =>
+                if !options.dont_wait && !handle_is_nonblocking(*entry)? =>
             {
                 if let Some((route, _)) = &route {
                     let notice =
@@ -319,7 +319,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
                         thread,
                         caught,
                         0,
-                        wait.deadline(entry)?,
+                        wait.deadline(*entry)?,
                     )?;
                     continue;
                 }
@@ -343,7 +343,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
                     thread,
                     caught,
                     0,
-                    wait.deadline(entry)?,
+                    wait.deadline(*entry)?,
                 )?;
             }
             Err(error) => {
@@ -430,13 +430,13 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
         return Err(mochios_posix_client::newlib_errno::from_status(-88));
     }
     let wait_all =
-        !socket::is_datagram(entry)? && flags & MSG_WAITALL != 0 && flags & MSG_PEEK == 0;
+        !socket::is_datagram(*entry)? && flags & MSG_WAITALL != 0 && flags & MSG_PEEK == 0;
     let (_, thread) = register_current_thread().ok_or(EAGAIN)?;
     let mut call = ReceiveCall {
-        entry,
+        entry: *entry,
         thread,
         caught: thread.nonrestart_signal_generation.load(Ordering::Acquire),
-        wait: socket::SocketWait::new(entry, syscall::HANDLE_SIGNAL_READABLE)?,
+        wait: socket::SocketWait::new(*entry, syscall::HANDLE_SIGNAL_READABLE)?,
     };
     let original = message;
     let mut copied = 0;

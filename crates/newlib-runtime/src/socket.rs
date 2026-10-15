@@ -74,7 +74,7 @@ pub unsafe extern "C" fn setsockopt(
             )
             .map_err(|_| EINVAL)?;
             control(
-                entry,
+                *entry,
                 if option == 20 {
                     wire::CONTROL_SET_RECEIVE_TIMEOUT
                 } else {
@@ -101,7 +101,7 @@ pub unsafe extern "C" fn setsockopt(
             c_int::from_ne_bytes(native),
         )
         .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
-        control(entry, tag, &payload, &mut [])?;
+        control(*entry, tag, &payload, &mut [])?;
         Ok(0)
     })();
     result_with_errno(result, -1)
@@ -134,7 +134,7 @@ pub unsafe extern "C" fn getsockopt(
             }
             let mut bytes = [0; 8];
             control(
-                entry,
+                *entry,
                 if option == 20 {
                     wire::CONTROL_GET_RECEIVE_TIMEOUT
                 } else {
@@ -172,7 +172,7 @@ pub unsafe extern "C" fn getsockopt(
             return Err(EFAULT);
         }
         let mut response = [0; 4];
-        control(entry, tag, &[], &mut response)?;
+        control(*entry, tag, &[], &mut response)?;
         let decoded = mochios_posix_client::socket::newlib_getsockopt_value(tag, &response)
             .map_err(|_| EIO)?;
         unsafe {
@@ -212,14 +212,14 @@ unsafe fn connect_io(fd: c_int, address: *const c_void, length: u32) -> Result<c
             if entry.handle.kind != FdKind::ObjectDatagram {
                 return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
             }
-            control(entry, wire::CONTROL_DISCONNECT, &[], &mut [])?;
+            control(*entry, wire::CONTROL_DISCONNECT, &[], &mut [])?;
             return Ok(0);
         }
         mochios_posix_client::socket::ConnectAddress::Peer(address) => address,
     };
     let (_, thread) = register_current_thread().ok_or(EAGAIN)?;
     let caught = thread.nonrestart_signal_generation.load(Ordering::Acquire);
-    let mut wait = SocketWait::new(entry, syscall::HANDLE_SIGNAL_WRITABLE)?;
+    let mut wait = SocketWait::new(*entry, syscall::HANDLE_SIGNAL_WRITABLE)?;
     let result = posix_client()
         .map_err(map_posix_client_error)?
         .connect_socket(
@@ -246,7 +246,7 @@ unsafe fn connect_io(fd: c_int, address: *const c_void, length: u32) -> Result<c
                     thread,
                     caught,
                     0,
-                    wait.deadline(entry)?,
+                    wait.deadline(*entry)?,
                 ) {
                     Ok(_) => (),
                     Err(EAGAIN) => {
@@ -302,7 +302,7 @@ unsafe fn accept_io(
     let limit = process_fd_limit()?;
     let pending = PendingFdReservation(state().fds.reserve_from(0, limit).map_err(|_| EMFILE)?);
     let client = posix_client().map_err(map_posix_client_error)?;
-    let accepted = stream_io(entry, syscall::HANDLE_SIGNAL_READABLE, || {
+    let accepted = stream_io(*entry, syscall::HANDLE_SIGNAL_READABLE, || {
         client
             .accept_socket(
                 mochios_posix_client::ObjectHandleAttachment {
@@ -392,7 +392,7 @@ pub extern "C" fn listen(fd: c_int, backlog: c_int) -> c_int {
             return Err(mochios_posix_client::newlib_errno::from_status(-88));
         }
         control(
-            entry,
+            *entry,
             wire::CONTROL_LISTEN,
             &(backlog.max(0) as u32).to_le_bytes(),
             &mut [],
@@ -420,7 +420,7 @@ pub unsafe extern "C" fn bind(fd: c_int, address: *const c_void, length: u32) ->
             .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
         let mut encoded = [0; wire::MAX_ADDRESS_LEN];
         let count = decoded.encode(&mut encoded).map_err(|_| EINVAL)?;
-        control(entry, wire::CONTROL_BIND, &encoded[..count], &mut [])?;
+        control(*entry, wire::CONTROL_BIND, &encoded[..count], &mut [])?;
         Ok(0)
     })();
     result_with_errno(result, -1)
@@ -576,7 +576,7 @@ pub(super) unsafe fn socket_name(
     } else {
         wire::CONTROL_LOCAL_ADDRESS
     };
-    let count = query_control(entry, tag, &[], &mut encoded)?;
+    let count = query_control(*entry, tag, &[], &mut encoded)?;
     let decoded = wire::Address::decode(&encoded[..count]).map_err(|_| EIO)?;
     let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
     let required =
@@ -613,7 +613,7 @@ pub extern "C" fn shutdown(fd: c_int, how: c_int) -> c_int {
             return Err(EINVAL);
         }
         control(
-            entry,
+            *entry,
             wire::CONTROL_SHUTDOWN,
             &(how as u32).to_le_bytes(),
             &mut [],
@@ -676,7 +676,7 @@ fn message_io(
     sending: bool,
 ) -> Result<isize, c_int> {
     let entry = with_fd_entry(fd)?;
-    message_entry(entry, buffer, length, flags, sending)
+    message_entry(*entry, buffer, length, flags, sending)
 }
 
 pub(super) fn is_datagram(entry: FdEntry) -> Result<bool, c_int> {
@@ -819,7 +819,7 @@ unsafe fn send_record_to(
         if !entry.handle.kind.is_socket() {
             return Err(mochios_posix_client::newlib_errno::from_status(-88));
         }
-        if !is_datagram(entry)? {
+        if !is_datagram(*entry)? {
             return Ok(None);
         }
         if address_length as usize > mochios_posix_client::socket::MAX_SOCKADDR_LEN {
@@ -832,7 +832,7 @@ unsafe fn send_record_to(
         if !matches!(address, wire::Address::UnixPath(_)) {
             return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
         }
-        super::socket_record::send_to(entry, buffer as u64, length, flags, address)
+        super::socket_record::send_to(*entry, buffer as u64, length, flags, address)
             .map(|record| Some(record.count))
     })();
     match result {
@@ -852,7 +852,7 @@ unsafe fn receive_record_address(
 ) -> Option<isize> {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        if !entry.handle.kind.is_socket() || !is_datagram(entry)? {
+        if !entry.handle.kind.is_socket() || !is_datagram(*entry)? {
             return Ok(None);
         }
         let capacity = if address.is_null() {
@@ -863,7 +863,7 @@ unsafe fn receive_record_address(
             }
             unsafe { address_length.read() as usize }
         };
-        let record = super::socket_record::io(entry, buffer as u64, length, flags, false)?;
+        let record = super::socket_record::io(*entry, buffer as u64, length, flags, false)?;
         if !address.is_null() {
             let source =
                 wire::Address::decode(&record.source[..record.source_length]).map_err(|_| EIO)?;

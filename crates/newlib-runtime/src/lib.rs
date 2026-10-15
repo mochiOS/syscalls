@@ -2,6 +2,7 @@
 
 mod child_cleanup;
 mod child_startup;
+mod fd_lease;
 mod image_startup;
 mod handle_capture;
 mod fork_policy;
@@ -477,9 +478,7 @@ impl HandleOps<FdObject> for RuntimeFdOps {
     }
 
     fn close_handle(&mut self, object: FdObject) {
-        if object.close_owned {
-            let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, object.lower_handle);
-        }
+        let _ = fd_lease::retire(object);
     }
 }
 
@@ -2513,18 +2512,21 @@ unsafe fn append_file_action(
     }
 }
 
-fn clone_current_fd_table() -> FdTable<FdObject> {
-    state().fds.clone()
+fn clone_current_fd_table() -> Result<(FdTable<FdObject>, [Option<fd_lease::Lease>; MAX_FDS]), c_int>
+{
+    let state = state();
+    let mut leases = [const { None }; MAX_FDS];
+    for (fd, lease) in leases.iter_mut().enumerate() {
+        if let Some(entry) = state.fds.get(fd as c_int) {
+            *lease = Some(fd_lease::Lease::new(entry)?);
+        }
+    }
+    Ok((state.fds.clone(), leases))
 }
 
 fn close_fd_entry(fds: &mut FdTable<FdObject>, fd: c_int) -> Result<(), c_int> {
     let entry = fds.get(fd).ok_or(EBADF)?;
-    if entry.handle.close_owned {
-        syscall_errno(syscall::raw_syscall1(
-            syscall::SyscallNumber::HandleClose,
-            entry.handle.lower_handle,
-        ))?;
-    }
+    fd_lease::retire(entry.handle)?;
     fds.take(fd).map_err(|_| EBADF)?;
     Ok(())
 }
@@ -2589,7 +2591,7 @@ fn install_spawn_open_entry(
 }
 
 fn change_directory_path(path: &str) -> Result<(), c_int> {
-    let base = rename_posix_base(-2, path)?;
+    let (base, _base_lease) = rename_posix_base(-2, path)?;
     let client = posix_client().map_err(map_posix_client_error)?;
     client.chdir_at(base, path).map_err(map_posix_client_error)
 }
@@ -2952,7 +2954,7 @@ fn execve_with_launch_context(
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> Result<(), c_int> {
-    let fds = clone_current_fd_table();
+    let (fds, _leases) = clone_current_fd_table()?;
     replace_process_image(path, argv, envp, &fds)
 }
 
@@ -3006,6 +3008,9 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     // child drop their private copy of this guard immediately after the native
     // clone returns, so the child never inherits a permanently locked STATE.
     let guard = state();
+    // Handle captures include retired-but-pinned references too. Freeze their
+    // bookkeeping with the FD table, and unlock the copied book in both images.
+    let fd_borrows = fd_lease::BORROWS.lock();
     let inherited_fds = guard.fds.clone();
     if guard.executable.is_null() {
         return Err(ENOENT);
@@ -3085,6 +3090,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
             Ordering::Relaxed,
         );
     }
+    drop(fd_borrows);
     drop(guard);
     drop(actions_guard);
     drop(update_guard);
@@ -3445,11 +3451,12 @@ fn apply_spawn_attributes(attributes: Option<PosixSpawnAttr>) -> Result<(), c_in
     Ok(())
 }
 
-fn with_fd_entry(fd: c_int) -> Result<PosixFdEntry<FdObject>, c_int> {
+fn with_fd_entry(fd: c_int) -> Result<fd_lease::Lease, c_int> {
     if fd < 0 || fd as usize >= MAX_FDS {
         return Err(EBADF);
     }
-    state().fds.get(fd).ok_or(EBADF)
+    let state = state();
+    fd_lease::Lease::new(state.fds.get(fd).ok_or(EBADF)?)
 }
 
 fn terminal_attributes_from_newlib(termios: NewlibTermios) -> posix_protocol::TerminalAttributes {
@@ -3549,7 +3556,7 @@ pub unsafe extern "C" fn tcgetwinsize(fd: c_int, size: *mut NewlibWinSize) -> c_
         let entry = with_fd_entry(fd)?;
         let mut bytes = [0; posix_protocol::TERMINAL_WINDOW_SIZE_LEN];
         let length = terminal_control(
-            entry,
+            *entry,
             posix_protocol::PTY_CONTROL_GET_WINDOW_SIZE,
             &[],
             &mut bytes,
@@ -3591,7 +3598,7 @@ pub unsafe extern "C" fn tcsetwinsize(fd: c_int, size: *const NewlibWinSize) -> 
         )
         .map_err(|_| EINVAL)?;
         let length = terminal_control(
-            entry,
+            *entry,
             posix_protocol::PTY_CONTROL_SET_WINDOW_SIZE,
             &bytes,
             &mut [],
@@ -3604,7 +3611,7 @@ pub unsafe extern "C" fn tcsetwinsize(fd: c_int, size: *const NewlibWinSize) -> 
     result_with_errno(result, -1)
 }
 
-fn terminal_attachment(fd: c_int) -> Result<ObjectHandleAttachment<u32>, c_int> {
+fn terminal_attachment(fd: c_int) -> Result<(fd_lease::Lease, ObjectHandleAttachment<u32>), c_int> {
     let entry = with_fd_entry(fd)?;
     if entry.handle.kind != FdKind::ObjectPty {
         return Err(ENOTTY);
@@ -3612,10 +3619,11 @@ fn terminal_attachment(fd: c_int) -> Result<ObjectHandleAttachment<u32>, c_int> 
     if entry.rights & syscall::HANDLE_RIGHT_TRANSFER == 0 {
         return Err(EACCES);
     }
-    Ok(ObjectHandleAttachment {
+    let attachment = ObjectHandleAttachment {
         handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
         rights: syscall::HANDLE_RIGHT_TRANSFER,
-    })
+    };
+    Ok((entry, attachment))
 }
 
 fn set_terminal_attributes(
@@ -4208,7 +4216,7 @@ pub extern "C" fn _write(fd: c_int, buffer: *const c_void, length: usize) -> isi
     }
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        syscall_write(entry, buffer, length)
+        syscall_write(*entry, buffer, length)
     })();
     record_stdio_io(&result);
     result_with_errno(result, -1)
@@ -4318,7 +4326,7 @@ pub unsafe extern "C" fn writev(fd: c_int, iov: *const IoVec, iovcnt: c_int) -> 
                 };
             },
             |bytes| {
-                syscall_write(entry, bytes.as_ptr().cast(), bytes.len())
+                syscall_write(*entry, bytes.as_ptr().cast(), bytes.len())
                     .and_then(|count| usize::try_from(count).map_err(|_| EIO))
             },
         )
@@ -4339,7 +4347,7 @@ pub extern "C" fn _read(fd: c_int, buffer: *mut c_void, length: usize) -> isize 
     }
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        syscall_read(entry, buffer, length)
+        syscall_read(*entry, buffer, length)
     })();
     record_stdio_io(&result);
     result_with_errno(result, -1)
@@ -4464,7 +4472,7 @@ pub unsafe extern "C" fn readv(fd: c_int, iov: *const IoVecMut, iovcnt: c_int) -
                 };
             },
             |bytes| {
-                syscall_read(entry, bytes.as_mut_ptr().cast(), bytes.len())
+                syscall_read(*entry, bytes.as_mut_ptr().cast(), bytes.len())
                     .and_then(|count| usize::try_from(count).map_err(|_| EIO))
             },
         )
@@ -4576,7 +4584,7 @@ pub extern "C" fn openpty(
             };
         if !termios.is_null() {
             let configure = with_fd_entry(slave_fd).and_then(|entry| {
-                set_terminal_attributes(entry, TCSANOW, unsafe { termios.read() })
+                set_terminal_attributes(*entry, TCSANOW, unsafe { termios.read() })
             });
             if let Err(errno) = configure {
                 let _ = _close(master_fd);
@@ -5064,13 +5072,15 @@ fn select_with_deadline(
         let ready_except = 0u64;
         let mut items = [syscall::HandleWaitItem::default(); MAX_FDS];
         let mut item_fds = [0usize; MAX_FDS];
+        let mut leases = [const { None }; MAX_FDS];
         let mut item_count = 0usize;
         for fd in 0..nfds as usize {
             let mask = 1u64 << fd;
             if requested & mask == 0 {
                 continue;
             }
-            let entry = with_fd_entry(fd as c_int)?;
+            leases[fd] = Some(with_fd_entry(fd as c_int)?);
+            let entry = leases[fd].as_ref().unwrap();
             match entry.handle.kind {
                 FdKind::ObjectStreamRead if requested_read & mask != 0 => {
                     items[item_count] = syscall::HandleWaitItem {
@@ -5223,6 +5233,7 @@ fn poll_with_deadline(
         let mut items = [syscall::HandleWaitItem::default(); MAX_FDS];
         let mut item_pollfds = [0usize; MAX_FDS];
         let mut item_kinds = [FdKind::Unused; MAX_FDS];
+        let mut leases = [const { None }; MAX_FDS];
         let mut item_count = 0usize;
         let mut immediately_ready = false;
         for index in 0..count {
@@ -5237,9 +5248,11 @@ fn poll_with_deadline(
                 immediately_ready = true;
                 continue;
             };
+            leases[index] = Some(entry);
+            let entry = leases[index].as_ref().unwrap();
             match entry.handle.kind {
                 FdKind::ObjectSocket | FdKind::ObjectDatagram => {
-                    pollfds[index].revents = socket::poll_events(entry, pollfds[index].events)?;
+                    pollfds[index].revents = socket::poll_events(**entry, pollfds[index].events)?;
                     immediately_ready |= pollfds[index].revents != 0;
                     let mut interests = syscall::HANDLE_SIGNAL_PEER_CLOSED;
                     if pollfds[index].events & READ_EVENTS != 0 {
@@ -5302,7 +5315,7 @@ fn poll_with_deadline(
             let poll_index = item_pollfds[item_index];
             if item_kinds[item_index].is_socket() {
                 pollfds[poll_index].revents = socket::poll_events(
-                    with_fd_entry(pollfds[poll_index].fd)?,
+                    **leases[poll_index].as_ref().unwrap(),
                     pollfds[poll_index].events,
                 )?;
                 continue;
@@ -5646,7 +5659,7 @@ pub extern "C" fn chmod(path: *const c_char, mode: u32) -> c_int {
 
 fn chmod_posix_at(dirfd: c_int, path: *const c_char, mode: u32) -> Result<(), c_int> {
     let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-    let base = rename_posix_base(dirfd, path)?;
+    let (base, _base_lease) = rename_posix_base(dirfd, path)?;
     let client = posix_client().map_err(map_posix_client_error)?;
     client
         .chmod_at(base, path, mode)
@@ -5713,7 +5726,7 @@ fn chown_posix_at(
         _ => return Err(EINVAL),
     };
     let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-    let base = rename_posix_base(dirfd, path)?;
+    let (base, _base_lease) = rename_posix_base(dirfd, path)?;
     let client = posix_client().map_err(map_posix_client_error)?;
     client
         .chown_at(base, path, uid, gid, protocol_flags)
@@ -5807,7 +5820,7 @@ pub extern "C" fn chroot(path: *const c_char) -> c_int {
     }
     let result = (|| {
         let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-        let base = rename_posix_base(-2, path)?;
+        let (base, _base_lease) = rename_posix_base(-2, path)?;
         let client = posix_client().map_err(map_posix_client_error)?;
         client.chroot_at(base, path).map_err(map_posix_client_error)
     })();
@@ -5991,7 +6004,7 @@ pub extern "C" fn _ftruncate(fd: c_int, length: i64) -> c_int {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
         if entry.handle.kind == FdKind::ObjectSharedMemory {
-            shared_memory::truncate(entry, length as u64)?;
+            shared_memory::truncate(*entry, length as u64)?;
             return Ok(0);
         }
         if !matches!(
@@ -6063,12 +6076,12 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
         if entry.handle.kind == FdKind::ObjectSharedMemory {
-            let status = shared_memory::stat(entry)?;
+            let status = shared_memory::stat(*entry)?;
             unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), status) };
             return Ok(0);
         }
         if entry.handle.kind.is_socket() {
-            let status = socket::stat(entry)?;
+            let status = socket::stat(*entry)?;
             unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), status) };
             return Ok(0);
         }
@@ -6185,7 +6198,7 @@ pub extern "C" fn tcgetattr(fd: c_int, termios: *mut NewlibTermios) -> c_int {
         let entry = with_fd_entry(fd)?;
         let mut encoded = [0; posix_protocol::TERMINAL_ATTRIBUTES_LEN];
         let length = terminal_control(
-            entry,
+            *entry,
             posix_protocol::PTY_CONTROL_GET_ATTRIBUTES,
             &[],
             &mut encoded,
@@ -6208,7 +6221,7 @@ pub extern "C" fn tcsetattr(fd: c_int, action: c_int, termios: *const NewlibTerm
     }
     let result = (|| {
         let entry = with_fd_entry(fd)?;
-        set_terminal_attributes(entry, action, unsafe { termios.read() })?;
+        set_terminal_attributes(*entry, action, unsafe { termios.read() })?;
         Ok(0)
     })();
     result_with_errno(result, -1)
@@ -6219,12 +6232,12 @@ pub extern "C" fn tcdrain(fd: c_int) -> c_int {
     let result = (|| {
         let entry = with_fd_entry(fd)?;
         loop {
-            match terminal_control(entry, posix_protocol::PTY_CONTROL_DRAIN, &[], &mut []) {
+            match terminal_control(*entry, posix_protocol::PTY_CONTROL_DRAIN, &[], &mut []) {
                 Ok(0) => return Ok(0),
                 Ok(_) => return Err(EIO),
                 Err(EAGAIN) => {
                     let _ = wait_for_handle(
-                        entry,
+                        *entry,
                         syscall::HANDLE_SIGNAL_IDLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
                     )?;
                 }
@@ -6250,7 +6263,7 @@ pub extern "C" fn tcflush(fd: c_int, queue_selector: c_int) -> c_int {
         let entry = with_fd_entry(fd)?;
         let mut encoded = [0; posix_protocol::TERMINAL_FLUSH_LEN];
         posix_protocol::encode_terminal_flush(flags, &mut encoded).map_err(|_| EINVAL)?;
-        match terminal_control(entry, posix_protocol::PTY_CONTROL_FLUSH, &encoded, &mut [])? {
+        match terminal_control(*entry, posix_protocol::PTY_CONTROL_FLUSH, &encoded, &mut [])? {
             0 => Ok(0),
             _ => Err(EIO),
         }
@@ -6266,12 +6279,12 @@ pub extern "C" fn tcflow(fd: c_int, action: c_int) -> c_int {
         posix_protocol::encode_terminal_flow(action, &mut encoded).map_err(|_| EINVAL)?;
         let entry = with_fd_entry(fd)?;
         loop {
-            match terminal_control(entry, posix_protocol::PTY_CONTROL_FLOW, &encoded, &mut []) {
+            match terminal_control(*entry, posix_protocol::PTY_CONTROL_FLOW, &encoded, &mut []) {
                 Ok(0) => return Ok(0),
                 Ok(_) => return Err(EIO),
                 Err(EAGAIN) => {
                     let _ = wait_for_handle(
-                        entry,
+                        *entry,
                         syscall::HANDLE_SIGNAL_IDLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
                     )?;
                 }
@@ -6285,7 +6298,7 @@ pub extern "C" fn tcflow(fd: c_int, action: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn tcgetpgrp(fd: c_int) -> c_int {
     let result = (|| {
-        let terminal = terminal_attachment(fd)?;
+        let (_lease, terminal) = terminal_attachment(fd)?;
         let group = posix_client()
             .map_err(map_posix_client_error)?
             .terminal_foreground_process_group(terminal)
@@ -6302,7 +6315,7 @@ pub extern "C" fn tcsetpgrp(fd: c_int, process_group: c_int) -> c_int {
         return -1;
     }
     let result = (|| {
-        let terminal = terminal_attachment(fd)?;
+        let (_lease, terminal) = terminal_attachment(fd)?;
         retry_terminal_operation(posix_protocol::SIGNAL_TTOU, || {
             posix_client()
                 .map_err(map_posix_client_error)?
@@ -6317,7 +6330,7 @@ pub extern "C" fn tcsetpgrp(fd: c_int, process_group: c_int) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn login_tty(fd: c_int) -> c_int {
     let result = (|| {
-        let terminal = terminal_attachment(fd)?;
+        let (_lease, terminal) = terminal_attachment(fd)?;
         posix_client()
             .map_err(map_posix_client_error)?
             .create_session()
@@ -6497,17 +6510,19 @@ pub extern "C" fn mmap(
         let access = mochios_posix_client::memory::native_access(prot).ok_or(EINVAL)?;
         let mapping = mochios_posix_client::memory::native_map(flags).ok_or(EINVAL)?;
         let mut shared_backing = None;
+        let backing_lease;
         let backing_handle = if mapping.anonymous {
             if offset != 0 {
                 return Err(EINVAL);
             }
             0
         } else {
-            let entry = with_fd_entry(fd)?;
+            backing_lease = with_fd_entry(fd)?;
+            let entry = &backing_lease;
             if entry.handle.kind == FdKind::ObjectSharedMemory {
                 let writable = mapping.options & mnu_abi::MEMORY_MAP_SHARED != 0
                     && access & mnu_abi::MEMORY_ACCESS_WRITE != 0;
-                shared_backing = Some(shared_memory::mapping(entry, writable)?);
+                shared_backing = Some(shared_memory::mapping(**entry, writable)?);
                 u64::from(shared_backing.as_ref().unwrap().0)
             } else {
                 if !matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSpecial) {
@@ -7860,12 +7875,14 @@ fn unlink_posix_at(dirfd: c_int, path: *const c_char, flags: c_int) -> Result<()
         return Err(EINVAL);
     }
     let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+    let directory_lease;
     let base = if path.starts_with('/') {
         StatAtBase::ProcessRoot
     } else if dirfd == -2 || i64::from(dirfd) == AT_FDCWD {
         StatAtBase::ProcessCwd
     } else {
-        let entry = with_fd_entry(dirfd)?;
+        directory_lease = with_fd_entry(dirfd)?;
+        let entry = &directory_lease;
         if entry.handle.kind != FdKind::ObjectDirectory {
             return Err(ENOTDIR);
         }
@@ -7919,8 +7936,8 @@ fn link_posix_at(
     }
     let old_path = core::str::from_utf8(unsafe { c_bytes(old_path) }).map_err(|_| EINVAL)?;
     let new_path = core::str::from_utf8(unsafe { c_bytes(new_path) }).map_err(|_| EINVAL)?;
-    let old_base = rename_posix_base(old_dirfd, old_path)?;
-    let new_base = rename_posix_base(new_dirfd, new_path)?;
+    let (old_base, _old_base_lease) = rename_posix_base(old_dirfd, old_path)?;
+    let (new_base, _new_base_lease) = rename_posix_base(new_dirfd, new_path)?;
     let protocol_flags = if flags & AT_SYMLINK_FOLLOW != 0 {
         posix_protocol::LINK_FOLLOW_SOURCE
     } else {
@@ -7972,7 +7989,7 @@ fn symlink_posix_at(
 ) -> Result<(), c_int> {
     let target = core::str::from_utf8(unsafe { c_bytes(target) }).map_err(|_| EINVAL)?;
     let link_path = core::str::from_utf8(unsafe { c_bytes(link_path) }).map_err(|_| EINVAL)?;
-    let base = rename_posix_base(dirfd, link_path)?;
+    let (base, _base_lease) = rename_posix_base(dirfd, link_path)?;
     let client = posix_client().map_err(map_posix_client_error)?;
     client
         .symlink_at(target, base, link_path)
@@ -8018,7 +8035,7 @@ fn readlink_posix_at(
     size: usize,
 ) -> Result<isize, c_int> {
     let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-    let base = rename_posix_base(dirfd, path)?;
+    let (base, _base_lease) = rename_posix_base(dirfd, path)?;
     let output = unsafe { core::slice::from_raw_parts_mut(output.cast::<u8>(), size) };
     let client = posix_client().map_err(map_posix_client_error)?;
     let read = client
@@ -8075,12 +8092,14 @@ pub extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: c_int) -> c_i
     }
     let result = (|| {
         let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+        let directory_lease;
         let base = if path.starts_with('/') {
             OpenAtBase::ProcessRoot
         } else if dirfd == -2 || i64::from(dirfd) == AT_FDCWD {
             OpenAtBase::ProcessCwd
         } else {
-            let entry = with_fd_entry(dirfd)?;
+            directory_lease = with_fd_entry(dirfd)?;
+            let entry = &directory_lease;
             if entry.handle.kind != FdKind::ObjectDirectory {
                 return Err(ENOTDIR);
             }
@@ -8123,21 +8142,25 @@ pub extern "C" fn _rename(old_path: *const c_char, new_path: *const c_char) -> c
     result_with_errno(result, -1)
 }
 
-fn rename_posix_base(dirfd: c_int, path: &str) -> Result<StatAtBase<u32>, c_int> {
+fn rename_posix_base(
+    dirfd: c_int,
+    path: &str,
+) -> Result<(StatAtBase<u32>, Option<fd_lease::Lease>), c_int> {
     if path.starts_with('/') {
-        return Ok(StatAtBase::ProcessRoot);
+        return Ok((StatAtBase::ProcessRoot, None));
     }
     if dirfd == -2 || i64::from(dirfd) == AT_FDCWD {
-        return Ok(StatAtBase::ProcessCwd);
+        return Ok((StatAtBase::ProcessCwd, None));
     }
     let entry = with_fd_entry(dirfd)?;
     if entry.handle.kind != FdKind::ObjectDirectory {
         return Err(ENOTDIR);
     }
-    Ok(StatAtBase::Directory(ObjectHandleAttachment {
+    let base = StatAtBase::Directory(ObjectHandleAttachment {
         handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
         rights: entry.rights,
-    }))
+    });
+    Ok((base, Some(entry)))
 }
 
 fn rename_posix_at(
@@ -8148,8 +8171,8 @@ fn rename_posix_at(
 ) -> Result<(), c_int> {
     let old_path = core::str::from_utf8(unsafe { c_bytes(old_path) }).map_err(|_| EINVAL)?;
     let new_path = core::str::from_utf8(unsafe { c_bytes(new_path) }).map_err(|_| EINVAL)?;
-    let old_base = rename_posix_base(old_dirfd, old_path)?;
-    let new_base = rename_posix_base(new_dirfd, new_path)?;
+    let (old_base, _old_base_lease) = rename_posix_base(old_dirfd, old_path)?;
+    let (new_base, _new_base_lease) = rename_posix_base(new_dirfd, new_path)?;
     let client = posix_client().map_err(map_posix_client_error)?;
     client
         .rename_at(old_base, old_path, new_base, new_path)
@@ -8191,7 +8214,7 @@ pub extern "C" fn chdir(path: *const c_char) -> c_int {
 pub extern "C" fn fchdir(fd: c_int) -> c_int {
     result_with_errno(
         with_fd_entry(fd)
-            .and_then(change_directory_entry)
+            .and_then(|entry| change_directory_entry(*entry))
             .map(|_| 0),
         -1,
     )

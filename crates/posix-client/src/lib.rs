@@ -16,6 +16,8 @@ pub mod io_vector;
 pub mod launch_arguments;
 #[cfg(feature = "fd-table")]
 pub mod fd;
+#[cfg(feature = "fd-table")]
+pub mod handle_borrow;
 pub mod memory;
 pub mod multiplex;
 pub mod newlib_errno;

@@ -8,9 +8,9 @@ fn set_nonblocking(fd: c_int, enabled: bool) -> Result<c_int, c_int> {
     let flags = if enabled { mask } else { 0 };
     match entry.handle.kind {
         FdKind::ObjectSocket | FdKind::ObjectDatagram => {
-            socket::set_status_flags(entry, if enabled { O_NONBLOCK } else { 0 })?;
+            socket::set_status_flags(*entry, if enabled { O_NONBLOCK } else { 0 })?;
         }
-        FdKind::ObjectSharedMemory => shared_memory::update_status_flags(entry, mask, flags)?,
+        FdKind::ObjectSharedMemory => shared_memory::update_status_flags(*entry, mask, flags)?,
         FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory => {
             posix_client()
                 .map_err(map_posix_client_error)?
