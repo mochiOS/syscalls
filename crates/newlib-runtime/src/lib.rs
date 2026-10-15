@@ -55,7 +55,7 @@ use mochios_capability_protocol::{
 use mochios_filesystem_protocol as filesystem_protocol;
 use mochios_posix_client::fd::{
     Entry as PosixFdEntry, FdError, FdReservation, FdTable, HandleOps, LaunchContextOps,
-    LaunchFdDescription, LaunchFdError, restore_launch_context, stage_launch_context,
+    LaunchFdDescription, LaunchFdError, plan_launch_context, restore_launch_context,
 };
 use mochios_posix_client::newlib_errno::{
     E2BIG, EACCES, EAGAIN, EBADF, EBUSY, ECHILD, EDEADLK, EEXIST, EFAULT, EFBIG, EINTR, EINVAL,
@@ -114,10 +114,7 @@ const TCOFLUSH: c_int = 1;
 const TCIOFLUSH: c_int = 2;
 
 const MAX_EXEC_VECTOR_ENTRIES: usize = 256;
-const MAX_STARTUP_IMAGE_BYTES: usize = mnu_abi::process_image::HEADER_LEN
-    + mnu_abi::process_image::MAX_RELOCATIONS * mnu_abi::process_image::RELOCATION_LEN
-    + mnu_abi::process_image::MAX_STACK_BYTES
-    + mnu_abi::process_image::MAX_MAPPINGS * mnu_abi::process_image::MAPPING_LEN;
+const MAX_STARTUP_IMAGE_BYTES: usize = mnu_abi::process_image::MAX_IMAGE_BYTES;
 
 type InitFn = unsafe extern "C" fn();
 type CLong = i64;
@@ -2361,16 +2358,32 @@ fn restore_fd_state_from_launch_context(fds: &mut FdTable<FdObject>) -> Result<b
     .map_err(map_launch_fd_error)
 }
 
-fn stage_fd_launch_context(fds: &FdTable<FdObject>) -> Result<(), c_int> {
-    let mut context = RuntimeLaunchContext;
-    stage_launch_context(fds, MAX_FDS, &mut context, |object| {
+fn attach_fd_launch_context(
+    fds: &FdTable<FdObject>,
+    output: &mut [u8],
+    length: usize,
+) -> Result<usize, c_int> {
+    use mnu_abi::process_image::ContextUpdate as U;
+    let mut updates = [U {
+        kind: U::REMOVE_VALUE,
+        key: 0,
+        value: 0,
+    }; MAX_FDS * 2];
+    let count = plan_launch_context(
+        fds,
+        MAX_FDS,
+        &mut updates,
+        |object| {
         Some(LaunchFdDescription {
             kind: inherited_fd_kind(object.kind)?,
             open_flags: object.open_flags as u32,
             has_handle: object.close_owned,
         })
-    })
-    .map_err(map_launch_fd_error)
+        },
+        |object| Some(object.lower_handle),
+    )
+    .map_err(|_| EIO)?;
+    mnu_abi::process_image::attach_context(output, length, &updates[..count]).map_err(|_| EIO)
 }
 
 extern "C" fn run_fini_array() {
@@ -2908,6 +2921,7 @@ fn replace_process_image(
         &plan.mappings(),
     )
     .map_err(|_| EIO)?;
+    let startup_length = attach_fd_launch_context(fds, &mut startup_image, startup_length)?;
 
     let byte_ceiling = address_space::snapshot()?.byte_ceiling();
     let client = posix_client().map_err(map_posix_client_error)?;
@@ -2929,10 +2943,6 @@ fn replace_process_image(
         return Err(EACCES);
     }
     if let Err(error) = authorize_exec_path(identity) {
-        close_object_handle(opened.handle);
-        return Err(error);
-    }
-    if let Err(error) = stage_fd_launch_context(fds) {
         close_object_handle(opened.handle);
         return Err(error);
     }

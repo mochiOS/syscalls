@@ -583,6 +583,28 @@ impl<H: Copy> FdTable<H> {
     }
 }
 
+fn launch_entry_metadata<H: Copy, E>(
+    entry: Entry<H>,
+    describe: &mut impl FnMut(H) -> Option<LaunchFdDescription>,
+) -> Result<(LaunchFdDescription, u64), LaunchFdError<E>> {
+    let description = describe(entry.handle).ok_or(LaunchFdError::InvalidMetadata)?;
+    let requires = mochios_posix_protocol::inherited_fd_kind_requires_handle(description.kind)
+        .ok_or(LaunchFdError::InvalidMetadata)?;
+    if requires != description.has_handle {
+        return Err(LaunchFdError::InvalidMetadata);
+    }
+    let metadata = mochios_posix_protocol::encode_inherited_fd_metadata(
+        mochios_posix_protocol::InheritedFdMetadata {
+            kind: description.kind,
+            open_flags: description.open_flags,
+            descriptor_flags: u8::try_from(entry.descriptor_flags)
+                .map_err(|_| LaunchFdError::InvalidMetadata)?,
+        },
+    )
+    .ok_or(LaunchFdError::InvalidMetadata)?;
+    Ok((description, metadata))
+}
+
 pub fn stage_launch_context<H, C, D>(
     table: &FdTable<H>,
     descriptor_limit: usize,
@@ -615,23 +637,7 @@ where
                 .map_err(LaunchFdError::Context)?;
             continue;
         };
-        let description = describe(entry.handle).ok_or(LaunchFdError::InvalidMetadata)?;
-        let requires_handle =
-            mochios_posix_protocol::inherited_fd_kind_requires_handle(description.kind)
-                .ok_or(LaunchFdError::InvalidMetadata)?;
-        if requires_handle != description.has_handle {
-            return Err(LaunchFdError::InvalidMetadata);
-        }
-        let descriptor_flags =
-            u8::try_from(entry.descriptor_flags).map_err(|_| LaunchFdError::InvalidMetadata)?;
-        let metadata = mochios_posix_protocol::encode_inherited_fd_metadata(
-            mochios_posix_protocol::InheritedFdMetadata {
-                kind: description.kind,
-                open_flags: description.open_flags,
-                descriptor_flags,
-            },
-        )
-        .ok_or(LaunchFdError::InvalidMetadata)?;
+        let (description, metadata) = launch_entry_metadata(entry, &mut describe)?;
         if description.has_handle {
             context
                 .set_handle(handle_key, entry.handle)
@@ -646,6 +652,67 @@ where
             .map_err(LaunchFdError::Context)?;
     }
     Ok(())
+}
+
+/// Build opaque native image-context edits in private caller storage. No live
+/// context or native reference is changed, including on metadata/capacity error.
+pub fn plan_launch_context<H: Copy>(
+    table: &FdTable<H>,
+    descriptor_limit: usize,
+    output: &mut [mnu_abi::process_image::ContextUpdate],
+    mut describe: impl FnMut(H) -> Option<LaunchFdDescription>,
+    mut label: impl FnMut(H) -> Option<u64>,
+) -> Result<usize, LaunchFdError<core::convert::Infallible>> {
+    use mnu_abi::process_image::ContextUpdate as U;
+    if descriptor_limit > DEFAULT_FD_LIMIT || output.len() < descriptor_limit * 2 {
+        return Err(LaunchFdError::InvalidDescriptor);
+    }
+    for index in 0..descriptor_limit {
+        let fd = index as i32;
+        let key =
+            mochios_posix_protocol::fd_handle_key(fd).ok_or(LaunchFdError::InvalidDescriptor)?;
+        let metadata_key =
+            mochios_posix_protocol::fd_metadata_key(fd).ok_or(LaunchFdError::InvalidDescriptor)?;
+        let entry = table
+            .get(fd)
+            .filter(|entry| entry.descriptor_flags & FD_CLOEXEC == 0);
+        let (handle, metadata) = if let Some(entry) = entry {
+            let (description, metadata) = launch_entry_metadata(entry, &mut describe)?;
+            let handle = if description.has_handle {
+                Some(
+                    label(entry.handle)
+                        .filter(|label| {
+                            *label > 0 && *label <= mnu_abi::PROCESS_MAX_OBJECT_HANDLES as u64
+                        })
+                        .ok_or(LaunchFdError::MissingHandle)?,
+                )
+            } else {
+                None
+            };
+            (handle, Some(metadata))
+        } else {
+            (None, None)
+        };
+        output[index * 2] = U {
+            kind: if handle.is_some() {
+                U::SET_HANDLE
+            } else {
+                U::REMOVE_HANDLE
+            },
+            key,
+            value: handle.unwrap_or(0),
+        };
+        output[index * 2 + 1] = U {
+            kind: if metadata.is_some() {
+                U::SET_VALUE
+            } else {
+                U::REMOVE_VALUE
+            },
+            key: metadata_key,
+            value: metadata.unwrap_or(0),
+        };
+    }
+    Ok(descriptor_limit * 2)
 }
 
 pub fn restore_launch_context<H, C, R, O>(
