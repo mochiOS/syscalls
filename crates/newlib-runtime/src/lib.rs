@@ -4501,7 +4501,15 @@ pub extern "C" fn _close(fd: c_int) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn close(fd: c_int) -> c_int {
-    _close(fd)
+    pthread_testcancel();
+    let result = _close(fd);
+    if result < 0 {
+        // _close has released STATE and any native-reference bookkeeping.
+        pthread_testcancel();
+    }
+    // Do not hide a completed close: the descriptor number may already have
+    // been reused by another thread. Retain concurrent cancellation instead.
+    result
 }
 
 #[unsafe(no_mangle)]
