@@ -1,6 +1,7 @@
 #![no_std]
 
 mod child_cleanup;
+mod child_startup;
 mod handle_capture;
 mod fork_policy;
 mod resource_policy;
@@ -2922,6 +2923,9 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     let client = posix_client().map_err(map_posix_client_error)?;
     let (_, thread_control) = current_thread_control().ok_or(ENOTSUP)?;
     service_signal_mask(thread_control, posix_protocol::SIGNAL_MASK_QUERY, 0)?;
+    // Captured as ordinary stream Handles, not FDs or kernel POSIX state.
+    // Keep ownership until both sides have confirmed child runtime startup.
+    let mut startup = CloneStartup::new()?;
     // Do not snapshot a thread slot during publication/reclamation. Acquire
     // this before the allocator, which those operations may themselves use.
     let lifecycle_guard = thread_lifecycle::capture()?;
@@ -3026,15 +3030,17 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         preparation.disarm_child();
         resource_policy::reset_child(&mut policy_guard);
         if FORK_EPOCH
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| epoch.checked_add(1))
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+                epoch.checked_add(1)
+            })
             .is_err()
         {
-            process_exit(EOVERFLOW);
+            startup.fail(EOVERFLOW);
         }
         // Rebind before releasing owner-tracked newlib locks: the copied
         // ThreadControl retains its private lock identity, not its native ID.
         thread_control.native_id.store(
-            native_thread_id().unwrap_or_else(|_| process_exit(127)),
+            native_thread_id().unwrap_or_else(|error| startup.fail(map_kernel_errno(error.raw()))),
             Ordering::Relaxed,
         );
     }
@@ -3050,14 +3056,18 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         // Fork's numeric slot labels are temporary transfer metadata, not exec
         // inheritance policy. Keep only the selected control endpoint key;
         // later exec stages exactly its intended descriptors into context.
-        if mochios_posix_client::inheritance::clear_transient_context(
-            &grants[..count], posix_protocol::CONTROL_HANDLE_KEY, |key| {
+        if let Err(error) = mochios_posix_client::inheritance::clear_transient_context(
+            &grants[..count],
+            posix_protocol::CONTROL_HANDLE_KEY,
+            |key| {
                 syscall_errno(syscall::raw_syscall1(
-                    syscall::SyscallNumber::ContextHandleRemove, key,
-                )).map(|_| ())
+                    syscall::SyscallNumber::ContextHandleRemove,
+                    key,
+                ))
+                .map(|_| ())
             },
-        ).is_err() {
-            process_exit(127);
+        ) {
+            startup.fail(error);
         }
         state().fds.clear_reservations();
         // The new native thread has no copied upcall target.
@@ -3071,10 +3081,11 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         let old_size = thread_control
             .signal_upcall_stack_size
             .load(Ordering::Relaxed);
-        if setup_signal_delivery(thread_control, None).is_err() {
-            process_exit(127);
+        if let Err(error) = setup_signal_delivery(thread_control, None) {
+            startup.fail(error);
         }
-        if old_stack != 0 && old_size != 0
+        if old_stack != 0
+            && old_size != 0
             && !signal_delivery::stack_is_active(thread_control, old_stack, old_size)
         {
             let _ = syscall::raw_syscall2(
@@ -3083,6 +3094,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
                 old_size as u64,
             );
         }
+        startup.ready();
         return Ok((0, inherited_fds, None));
     }
     let image = u32::try_from(syscall_errno(syscall::RawSyscallResult::new(image))?)
@@ -3136,6 +3148,9 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
             syscall::SyscallNumber::ProcessHandleResume,
             u64::from(handle),
         ))?;
+        // Locks copied by the VM snapshot were released before ProcessCreate.
+        // EOF alone is failure: a child killed during startup is not ready.
+        startup.wait()?;
         Ok(process_id)
     })();
     match result {
@@ -3143,6 +3158,76 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         Err(error) => {
             cleanup_failed_child(u64::from(handle), registration_attempted);
             Err(error)
+        }
+    }
+}
+
+struct CloneStartup {
+    read: Option<u32>,
+    write: Option<u32>,
+}
+
+impl CloneStartup {
+    fn new() -> Result<Self, c_int> {
+        let pair = create_spawn_status_stream()?;
+        Ok(Self {
+            read: Some(pair.read),
+            write: Some(pair.write),
+        })
+    }
+
+    fn send(&mut self, status: c_int) -> Result<(), c_int> {
+        if let Some(handle) = self.read.take() {
+            close_object_handle(handle);
+        }
+        let handle = self.write.take().ok_or(EBADF)?;
+        let result = child_startup::send(status, |packet| {
+            syscall_errno(syscall::raw_syscall3(
+                syscall::SyscallNumber::HandleWrite,
+                u64::from(handle),
+                packet.as_ptr() as u64,
+                packet.len() as u64,
+            ))
+            .and_then(|count| usize::try_from(count).map_err(|_| EIO))
+        });
+        close_object_handle(handle);
+        result
+    }
+
+    fn fail(&mut self, error: c_int) -> ! {
+        let _ = self.send(error);
+        process_exit(SPAWN_FAIL_EXIT_STATUS)
+    }
+
+    fn ready(&mut self) {
+        if self.send(0).is_err() {
+            process_exit(SPAWN_FAIL_EXIT_STATUS);
+        }
+    }
+
+    fn wait(&mut self) -> Result<(), c_int> {
+        if let Some(handle) = self.write.take() {
+            close_object_handle(handle);
+        }
+        let handle = self.read.take().ok_or(EBADF)?;
+        let result = child_startup::receive(|packet| {
+            syscall_errno(syscall::raw_syscall3(
+                syscall::SyscallNumber::HandleRead,
+                u64::from(handle),
+                packet.as_mut_ptr() as u64,
+                packet.len() as u64,
+            ))
+            .and_then(|count| usize::try_from(count).map_err(|_| EIO))
+        });
+        close_object_handle(handle);
+        result
+    }
+}
+
+impl Drop for CloneStartup {
+    fn drop(&mut self) {
+        for handle in [self.read.take(), self.write.take()].into_iter().flatten() {
+            close_object_handle(handle);
         }
     }
 }
