@@ -892,6 +892,68 @@ pub mod handle {
         syscall::call1(syscall::SyscallNumber::ProviderObjectReferenceCount, object_id)
     }
 
+    /// Private ownership of a prepared provider-memory extent update. It is
+    /// neither clonable nor transferable. Drop cancels before begin, or
+    /// quarantines an unconfirmed in-flight backing after begin.
+    pub struct ProviderMemoryUpdate {
+        handle: Handle,
+    }
+
+    impl ProviderMemoryUpdate {
+        /// Call before issuing external mutation. No storage I/O is performed.
+        pub fn begin(&mut self) -> SysResult<()> {
+            self.operation(mnu_abi::memory_update::BEGIN)
+        }
+
+        /// Confirm storage is unchanged, not merely that an I/O error occurred.
+        pub fn confirm_unchanged(&mut self) -> SysResult<()> {
+            self.operation(mnu_abi::memory_update::UNCHANGED)
+        }
+
+        /// Confirm the new extent is authoritative. Once requested, even an
+        /// error/drop keeps publication intent for deferred cleanup retry.
+        pub fn publish(&mut self) -> SysResult<()> {
+            self.operation(mnu_abi::memory_update::PUBLISH)
+        }
+
+        fn operation(&mut self, code: u64) -> SysResult<()> {
+            syscall::call6(
+                syscall::SyscallNumber::HandleControl,
+                self.handle as u64,
+                code,
+                0,
+                0,
+                0,
+                0,
+            )
+            .map(|_| ())
+        }
+    }
+
+    impl Drop for ProviderMemoryUpdate {
+        fn drop(&mut self) {
+            let _ = close(self.handle);
+        }
+    }
+
+    /// Requires a caller-local RECEIVE endpoint capability, not a consumer's
+    /// FileHandle CONTROL. Identity is scoped to that exact provider endpoint.
+    pub fn prepare_provider_memory_update(
+        endpoint: Handle,
+        identity: u64,
+        old_length: u64,
+        length: u64,
+    ) -> SysResult<ProviderMemoryUpdate> {
+        let handle = decode(syscall::call4(
+            syscall::SyscallNumber::ProviderMemoryUpdateCreate,
+            endpoint as u64,
+            identity,
+            old_length,
+            length,
+        )?)?;
+        Ok(ProviderMemoryUpdate { handle })
+    }
+
     /// Updates generic readiness signals for an object owned by the caller's
     /// provider endpoint.
     pub fn signal_provider_object(object_id: u64, set: u64, clear: u64) -> SysResult<()> {
