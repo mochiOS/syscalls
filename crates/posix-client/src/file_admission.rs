@@ -25,6 +25,27 @@ impl<E, W> From<ClientError<E>> for Error<E, W> {
 
 const TICKET_RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_TRANSFER;
 
+/// Immutable input snapshot, not ownership of native references or a retry
+/// guarantee. Keep the source leases alive until the logical operation ends.
+/// After an interrupted pre-storage wait the caller may deliver signals, then
+/// execute this same snapshot again without touching an application pathname.
+pub struct Prepared<H, const SIZE: usize> {
+    opcode: u16,
+    payload: [u8; SIZE],
+    length: usize,
+    sources: ObjectHandles<H>,
+    success_objects: usize,
+}
+
+pub type PreparedOpen<H> =
+    Prepared<H, { protocol::HEADER_LEN + protocol::OPEN_AT_HEADER_LEN + protocol::MAX_PATH_LEN }>;
+pub type PreparedLength<H> =
+    Prepared<H, { protocol::HEADER_LEN + protocol::FILE_LENGTH_PAYLOAD_LEN }>;
+pub type PreparedTruncate<H> = Prepared<
+    H,
+    { protocol::HEADER_LEN + protocol::TRUNCATE_AT_HEADER_LEN + protocol::MAX_PATH_LEN },
+>;
+
 struct Owned<'a, T: ObjectTransport> {
     transport: &'a T,
     object: ObjectHandleAttachment<T::Handle>,
@@ -80,12 +101,25 @@ impl<T: ObjectTransport> Client<T> {
         path: &str,
         wait: impl FnMut(&ObjectHandleAttachment<T::Handle>) -> Result<(), W>,
     ) -> Result<ObjectHandleAttachment<T::Handle>, Error<T::Error, W>> {
+        let prepared = self.prepare_open_at(base, options, mode, path)?;
+        self.execute_file_mutation(&prepared, wait)?
+            .ok_or(ClientError::MismatchedResponse.into())
+    }
+
+    pub fn prepare_open_at(
+        &self,
+        base: OpenAtBase<T::Handle>,
+        options: u32,
+        mode: u32,
+        path: &str,
+    ) -> Result<PreparedOpen<T::Handle>, ClientError<T::Error>> {
         let (base, directory) = match base {
             OpenAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
             OpenAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
             OpenAtBase::Directory(handle) => (protocol::OpenBase::AttachedDirectory, Some(handle)),
         };
-        let mut payload = [0; protocol::OPEN_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
+        let mut payload =
+            [0; protocol::HEADER_LEN + protocol::OPEN_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
         let len = protocol::encode_open_at(
             protocol::OpenAtRequest {
                 base,
@@ -97,9 +131,13 @@ impl<T: ObjectTransport> Client<T> {
         )
         .map_err(ClientError::Protocol)?;
         let handles = Self::mutation_source(directory, mnu_abi::HANDLE_RIGHT_READ)?;
-        self.queued_mutation::<{ protocol::HEADER_LEN + protocol::OPEN_AT_HEADER_LEN + protocol::MAX_PATH_LEN }, W>(
-            protocol::OP_OPEN_AT, &payload[..len], handles, 1, wait,
-        )?.ok_or(ClientError::MismatchedResponse.into())
+        Ok(Prepared {
+            opcode: protocol::OP_OPEN_AT,
+            payload,
+            length: len,
+            sources: handles,
+            success_objects: 1,
+        })
     }
 
     pub fn ftruncate_with_wait<W>(
@@ -108,17 +146,26 @@ impl<T: ObjectTransport> Client<T> {
         length: u64,
         wait: impl FnMut(&ObjectHandleAttachment<T::Handle>) -> Result<(), W>,
     ) -> Result<(), Error<T::Error, W>> {
-        let mut payload = [0; protocol::FILE_LENGTH_PAYLOAD_LEN];
-        protocol::encode_file_length(length, &mut payload).map_err(ClientError::Protocol)?;
+        let prepared = self.prepare_ftruncate(file, length)?;
+        self.execute_file_mutation(&prepared, wait).map(|_| ())
+    }
+
+    pub fn prepare_ftruncate(
+        &self,
+        file: ObjectHandleAttachment<T::Handle>,
+        length: u64,
+    ) -> Result<PreparedLength<T::Handle>, ClientError<T::Error>> {
+        let mut payload = [0; protocol::HEADER_LEN + protocol::FILE_LENGTH_PAYLOAD_LEN];
+        protocol::encode_file_length(length, &mut payload[..protocol::FILE_LENGTH_PAYLOAD_LEN])
+            .map_err(ClientError::Protocol)?;
         let handles = Self::mutation_source(Some(file), mnu_abi::HANDLE_RIGHT_WRITE)?;
-        self.queued_mutation::<{ protocol::HEADER_LEN + protocol::FILE_LENGTH_PAYLOAD_LEN }, W>(
-            protocol::OP_FTRUNCATE,
-            &payload,
-            handles,
-            0,
-            wait,
-        )
-        .map(|_| ())
+        Ok(Prepared {
+            opcode: protocol::OP_FTRUNCATE,
+            payload,
+            length: protocol::FILE_LENGTH_PAYLOAD_LEN,
+            sources: handles,
+            success_objects: 0,
+        })
     }
 
     pub fn truncate_at_with_wait<W>(
@@ -128,21 +175,53 @@ impl<T: ObjectTransport> Client<T> {
         length: u64,
         wait: impl FnMut(&ObjectHandleAttachment<T::Handle>) -> Result<(), W>,
     ) -> Result<(), Error<T::Error, W>> {
+        let prepared = self.prepare_truncate_at(base, path, length)?;
+        self.execute_file_mutation(&prepared, wait).map(|_| ())
+    }
+
+    pub fn prepare_truncate_at(
+        &self,
+        base: StatAtBase<T::Handle>,
+        path: &str,
+        length: u64,
+    ) -> Result<PreparedTruncate<T::Handle>, ClientError<T::Error>> {
         let (base, directory) = match base {
             StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
             StatAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
             StatAtBase::Directory(handle) => (protocol::OpenBase::AttachedDirectory, Some(handle)),
         };
-        let mut payload = [0; protocol::TRUNCATE_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
+        let mut payload =
+            [0; protocol::HEADER_LEN + protocol::TRUNCATE_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
         let len = protocol::encode_truncate_at(
             protocol::TruncateAtRequest { base, length, path },
             &mut payload,
         )
         .map_err(ClientError::Protocol)?;
         let handles = Self::mutation_source(directory, mnu_abi::HANDLE_RIGHT_READ)?;
-        self.queued_mutation::<{ protocol::HEADER_LEN + protocol::TRUNCATE_AT_HEADER_LEN + protocol::MAX_PATH_LEN }, W>(
-            protocol::OP_TRUNCATE_AT, &payload[..len], handles, 0, wait,
-        ).map(|_| ())
+        Ok(Prepared {
+            opcode: protocol::OP_TRUNCATE_AT,
+            payload,
+            length: len,
+            sources: handles,
+            success_objects: 0,
+        })
+    }
+
+    /// One invocation owns all received references until success or error.
+    /// In particular Error::Wait returns AFTER cancelling the current ticket.
+    /// A transport/storage error does not authorize a second invocation.
+    pub fn execute_file_mutation<const SIZE: usize, W>(
+        &self,
+        prepared: &Prepared<T::Handle, SIZE>,
+        wait: impl FnMut(&ObjectHandleAttachment<T::Handle>) -> Result<(), W>,
+    ) -> Result<Option<ObjectHandleAttachment<T::Handle>>, Error<T::Error, W>> {
+        self.queued_mutation::<SIZE, W>(
+            prepared.opcode,
+            &prepared.payload[..prepared.length],
+            prepared.sources.clone(),
+            prepared.success_objects,
+            wait,
+        )
     }
 
     fn mutation_source(
