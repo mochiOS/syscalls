@@ -7710,6 +7710,43 @@ pub unsafe extern "C" fn clock_nanosleep(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn sleep(seconds: u32) -> u32 {
+    let saved_errno = unsafe { *__errno() };
+    let request = Timespec {
+        tv_sec: i64::from(seconds),
+        tv_nsec: 0,
+    };
+    let mut remaining = Timespec {
+        tv_sec: i64::from(seconds),
+        tv_nsec: 0,
+    };
+    // Reuse the cancellable monotonic wait, not process-wide alarm state.
+    let result = unsafe { nanosleep(&request, &mut remaining) };
+    let error = unsafe { *__errno() };
+    set_errno(saved_errno);
+    if result == 0 {
+        0
+    } else if error == EINTR {
+        // Returning a truncated fraction would incorrectly claim completion.
+        (remaining.tv_sec as u32)
+            .saturating_add(u32::from(remaining.tv_nsec != 0))
+            .min(seconds)
+    } else {
+        seconds
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn usleep(microseconds: u64) -> c_int {
+    // The SDK's useconds_t is unsigned long (64 bits), not a Linux u32.
+    let request = Timespec {
+        tv_sec: (microseconds / 1_000_000) as i64,
+        tv_nsec: ((microseconds % 1_000_000) * 1_000) as i64,
+    };
+    unsafe { nanosleep(&request, ptr::null_mut()) }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Timespec) -> c_int {
     pthread_testcancel();
     if request.is_null() {
