@@ -625,6 +625,8 @@ impl HeapState {
             base: 0,
             current_break: 0,
             mapped_end: 0,
+            reserved_end: 0,
+            pending_release: None,
             maximum_end: 0,
             page_size: PAGE_SIZE,
         }
@@ -2392,6 +2394,8 @@ unsafe fn initialize_runtime(stack: StackView) {
         base: 0,
         current_break: 0,
         mapped_end: 0,
+        reserved_end: 0,
+        pending_release: None,
         maximum_end: stack_limit,
         page_size: PAGE_SIZE,
     };
@@ -6313,7 +6317,7 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
             posix_protocol::RLIM_INFINITY
         };
         let memory_limit = if increment >= 0 {
-            address_space::current()?
+            address_space::snapshot()?
         } else {
             address_space::Limit::UNLIMITED
         };
@@ -6334,6 +6338,10 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
 #[unsafe(no_mangle)]
 pub extern "C" fn sbrk(increment: isize) -> *mut c_void {
     _sbrk(increment)
+}
+
+fn trim_heap_reservation() -> Result<(), c_int> {
+    state().heap.trim_unused()
 }
 
 #[unsafe(no_mangle)]

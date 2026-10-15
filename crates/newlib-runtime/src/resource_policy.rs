@@ -15,6 +15,11 @@ impl Mapping {
         let limit = client
             .resource_limit(0, posix_protocol::RLIMIT_AS, None)
             .map_err(map_posix_client_error)?;
+        if limit.soft != posix_protocol::RLIM_INFINITY {
+            // POLICY -> STATE is the same order used by clone. This mapping
+            // cannot discover its own policy recursively through current().
+            trim_heap_reservation()?;
+        }
         let handle = client
             .resource_policy_handle()
             .map_err(map_posix_client_error)?
