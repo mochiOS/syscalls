@@ -21,6 +21,7 @@ pub mod newlib_errno;
 pub mod process_image;
 pub mod process_creation;
 mod fork;
+mod resource_policy;
 pub mod random;
 pub mod signal;
 pub mod signal_context;

@@ -16,6 +16,7 @@ pub const VERSION: u32 = 1;
 pub const HEADER_LEN: usize = 24;
 pub const LIMIT_LEN: usize = 16;
 pub const BYTE_LEN: usize = HEADER_LEN + RLIMIT_COUNT as usize * LIMIT_LEN;
+pub const READER_RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_MAP;
 const FORMAT: u64 = (VERSION as u64) << 32 | RLIMIT_COUNT as u64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

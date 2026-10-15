@@ -286,6 +286,9 @@ pub const OP_FORK_PREPARE: u16 = 91;
 pub const OP_FORK_COMMIT: u16 = 92;
 /// One token, no objects. Cancels only the authenticated sender's preparation.
 pub const OP_FORK_CANCEL: u16 = 93;
+/// Empty request, no attachments. Returns exactly one READ|MAP RAM Handle
+/// containing this authenticated caller's resource_policy::ResourcePolicy.
+pub const OP_RESOURCE_POLICY: u16 = 94;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
