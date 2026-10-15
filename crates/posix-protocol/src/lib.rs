@@ -372,6 +372,9 @@ pub const STATUS_ECHILD: i32 = -10;
 pub const STATUS_EAGAIN: i32 = -11;
 pub const STATUS_ENOTTY: i32 = -25;
 pub const STATUS_ENOSYS: i32 = -38;
+/// Truncate was rejected specifically by RLIMIT_FSIZE, not a filesystem's
+/// maximum object size. libc must generate SIGXFSZ and then report EFBIG.
+pub const STATUS_FILE_SIZE_LIMIT: i32 = -0x10001;
 
 pub const SESSION_INFO_LEN: usize = 20;
 pub const UMASK_PAYLOAD_LEN: usize = 4;

@@ -140,7 +140,16 @@ pub const LINK_AT_FLAGS_ALL: u32 = LINK_AT_FOLLOW_SOURCE
 
 pub const TRUNCATE_AT_BASE_ATTACHED: u32 = 1 << 0;
 pub const TRUNCATE_AT_ROOT_ATTACHED: u32 = 1 << 1;
-pub const TRUNCATE_AT_FLAGS_ALL: u32 = TRUNCATE_AT_BASE_ATTACHED | TRUNCATE_AT_ROOT_ATTACHED;
+/// For OP_TRUNCATE[_HANDLE/_AT], node_id carries an inclusive growth ceiling.
+/// The filesystem checks current size and changes it in one serialized
+/// operation. Shrinking or retaining an already-larger size remains allowed.
+/// This is a per-operation bound, not a resource policy or credential.
+pub const TRUNCATE_GROWTH_BOUNDED: u32 = 1 << 2;
+pub const TRUNCATE_AT_FLAGS_ALL: u32 =
+    TRUNCATE_AT_BASE_ATTACHED | TRUNCATE_AT_ROOT_ATTACHED | TRUNCATE_GROWTH_BOUNDED;
+/// Non-errno operation failure. No mutation occurred because a supplied
+/// growth ceiling was exceeded; the caller chooses its own policy response.
+pub const ERROR_GROWTH_LIMIT: i32 = 0x10000;
 
 pub const SYMLINK_AT_BASE_ATTACHED: u32 = 1 << 0;
 pub const SYMLINK_AT_ROOT_ATTACHED: u32 = 1 << 1;

@@ -5816,15 +5816,13 @@ pub extern "C" fn _ftruncate(fd: c_int, length: i64) -> c_int {
             return Err(EINVAL);
         }
         let client = posix_client().map_err(map_posix_client_error)?;
-        client
-            .ftruncate(
+        finish_file_resize(client.ftruncate(
                 ObjectHandleAttachment {
                     handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
                     rights: entry.rights,
                 },
                 length as u64,
-            )
-            .map_err(map_posix_client_error)?;
+            ))?;
         Ok(0)
     })();
     result_with_errno(result, -1)
@@ -5833,6 +5831,18 @@ pub extern "C" fn _ftruncate(fd: c_int, length: i64) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn ftruncate(fd: c_int, length: i64) -> c_int {
     _ftruncate(fd, length)
+}
+
+fn finish_file_resize(
+    result: Result<(), PosixClientError<syscall::SysError>>,
+) -> Result<(), c_int> {
+    match result {
+        Err(PosixClientError::Remote(posix_protocol::STATUS_FILE_SIZE_LIMIT)) => {
+            generate_thread_signal(posix_protocol::SIGNAL_XFSZ)?;
+            Err(EFBIG)
+        }
+        other => other.map_err(map_posix_client_error),
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -5849,9 +5859,7 @@ pub extern "C" fn truncate(path: *const c_char, length: i64) -> c_int {
         (|| {
             let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
             let client = posix_client().map_err(map_posix_client_error)?;
-            client
-                .truncate_at(StatAtBase::ProcessCwd, path, length as u64)
-                .map_err(map_posix_client_error)?;
+            finish_file_resize(client.truncate_at(StatAtBase::ProcessCwd, path, length as u64))?;
             Ok(0)
         })(),
         -1,
