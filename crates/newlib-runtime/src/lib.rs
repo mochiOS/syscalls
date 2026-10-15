@@ -5,6 +5,7 @@ mod child_startup;
 mod fd_lease;
 mod callback_resources;
 mod file_mutation;
+mod file_metadata;
 mod image_startup;
 mod handle_capture;
 mod fork_policy;
@@ -6079,26 +6080,35 @@ pub extern "C" fn fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
 }
 
 fn stat_with_flags(path: *const c_char, stat_buf: *mut c_void, flags: u64) -> c_int {
+    stat_at_with_flags(-2, path, stat_buf, flags)
+}
+
+fn stat_at_with_flags(
+    dirfd: c_int,
+    path: *const c_char,
+    stat_buf: *mut c_void,
+    flags: u64,
+) -> c_int {
     if path.is_null() || stat_buf.is_null() {
         set_errno(EFAULT);
         return -1;
     }
     let result = (|| {
-        let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-        let flags = match flags {
-            0 => 0,
-            AT_SYMLINK_NOFOLLOW => STAT_NOFOLLOW,
-            _ => return Err(EINVAL),
-        };
-        let client = posix_client().map_err(map_posix_client_error)?;
-        let status = client
-            .stat_at(StatAtBase::ProcessCwd, flags, path)
-            .map_err(map_posix_client_error)?;
-        let translated = translate_posix_stat(&status)?;
+        let translated = file_metadata::at(dirfd, path, flags)?;
         unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), translated) };
         Ok(0)
     })();
     result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fstatat(
+    dirfd: c_int,
+    path: *const c_char,
+    stat_buf: *mut c_void,
+    flags: c_int,
+) -> c_int {
+    stat_at_with_flags(dirfd, path, stat_buf, flags as u64)
 }
 
 #[unsafe(no_mangle)]
