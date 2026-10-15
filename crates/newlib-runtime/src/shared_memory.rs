@@ -64,16 +64,26 @@ pub(super) fn truncate(entry: FdEntry, length: u64) -> Result<(), c_int> {
     if !mochios_posix_client::fd::access_allows_write(entry.handle.open_flags as u32) {
         return Err(EBADF);
     }
-    let bytes = length.to_le_bytes();
-    let written = syscall_errno(syscall::raw_syscall6(
+    let limit = resource_policy::read(posix_protocol::RLIMIT_FSIZE)?;
+    let mut bytes = [0; 16];
+    bytes[..8].copy_from_slice(&length.to_le_bytes());
+    bytes[8..].copy_from_slice(&limit.soft.to_le_bytes());
+    // Current size and growth admission are selected by the Provider under
+    // its shared description/namespace lock, never by a client-side stat.
+    let result = syscall::raw_syscall6(
         syscall::SyscallNumber::HandleControl,
         entry.handle.lower_handle,
-        wire::CONTROL_RESIZE,
+        wire::CONTROL_RESIZE_BOUNDED,
         bytes.as_ptr() as u64,
         bytes.len() as u64,
         0,
         0,
-    ))?;
+    );
+    if result.raw() == mnu_abi::provider::STATUS_BOUND_REACHED as u64 {
+        generate_thread_signal(posix_protocol::SIGNAL_XFSZ)?;
+        return Err(EFBIG);
+    }
+    let written = syscall_errno(result)?;
     if written != 0 {
         return Err(EIO);
     }
