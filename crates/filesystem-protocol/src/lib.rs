@@ -152,8 +152,18 @@ pub const TRUNCATE_AT_FLAGS_ALL: u32 =
 pub const ERROR_GROWTH_LIMIT: i32 = 0x10000;
 /// Memory admission is temporarily busy BEFORE any namespace or storage
 /// mutation. Retrying is safe; ordinary EAGAIN (including publication or
-/// backend failures) does not carry this guarantee. Replies have no objects.
+/// backend failures) does not carry this guarantee. Legacy replies have no
+/// objects; requests using MUTATION_ADMISSION receive one WAIT|TRANSFER ticket.
 pub const ERROR_MEMORY_ADMISSION_BUSY: i32 = 0x10002;
+
+/// Opt in to nonblocking FIFO admission for OPEN_AT, TRUNCATE_HANDLE and
+/// TRUNCATE_AT. The service never waits on the client's behalf. A busy reply
+/// attaches exactly one WAIT|TRANSFER position, which the caller awaits and
+/// explicitly attaches on the next attempt. No other error authorizes replay.
+pub const MUTATION_ADMISSION: u32 = 1 << 31;
+/// The final attachment is a borrowed admission ticket, after all ordinary
+/// path anchors or the target FileHandle. Requires MUTATION_ADMISSION.
+pub const MUTATION_ADMISSION_ATTACHED: u32 = 1 << 30;
 
 pub const SYMLINK_AT_BASE_ATTACHED: u32 = 1 << 0;
 pub const SYMLINK_AT_ROOT_ATTACHED: u32 = 1 << 1;
