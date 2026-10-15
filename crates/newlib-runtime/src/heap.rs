@@ -1,5 +1,5 @@
 //! Contiguous newlib break arena. POSIX policy stays outside the native VM ABI.
-use super::{EINVAL, ENOMEM, NATIVE_READ_WRITE, align_up, syscall, syscall_errno};
+use super::{EINVAL, ENOMEM, NATIVE_READ_WRITE, address_space, align_up, syscall, syscall_errno};
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -18,6 +18,7 @@ impl HeapState {
         increment: isize,
         image_data_bytes: usize,
         data_limit: u64,
+        memory_limit: address_space::Limit,
     ) -> Result<usize, i32> {
         if !self.initialized {
             return Err(ENOMEM);
@@ -49,15 +50,7 @@ impl HeapState {
                 if desired > RESERVATION_BYTES {
                     return Err(ENOMEM);
                 }
-                let mapped = syscall_errno(syscall::raw_syscall6(
-                    syscall::SyscallNumber::MemoryMap,
-                    0,
-                    RESERVATION_BYTES as u64,
-                    0,
-                    0,
-                    0,
-                    0,
-                ))? as usize;
+                let mapped = memory_limit.map(0, RESERVATION_BYTES as u64, 0, 0, 0, 0)? as usize;
                 reservation = Some((mapped, RESERVATION_BYTES));
                 let end = mapped.checked_add(RESERVATION_BYTES).ok_or(ENOMEM)?;
                 if mapped == 0 || end > next.maximum_end {

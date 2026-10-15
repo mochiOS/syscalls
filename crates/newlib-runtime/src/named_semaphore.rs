@@ -14,7 +14,14 @@ const RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_READ
     | mnu_abi::HANDLE_RIGHT_MAP
     | mnu_abi::HANDLE_RIGHT_DUPLICATE
     | mnu_abi::HANDLE_RIGHT_TRANSFER;
-struct NativeMappings;
+struct NativeMappings(Option<address_space::Limit>);
+
+impl NativeMappings {
+    // Cleanup never maps. Do not accidentally allow a map without policy.
+    fn cleanup() -> Self {
+        Self(None)
+    }
+}
 
 impl MappingOps<u32> for NativeMappings {
     type Error = c_int;
@@ -37,15 +44,14 @@ impl MappingOps<u32> for NativeMappings {
         {
             return Err(EIO);
         }
-        let address = syscall_errno(syscall::raw_syscall6(
-            syscall::SyscallNumber::MemoryMap,
+        let address = self.0.ok_or(EINVAL)?.map(
             0,
             PAGE_SIZE,
             mnu_abi::MEMORY_ACCESS_READ | mnu_abi::MEMORY_ACCESS_WRITE,
             mnu_abi::MEMORY_MAP_SHARED,
             handle as u64,
             0,
-        ))?;
+        )?;
         // The native MemoryObject mapping has readable/writable page backing.
         // Reject uninitialized/corrupt service state before returning a pointer.
         if address == 0 || unsafe { &*(address as *const Semaphore) }.value().is_err() {
@@ -111,7 +117,7 @@ fn request(opcode: u16, payload: &[u8], opened: bool) -> Result<Option<u32>, c_i
         }
     }
     for attachment in handles.iter() {
-        NativeMappings.close_handle(attachment.handle);
+        NativeMappings::cleanup().close_handle(attachment.handle);
     }
     Err(outcome.err().unwrap_or(EIO))
 }
@@ -148,13 +154,14 @@ pub unsafe extern "C" fn __mochios_sem_open(
             &mut payload,
         )
         .map_err(|_| EINVAL)?;
+        let mut mappings = NativeMappings(Some(address_space::current()?));
         let handle =
             request(posix_protocol::OP_SEMAPHORE_OPEN, &payload[..length], true)?.ok_or(EIO)?;
         // STATE also stabilizes this table during fork; no separate lock is
         // copied in an in-progress state. Native fork preserves Handle numbers.
         state()
             .named_semaphores
-            .adopt(handle, &mut NativeMappings)
+            .adopt(handle, &mut mappings)
             .map_err(error)
     })();
     match outcome {
@@ -170,7 +177,7 @@ pub unsafe extern "C" fn __mochios_sem_open(
 pub unsafe extern "C" fn sem_close(pointer: *mut Semaphore) -> c_int {
     let outcome = state()
         .named_semaphores
-        .close(pointer as u64, &mut NativeMappings)
+        .close(pointer as u64, &mut NativeMappings::cleanup())
         .map_err(error);
     match outcome {
         Ok(()) => 0,

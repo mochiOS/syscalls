@@ -4,6 +4,7 @@ mod child_cleanup;
 mod handle_capture;
 mod fork_policy;
 mod resource_policy;
+mod address_space;
 mod heap;
 use heap::HeapState;
 mod atfork;
@@ -1235,15 +1236,8 @@ fn allocate_thread_reent(control: &ThreadControl) -> Result<(), c_int> {
     if size == 0 || mapping_size == 0 {
         return Err(EINVAL);
     }
-    let address = syscall_errno(syscall::raw_syscall6(
-        syscall::SyscallNumber::MemoryMap,
-        0,
-        mapping_size as u64,
-        NATIVE_READ_WRITE,
-        0,
-        0,
-        0,
-    ))? as usize;
+    let address =
+        address_space::current()?.map(0, mapping_size as u64, NATIVE_READ_WRITE, 0, 0, 0)? as usize;
     control
         .reent_mapping_size
         .store(mapping_size, Ordering::Relaxed);
@@ -1310,7 +1304,7 @@ fn register_current_thread() -> Option<(Pthread, &'static ThreadControl)> {
         release_thread_control(control);
         return None;
     }
-    if setup_signal_delivery(control).is_err() {
+    if setup_signal_delivery(control, None).is_err() {
         control.state.store(THREAD_REAPING, Ordering::Relaxed);
         release_thread_control(control);
         return None;
@@ -1340,7 +1334,28 @@ fn register_initial_thread() -> Option<(Pthread, &'static ThreadControl)> {
     Some((token, control))
 }
 
-fn setup_signal_delivery(control: &ThreadControl) -> Result<(), c_int> {
+fn allocate_signal_stack(control: &ThreadControl) -> Result<(), c_int> {
+    if has_posix_environment()? {
+        let stack = address_space::current()?.map(
+            0,
+            SIGNAL_UPCALL_STACK_SIZE as u64,
+            NATIVE_READ_WRITE,
+            0,
+            0,
+            0,
+        )? as usize;
+        control
+            .signal_upcall_stack_size
+            .store(SIGNAL_UPCALL_STACK_SIZE, Ordering::Relaxed);
+        control.signal_upcall_stack.store(stack, Ordering::Release);
+    }
+    Ok(())
+}
+
+fn setup_signal_delivery(
+    control: &ThreadControl,
+    prepared_stack: Option<usize>,
+) -> Result<(), c_int> {
     // Native bootstrap services run before a POSIX endpoint can be delegated.
     // An inherited endpoint still requires successful registration below.
     if !has_posix_environment()? {
@@ -1366,15 +1381,18 @@ fn setup_signal_delivery(control: &ThreadControl) -> Result<(), c_int> {
         posix_protocol::SIGNAL_MASK_INITIALIZE,
         control.signal_mask.load(Ordering::Acquire),
     )?;
-    let stack = syscall_errno(syscall::raw_syscall6(
-        syscall::SyscallNumber::MemoryMap,
-        0,
-        SIGNAL_UPCALL_STACK_SIZE as u64,
-        NATIVE_READ_WRITE,
-        0,
-        0,
-        0,
-    ))? as usize;
+    let stack = match prepared_stack {
+        Some(stack) if stack != 0 => stack,
+        Some(_) => return Err(EINVAL),
+        None => address_space::current()?.map(
+            0,
+            SIGNAL_UPCALL_STACK_SIZE as u64,
+            NATIVE_READ_WRITE,
+            0,
+            0,
+            0,
+        )? as usize,
+    };
     let config = syscall::ThreadUpcallConfig {
         entry: posix_signal_upcall as *const () as u64,
         stack_base: stack as u64,
@@ -1537,8 +1555,15 @@ unsafe extern "C" fn pthread_start_trampoline(argument: *mut c_void) -> ! {
     let control = unsafe { &*argument.cast::<ThreadControl>() };
     let native_id = native_thread_id().unwrap_or_else(|_| process_exit(127));
     control.native_id.store(native_id, Ordering::Relaxed);
-    control.newlib_lock_identity.store(native_id, Ordering::Relaxed);
-    if setup_signal_delivery(control).is_err() {
+    control
+        .newlib_lock_identity
+        .store(native_id, Ordering::Relaxed);
+    if setup_signal_delivery(
+        control,
+        Some(control.signal_upcall_stack.load(Ordering::Acquire)),
+    )
+    .is_err()
+    {
         process_exit(127);
     }
     let _ = control.state.compare_exchange(
@@ -3040,7 +3065,7 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         let old_size = thread_control
             .signal_upcall_stack_size
             .load(Ordering::Relaxed);
-        if setup_signal_delivery(thread_control).is_err() {
+        if setup_signal_delivery(thread_control, None).is_err() {
             process_exit(127);
         }
         if old_stack != 0 && old_size != 0
@@ -4007,7 +4032,7 @@ pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
         Err(_) => process_exit(127),
     }
     let (_, initial_thread) = register_initial_thread().unwrap_or_else(|| process_exit(127));
-    if let Err(error) = setup_signal_delivery(initial_thread) {
+    if let Err(error) = setup_signal_delivery(initial_thread, None) {
         startup_failure(b"newlib: signal startup failed: ", error);
     }
     unsafe { __sinit(_impure_ptr) };
@@ -6287,6 +6312,11 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
         } else {
             posix_protocol::RLIM_INFINITY
         };
+        let memory_limit = if increment >= 0 {
+            address_space::current()?
+        } else {
+            address_space::Limit::UNLIMITED
+        };
         // The matching SDK linker script defines the complete writable image
         // span, including TLS templates, bss and alignment gaps. No dereference.
         let image_data_bytes = (ptr::addr_of!(__mochios_data_end) as usize)
@@ -6295,7 +6325,7 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
         let mut state = state();
         state
             .heap
-            .adjust(increment, image_data_bytes, data_limit)
+            .adjust(increment, image_data_bytes, data_limit, memory_limit)
             .map(|old_break| old_break as *mut c_void)
     })();
     result_with_errno(result, (-1isize) as *mut c_void)
@@ -6350,15 +6380,14 @@ pub extern "C" fn mmap(
                 entry.handle.lower_handle
             }
         };
-        let mapped = syscall_errno(syscall::raw_syscall6(
-            syscall::SyscallNumber::MemoryMap,
+        let mapped = address_space::current()?.map(
             addr as u64,
             len as u64,
             access,
             mapping.options,
             backing_handle,
             offset as u64,
-        ))?;
+        )?;
         // Native MemoryMap retained the backing; RAII also closes it if map
         // failed. The FD continues to own its independent Provider reference.
         drop(shared_backing);
@@ -8299,16 +8328,11 @@ pub unsafe extern "C" fn pthread_create(
         stack_size
     };
     let stack_base = if owns_stack {
-        match syscall_errno(syscall::raw_syscall6(
-            syscall::SyscallNumber::MemoryMap,
-            0,
-            stack_size as u64,
-            NATIVE_READ_WRITE,
-            0,
-            0,
-            0,
-        )) {
+        match address_space::current()
+            .and_then(|limit| limit.map(0, stack_size as u64, NATIVE_READ_WRITE, 0, 0, 0))
+        {
             Ok(address) => address as usize,
+            Err(ENOMEM) => return EAGAIN,
             Err(error) => return error,
         }
     } else {
@@ -8340,7 +8364,14 @@ pub unsafe extern "C" fn pthread_create(
     if let Err(error) = allocate_thread_reent(control) {
         control.state.store(THREAD_REAPING, Ordering::Relaxed);
         release_thread_control(control);
-        return error;
+        return if error == ENOMEM { EAGAIN } else { error };
+    }
+    // Admission must finish in the creating thread. A child cannot report an
+    // AS-limit failure by killing the whole process after pthread_create won.
+    if let Err(error) = allocate_signal_stack(control) {
+        control.state.store(THREAD_REAPING, Ordering::Relaxed);
+        release_thread_control(control);
+        return if error == ENOMEM { EAGAIN } else { error };
     }
     control.joinability.store(
         if detachstate == PTHREAD_CREATE_DETACHED {

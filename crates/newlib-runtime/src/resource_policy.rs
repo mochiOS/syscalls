@@ -8,8 +8,14 @@ pub(super) struct Mapping(u64);
 
 impl Mapping {
     fn open() -> Result<Self, c_int> {
-        let handle = posix_client()
-            .map_err(map_posix_client_error)?
+        let client = posix_client().map_err(map_posix_client_error)?;
+        // This page cannot supply its own admission limit before it is
+        // mapped. One allocation-free scalar RPC bootstraps that limit;
+        // subsequent reads, including ordinary map admission, use the page.
+        let limit = client
+            .resource_limit(0, posix_protocol::RLIMIT_AS, None)
+            .map_err(map_posix_client_error)?;
+        let handle = client
             .resource_policy_handle()
             .map_err(map_posix_client_error)?
             .handle;
@@ -30,15 +36,14 @@ impl Mapping {
             {
                 return Err(EIO);
             }
-            let address = syscall_errno(syscall::raw_syscall6(
-                syscall::SyscallNumber::MemoryMap,
+            let address = address_space::Limit::from_soft(limit.soft).map(
                 0,
                 PAGE_SIZE as u64,
                 mnu_abi::MEMORY_ACCESS_READ,
                 mnu_abi::MEMORY_MAP_SHARED,
                 u64::from(handle),
                 0,
-            ))?;
+            )?;
             let mapping = Self(address);
             if address == 0 || address % PAGE_SIZE as u64 != 0 {
                 return Err(EIO);
