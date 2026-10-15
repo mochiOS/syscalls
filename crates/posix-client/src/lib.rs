@@ -1783,8 +1783,31 @@ impl<T: ObjectTransport> Client<T> {
             handles.clear();
             return Err(ClientError::RequestTooLarge);
         }
+        const SMALL: usize = 256;
+        if payload.len() <= SMALL - protocol::HEADER_LEN
+            && response_payload.len() <= SMALL - protocol::HEADER_LEN
+        {
+            self.object_request_frame::<SMALL>(opcode, flags, payload, response_payload, handles)
+        } else {
+            self.object_request_frame::<{ protocol::CONTROL_MESSAGE_LEN }>(
+                opcode, flags, payload, response_payload, handles,
+            )
+        }
+    }
+
+    // Handle discovery can run while libc's allocator is locked. Keep it
+    // allocation-free and keep path-sized buffers out of the small RPC frame.
+    #[inline(never)]
+    fn object_request_frame<const SIZE: usize>(
+        &self,
+        opcode: u16,
+        flags: u32,
+        payload: &[u8],
+        response_payload: &mut [u8],
+        handles: &mut ObjectHandles<T::Handle>,
+    ) -> Result<usize, ClientError<T::Error>> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let mut request_bytes = [0u8; protocol::CONTROL_MESSAGE_LEN];
+        let mut request_bytes = [0u8; SIZE];
         let request_len = protocol::encode(
             protocol::Header {
                 opcode,
@@ -1801,7 +1824,7 @@ impl<T: ObjectTransport> Client<T> {
             ClientError::Protocol(error)
         })?;
 
-        let mut response_bytes = [0u8; protocol::CONTROL_MESSAGE_LEN];
+        let mut response_bytes = [0u8; SIZE];
         let response_len = self
             .transport
             .call_with_handles(&request_bytes[..request_len], &mut response_bytes, handles)
