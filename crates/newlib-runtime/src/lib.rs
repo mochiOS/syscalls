@@ -4662,6 +4662,9 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
         if fd < 0 || fd as usize >= MAX_FDS {
             return Err(EBADF);
         }
+        if matches!(cmd, F_GETFL | F_SETFL) {
+            return fd_options::status(fd, cmd, arg);
+        }
         // Read policy before locking the FD table. Fork uses
         // allocator -> POLICY -> STATE; policy discovery itself never mallocs.
         let limit = if matches!(cmd, F_DUPFD | F_DUPFD_CLOEXEC) {
@@ -4677,97 +4680,11 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
                 duplicate_fd_from(&mut state.fds, fd, Some(arg), cmd == F_DUPFD_CLOEXEC, limit)
             }
             F_GETFD => Ok(entry.descriptor_flags as c_int),
-            F_GETFL if entry.handle.kind.is_socket() => {
-                socket::get_status_flags(entry)
-            }
-            F_GETFL if entry.handle.kind == FdKind::ObjectSharedMemory =>
-                shared_memory::get_status_flags(entry),
             F_SETFD => {
                 state
                     .fds
                     .set_descriptor_flags(fd, (arg & FD_CLOEXEC) as u32)
                     .map_err(|_| EBADF)?;
-                Ok(0)
-            }
-            F_GETFL
-                if matches!(
-                    entry.handle.kind,
-                    FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
-                ) =>
-            {
-                let client = posix_client().map_err(map_posix_client_error)?;
-                let flags = client
-                    .get_status_flags(ObjectHandleAttachment {
-                        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-                        rights: entry.rights,
-                    })
-                    .map_err(map_posix_client_error)?;
-                Ok((entry.handle.open_flags & 0x3) | newlib_mutable_status_flags(flags))
-            }
-            F_GETFL
-                if matches!(
-                    entry.handle.kind,
-                    FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite | FdKind::ObjectPty
-                ) =>
-            {
-                let options = syscall_errno(syscall::raw_syscall1(
-                    syscall::SyscallNumber::HandleOptionsGet,
-                    entry.handle.lower_handle,
-                ))?;
-                let nonblocking = if options & syscall::HANDLE_OPTION_NONBLOCKING != 0 {
-                    O_NONBLOCK
-                } else {
-                    0
-                };
-                Ok((entry.handle.open_flags & 0x3) | nonblocking)
-            }
-            F_GETFL => Ok(entry.handle.open_flags),
-            F_SETFL => {
-                if entry.handle.kind.is_socket() {
-                    socket::set_status_flags(entry, arg)?;
-                    return Ok(0);
-                }
-                if entry.handle.kind == FdKind::ObjectSharedMemory {
-                    shared_memory::set_status_flags(entry, arg)?;
-                    return Ok(0);
-                }
-                if matches!(
-                    entry.handle.kind,
-                    FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
-                ) {
-                    let client = posix_client().map_err(map_posix_client_error)?;
-                    client
-                        .set_status_flags(
-                            ObjectHandleAttachment {
-                                handle: u32::try_from(entry.handle.lower_handle)
-                                    .map_err(|_| EBADF)?,
-                                rights: entry.rights,
-                            },
-                            posix_mutable_status_flags(arg),
-                        )
-                        .map_err(map_posix_client_error)?;
-                    return Ok(0);
-                }
-                if matches!(
-                    entry.handle.kind,
-                    FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite | FdKind::ObjectPty
-                ) {
-                    if arg & !(O_NONBLOCK | 0x3) != 0 {
-                        return Err(EINVAL);
-                    }
-                    let options = if arg & O_NONBLOCK != 0 {
-                        syscall::HANDLE_OPTION_NONBLOCKING
-                    } else {
-                        0
-                    };
-                    let _ = syscall_errno(syscall::raw_syscall2(
-                        syscall::SyscallNumber::HandleOptionsSet,
-                        entry.handle.lower_handle,
-                        options,
-                    ))?;
-                    return Ok(0);
-                }
-                state.fds.get_mut(fd).ok_or(EBADF)?.handle.open_flags = arg;
                 Ok(0)
             }
             _ => Err(EINVAL),
