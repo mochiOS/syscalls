@@ -8,6 +8,7 @@ mod callback_resources;
 mod file_mutation;
 mod file_metadata;
 mod directory_io;
+mod path_io;
 mod io_resources;
 mod pipe;
 mod pty_creation;
@@ -7960,14 +7961,7 @@ fn readlink_posix_at(
     output: *mut c_char,
     size: usize,
 ) -> Result<isize, c_int> {
-    let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-    let (base, _base_lease) = rename_posix_base(dirfd, path)?;
-    let output = unsafe { core::slice::from_raw_parts_mut(output.cast::<u8>(), size) };
-    let client = posix_client().map_err(map_posix_client_error)?;
-    let read = client
-        .readlink_at(base, path, output)
-        .map_err(map_posix_client_error)?;
-    isize::try_from(read).map_err(|_| EIO)
+    path_io::readlink(dirfd, path, output, size)
 }
 
 #[unsafe(no_mangle)]
