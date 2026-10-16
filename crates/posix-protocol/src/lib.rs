@@ -463,6 +463,8 @@ pub const OPEN_APPEND: u32 = 1 << 5;
 pub const OPEN_NONBLOCK: u32 = 1 << 6;
 pub const OPEN_DIRECTORY: u32 = 1 << 7;
 pub const OPEN_NOFOLLOW: u32 = 1 << 8;
+/// The client understands provider-defined directory continuation positions.
+pub const OPEN_CURSOR_RECORDS: u32 = 1 << 9;
 pub const OPEN_OPTIONS_ALL: u32 = OPEN_READ
     | OPEN_WRITE
     | OPEN_CREATE
@@ -471,7 +473,8 @@ pub const OPEN_OPTIONS_ALL: u32 = OPEN_READ
     | OPEN_APPEND
     | OPEN_NONBLOCK
     | OPEN_DIRECTORY
-    | OPEN_NOFOLLOW;
+    | OPEN_NOFOLLOW
+    | OPEN_CURSOR_RECORDS;
 
 pub const MUTABLE_STATUS_FLAGS: u32 = OPEN_APPEND | OPEN_NONBLOCK;
 

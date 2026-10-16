@@ -84,21 +84,59 @@ pub(super) fn adopt(fd: c_int) -> Result<*mut c_void, c_int> {
 }
 
 pub(super) fn rewind(stream: &mut DirStream) -> Result<(), c_int> {
+    seek(stream, 0)
+}
+
+pub(super) fn tell(stream: &mut DirStream) -> Result<core::ffi::c_long, c_int> {
+    if let Some(position) = stream.next_position {
+        return position.try_into().map_err(|_| EOVERFLOW);
+    }
+    // Legacy records cannot describe a logical position inside prefetch.
+    // Never substitute the provider's already-advanced cursor for that point.
+    if stream.buffer_offset < stream.buffer_len {
+        return Err(ENOTSUP);
+    }
     io_resources::with(
         || with_fd_entry(stream.fd),
         |entry| {
             if entry.handle.kind != FdKind::ObjectDirectory {
                 return Err(EBADF);
             }
-            syscall_errno(syscall::raw_syscall3(
+            let position = syscall_errno(syscall::raw_syscall3(
                 syscall::SyscallNumber::HandleSeek,
                 entry.handle.lower_handle,
                 0,
+                syscall::HANDLE_SEEK_CURRENT,
+            ))?;
+            let result = position.try_into().map_err(|_| EOVERFLOW)?;
+            let _native = defer_native_delivery();
+            stream.next_position = Some(position);
+            Ok(result)
+        },
+    )
+}
+
+pub(super) fn seek(stream: &mut DirStream, position: core::ffi::c_long) -> Result<(), c_int> {
+    let position = u64::try_from(position).map_err(|_| EINVAL)?;
+    io_resources::with(
+        || with_fd_entry(stream.fd),
+        |entry| {
+            if entry.handle.kind != FdKind::ObjectDirectory {
+                return Err(EBADF);
+            }
+            let next = syscall_errno(syscall::raw_syscall3(
+                syscall::SyscallNumber::HandleSeek,
+                entry.handle.lower_handle,
+                position,
                 syscall::HANDLE_SEEK_START,
             ))?;
+            if next != position {
+                return Err(EIO);
+            }
             let _native = defer_native_delivery();
             stream.buffer_offset = 0;
             stream.buffer_len = 0;
+            stream.next_position = Some(position);
             Ok(())
         },
     )

@@ -614,6 +614,7 @@ struct DirStream {
     buffer: [u8; DIR_BUFFER_SIZE],
     buffer_offset: usize,
     buffer_len: usize,
+    next_position: Option<u64>,
     current: NewlibDirent,
 }
 
@@ -624,6 +625,7 @@ impl DirStream {
             buffer: [0; DIR_BUFFER_SIZE],
             buffer_offset: 0,
             buffer_len: 0,
+            next_position: None,
             current: NewlibDirent::empty(),
         }
     }
@@ -2159,7 +2161,7 @@ fn posix_open_options(flags: c_int) -> Result<u32, c_int> {
             options |= target;
         }
     }
-    Ok(options)
+    Ok(options | posix_protocol::OPEN_CURSOR_RECORDS)
 }
 
 fn posix_mutable_status_flags(flags: c_int) -> u32 {
@@ -4102,7 +4104,9 @@ fn next_dirent(stream: &mut DirStream) -> Result<Option<NewlibDirent>, c_int> {
             out.d_name[index] = name[index] as c_char;
         }
 
+        let _native = defer_native_delivery();
         stream.buffer_offset += consumed;
+        stream.next_position = header.next_position;
         return Ok(Some(out));
     }
 }
@@ -5703,6 +5707,29 @@ pub extern "C" fn dirfd(dirp: *mut c_void) -> c_int {
     }
     let stream = unsafe { &*(dirp as *mut DirStream) };
     stream.fd
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn telldir(dirp: *mut c_void) -> core::ffi::c_long {
+    if dirp.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    result_with_errno(
+        directory_io::tell(unsafe { &mut *dirp.cast::<DirStream>() }),
+        -1,
+    )
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn seekdir(dirp: *mut c_void, position: core::ffi::c_long) {
+    if dirp.is_null() {
+        set_errno(EFAULT);
+        return;
+    }
+    if let Err(error) = directory_io::seek(unsafe { &mut *dirp.cast::<DirStream>() }, position) {
+        set_errno(error);
+    }
 }
 
 #[unsafe(no_mangle)]

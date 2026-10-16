@@ -204,6 +204,9 @@ pub const OPEN_AT_NONBLOCK: u32 = 1 << 10;
 /// Opens a directory for pathname traversal after checking search permission.
 /// This is an internal filesystem-service operation, not a POSIX `open` flag.
 pub const OPEN_AT_SEARCH: u32 = 1 << 11;
+/// Request cursor-bearing records on a directory's provider stream. The
+/// format is part of its open description and is shared by Handle aliases.
+pub const OPEN_AT_CURSOR_RECORDS: u32 = 1 << 12;
 pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
     | OPEN_AT_WRITE
     | OPEN_AT_CREATE
@@ -215,7 +218,8 @@ pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
     | OPEN_AT_BASE_ATTACHED
     | OPEN_AT_ROOT_ATTACHED
     | OPEN_AT_NONBLOCK
-    | OPEN_AT_SEARCH;
+    | OPEN_AT_SEARCH
+    | OPEN_AT_CURSOR_RECORDS;
 
 pub const STAT_AT_NOFOLLOW: u32 = 1 << 0;
 pub const STAT_AT_BASE_ATTACHED: u32 = 1 << 1;
