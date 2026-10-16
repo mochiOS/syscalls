@@ -8280,7 +8280,7 @@ pub unsafe extern "C" fn pthread_create(
         Err(error) => {
             control.state.store(THREAD_REAPING, Ordering::Relaxed);
             release_thread_control(control);
-            return error;
+            return if error == ENOMEM { EAGAIN } else { error };
         }
     };
     let _ = control
