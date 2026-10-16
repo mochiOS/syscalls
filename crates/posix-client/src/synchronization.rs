@@ -32,7 +32,7 @@ pub fn wait_u32(
         Some(syscall::AddressWaitResult::Awoken) => Ok(WaitStatus::Awoken),
         Some(syscall::AddressWaitResult::ValueChanged) => Ok(WaitStatus::ValueChanged),
         Some(syscall::AddressWaitResult::DeadlineReached) => Ok(WaitStatus::DeadlineReached),
-        None => Err(syscall::SysError::from_raw(syscall::EIO as i64)),
+        None => Err(syscall::NativeError::BackingFailure.into_raw().into()),
     }
 }
 
@@ -53,7 +53,7 @@ pub fn wait_u64(
         Some(syscall::AddressWaitResult::Awoken) => Ok(WaitStatus::Awoken),
         Some(syscall::AddressWaitResult::ValueChanged) => Ok(WaitStatus::ValueChanged),
         Some(syscall::AddressWaitResult::DeadlineReached) => Ok(WaitStatus::DeadlineReached),
-        None => Err(syscall::SysError::from_raw(syscall::EIO as i64)),
+        None => Err(syscall::NativeError::BackingFailure.into_raw().into()),
     }
 }
 
@@ -92,7 +92,7 @@ pub fn wait_u64_guarded(
         Some(syscall::AddressWaitResult::Awoken) => Ok(WaitStatus::Awoken),
         Some(syscall::AddressWaitResult::ValueChanged) => Ok(WaitStatus::ValueChanged),
         Some(syscall::AddressWaitResult::DeadlineReached) => Ok(WaitStatus::DeadlineReached),
-        None => Err(syscall::SysError::from_raw(syscall::EIO as i64)),
+        None => Err(syscall::NativeError::BackingFailure.into_raw().into()),
     }
 }
 
@@ -102,5 +102,8 @@ fn wake_address(address: u64, maximum_count: usize) -> Result<usize, syscall::Sy
         address,
         maximum_count as u64,
     )?;
-    usize::try_from(raw).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+    if raw > maximum_count as u64 {
+        return Err(syscall::NativeError::BackingFailure.into_raw().into());
+    }
+    usize::try_from(raw).map_err(|_| syscall::NativeError::LimitExceeded.into_raw().into())
 }
