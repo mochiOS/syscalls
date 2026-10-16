@@ -201,7 +201,19 @@ impl Drop for OpenResources {
 }
 
 pub(super) fn open(path: *const c_char, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
-    open_in_slot(-2, path, flags, mode, None)
+    open_in_slot(-2, path, flags, mode, None, None)
+}
+
+/// Initialize an enclosing owner while the FD is still reserved. This is an
+/// internal Rust handoff, never an application callback: it must not wait or
+/// invoke C. Failure leaves the received Handle and reservation with this scope.
+pub(super) fn open_with_handoff(
+    path: *const c_char,
+    flags: c_int,
+    mode: c_int,
+    handoff: &mut dyn FnMut(c_int) -> Result<(), c_int>,
+) -> Result<c_int, c_int> {
+    open_in_slot(-2, path, flags, mode, None, Some(handoff))
 }
 
 pub(super) fn open_at(
@@ -210,7 +222,7 @@ pub(super) fn open_at(
     flags: c_int,
     mode: c_int,
 ) -> Result<c_int, c_int> {
-    open_in_slot(dirfd, path, flags, mode, None)
+    open_in_slot(dirfd, path, flags, mode, None, None)
 }
 
 pub(super) fn open_for_spawn(
@@ -219,7 +231,7 @@ pub(super) fn open_for_spawn(
     mode: c_int,
     fd: c_int,
 ) -> Result<c_int, c_int> {
-    open_in_slot(-2, path, flags, mode, Some(fd))
+    open_in_slot(-2, path, flags, mode, Some(fd), None)
 }
 
 fn open_in_slot(
@@ -228,6 +240,7 @@ fn open_in_slot(
     flags: c_int,
     mode: c_int,
     target: Option<c_int>,
+    mut handoff: Option<&mut dyn FnMut(c_int) -> Result<(), c_int>>,
 ) -> Result<c_int, c_int> {
     let (_, control) = register_current_thread().ok_or(EAGAIN)?;
     let native = delivery(control);
@@ -319,6 +332,18 @@ fn open_in_slot(
             }
             completion_delivery = Some(native);
             break;
+        }
+        if let Some(handoff) = handoff.as_mut() {
+            let fd = scope
+                .as_ref()
+                .get_ref()
+                .resource()
+                .unwrap()
+                .source
+                .reservation
+                .0
+                .descriptor();
+            handoff(fd)?;
         }
         // Keep native delivery closed through installation AND retirement.
         // There must be no fallible C dispatch after ownership moves to the FD

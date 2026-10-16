@@ -1,6 +1,66 @@
 //! A directory refill keeps its source reference through I/O and state updates.
 use super::*;
 
+struct PendingDirectory {
+    allocation: *mut DirStream,
+    published: bool,
+    // Acquired only at the final, non-waiting handoff. Keep delivery closed
+    // until the enclosing allocation scope has retired, not merely until open
+    // returns its descriptor to this Rust frame.
+    completion: Option<mochios_posix_client::upcall_guard::Guard<'static>>,
+}
+
+impl Drop for PendingDirectory {
+    fn drop(&mut self) {
+        if !self.published {
+            unsafe { free(self.allocation.cast()) };
+        }
+    }
+}
+
+pub(super) fn open(path: *const c_char) -> Result<*mut c_void, c_int> {
+    io_resources::with(
+        || {
+            let allocation =
+                unsafe { malloc(core::mem::size_of::<DirStream>()) }.cast::<DirStream>();
+            if allocation.is_null() {
+                return Err(ENOMEM);
+            }
+            Ok(PendingDirectory {
+                allocation,
+                published: false,
+                completion: None,
+            })
+        },
+        |pending| {
+            // The allocation is tracked before pathname admission can run C.
+            const O_DIRECTORY: c_int = 0x200000;
+            let flags = O_DIRECTORY | O_CLOEXEC;
+            let mut initialize = |fd| {
+                pending.completion = defer_native_delivery();
+                // The descriptor is not visible yet. A fault here leaves its
+                // Handle and reservation in open's inner tracked owner.
+                unsafe { pending.allocation.write(DirStream::new(fd)) };
+                Ok(())
+            };
+            match file_mutation::open_with_handoff(path, flags, 0, &mut initialize) {
+                Err(error) if error == EACCES || error == EPERM => {
+                    retry_open_with_prompt_using(path, flags, || {
+                        file_mutation::open_with_handoff(path, flags, 0, &mut initialize)
+                    })?;
+                }
+                result => {
+                    result?;
+                }
+            }
+            // The handoff guard still closes delivery after FD installation.
+            // No fallible operation may hide that FD before returning its DIR.
+            pending.published = true;
+            Ok(pending.allocation.cast())
+        },
+    )
+}
+
 pub(super) fn refill(stream: &mut DirStream) -> Result<bool, c_int> {
     io_resources::with(
         || with_fd_entry(stream.fd),

@@ -2197,6 +2197,14 @@ impl Drop for PendingFdReservation {
 }
 
 fn retry_open_with_prompt(path: *const c_char, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
+    retry_open_with_prompt_using(path, flags, || file_mutation::open(path, flags, mode))
+}
+
+fn retry_open_with_prompt_using(
+    path: *const c_char,
+    flags: c_int,
+    retry: impl FnOnce() -> Result<c_int, c_int>,
+) -> Result<c_int, c_int> {
     let path_bytes = unsafe { c_bytes(path) };
     let path_str = core::str::from_utf8(path_bytes).map_err(|_| EACCES)?;
     let capability = if open_requires_write_access(flags) {
@@ -2216,7 +2224,7 @@ fn retry_open_with_prompt(path: *const c_char, flags: c_int, mode: c_int) -> Res
         | CapabilityDecision::AllowForProcess
         | CapabilityDecision::AllowPersistently
         | CapabilityDecision::AllowAllUserGrantable => {
-            let result = file_mutation::open(path, flags, mode);
+            let result = retry();
             if decision == CapabilityDecision::AllowOnce {
                 drop_capability(capability);
             }
@@ -5679,25 +5687,7 @@ pub extern "C" fn opendir(path: *const c_char) -> *mut c_void {
         return ptr::null_mut();
     }
 
-    // Ask the filesystem for a directory atomically; never accept a regular
-    // file and discover the mismatch only on the first readdir call.
-    const O_DIRECTORY: c_int = 0x200000;
-    let fd = _open(path, O_DIRECTORY | O_CLOEXEC, 0);
-    if fd < 0 {
-        return ptr::null_mut();
-    }
-
-    let allocation = unsafe { malloc(core::mem::size_of::<DirStream>()) as *mut DirStream };
-    if allocation.is_null() {
-        let _ = _close(fd);
-        set_errno(ENOMEM);
-        return ptr::null_mut();
-    }
-
-    unsafe {
-        ptr::write(allocation, DirStream::new(fd));
-    }
-    allocation.cast::<c_void>()
+    result_with_errno(directory_io::open(path), ptr::null_mut())
 }
 
 #[unsafe(no_mangle)]
