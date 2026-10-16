@@ -5706,6 +5706,17 @@ pub extern "C" fn dirfd(dirp: *mut c_void) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn rewinddir(dirp: *mut c_void) {
+    if dirp.is_null() {
+        set_errno(EFAULT);
+        return;
+    }
+    if let Err(error) = directory_io::rewind(unsafe { &mut *dirp.cast::<DirStream>() }) {
+        set_errno(error);
+    }
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn closedir(dirp: *mut c_void) -> c_int {
     if dirp.is_null() {
         set_errno(EFAULT);

@@ -83,6 +83,27 @@ pub(super) fn adopt(fd: c_int) -> Result<*mut c_void, c_int> {
     })
 }
 
+pub(super) fn rewind(stream: &mut DirStream) -> Result<(), c_int> {
+    io_resources::with(
+        || with_fd_entry(stream.fd),
+        |entry| {
+            if entry.handle.kind != FdKind::ObjectDirectory {
+                return Err(EBADF);
+            }
+            syscall_errno(syscall::raw_syscall3(
+                syscall::SyscallNumber::HandleSeek,
+                entry.handle.lower_handle,
+                0,
+                syscall::HANDLE_SEEK_START,
+            ))?;
+            let _native = defer_native_delivery();
+            stream.buffer_offset = 0;
+            stream.buffer_len = 0;
+            Ok(())
+        },
+    )
+}
+
 pub(super) fn refill(stream: &mut DirStream) -> Result<bool, c_int> {
     io_resources::with(
         || with_fd_entry(stream.fd),
