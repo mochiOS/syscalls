@@ -47,6 +47,9 @@ pub const fn from_status(status: i64) -> i32 {
             mnu_abi::status::Error::InvalidAddress => EFAULT,
             mnu_abi::status::Error::ResourceUnavailable => ENOMEM,
             mnu_abi::status::Error::BackingFailure => EIO,
+            mnu_abi::status::Error::InvalidArgument => EINVAL,
+            mnu_abi::status::Error::AccessDenied => EACCES,
+            mnu_abi::status::Error::NotReady => EAGAIN,
         };
     }
     match status.unsigned_abs() {
