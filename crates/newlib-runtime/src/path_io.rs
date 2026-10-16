@@ -59,6 +59,53 @@ pub(super) fn at<T: Copy>(
     )
 }
 
+pub(super) fn chmod(dirfd: c_int, path: *const c_char, mode: u32) -> Result<(), c_int> {
+    at(dirfd, path, |base, path| {
+        posix_client()
+            .map_err(map_posix_client_error)?
+            .chmod_at(base, path, mode)
+            .map_err(map_posix_client_error)
+    })
+}
+
+pub(super) fn chown(
+    dirfd: c_int,
+    path: *const c_char,
+    uid: u32,
+    gid: u32,
+    flags: u32,
+) -> Result<(), c_int> {
+    at(dirfd, path, |base, path| {
+        posix_client()
+            .map_err(map_posix_client_error)?
+            .chown_at(base, path, uid, gid, flags)
+            .map_err(map_posix_client_error)
+    })
+}
+
+pub(super) fn unlink(dirfd: c_int, path: *const c_char, options: u32) -> Result<(), c_int> {
+    at(dirfd, path, |base, path| {
+        posix_client()
+            .map_err(map_posix_client_error)?
+            .unlink_at(base, options, path)
+            .map_err(map_posix_client_error)
+    })
+}
+
+pub(super) fn mkdir(dirfd: c_int, path: *const c_char, mode: u32) -> Result<(), c_int> {
+    at(dirfd, path, |base, path| {
+        let base = match base {
+            StatAtBase::ProcessRoot => OpenAtBase::ProcessRoot,
+            StatAtBase::ProcessCwd => OpenAtBase::ProcessCwd,
+            StatAtBase::Directory(handle) => OpenAtBase::Directory(handle),
+        };
+        posix_client()
+            .map_err(map_posix_client_error)?
+            .mkdir_at(base, mode, path)
+            .map_err(map_posix_client_error)
+    })
+}
+
 pub(super) fn readlink(
     dirfd: c_int,
     path: *const c_char,

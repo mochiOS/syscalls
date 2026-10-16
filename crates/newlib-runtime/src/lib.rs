@@ -5512,12 +5512,7 @@ pub extern "C" fn chmod(path: *const c_char, mode: u32) -> c_int {
 }
 
 fn chmod_posix_at(dirfd: c_int, path: *const c_char, mode: u32) -> Result<(), c_int> {
-    let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-    let (base, _base_lease) = rename_posix_base(dirfd, path)?;
-    let client = posix_client().map_err(map_posix_client_error)?;
-    client
-        .chmod_at(base, path, mode)
-        .map_err(map_posix_client_error)
+    path_io::chmod(dirfd, path, mode)
 }
 
 #[unsafe(no_mangle)]
@@ -5581,12 +5576,7 @@ fn chown_posix_at(
         AT_SYMLINK_NOFOLLOW => posix_protocol::CHOWN_NOFOLLOW,
         _ => return Err(EINVAL),
     };
-    let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-    let (base, _base_lease) = rename_posix_base(dirfd, path)?;
-    let client = posix_client().map_err(map_posix_client_error)?;
-    client
-        .chown_at(base, path, uid, gid, protocol_flags)
-        .map_err(map_posix_client_error)
+    path_io::chown(dirfd, path, uid, gid, protocol_flags)
 }
 
 #[unsafe(no_mangle)]
@@ -7801,31 +7791,11 @@ fn unlink_posix_at(dirfd: c_int, path: *const c_char, flags: c_int) -> Result<()
     if flags & !AT_REMOVEDIR != 0 {
         return Err(EINVAL);
     }
-    let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-    let directory_lease;
-    let base = if path.starts_with('/') {
-        StatAtBase::ProcessRoot
-    } else if dirfd == -2 || i64::from(dirfd) == AT_FDCWD {
-        StatAtBase::ProcessCwd
-    } else {
-        directory_lease = with_fd_entry(dirfd)?;
-        let entry = &directory_lease;
-        if entry.handle.kind != FdKind::ObjectDirectory {
-            return Err(ENOTDIR);
-        }
-        StatAtBase::Directory(ObjectHandleAttachment {
-            handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-            rights: entry.rights,
-        })
-    };
     let mut options = 0;
     if flags & AT_REMOVEDIR != 0 {
         options |= posix_protocol::UNLINK_REMOVE_DIRECTORY;
     }
-    let client = posix_client().map_err(map_posix_client_error)?;
-    client
-        .unlink_at(base, options, path)
-        .map_err(map_posix_client_error)
+    path_io::unlink(dirfd, path, options)
 }
 
 #[unsafe(no_mangle)]
@@ -7988,14 +7958,7 @@ pub extern "C" fn _mkdir(path: *const c_char, mode: c_int) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
-    let result = (|| {
-        let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-        let client = posix_client().map_err(map_posix_client_error)?;
-        client
-            .mkdir_at(OpenAtBase::ProcessCwd, mode as u32, path)
-            .map_err(map_posix_client_error)?;
-        Ok(0)
-    })();
+    let result = path_io::mkdir(-2, path, mode as u32).map(|_| 0);
     result_with_errno(result, -1)
 }
 
@@ -8010,30 +7973,7 @@ pub extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: c_int) -> c_i
         set_errno(EFAULT);
         return -1;
     }
-    let result = (|| {
-        let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-        let directory_lease;
-        let base = if path.starts_with('/') {
-            OpenAtBase::ProcessRoot
-        } else if dirfd == -2 || i64::from(dirfd) == AT_FDCWD {
-            OpenAtBase::ProcessCwd
-        } else {
-            directory_lease = with_fd_entry(dirfd)?;
-            let entry = &directory_lease;
-            if entry.handle.kind != FdKind::ObjectDirectory {
-                return Err(ENOTDIR);
-            }
-            OpenAtBase::Directory(ObjectHandleAttachment {
-                handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-                rights: entry.rights,
-            })
-        };
-        let client = posix_client().map_err(map_posix_client_error)?;
-        client
-            .mkdir_at(base, mode as u32, path)
-            .map_err(map_posix_client_error)?;
-        Ok(0)
-    })();
+    let result = path_io::mkdir(dirfd, path, mode as u32).map(|_| 0);
     result_with_errno(result, -1)
 }
 
