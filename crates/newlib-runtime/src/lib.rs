@@ -14,6 +14,7 @@ mod mapping_io;
 mod mapping_backing;
 mod object_reply;
 mod shared_memory_namespace;
+mod current_directory;
 mod pipe;
 mod pty_creation;
 mod vector_metadata;
@@ -8060,18 +8061,7 @@ pub extern "C" fn fchdir(fd: c_int) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn getcwd(buffer: *mut c_char, size: usize) -> *mut c_char {
-    if buffer.is_null() || size == 0 {
-        set_errno(EINVAL);
-        return ptr::null_mut();
-    }
-    let result = (|| {
-        let client = posix_client().map_err(map_posix_client_error)?;
-        let output = unsafe { core::slice::from_raw_parts_mut(buffer.cast::<u8>(), size - 1) };
-        let length = client.getcwd(output).map_err(map_posix_client_error)?;
-        unsafe { buffer.add(length).write(0) };
-        Ok(buffer)
-    })();
-    result_with_errno(result, ptr::null_mut())
+    result_with_errno(current_directory::copy(buffer, size), ptr::null_mut())
 }
 
 #[unsafe(no_mangle)]
