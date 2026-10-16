@@ -54,55 +54,57 @@ pub unsafe extern "C" fn setsockopt(
     value: *const c_void,
     length: u32,
 ) -> c_int {
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        if !entry.handle.kind.is_socket() {
-            return Err(mochios_posix_client::newlib_errno::from_status(-88));
-        }
-        if level == 1 && matches!(option, 20 | 21) {
-            if length < core::mem::size_of::<Timeval>() as u32 {
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            if !entry.handle.kind.is_socket() {
+                return Err(mochios_posix_client::newlib_errno::from_status(-88));
+            }
+            if level == 1 && matches!(option, 20 | 21) {
+                if length < core::mem::size_of::<Timeval>() as u32 {
+                    return Err(EINVAL);
+                }
+                if value.is_null() {
+                    return Err(EFAULT);
+                }
+                let timeout = unsafe { value.cast::<Timeval>().read_unaligned() };
+                let duration = mochios_posix_client::socket::socket_timeout_nanoseconds(
+                    timeout.tv_sec,
+                    timeout.tv_usec,
+                )
+                .map_err(|_| EINVAL)?;
+                control(
+                    **entry,
+                    if option == 20 {
+                        wire::CONTROL_SET_RECEIVE_TIMEOUT
+                    } else {
+                        wire::CONTROL_SET_SEND_TIMEOUT
+                    },
+                    &duration.to_le_bytes(),
+                    &mut [],
+                )?;
+                return Ok(0);
+            }
+            if length < core::mem::size_of::<c_int>() as u32 {
                 return Err(EINVAL);
             }
             if value.is_null() {
                 return Err(EFAULT);
             }
-            let timeout = unsafe { value.cast::<Timeval>().read_unaligned() };
-            let duration = mochios_posix_client::socket::socket_timeout_nanoseconds(
-                timeout.tv_sec,
-                timeout.tv_usec,
+            let mut native = [0; 4];
+            unsafe {
+                ptr::copy_nonoverlapping(value.cast::<u8>(), native.as_mut_ptr(), native.len());
+            }
+            let (tag, payload) = mochios_posix_client::socket::newlib_setsockopt(
+                level,
+                option,
+                c_int::from_ne_bytes(native),
             )
-            .map_err(|_| EINVAL)?;
-            control(
-                *entry,
-                if option == 20 {
-                    wire::CONTROL_SET_RECEIVE_TIMEOUT
-                } else {
-                    wire::CONTROL_SET_SEND_TIMEOUT
-                },
-                &duration.to_le_bytes(),
-                &mut [],
-            )?;
-            return Ok(0);
-        }
-        if length < core::mem::size_of::<c_int>() as u32 {
-            return Err(EINVAL);
-        }
-        if value.is_null() {
-            return Err(EFAULT);
-        }
-        let mut native = [0; 4];
-        unsafe {
-            ptr::copy_nonoverlapping(value.cast::<u8>(), native.as_mut_ptr(), native.len());
-        }
-        let (tag, payload) = mochios_posix_client::socket::newlib_setsockopt(
-            level,
-            option,
-            c_int::from_ne_bytes(native),
-        )
-        .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
-        control(*entry, tag, &payload, &mut [])?;
-        Ok(0)
-    })();
+            .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
+            control(**entry, tag, &payload, &mut [])?;
+            Ok(0)
+        },
+    );
     result_with_errno(result, -1)
 }
 
@@ -114,74 +116,82 @@ pub unsafe extern "C" fn getsockopt(
     value: *mut c_void,
     length: *mut u32,
 ) -> c_int {
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        if !entry.handle.kind.is_socket() {
-            return Err(mochios_posix_client::newlib_errno::from_status(-88));
-        }
-        if level == 1 && matches!(option, 20 | 21) {
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            if !entry.handle.kind.is_socket() {
+                return Err(mochios_posix_client::newlib_errno::from_status(-88));
+            }
+            if level == 1 && matches!(option, 20 | 21) {
+                if length.is_null() {
+                    return Err(EFAULT);
+                }
+                let capacity = unsafe { length.read_unaligned() };
+                if capacity > i32::MAX as u32 {
+                    return Err(EINVAL);
+                }
+                let count = (capacity as usize).min(core::mem::size_of::<Timeval>());
+                if count != 0 && value.is_null() {
+                    return Err(EFAULT);
+                }
+                let mut bytes = [0; 8];
+                control(
+                    **entry,
+                    if option == 20 {
+                        wire::CONTROL_GET_RECEIVE_TIMEOUT
+                    } else {
+                        wire::CONTROL_GET_SEND_TIMEOUT
+                    },
+                    &[],
+                    &mut bytes,
+                )?;
+                let duration = u64::from_le_bytes(bytes);
+                if duration % 1000 != 0 {
+                    return Err(EIO);
+                }
+                let mut native = [0; 16];
+                native[..8].copy_from_slice(&((duration / 1_000_000_000) as i64).to_ne_bytes());
+                native[8..]
+                    .copy_from_slice(&((duration % 1_000_000_000 / 1000) as i64).to_ne_bytes());
+                unsafe {
+                    if count != 0 {
+                        ptr::copy_nonoverlapping(native.as_ptr(), value.cast::<u8>(), count);
+                    }
+                    length.write_unaligned(count as u32);
+                }
+                return Ok(0);
+            }
+            let tag = mochios_posix_client::socket::newlib_getsockopt_tag(level, option).map_err(
+                |error| mochios_posix_client::newlib_errno::from_status(i64::from(error)),
+            )?;
             if length.is_null() {
                 return Err(EFAULT);
             }
-            let capacity = unsafe { length.read_unaligned() };
+            let capacity = unsafe { length.read() };
             if capacity > i32::MAX as u32 {
                 return Err(EINVAL);
             }
-            let count = (capacity as usize).min(core::mem::size_of::<Timeval>());
+            let count = (capacity as usize).min(core::mem::size_of::<c_int>());
             if count != 0 && value.is_null() {
                 return Err(EFAULT);
             }
-            let mut bytes = [0; 8];
-            control(
-                *entry,
-                if option == 20 {
-                    wire::CONTROL_GET_RECEIVE_TIMEOUT
-                } else {
-                    wire::CONTROL_GET_SEND_TIMEOUT
-                },
-                &[],
-                &mut bytes,
-            )?;
-            let duration = u64::from_le_bytes(bytes);
-            if duration % 1000 != 0 {
-                return Err(EIO);
-            }
-            let mut native = [0; 16];
-            native[..8].copy_from_slice(&((duration / 1_000_000_000) as i64).to_ne_bytes());
-            native[8..].copy_from_slice(&((duration % 1_000_000_000 / 1000) as i64).to_ne_bytes());
+            let mut response = [0; 4];
+            control(**entry, tag, &[], &mut response)?;
+            let decoded = mochios_posix_client::socket::newlib_getsockopt_value(tag, &response)
+                .map_err(|_| EIO)?;
             unsafe {
                 if count != 0 {
-                    ptr::copy_nonoverlapping(native.as_ptr(), value.cast::<u8>(), count);
+                    ptr::copy_nonoverlapping(
+                        decoded.to_ne_bytes().as_ptr(),
+                        value.cast::<u8>(),
+                        count,
+                    );
                 }
-                length.write_unaligned(count as u32);
+                length.write(count as u32);
             }
-            return Ok(0);
-        }
-        let tag = mochios_posix_client::socket::newlib_getsockopt_tag(level, option)
-            .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
-        if length.is_null() {
-            return Err(EFAULT);
-        }
-        let capacity = unsafe { length.read() };
-        if capacity > i32::MAX as u32 {
-            return Err(EINVAL);
-        }
-        let count = (capacity as usize).min(core::mem::size_of::<c_int>());
-        if count != 0 && value.is_null() {
-            return Err(EFAULT);
-        }
-        let mut response = [0; 4];
-        control(*entry, tag, &[], &mut response)?;
-        let decoded = mochios_posix_client::socket::newlib_getsockopt_value(tag, &response)
-            .map_err(|_| EIO)?;
-        unsafe {
-            if count != 0 {
-                ptr::copy_nonoverlapping(decoded.to_ne_bytes().as_ptr(), value.cast::<u8>(), count);
-            }
-            length.write(count as u32);
-        }
-        Ok(0)
-    })();
+            Ok(0)
+        },
+    );
     result_with_errno(result, -1)
 }
 
@@ -483,43 +493,50 @@ fn finish_accept(result: Result<c_int, c_int>) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn listen(fd: c_int, backlog: c_int) -> c_int {
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        if !entry.handle.kind.is_socket() {
-            return Err(mochios_posix_client::newlib_errno::from_status(-88));
-        }
-        control(
-            *entry,
-            wire::CONTROL_LISTEN,
-            &(backlog.max(0) as u32).to_le_bytes(),
-            &mut [],
-        )?;
-        Ok(0)
-    })();
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            if !entry.handle.kind.is_socket() {
+                return Err(mochios_posix_client::newlib_errno::from_status(-88));
+            }
+            control(
+                **entry,
+                wire::CONTROL_LISTEN,
+                &(backlog.max(0) as u32).to_le_bytes(),
+                &mut [],
+            )?;
+            Ok(0)
+        },
+    );
     result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bind(fd: c_int, address: *const c_void, length: u32) -> c_int {
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        if !entry.handle.kind.is_socket() {
-            return Err(mochios_posix_client::newlib_errno::from_status(-88));
-        }
-        if address.is_null() {
-            return Err(EFAULT);
-        }
-        if length as usize > mochios_posix_client::socket::MAX_SOCKADDR_LEN {
-            return Err(EINVAL);
-        }
-        let bytes = unsafe { core::slice::from_raw_parts(address.cast::<u8>(), length as usize) };
-        let decoded = mochios_posix_client::socket::decode_sockaddr(bytes)
-            .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
-        let mut encoded = [0; wire::MAX_ADDRESS_LEN];
-        let count = decoded.encode(&mut encoded).map_err(|_| EINVAL)?;
-        control(*entry, wire::CONTROL_BIND, &encoded[..count], &mut [])?;
-        Ok(0)
-    })();
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            if !entry.handle.kind.is_socket() {
+                return Err(mochios_posix_client::newlib_errno::from_status(-88));
+            }
+            if address.is_null() {
+                return Err(EFAULT);
+            }
+            if length as usize > mochios_posix_client::socket::MAX_SOCKADDR_LEN {
+                return Err(EINVAL);
+            }
+            let bytes =
+                unsafe { core::slice::from_raw_parts(address.cast::<u8>(), length as usize) };
+            let decoded =
+                mochios_posix_client::socket::decode_sockaddr(bytes).map_err(|error| {
+                    mochios_posix_client::newlib_errno::from_status(i64::from(error))
+                })?;
+            let mut encoded = [0; wire::MAX_ADDRESS_LEN];
+            let count = decoded.encode(&mut encoded).map_err(|_| EINVAL)?;
+            control(**entry, wire::CONTROL_BIND, &encoded[..count], &mut [])?;
+            Ok(0)
+        },
+    );
     result_with_errno(result, -1)
 }
 
@@ -673,34 +690,38 @@ pub(super) unsafe fn socket_name(
     length: *mut u32,
     peer: bool,
 ) -> Result<c_int, c_int> {
-    let entry = with_fd_entry(fd)?;
-    if !entry.handle.kind.is_socket() {
-        return Err(mochios_posix_client::newlib_errno::from_status(-88));
-    }
-    if address.is_null() || length.is_null() {
-        return Err(EFAULT);
-    }
-    let capacity = unsafe { length.read() } as usize;
-    let mut encoded = [0; wire::MAX_ADDRESS_LEN];
-    let tag = if peer {
-        wire::CONTROL_PEER_ADDRESS
-    } else {
-        wire::CONTROL_LOCAL_ADDRESS
-    };
-    let count = query_control(*entry, tag, &[], &mut encoded)?;
-    let decoded = wire::Address::decode(&encoded[..count]).map_err(|_| EIO)?;
-    let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
-    let required =
-        mochios_posix_client::socket::encode_sockaddr(decoded, &mut native).map_err(|_| EIO)?;
-    unsafe {
-        ptr::copy_nonoverlapping(
-            native.as_ptr(),
-            address.cast::<u8>(),
-            capacity.min(required),
-        );
-        length.write(required as u32);
-    }
-    Ok(0)
+    io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            if !entry.handle.kind.is_socket() {
+                return Err(mochios_posix_client::newlib_errno::from_status(-88));
+            }
+            if address.is_null() || length.is_null() {
+                return Err(EFAULT);
+            }
+            let capacity = unsafe { length.read() } as usize;
+            let mut encoded = [0; wire::MAX_ADDRESS_LEN];
+            let tag = if peer {
+                wire::CONTROL_PEER_ADDRESS
+            } else {
+                wire::CONTROL_LOCAL_ADDRESS
+            };
+            let count = query_control(**entry, tag, &[], &mut encoded)?;
+            let decoded = wire::Address::decode(&encoded[..count]).map_err(|_| EIO)?;
+            let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
+            let required = mochios_posix_client::socket::encode_sockaddr(decoded, &mut native)
+                .map_err(|_| EIO)?;
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    native.as_ptr(),
+                    address.cast::<u8>(),
+                    capacity.min(required),
+                );
+                length.write(required as u32);
+            }
+            Ok(0)
+        },
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -715,22 +736,24 @@ pub unsafe extern "C" fn getpeername(fd: c_int, address: *mut c_void, length: *m
 
 #[unsafe(no_mangle)]
 pub extern "C" fn shutdown(fd: c_int, how: c_int) -> c_int {
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        if !entry.handle.kind.is_socket() {
-            return Err(mochios_posix_client::newlib_errno::from_status(-88));
-        }
-        if !(0..=2).contains(&how) {
-            return Err(EINVAL);
-        }
-        control(
-            *entry,
-            wire::CONTROL_SHUTDOWN,
-            &(how as u32).to_le_bytes(),
-            &mut [],
-        )?;
-        Ok(0)
-    })();
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            if !entry.handle.kind.is_socket() {
+                return Err(mochios_posix_client::newlib_errno::from_status(-88));
+            }
+            if !(0..=2).contains(&how) {
+                return Err(EINVAL);
+            }
+            control(
+                **entry,
+                wire::CONTROL_SHUTDOWN,
+                &(how as u32).to_le_bytes(),
+                &mut [],
+            )?;
+            Ok(0)
+        },
+    );
     result_with_errno(result, -1)
 }
 
