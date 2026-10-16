@@ -109,6 +109,15 @@ pub struct FdReservations {
 }
 
 impl FdReservations {
+    /// Preview a reserved label without publishing a file. The label remains
+    /// unusable until commit_group succeeds; cancellation keeps it unopened.
+    pub fn descriptor(&self, index: usize) -> Option<i32> {
+        self.indices
+            .get(index)
+            .filter(|_| index < self.count)
+            .map(|&index| index as i32)
+    }
+
     pub fn len(&self) -> usize {
         self.count
     }
