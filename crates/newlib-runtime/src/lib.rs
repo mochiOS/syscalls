@@ -3,6 +3,7 @@
 mod child_cleanup;
 mod child_startup;
 mod fd_lease;
+mod fd_creation;
 mod callback_resources;
 mod file_mutation;
 mod file_metadata;

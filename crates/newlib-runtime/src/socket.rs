@@ -2,23 +2,8 @@
 //! descriptor flags stay local while status options are shared by the Provider.
 
 use super::*;
+use super::fd_creation::{PendingHandles, PendingPair};
 use mochios_posix_protocol::socket as wire;
-
-struct PendingPair([FdReservation; 2]);
-
-struct PendingSocketHandles<const N: usize> {
-    handles: [ObjectHandleAttachment<u32>; N],
-    installed: bool,
-}
-impl<const N: usize> Drop for PendingSocketHandles<N> {
-    fn drop(&mut self) {
-        if !self.installed {
-            for handle in self.handles {
-                close_object_handle(handle.handle);
-            }
-        }
-    }
-}
 
 pub(super) struct SocketWait {
     started: Option<(u64, u64)>,
@@ -554,7 +539,7 @@ pub extern "C" fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int {
                     .map_err(map_posix_client_error)?;
                 Ok((
                     pending,
-                    PendingSocketHandles {
+                    PendingHandles {
                         handles: [opened],
                         installed: false,
                     },
@@ -585,14 +570,6 @@ pub extern "C" fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int {
     })();
     result_with_errno(result, -1)
 }
-impl Drop for PendingPair {
-    fn drop(&mut self) {
-        let mut state = state();
-        for reservation in &self.0 {
-            state.fds.cancel_reservation(reservation);
-        }
-    }
-}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn socketpair(
@@ -622,7 +599,7 @@ pub unsafe extern "C" fn socketpair(
                     .map_err(map_posix_client_error)?;
                 Ok((
                     pending,
-                    PendingSocketHandles {
+                    PendingHandles {
                         handles: opened,
                         installed: false,
                     },
