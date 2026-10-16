@@ -36,6 +36,16 @@ pub const EOVERFLOW: i32 = 139;
 /// Unknown statuses become EIO rather than accidentally naming an unrelated
 /// newlib error. This function must not be applied to an existing C errno.
 pub const fn from_status(status: i64) -> i32 {
+    let native = if status < 0 {
+        status as u64
+    } else {
+        status.wrapping_neg() as u64
+    };
+    if let Some(error) = mnu_abi::status::Error::from_raw(native) {
+        return match error {
+            mnu_abi::status::Error::LimitExceeded => EOVERFLOW,
+        };
+    }
     match status.unsigned_abs() {
         0x10001 => EFBIG, // POSIX wire STATUS_FILE_SIZE_LIMIT
         1..=14 | 16..=34 => status.unsigned_abs() as i32,

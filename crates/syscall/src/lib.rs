@@ -7,6 +7,7 @@ use core::arch::asm;
 pub mod execution;
 pub mod memory;
 pub mod image;
+pub use mnu_abi::status::Error as NativeError;
 
 pub use mnu_abi::{
     ProcessorInfo,
@@ -50,6 +51,13 @@ impl SysError {
         self.raw
     }
 
+    pub const fn native_error(self) -> Option<NativeError> {
+        NativeError::from_raw(self.raw as u64)
+    }
+
+    /// Legacy status magnitude, not a C errno conversion. Tagged native
+    /// failures have no errno here; use `native_error` or the compatibility
+    /// layer's explicit mapping instead.
     pub fn errno(self) -> Option<u64> {
         if (-4095..=-1).contains(&self.raw) {
             Some(self.raw.unsigned_abs())
@@ -81,9 +89,10 @@ impl RawSyscallResult {
 
     pub fn into_result(self) -> SysResult<u64> {
         let signed = self.raw as i64;
-        // Native values such as Handle rights use all 64 bits. Only the
-        // reserved negative errno range denotes failure, not the sign bit.
-        if (-4095..=-1).contains(&signed) {
+        // Do not confuse high-bit Handle rights with failures. The tagged
+        // native domain is separate from the legacy errno range, retained
+        // only until the remaining mechanisms have migrated.
+        if mnu_abi::status::is_error(self.raw) || (-4095..=-1).contains(&signed) {
             Err(SysError::from_raw(signed))
         } else {
             Ok(self.raw)
