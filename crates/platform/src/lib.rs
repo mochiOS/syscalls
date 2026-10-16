@@ -1632,32 +1632,6 @@ pub mod performance {
     }
 }
 
-
-pub mod event {
-    use super::syscall::{self, SysResult};
-
-    pub fn create(flags: u64) -> SysResult<u64> {
-        syscall::call2(syscall::SyscallNumber::EventCreate, flags, 0)
-    }
-
-    pub fn wait(event_id: u64, timeout_ms: u64) -> SysResult<u64> {
-        syscall::call3(syscall::SyscallNumber::EventWait, event_id, timeout_ms, 0)
-    }
-
-    pub fn signal(event_id: u64) -> SysResult<u64> {
-        syscall::call3(syscall::SyscallNumber::EventSignal, event_id, 0, 0)
-    }
-
-    pub fn poll(events_ptr: u64, count: u64, timeout_ms: u64) -> SysResult<u64> {
-        syscall::call3(
-            syscall::SyscallNumber::EventPoll,
-            events_ptr,
-            count,
-            timeout_ms,
-        )
-    }
-}
-
 pub mod capability {
     mod prepared_image;
     pub use prepared_image::{PreparedExecutionImage, prepare_execution_image};
