@@ -280,11 +280,19 @@ pub(super) fn readlink(
         return Err(EFAULT);
     }
     at(dirfd, path, |base, path| {
-        let output = unsafe { core::slice::from_raw_parts_mut(output.cast::<u8>(), size) };
+        // A handler can access or replace the application's output while IPC
+        // waits. Lend only runtime-owned storage across that reentrant call.
+        let mut target = [0u8; posix_protocol::MAX_PATH_LEN];
+        let capacity = size.min(target.len());
         let client = posix_client().map_err(map_posix_client_error)?;
         let read = client
-            .readlink_at(base, path, output)
+            .readlink_at(base, path, &mut target[..capacity])
             .map_err(map_posix_client_error)?;
+        let bytes = target.get(..read).filter(|_| read <= capacity).ok_or(EIO)?;
+        // Keep the pathname/base scope alive through copyout, so a synchronous
+        // fault followed by a C nonlocal exit still retires its directory pin.
+        // readlink copies a prefix, never a trailing NUL or the advertised size.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), output.cast::<u8>(), read) };
         isize::try_from(read).map_err(|_| EIO)
     })
 }
