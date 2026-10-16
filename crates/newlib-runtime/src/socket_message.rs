@@ -35,6 +35,16 @@ impl Drop for OwnedHandle {
     }
 }
 
+struct Outgoing {
+    entry: fd_lease::Lease,
+    control: Option<VectorBuffer>,
+    payload: Option<VectorBuffer>,
+    ram: Option<OwnedHandle>,
+    route: Option<(ObjectHandleAttachment<u32>, OwnedHandle)>,
+    job: Option<(ObjectHandleAttachment<u32>, OwnedHandle)>,
+    notification: Option<OwnedHandle>,
+}
+
 struct Incoming {
     reservation: FdReservations,
     entries: [Option<FdEntry>; control::MAX_RIGHTS],
@@ -69,7 +79,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
     {
         return Err(EFAULT);
     }
-    let options = mochios_posix_client::socket::message_options(flags, true)
+    mochios_posix_client::socket::message_options(flags, true)
         .map_err(|_| mochios_posix_client::newlib_errno::EOPNOTSUPP)?;
     let mut vectors = [Vector {
         base: ptr::null_mut(),
@@ -90,11 +100,45 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
         (vectors[index].base.is_null(), vectors[index].length)
     })
     .map_err(vector_errno)?;
-    let entry = with_fd_entry(fd)?;
+    io_resources::with(
+        || {
+            Ok(Outgoing {
+                entry: with_fd_entry(fd)?,
+                control: None,
+                payload: None,
+                ram: None,
+                route: None,
+                job: None,
+                notification: None,
+            })
+        },
+        |outgoing| unsafe { send_vectors(fd, message, flags, vectors, total, outgoing) },
+    )
+}
+
+unsafe fn send_vectors(
+    fd: c_int,
+    message: Message,
+    flags: c_int,
+    vectors: &[Vector],
+    total: usize,
+    outgoing: &mut Outgoing,
+) -> Result<isize, c_int> {
+    let Outgoing {
+        entry,
+        control: control_storage,
+        payload: storage,
+        ram,
+        route,
+        job: outgoing_job,
+        notification: outgoing_notification,
+    } = outgoing;
+    let options = mochios_posix_client::socket::message_options(flags, true)
+        .map_err(|_| mochios_posix_client::newlib_errno::EOPNOTSUPP)?;
     if !entry.handle.kind.is_socket() {
         return Err(mochios_posix_client::newlib_errno::from_status(-88));
     }
-    if socket::is_datagram(*entry)? && total > posix_protocol::socket_record::MAX_RECORD_SIZE {
+    if socket::is_datagram(**entry)? && total > posix_protocol::socket_record::MAX_RECORD_SIZE {
         return Err(mochios_posix_client::newlib_errno::from_status(-90));
     }
     // Snapshot the complete control chain before lookup or staging. The codec
@@ -102,8 +146,11 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
     if message.control_length > mochios_posix_client::io_vector::MAX_TRANSFER_BYTES {
         return Err(mochios_posix_client::newlib_errno::from_status(-105));
     }
-    let mut control_storage = VectorBuffer::new(message.control_length)?;
-    let ancillary = control_storage.bytes();
+    {
+        let _native = defer_native_delivery();
+        *control_storage = Some(VectorBuffer::new(message.control_length)?);
+    }
+    let ancillary = control_storage.as_mut().unwrap().bytes();
     if !ancillary.is_empty() {
         unsafe {
             ptr::copy_nonoverlapping(
@@ -121,8 +168,11 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
             _ => EINVAL,
         })?;
     if count == 0 {
-        let mut storage = VectorBuffer::new(total)?;
-        let bytes = storage.bytes();
+        {
+            let _native = defer_native_delivery();
+            *storage = Some(VectorBuffer::new(total)?);
+        }
+        let bytes = storage.as_mut().unwrap().bytes();
         let mut offset = 0;
         for vector in vectors {
             let size = vector.length.min(bytes.len() - offset);
@@ -136,7 +186,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
                 break;
             }
         }
-        if !message.name.is_null() && socket::is_datagram(*entry)? {
+        if !message.name.is_null() && socket::is_datagram(**entry)? {
             if message.name_length as usize > mochios_posix_client::socket::MAX_SOCKADDR_LEN {
                 return Err(EINVAL);
             }
@@ -146,7 +196,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
             let address = mochios_posix_client::socket::decode_sockaddr(address)
                 .map_err(|status| mochios_posix_client::newlib_errno::from_status(status as i64))?;
             return socket_record::send_to(
-                *entry,
+                **entry,
                 bytes.as_ptr() as u64,
                 bytes.len(),
                 flags,
@@ -154,22 +204,26 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
             )
             .map(|record| record.count);
         }
-        return socket::message_entry(*entry, bytes.as_ptr() as u64, bytes.len(), flags, true);
+        return socket::message_entry(**entry, bytes.as_ptr() as u64, bytes.len(), flags, true);
     }
-    let datagram = socket::is_datagram(*entry)?;
+    let datagram = socket::is_datagram(**entry)?;
     if total > wire::MAX_PAYLOAD_LEN as usize {
         return Err(mochios_posix_client::newlib_errno::from_status(-90));
     }
-    let raw = syscall_errno(syscall::raw_syscall2(
-        syscall::SyscallNumber::MemoryObjectCreate,
-        ((total.max(1) + 4095) & !4095) as u64,
-        0,
-    ))?;
-    let ram = OwnedHandle(u32::try_from(raw).map_err(|_| EIO)?);
-    let ram_rights = syscall_errno(syscall::raw_syscall1(
-        syscall::SyscallNumber::HandleRightsGet,
-        raw,
-    ))?;
+    let (raw, ram_rights) = {
+        let _native = defer_native_delivery();
+        let raw = syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::MemoryObjectCreate,
+            ((total.max(1) + 4095) & !4095) as u64,
+            0,
+        ))?;
+        *ram = Some(OwnedHandle(u32::try_from(raw).map_err(|_| EIO)?));
+        let ram_rights = syscall_errno(syscall::raw_syscall1(
+            syscall::SyscallNumber::HandleRightsGet,
+            raw,
+        ))?;
+        (raw, ram_rights)
+    };
     let mut offset = 0;
     for vector in vectors {
         if vector.length != 0 {
@@ -189,38 +243,42 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
     let transport = socket_record::endpoint()?;
     let (_, thread) = register_current_thread().ok_or(EAGAIN)?;
     let caught = thread.nonrestart_signal_generation.load(Ordering::Acquire);
-    let mut wait = socket::SocketWait::new(*entry, syscall::HANDLE_SIGNAL_WRITABLE)?;
+    let mut wait = socket::SocketWait::new(**entry, syscall::HANDLE_SIGNAL_WRITABLE)?;
     let source = ObjectHandleAttachment {
         handle: entry.handle.lower_handle as u32,
         rights: entry.rights,
     };
     let mut address = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
-    let route = if message.name.is_null() || !datagram {
-        None
-    } else {
-        let length = message.name_length as usize;
-        if length > address.len() {
-            return Err(EINVAL);
-        }
-        unsafe { ptr::copy_nonoverlapping(message.name.cast(), address.as_mut_ptr(), length) };
-        let address = mochios_posix_client::socket::decode_sockaddr(&address[..length])
-            .map_err(|status| mochios_posix_client::newlib_errno::from_status(status as i64))?;
-        let route = mochios_posix_client::socket_record::prepare_route(
-            &transport,
-            source,
-            total,
-            address,
-            close_object_handle,
-        )
-        .map_err(map_posix_client_error)?;
-        Some((route, OwnedHandle(route.handle)))
-    };
-    let job = {
+    {
+        let _native = defer_native_delivery();
+        *route = if message.name.is_null() || !datagram {
+            None
+        } else {
+            let length = message.name_length as usize;
+            if length > address.len() {
+                return Err(EINVAL);
+            }
+            unsafe { ptr::copy_nonoverlapping(message.name.cast(), address.as_mut_ptr(), length) };
+            let address = mochios_posix_client::socket::decode_sockaddr(&address[..length])
+                .map_err(|status| mochios_posix_client::newlib_errno::from_status(status as i64))?;
+            let route = mochios_posix_client::socket_record::prepare_route(
+                &transport,
+                source,
+                total,
+                address,
+                close_object_handle,
+            )
+            .map_err(map_posix_client_error)?;
+            Some((route, OwnedHandle(route.handle)))
+        };
+    }
+    let job_handle = {
+        let _native = defer_native_delivery();
         // Keep all source FDs stable across validation and every staging batch.
         // Only bounded worker calls happen here, never capacity waits. Once
         // appended, independent server-owned references survive sender close.
         let state = state();
-        if state.fds.get(fd) != Some(*entry) {
+        if state.fds.get(fd) != Some(**entry) {
             return Err(EBADF);
         }
         for &descriptor in &descriptors[..count] {
@@ -271,7 +329,8 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
             )
             .map_err(map_posix_client_error)?;
         }
-        (job, pending)
+        *outgoing_job = Some((job, pending));
+        job
     };
     loop {
         if io_cancellation_requested(thread)
@@ -279,38 +338,41 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
         {
             return Err(EINTR);
         }
-        let result = if datagram {
-            socket_transfer::commit(
-                &transport,
-                job.0,
-                ObjectHandleAttachment {
-                    handle: ram.0,
-                    rights: ram_rights,
-                },
-                0,
-                total as u32,
-                close_object_handle,
-            )
-            .map(|_| total as u32)
-        } else {
-            socket_transfer::commit_prefix(
-                &transport,
-                job.0,
-                ObjectHandleAttachment {
-                    handle: ram.0,
-                    rights: ram_rights,
-                },
-                0,
-                total as u32,
-                close_object_handle,
-            )
+        let result = {
+            let _native = defer_native_delivery();
+            if datagram {
+                socket_transfer::commit(
+                    &transport,
+                    job_handle,
+                    ObjectHandleAttachment {
+                        handle: raw as u32,
+                        rights: ram_rights,
+                    },
+                    0,
+                    total as u32,
+                    close_object_handle,
+                )
+                .map(|_| total as u32)
+            } else {
+                socket_transfer::commit_prefix(
+                    &transport,
+                    job_handle,
+                    ObjectHandleAttachment {
+                        handle: raw as u32,
+                        rights: ram_rights,
+                    },
+                    0,
+                    total as u32,
+                    close_object_handle,
+                )
+            }
         };
         match result {
             Ok(count) => return Ok(count as isize),
             Err(PosixClientError::Remote(-11))
-                if !options.dont_wait && !handle_is_nonblocking(*entry)? =>
+                if !options.dont_wait && !handle_is_nonblocking(**entry)? =>
             {
-                if let Some((route, _)) = &route {
+                if let Some((route, _)) = route.as_ref() {
                     let notice =
                         object_entry(route.handle as u64, route.rights, FdKind::ObjectSocket, 2);
                     wait_for_handle_capacity(
@@ -319,18 +381,22 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
                         thread,
                         caught,
                         0,
-                        wait.deadline(*entry)?,
+                        wait.deadline(**entry)?,
                     )?;
                     continue;
                 }
-                let notification = mochios_posix_client::socket_record::wait_send(
-                    &transport,
-                    source,
-                    if datagram { total } else { 1 },
-                    close_object_handle,
-                )
-                .map_err(map_posix_client_error)?;
-                let _notification = OwnedHandle(notification.handle);
+                let notification = {
+                    let _native = defer_native_delivery();
+                    let notification = mochios_posix_client::socket_record::wait_send(
+                        &transport,
+                        source,
+                        if datagram { total } else { 1 },
+                        close_object_handle,
+                    )
+                    .map_err(map_posix_client_error)?;
+                    *outgoing_notification = Some(OwnedHandle(notification.handle));
+                    notification
+                };
                 let notice = object_entry(
                     notification.handle as u64,
                     notification.rights,
@@ -343,8 +409,10 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
                     thread,
                     caught,
                     0,
-                    wait.deadline(*entry)?,
+                    wait.deadline(**entry)?,
                 )?;
+                let _native = defer_native_delivery();
+                drop(outgoing_notification.take());
             }
             Err(error) => {
                 let error = map_posix_client_error(error);
