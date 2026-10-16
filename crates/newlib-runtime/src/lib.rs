@@ -3524,46 +3524,55 @@ fn terminal_control(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcgetwinsize(fd: c_int, size: *mut NewlibWinSize) -> c_int {
-    let result = (|| {
-        if size.is_null() {
-            return Err(EFAULT);
-        }
-        let entry = with_fd_entry(fd)?;
-        let mut bytes = [0; posix_protocol::TERMINAL_WINDOW_SIZE_LEN];
-        let length = terminal_control(
-            *entry,
-            posix_protocol::PTY_CONTROL_GET_WINDOW_SIZE,
-            &[],
-            &mut bytes,
-        )?;
-        if length != bytes.len() {
-            return Err(EIO);
-        }
-        let window = posix_protocol::decode_terminal_window_size(&bytes).map_err(|_| EIO)?;
-        unsafe {
-            size.write(NewlibWinSize {
-                ws_row: window.rows,
-                ws_col: window.columns,
-                ws_xpixel: window.pixel_width,
-                ws_ypixel: window.pixel_height,
-            })
-        };
-        Ok(0)
-    })();
+    if size.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            let mut bytes = [0; posix_protocol::TERMINAL_WINDOW_SIZE_LEN];
+            let length = terminal_control(
+                **entry,
+                posix_protocol::PTY_CONTROL_GET_WINDOW_SIZE,
+                &[],
+                &mut bytes,
+            )?;
+            if length != bytes.len() {
+                return Err(EIO);
+            }
+            let window = posix_protocol::decode_terminal_window_size(&bytes).map_err(|_| EIO)?;
+            unsafe {
+                size.write(NewlibWinSize {
+                    ws_row: window.rows,
+                    ws_col: window.columns,
+                    ws_xpixel: window.pixel_width,
+                    ws_ypixel: window.pixel_height,
+                })
+            };
+            Ok(0)
+        },
+    );
     result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcsetwinsize(fd: c_int, size: *const NewlibWinSize) -> c_int {
-    let result = (|| {
-        if size.is_null() {
-            return Err(EFAULT);
-        }
-        let entry = with_fd_entry(fd)?;
-        let window = unsafe { size.read() };
-        set_terminal_window_size(*entry, window)?;
-        Ok(0)
-    })();
+    if size.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    let result = io_resources::with_initialized(
+        || Ok((with_fd_entry(fd)?, None)),
+        |(_, window)| {
+            *window = Some(unsafe { size.read() });
+            Ok(())
+        },
+        |(entry, window)| {
+            set_terminal_window_size(**entry, window.unwrap())?;
+            Ok(0)
+        },
+    );
     result_with_errno(result, -1)
 }
 
@@ -6043,8 +6052,7 @@ pub extern "C" fn lstat(path: *const c_char, stat_buf: *mut c_void) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _isatty(fd: c_int) -> c_int {
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
+    let result = io_resources::with(|| with_fd_entry(fd), |entry| {
         Ok(
             if matches!(
                 entry.handle.kind,
@@ -6055,7 +6063,7 @@ pub extern "C" fn _isatty(fd: c_int) -> c_int {
                 0
             },
         )
-    })();
+    });
     result_with_errno(result, -1)
 }
 
@@ -6070,22 +6078,25 @@ pub extern "C" fn tcgetattr(fd: c_int, termios: *mut NewlibTermios) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        let mut encoded = [0; posix_protocol::TERMINAL_ATTRIBUTES_LEN];
-        let length = terminal_control(
-            *entry,
-            posix_protocol::PTY_CONTROL_GET_ATTRIBUTES,
-            &[],
-            &mut encoded,
-        )?;
-        if length != encoded.len() {
-            return Err(EIO);
-        }
-        let attributes = posix_protocol::decode_terminal_attributes(&encoded).map_err(|_| EIO)?;
-        unsafe { termios.write(terminal_attributes_to_newlib(attributes)) };
-        Ok(0)
-    })();
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            let mut encoded = [0; posix_protocol::TERMINAL_ATTRIBUTES_LEN];
+            let length = terminal_control(
+                **entry,
+                posix_protocol::PTY_CONTROL_GET_ATTRIBUTES,
+                &[],
+                &mut encoded,
+            )?;
+            if length != encoded.len() {
+                return Err(EIO);
+            }
+            let attributes =
+                posix_protocol::decode_terminal_attributes(&encoded).map_err(|_| EIO)?;
+            unsafe { termios.write(terminal_attributes_to_newlib(attributes)) };
+            Ok(0)
+        },
+    );
     result_with_errno(result, -1)
 }
 
@@ -6095,32 +6106,40 @@ pub extern "C" fn tcsetattr(fd: c_int, action: c_int, termios: *const NewlibTerm
         set_errno(EFAULT);
         return -1;
     }
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        set_terminal_attributes(*entry, action, unsafe { termios.read() })?;
-        Ok(0)
-    })();
+    let result = io_resources::with_initialized(
+        || Ok((with_fd_entry(fd)?, None)),
+        |(_, attributes)| {
+            *attributes = Some(unsafe { termios.read() });
+            Ok(())
+        },
+        |(entry, attributes)| {
+            set_terminal_attributes(**entry, action, attributes.unwrap())?;
+            Ok(0)
+        },
+    );
     result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn tcdrain(fd: c_int) -> c_int {
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        loop {
-            match terminal_control(*entry, posix_protocol::PTY_CONTROL_DRAIN, &[], &mut []) {
-                Ok(0) => return Ok(0),
-                Ok(_) => return Err(EIO),
-                Err(EAGAIN) => {
-                    let _ = wait_for_handle(
-                        *entry,
-                        syscall::HANDLE_SIGNAL_IDLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
-                    )?;
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            loop {
+                match terminal_control(**entry, posix_protocol::PTY_CONTROL_DRAIN, &[], &mut []) {
+                    Ok(0) => return Ok(0),
+                    Ok(_) => return Err(EIO),
+                    Err(EAGAIN) => {
+                        let _ = wait_for_handle(
+                            **entry,
+                            syscall::HANDLE_SIGNAL_IDLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
+                        )?;
+                    }
+                    Err(errno) => return Err(errno),
                 }
-                Err(errno) => return Err(errno),
             }
-        }
-    })();
+        },
+    );
     result_with_errno(result, -1)
 }
 
@@ -6135,52 +6154,64 @@ pub extern "C" fn tcflush(fd: c_int, queue_selector: c_int) -> c_int {
             return -1;
         }
     };
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        let mut encoded = [0; posix_protocol::TERMINAL_FLUSH_LEN];
-        posix_protocol::encode_terminal_flush(flags, &mut encoded).map_err(|_| EINVAL)?;
-        match terminal_control(*entry, posix_protocol::PTY_CONTROL_FLUSH, &encoded, &mut [])? {
-            0 => Ok(0),
-            _ => Err(EIO),
-        }
-    })();
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            let mut encoded = [0; posix_protocol::TERMINAL_FLUSH_LEN];
+            posix_protocol::encode_terminal_flush(flags, &mut encoded).map_err(|_| EINVAL)?;
+            match terminal_control(
+                **entry,
+                posix_protocol::PTY_CONTROL_FLUSH,
+                &encoded,
+                &mut [],
+            )? {
+                0 => Ok(0),
+                _ => Err(EIO),
+            }
+        },
+    );
     result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn tcflow(fd: c_int, action: c_int) -> c_int {
-    let result = (|| {
-        let action = u32::try_from(action).map_err(|_| EINVAL)?;
-        let mut encoded = [0; posix_protocol::TERMINAL_FLOW_LEN];
-        posix_protocol::encode_terminal_flow(action, &mut encoded).map_err(|_| EINVAL)?;
-        let entry = with_fd_entry(fd)?;
-        loop {
-            match terminal_control(*entry, posix_protocol::PTY_CONTROL_FLOW, &encoded, &mut []) {
-                Ok(0) => return Ok(0),
-                Ok(_) => return Err(EIO),
-                Err(EAGAIN) => {
-                    let _ = wait_for_handle(
-                        *entry,
-                        syscall::HANDLE_SIGNAL_IDLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
-                    )?;
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            let action = u32::try_from(action).map_err(|_| EINVAL)?;
+            let mut encoded = [0; posix_protocol::TERMINAL_FLOW_LEN];
+            posix_protocol::encode_terminal_flow(action, &mut encoded).map_err(|_| EINVAL)?;
+            loop {
+                match terminal_control(**entry, posix_protocol::PTY_CONTROL_FLOW, &encoded, &mut [])
+                {
+                    Ok(0) => return Ok(0),
+                    Ok(_) => return Err(EIO),
+                    Err(EAGAIN) => {
+                        let _ = wait_for_handle(
+                            **entry,
+                            syscall::HANDLE_SIGNAL_IDLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
+                        )?;
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(error) => return Err(error),
             }
-        }
-    })();
+        },
+    );
     result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn tcgetpgrp(fd: c_int) -> c_int {
-    let result = (|| {
-        let (_lease, terminal) = terminal_attachment(fd)?;
-        let group = posix_client()
-            .map_err(map_posix_client_error)?
-            .terminal_foreground_process_group(terminal)
-            .map_err(map_posix_client_error)?;
-        c_int::try_from(group).map_err(|_| EOVERFLOW)
-    })();
+    let result = io_resources::with(
+        || terminal_attachment(fd),
+        |(_, terminal)| {
+            let group = posix_client()
+                .map_err(map_posix_client_error)?
+                .terminal_foreground_process_group(*terminal)
+                .map_err(map_posix_client_error)?;
+            c_int::try_from(group).map_err(|_| EOVERFLOW)
+        },
+    );
     result_with_errno(result, -1)
 }
 
@@ -6190,43 +6221,47 @@ pub extern "C" fn tcsetpgrp(fd: c_int, process_group: c_int) -> c_int {
         set_errno(EINVAL);
         return -1;
     }
-    let result = (|| {
-        let (_lease, terminal) = terminal_attachment(fd)?;
-        retry_terminal_operation(posix_protocol::SIGNAL_TTOU, || {
-            posix_client()
-                .map_err(map_posix_client_error)?
-                .set_terminal_foreground_process_group(terminal, process_group as u64)
-                .map_err(map_posix_client_error)
-        })?;
-        Ok(0)
-    })();
+    let result = io_resources::with(
+        || terminal_attachment(fd),
+        |(_, terminal)| {
+            retry_terminal_operation(posix_protocol::SIGNAL_TTOU, || {
+                posix_client()
+                    .map_err(map_posix_client_error)?
+                    .set_terminal_foreground_process_group(*terminal, process_group as u64)
+                    .map_err(map_posix_client_error)
+            })?;
+            Ok(0)
+        },
+    );
     result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn login_tty(fd: c_int) -> c_int {
-    let result = (|| {
-        let (_lease, terminal) = terminal_attachment(fd)?;
-        posix_client()
-            .map_err(map_posix_client_error)?
-            .create_session()
-            .map_err(map_posix_client_error)?;
-        let client = posix_client().map_err(map_posix_client_error)?;
-        client
-            .acquire_controlling_terminal(terminal)
-            .map_err(map_posix_client_error)?;
-        for target in 0..=2 {
-            if fd != target && dup2(fd, target) < 0 {
-                let errno = unsafe { *__errno() };
-                let _ = client.release_controlling_terminal(terminal);
-                return Err(errno);
+    let result = io_resources::with(
+        || terminal_attachment(fd),
+        |(_, terminal)| {
+            posix_client()
+                .map_err(map_posix_client_error)?
+                .create_session()
+                .map_err(map_posix_client_error)?;
+            let client = posix_client().map_err(map_posix_client_error)?;
+            client
+                .acquire_controlling_terminal(*terminal)
+                .map_err(map_posix_client_error)?;
+            for target in 0..=2 {
+                if fd != target && dup2(fd, target) < 0 {
+                    let errno = unsafe { *__errno() };
+                    let _ = client.release_controlling_terminal(*terminal);
+                    return Err(errno);
+                }
             }
-        }
-        if fd > 2 && close(fd) < 0 {
-            return Err(unsafe { *__errno() });
-        }
-        Ok(0)
-    })();
+            if fd > 2 && close(fd) < 0 {
+                return Err(unsafe { *__errno() });
+            }
+            Ok(0)
+        },
+    );
     result_with_errno(result, -1)
 }
 
