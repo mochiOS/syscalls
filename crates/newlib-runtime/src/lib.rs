@@ -6387,11 +6387,13 @@ pub extern "C" fn munmap(addr: *mut c_void, len: usize) -> c_int {
         }
         let native_len =
             mochios_posix_client::memory::unmap_span(addr as u64, len as u64).ok_or(EINVAL)?;
-        let _ = syscall_errno(syscall::raw_syscall2(
+        let _ = syscall::raw_syscall2(
             syscall::SyscallNumber::MemoryUnmap,
             addr as u64,
             native_len,
-        ))?;
+        )
+        .into_result()
+        .map_err(|error| mochios_posix_client::memory::unmap_errno(error.raw()))?;
         Ok(0)
     })();
     result_with_errno(result, -1)
