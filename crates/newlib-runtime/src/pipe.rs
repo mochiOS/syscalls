@@ -1,6 +1,6 @@
 //! POSIX labels and publication stay local; the kernel creates generic streams.
-use super::*;
 use super::fd_creation::{PendingHandles, PendingPair};
+use super::*;
 
 pub(super) fn create(output: *mut c_int, flags: c_int) -> Result<c_int, c_int> {
     io_resources::with(
@@ -61,11 +61,8 @@ pub(super) fn create(output: *mut c_int, flags: c_int) -> Result<c_int, c_int> {
                     flags | 1,
                 ),
             ];
-            // A fault on either write abandons the tracked pair, not open FDs.
-            unsafe {
-                output.write(pending.0[0].descriptor());
-                output.add(1).write(pending.0[1].descriptor());
-            }
+            // Keep both Handles and slots rollback-owned on a copy error.
+            pending.copy_descriptors(output)?;
             state()
                 .fds
                 .commit_pair([&pending.0[0], &pending.0[1]], entries)

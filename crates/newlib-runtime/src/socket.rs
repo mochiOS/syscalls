@@ -637,12 +637,8 @@ pub unsafe extern "C" fn socketpair(
                         flags,
                     )
                 });
-                // Neither label is an open FD until every caller-memory write succeeds.
-                // The active scope owns both Handles and reservations on a fault.
-                unsafe {
-                    output.write(pending.0[0].descriptor());
-                    output.add(1).write(pending.0[1].descriptor());
-                }
+                // Neither label is an open FD until the output copy succeeds.
+                pending.copy_descriptors(output)?;
                 state()
                     .fds
                     .commit_pair([&pending.0[0], &pending.0[1]], entries)
