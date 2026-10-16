@@ -157,6 +157,31 @@ pub(super) fn chmod(dirfd: c_int, path: *const c_char, mode: u32) -> Result<(), 
     })
 }
 
+pub(super) fn chdir(path: *const c_char) -> Result<(), c_int> {
+    at(-2, path, |base, path| {
+        posix_client()
+            .map_err(map_posix_client_error)?
+            .chdir_at(base, path)
+            .map_err(map_posix_client_error)
+    })
+}
+
+pub(super) fn chroot(path: *const c_char) -> Result<(), c_int> {
+    at(-2, path, |base, path| {
+        posix_client()
+            .map_err(map_posix_client_error)?
+            .chroot_at(base, path)
+            .map_err(map_posix_client_error)
+    })
+}
+
+pub(super) fn fchdir(fd: c_int) -> Result<(), c_int> {
+    io_resources::with(
+        || with_fd_entry(fd),
+        |entry| change_directory_entry(**entry),
+    )
+}
+
 pub(super) fn chown(
     dirfd: c_int,
     path: *const c_char,

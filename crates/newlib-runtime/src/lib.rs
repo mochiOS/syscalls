@@ -2566,10 +2566,8 @@ fn duplicate_spawn_fd_entry(old_fd: c_int, new_fd: c_int) -> Result<(), c_int> {
     Ok(())
 }
 
-fn change_directory_path(path: &str) -> Result<(), c_int> {
-    let (base, _base_lease) = rename_posix_base(-2, path)?;
-    let client = posix_client().map_err(map_posix_client_error)?;
-    client.chdir_at(base, path).map_err(map_posix_client_error)
+fn change_directory_path(path: *const c_char) -> Result<(), c_int> {
+    path_io::chdir(path)
 }
 
 fn change_directory_entry(entry: FdEntry) -> Result<(), c_int> {
@@ -2668,15 +2666,12 @@ fn apply_spawn_file_actions(actions: *const c_void) -> Result<(), c_int> {
                 if path.is_null() {
                     return Err(EFAULT);
                 }
-                let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
                 change_directory_path(path)?;
             }
             FAE_FCHDIR => {
                 // Safety: the active union field is determined by fae_action.
                 let fd = unsafe { entry.fae_data.dirfd };
-                let _delivery = defer_native_delivery();
-                let directory = with_fd_entry(fd)?;
-                change_directory_entry(*directory)?;
+                path_io::fchdir(fd)?;
             }
             _ => return Err(EINVAL),
         }
@@ -5666,12 +5661,7 @@ pub extern "C" fn chroot(path: *const c_char) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
-    let result = (|| {
-        let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-        let (base, _base_lease) = rename_posix_base(-2, path)?;
-        let client = posix_client().map_err(map_posix_client_error)?;
-        client.chroot_at(base, path).map_err(map_posix_client_error)
-    })();
+    let result = path_io::chroot(path);
     result_with_errno(result.map(|_| 0), -1)
 }
 
@@ -8042,22 +8032,13 @@ pub extern "C" fn chdir(path: *const c_char) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
-    let result = (|| {
-        let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
-        change_directory_path(path)?;
-        Ok(0)
-    })();
+    let result = change_directory_path(path).map(|_| 0);
     result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fchdir(fd: c_int) -> c_int {
-    result_with_errno(
-        with_fd_entry(fd)
-            .and_then(|entry| change_directory_entry(*entry))
-            .map(|_| 0),
-        -1,
-    )
+    result_with_errno(path_io::fchdir(fd).map(|_| 0), -1)
 }
 
 #[unsafe(no_mangle)]
