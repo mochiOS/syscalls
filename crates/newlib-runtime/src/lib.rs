@@ -15,6 +15,7 @@ mod socket_receive_address;
 mod time_memory;
 mod multiplex_memory;
 mod resource_limit_memory;
+mod signal_memory;
 mod directory_io;
 mod path_io;
 mod user_copy;
@@ -6646,11 +6647,21 @@ pub unsafe extern "C" fn sigaction(
     let index = signal as usize - 1;
     if action.is_null() {
         if !old_action.is_null() {
-            unsafe { old_action.write(SIGNAL_ACTIONS.lock()[index]) };
+            let previous = SIGNAL_ACTIONS.lock()[index];
+            return result_with_errno(
+                signal_memory::write_action(old_action, previous).map(|_| 0),
+                -1,
+            );
         }
         return 0;
     }
-    let mut replacement = unsafe { action.read() };
+    let mut replacement = match signal_memory::read_action(action) {
+        Ok(value) => value,
+        Err(error) => {
+            set_errno(error);
+            return -1;
+        }
+    };
     if replacement.sa_flags & !(SA_NOCLDSTOP | SA_NOCLDWAIT | SA_RESTART | SA_SIGINFO | SA_ONSTACK) != 0
         || (replacement.sa_flags & (SA_NOCLDSTOP | SA_NOCLDWAIT) != 0
             && signal != posix_protocol::SIGNAL_CHLD as c_int)
@@ -6694,12 +6705,17 @@ pub unsafe extern "C" fn sigaction(
         set_errno(error);
         return -1;
     }
-    if !old_action.is_null() {
-        unsafe { old_action.write(previous) };
-    }
     {
         let mut actions = SIGNAL_ACTIONS.lock();
         actions[index] = replacement;
+    }
+    // The service already committed. Publish the matching local handler before
+    // any fallible copyout; EFAULT must not leave the two dispositions divergent.
+    if !old_action.is_null() {
+        return result_with_errno(
+            signal_memory::write_action(old_action, previous).map(|_| 0),
+            -1,
+        );
     }
     0
 }
@@ -6732,11 +6748,11 @@ fn update_current_signal_mask(how: c_int, set: *const u64, old_set: *mut u64) ->
             mochios_posix_client::signal::SIGNAL_UNBLOCK => posix_protocol::SIGNAL_MASK_UNBLOCK,
             _ => return Err(EINVAL),
         };
-        (operation, unsafe { set.read() })
+        (operation, signal_memory::read_set(set)?)
     };
     let previous = service_signal_mask(control, operation, requested)?;
     if !old_set.is_null() {
-        unsafe { old_set.write(previous) };
+        signal_memory::write_set(old_set, previous)?;
     }
     let updated = control.signal_mask.load(Ordering::Acquire);
     if previous & !updated != 0 {
@@ -6751,8 +6767,7 @@ pub unsafe extern "C" fn sigemptyset(set: *mut u64) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
-    unsafe { set.write(0) };
-    0
+    result_with_errno(signal_memory::write_set(set, 0).map(|_| 0), -1)
 }
 
 #[unsafe(no_mangle)]
@@ -6761,8 +6776,7 @@ pub unsafe extern "C" fn sigfillset(set: *mut u64) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
-    unsafe { set.write(u64::MAX) };
-    0
+    result_with_errno(signal_memory::write_set(set, u64::MAX).map(|_| 0), -1)
 }
 
 #[unsafe(no_mangle)]
@@ -6775,8 +6789,11 @@ pub unsafe extern "C" fn sigaddset(set: *mut u64, signal: c_int) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
-    unsafe { set.write(set.read() | bit) };
-    0
+    result_with_errno(
+        signal_memory::read_set(set)
+            .and_then(|value| signal_memory::write_set(set, value | bit).map(|_| 0)),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -6789,8 +6806,11 @@ pub unsafe extern "C" fn sigdelset(set: *mut u64, signal: c_int) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
-    unsafe { set.write(set.read() & !bit) };
-    0
+    result_with_errno(
+        signal_memory::read_set(set)
+            .and_then(|value| signal_memory::write_set(set, value & !bit).map(|_| 0)),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -6803,7 +6823,10 @@ pub unsafe extern "C" fn sigismember(set: *const u64, signal: c_int) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
-    c_int::from(unsafe { set.read() } & bit != 0)
+    result_with_errno(
+        signal_memory::read_set(set).map(|value| c_int::from(value & bit != 0)),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -6836,10 +6859,7 @@ pub unsafe extern "C" fn sigpending(set: *mut u64) -> c_int {
         posix_client()
             .map_err(map_posix_client_error)
             .and_then(|client| client.thread_pending_signals().map_err(map_posix_client_error))
-            .map(|pending| {
-                unsafe { set.write(pending) };
-                0
-            }),
+            .and_then(|pending| signal_memory::write_set(set, pending).map(|_| 0)),
         -1,
     )
 }
@@ -6851,7 +6871,7 @@ pub unsafe extern "C" fn sigwait(set: *const u64, selected: *mut c_int) -> c_int
             return Err(EFAULT);
         }
         let _ = register_current_thread().ok_or(EAGAIN)?;
-        let mask = unsafe { set.read() };
+        let mask = signal_memory::read_set(set)?;
         let client = posix_client().map_err(map_posix_client_error)?;
         loop {
             let epoch = client.thread_signal_epoch().map_err(map_posix_client_error)?;
@@ -6859,7 +6879,7 @@ pub unsafe extern "C" fn sigwait(set: *const u64, selected: *mut c_int) -> c_int
                 Ok(signal) => {
                     // This signal was consumed synchronously. Do not dispatch
                     // its handler or discard it due to a later async delivery.
-                    unsafe { selected.write(signal as c_int) };
+                    signal_memory::write_selected(selected, signal as c_int)?;
                     return Ok(());
                 }
                 Err(PosixClientError::Remote(posix_protocol::STATUS_EINTR)) => {
@@ -6914,7 +6934,7 @@ fn wait_signal_info(
             return Err(EFAULT);
         }
         register_current_thread().ok_or(EAGAIN)?;
-        let mask = unsafe { set.read() };
+        let mask = signal_memory::read_set(set)?;
         let client = posix_client().map_err(map_posix_client_error)?;
         let epoch = client.thread_signal_epoch().map_err(map_posix_client_error)?;
         let received = match deadline {
@@ -6929,17 +6949,7 @@ fn wait_signal_info(
             }
             Err(error) => return Err(map_posix_client_error(error)),
         };
-        let value = mochios_posix_client::signal_context::SigInfo::from_origin(
-            accepted.signal,
-            accepted.origin,
-        )
-        .map_err(|error| match error {
-            mochios_posix_client::signal_context::InfoError::Overflow => EOVERFLOW,
-            _ => EIO,
-        })?;
-        if !info.is_null() {
-            unsafe { info.write(value) };
-        }
+        signal_memory::write_info(info, accepted.signal, accepted.origin)?;
         Ok(accepted.signal as c_int)
     })()
 }
