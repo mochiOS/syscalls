@@ -12,6 +12,8 @@ mod path_io;
 mod io_resources;
 mod mapping_io;
 mod mapping_backing;
+mod object_reply;
+mod shared_memory_namespace;
 mod pipe;
 mod pty_creation;
 mod vector_metadata;

@@ -6,58 +6,12 @@ use mochios_posix_protocol::shared_memory as wire;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shm_open(pointer: *const c_char, flags: c_int, mode: u32) -> c_int {
-    let result = (|| {
-        let options =
-            mochios_posix_client::shared_memory::newlib_open_options(flags).ok_or(EINVAL)?;
-        if pointer.is_null() {
-            return Err(EFAULT);
-        }
-        let name = unsafe { named_semaphore::name(pointer) }?;
-        let limit = process_fd_limit()?;
-        let reservation =
-            PendingFdReservation(state().fds.reserve_from(0, limit).map_err(|_| EMFILE)?);
-        let client = posix_client().map_err(map_posix_client_error)?;
-        let opened = client
-            .open_shared_memory(
-                wire::Open {
-                    options,
-                    mode: if options & wire::CREATE != 0 { mode } else { 0 },
-                    name,
-                },
-                close_object_handle,
-            )
-            .map_err(map_posix_client_error)?;
-        let entry = object_entry(
-            u64::from(opened.handle),
-            opened.rights,
-            FdKind::ObjectSharedMemory,
-            (flags & 3) | O_CLOEXEC,
-        );
-        match state().fds.commit_reservation(&reservation.0, entry) {
-            Ok(fd) => Ok(fd),
-            Err(_) => {
-                close_object_handle(opened.handle);
-                Err(EIO)
-            }
-        }
-    })();
-    result_with_errno(result, -1)
+    result_with_errno(shared_memory_namespace::open(pointer, flags, mode), -1)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shm_unlink(pointer: *const c_char) -> c_int {
-    let result = (|| {
-        if pointer.is_null() {
-            return Err(EFAULT);
-        }
-        let name = unsafe { named_semaphore::name(pointer) }?;
-        posix_client()
-            .map_err(map_posix_client_error)?
-            .unlink_shared_memory(name, close_object_handle)
-            .map_err(map_posix_client_error)?;
-        Ok(0)
-    })();
-    result_with_errno(result, -1)
+    result_with_errno(shared_memory_namespace::unlink(pointer), -1)
 }
 
 pub(super) fn truncate(entry: FdEntry, length: u64) -> Result<(), c_int> {

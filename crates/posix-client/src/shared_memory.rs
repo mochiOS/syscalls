@@ -18,6 +18,57 @@ pub struct PreparedBacking<H> {
     rights: u64,
 }
 
+/// Owned serialized name request; reply validation does not consume Handles.
+pub struct PreparedNamespace {
+    frame: [u8; protocol::HEADER_LEN + wire::OPEN_HEADER_LEN + wire::MAX_NAME_BYTES + 1],
+    length: usize,
+    request_id: u64,
+    rights: Option<u64>,
+}
+
+fn validate_status<E>(request_id: u64, response: &[u8]) -> Result<(), ClientError<E>> {
+    let (header, payload) = protocol::decode(response).map_err(ClientError::Protocol)?;
+    if header.opcode != protocol::OP_STATUS
+        || header.request_id != request_id
+        || header.flags != 0
+        || header.status > 0
+        || header.status == protocol::STATUS_MEMORY_ADMISSION_BUSY
+    {
+        return Err(ClientError::MismatchedResponse);
+    }
+    if header.status != protocol::STATUS_OK {
+        return Err(ClientError::Remote(header.status));
+    }
+    if !payload.is_empty() {
+        return Err(ClientError::ResponseTooLarge);
+    }
+    Ok(())
+}
+
+impl PreparedNamespace {
+    pub fn request(&self) -> &[u8] {
+        &self.frame[..self.length]
+    }
+    pub fn validate<H: Copy + Default + Eq, E>(
+        &self,
+        response: &[u8],
+        handles: &ObjectHandles<H>,
+    ) -> Result<Option<ObjectHandleAttachment<H>>, ClientError<E>> {
+        validate_status(self.request_id, response)?;
+        if let Some(rights) = self.rights {
+            let received = handles.get(0).ok_or(ClientError::MismatchedResponse)?;
+            if handles.len() != 1 || received.handle == H::default() || received.rights != rights {
+                return Err(ClientError::MismatchedResponse);
+            }
+            Ok(Some(received))
+        } else if handles.is_empty() {
+            Ok(None)
+        } else {
+            Err(ClientError::MismatchedResponse)
+        }
+    }
+}
+
 impl<H: Copy + Default + PartialEq> PreparedBacking<H> {
     pub fn request(&self) -> &[u8] {
         &self.frame
@@ -33,21 +84,7 @@ impl<H: Copy + Default + PartialEq> PreparedBacking<H> {
         response: &[u8],
         handles: &ObjectHandles<H>,
     ) -> Result<ObjectHandleAttachment<H>, ClientError<E>> {
-        let (header, payload) = protocol::decode(response).map_err(ClientError::Protocol)?;
-        if header.opcode != protocol::OP_STATUS
-            || header.request_id != self.request_id
-            || header.flags != 0
-            || header.status > 0
-            || header.status == protocol::STATUS_MEMORY_ADMISSION_BUSY
-        {
-            return Err(ClientError::MismatchedResponse);
-        }
-        if header.status != protocol::STATUS_OK {
-            return Err(ClientError::Remote(header.status));
-        }
-        if !payload.is_empty() {
-            return Err(ClientError::ResponseTooLarge);
-        }
+        validate_status(self.request_id, response)?;
         let received = handles.get(0).ok_or(ClientError::MismatchedResponse)?;
         if handles.len() != 1
             || received.handle == H::default()
@@ -97,6 +134,61 @@ pub fn newlib_open_options(flags: i32) -> Option<u32> {
 }
 
 impl<T: ObjectTransport> Client<T> {
+    pub fn prepare_shared_memory_open(
+        &self,
+        request: wire::Open<'_>,
+    ) -> Result<PreparedNamespace, ClientError<T::Error>> {
+        let mut payload = [0; wire::OPEN_HEADER_LEN + wire::MAX_NAME_BYTES + 1];
+        let length = wire::encode_open(request, &mut payload).map_err(ClientError::Protocol)?;
+        self.prepare_shared_memory_namespace(
+            protocol::OP_SHARED_MEMORY_OPEN,
+            &payload[..length],
+            Some(rights(request.options & wire::READ_WRITE != 0)),
+        )
+    }
+
+    pub fn prepare_shared_memory_unlink(
+        &self,
+        name: &[u8],
+    ) -> Result<PreparedNamespace, ClientError<T::Error>> {
+        let mut payload = [0; wire::NAME_HEADER_LEN + wire::MAX_NAME_BYTES + 1];
+        let length = wire::encode_name(name, &mut payload).map_err(ClientError::Protocol)?;
+        self.prepare_shared_memory_namespace(
+            protocol::OP_SHARED_MEMORY_UNLINK,
+            &payload[..length],
+            None,
+        )
+    }
+
+    fn prepare_shared_memory_namespace(
+        &self,
+        opcode: u16,
+        payload: &[u8],
+        rights: Option<u64>,
+    ) -> Result<PreparedNamespace, ClientError<T::Error>> {
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let mut frame =
+            [0; protocol::HEADER_LEN + wire::OPEN_HEADER_LEN + wire::MAX_NAME_BYTES + 1];
+        let length = protocol::encode(
+            protocol::Header {
+                opcode,
+                request_id,
+                flags: 0,
+                payload_len: payload.len() as u32,
+                status: 0,
+            },
+            payload,
+            &mut frame,
+        )
+        .map_err(ClientError::Protocol)?;
+        Ok(PreparedNamespace {
+            frame,
+            length,
+            request_id,
+            rights,
+        })
+    }
+
     pub fn prepare_shared_memory_backing(
         &self,
         descriptor: ObjectHandleAttachment<T::Handle>,
@@ -178,49 +270,43 @@ impl<T: ObjectTransport> Client<T> {
     pub fn open_shared_memory(
         &self,
         request: wire::Open<'_>,
-        mut close: impl FnMut(T::Handle),
+        close: impl FnMut(T::Handle),
     ) -> Result<ObjectHandleAttachment<T::Handle>, ClientError<T::Error>> {
-        let mut payload = [0; wire::OPEN_HEADER_LEN + wire::MAX_NAME_BYTES + 1];
-        let length = wire::encode_open(request, &mut payload).map_err(ClientError::Protocol)?;
-        let mut handles = ObjectHandles::new();
-        let outcome = self.request_with_handles(
-            protocol::OP_SHARED_MEMORY_OPEN,
-            0,
-            &payload[..length],
-            &mut [],
-            &mut handles,
-        );
-        if matches!(outcome, Ok(0)) && handles.len() == 1 {
-            let received = handles.get(0).unwrap();
-            if received.handle != T::Handle::default()
-                && received.rights == rights(request.options & wire::READ_WRITE != 0)
-            {
-                return Ok(received);
-            }
-        }
-        drain_received_handles(&mut handles, &ObjectHandles::new(), &mut close);
-        Err(outcome.err().unwrap_or(ClientError::MismatchedResponse))
+        let prepared = self.prepare_shared_memory_open(request)?;
+        self.execute_shared_memory_namespace(&prepared, close)?
+            .ok_or(ClientError::MismatchedResponse)
     }
 
     pub fn unlink_shared_memory(
         &self,
         name: &[u8],
-        mut close: impl FnMut(T::Handle),
+        close: impl FnMut(T::Handle),
     ) -> Result<(), ClientError<T::Error>> {
-        let mut payload = [0; wire::NAME_HEADER_LEN + wire::MAX_NAME_BYTES + 1];
-        let length = wire::encode_name(name, &mut payload).map_err(ClientError::Protocol)?;
+        let prepared = self.prepare_shared_memory_unlink(name)?;
+        self.execute_shared_memory_namespace(&prepared, close)
+            .map(|_| ())
+    }
+
+    fn execute_shared_memory_namespace(
+        &self,
+        prepared: &PreparedNamespace,
+        mut close: impl FnMut(T::Handle),
+    ) -> Result<Option<ObjectHandleAttachment<T::Handle>>, ClientError<T::Error>> {
         let mut handles = ObjectHandles::new();
-        let outcome = self.request_with_handles(
-            protocol::OP_SHARED_MEMORY_UNLINK,
-            0,
-            &payload[..length],
-            &mut [],
-            &mut handles,
-        );
-        if matches!(outcome, Ok(0)) && handles.is_empty() {
-            return Ok(());
+        let mut response = [0; protocol::HEADER_LEN + 1];
+        let outcome = self
+            .transport
+            .call_with_handles(prepared.request(), &mut response, &mut handles)
+            .map_err(ClientError::Transport)
+            .and_then(|length| {
+                let response = response
+                    .get(..length)
+                    .ok_or(ClientError::ResponseTooLarge)?;
+                prepared.validate(response, &handles)
+            });
+        if outcome.is_err() {
+            drain_received_handles(&mut handles, &ObjectHandles::new(), &mut close);
         }
-        drain_received_handles(&mut handles, &ObjectHandles::new(), &mut close);
-        Err(outcome.err().unwrap_or(ClientError::MismatchedResponse))
+        outcome
     }
 }
