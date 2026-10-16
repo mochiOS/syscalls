@@ -79,7 +79,7 @@ pub const fn native_map(flags: i32) -> Option<NativeMap> {
     }
     let mut options = 0;
     if flags & MAP_FIXED != 0 {
-        options |= mnu_abi::MEMORY_MAP_EXACT;
+        options |= mnu_abi::MEMORY_MAP_EXACT | mnu_abi::MEMORY_MAP_REPLACE;
     }
     if sharing == MAP_SHARED {
         options |= mnu_abi::MEMORY_MAP_SHARED;
