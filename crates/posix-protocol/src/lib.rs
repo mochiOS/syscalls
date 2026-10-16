@@ -492,7 +492,10 @@ pub const UNLINK_FLAGS_ALL: u32 = UNLINK_REMOVE_DIRECTORY;
 pub const WAIT_NOHANG: u32 = 1 << 0;
 pub const WAIT_UNTRACED: u32 = 1 << 1;
 pub const WAIT_CONTINUED: u32 = 1 << 3;
-pub const WAIT_OPTIONS_ALL: u32 = WAIT_NOHANG | WAIT_UNTRACED | WAIT_CONTINUED;
+/// Observe a selected child event without consuming it or charging its CPU
+/// time to the parent's already-waited accounting. This is userspace policy.
+pub const WAIT_NOWAIT: u32 = 1 << 4;
+pub const WAIT_OPTIONS_ALL: u32 = WAIT_NOHANG | WAIT_UNTRACED | WAIT_CONTINUED | WAIT_NOWAIT;
 pub const WAIT_STATUS_CONTINUED: u32 = 0xffff;
 
 pub const RESOURCE_LIMIT_SET: u32 = 1 << 0;
