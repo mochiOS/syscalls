@@ -1101,6 +1101,41 @@ impl<T: ObjectTransport> Client<T> {
         Err(ClientError::MismatchedResponse)
     }
 
+    pub fn canonical_path_at(
+        &self,
+        base: StatAtBase<T::Handle>,
+        path: &str,
+        output: &mut [u8],
+    ) -> Result<usize, ClientError<T::Error>> {
+        let (base, directory) = match base {
+            StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
+            StatAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
+            StatAtBase::Directory(handle) => (protocol::OpenBase::AttachedDirectory, Some(handle)),
+        };
+        let mut payload = [0u8; protocol::STAT_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
+        let length = protocol::encode_stat_at(
+            protocol::StatAtRequest {
+                base,
+                flags: 0,
+                path,
+            },
+            &mut payload,
+        )
+        .map_err(ClientError::Protocol)?;
+        let mut handles = ObjectHandles::new();
+        if let Some(directory) = directory {
+            handles
+                .push(directory)
+                .map_err(|_| ClientError::RequestTooLarge)?;
+        }
+        self.request_without_reply_handles(
+            protocol::OP_CANONICAL_PATH_AT,
+            &payload[..length],
+            output,
+            &mut handles,
+        )
+    }
+
     pub fn stat_at(
         &self,
         base: StatAtBase<T::Handle>,

@@ -15,6 +15,7 @@ mod mapping_backing;
 mod object_reply;
 mod shared_memory_namespace;
 mod current_directory;
+mod canonical_path;
 mod pipe;
 mod pty_creation;
 mod vector_metadata;
@@ -8066,52 +8067,7 @@ pub extern "C" fn getcwd(buffer: *mut c_char, size: usize) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn realpath(path: *const c_char, resolved_path: *mut c_char) -> *mut c_char {
-    if path.is_null() {
-        set_errno(EFAULT);
-        return ptr::null_mut();
-    }
-    let result = (|| {
-        let path_bytes = unsafe { c_bytes(path) };
-        let mut cwd_storage = [0u8; 4096];
-        let mut cwd_len = 0usize;
-        let out_len = if path_bytes.first() == Some(&b'/') {
-            path_bytes.len()
-        } else {
-            let client = posix_client().map_err(map_posix_client_error)?;
-            cwd_len = client
-                .getcwd(&mut cwd_storage[..4095])
-                .map_err(map_posix_client_error)?;
-            cwd_len + usize::from(cwd_len != 1) + path_bytes.len()
-        };
-        let out_ptr = if resolved_path.is_null() {
-            unsafe { malloc(out_len + 1) as *mut c_char }
-        } else {
-            resolved_path
-        };
-        if out_ptr.is_null() {
-            return Err(ENOMEM);
-        }
-        let out = out_ptr.cast::<u8>();
-        if path_bytes.first() == Some(&b'/') {
-            unsafe {
-                ptr::copy_nonoverlapping(path_bytes.as_ptr(), out, path_bytes.len());
-                out.add(path_bytes.len()).write(0);
-            }
-            return Ok(out_ptr);
-        }
-        unsafe {
-            ptr::copy_nonoverlapping(cwd_storage.as_ptr(), out, cwd_len);
-            let mut written = cwd_len;
-            if cwd_len != 1 {
-                out.add(written).write(b'/');
-                written += 1;
-            }
-            ptr::copy_nonoverlapping(path_bytes.as_ptr(), out.add(written), path_bytes.len());
-            out.add(written + path_bytes.len()).write(0);
-        }
-        Ok(out_ptr)
-    })();
-    result_with_errno(result, ptr::null_mut())
+    result_with_errno(canonical_path::resolve(path, resolved_path), ptr::null_mut())
 }
 
 #[unsafe(no_mangle)]

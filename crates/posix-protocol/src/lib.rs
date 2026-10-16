@@ -294,6 +294,9 @@ pub const OP_FORK_CANCEL: u16 = 93;
 /// Empty request, no attachments. Returns exactly one READ|MAP RAM Handle
 /// containing this authenticated caller's resource_policy::ResourcePolicy.
 pub const OP_RESOURCE_POLICY: u16 = 94;
+/// StatAtRequest with zero flags; returns an existing path's canonical bytes.
+/// Directory authority is attached, never represented by a process-local FD.
+pub const OP_CANONICAL_PATH_AT: u16 = 95;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
