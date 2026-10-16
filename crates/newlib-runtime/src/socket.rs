@@ -67,7 +67,7 @@ pub unsafe extern "C" fn setsockopt(
                 if value.is_null() {
                     return Err(EFAULT);
                 }
-                let timeout = unsafe { value.cast::<Timeval>().read_unaligned() };
+                let timeout = socket_memory::read_timeout(value)?;
                 let duration = mochios_posix_client::socket::socket_timeout_nanoseconds(
                     timeout.tv_sec,
                     timeout.tv_usec,
@@ -92,9 +92,7 @@ pub unsafe extern "C" fn setsockopt(
                 return Err(EFAULT);
             }
             let mut native = [0; 4];
-            unsafe {
-                ptr::copy_nonoverlapping(value.cast::<u8>(), native.as_mut_ptr(), native.len());
-            }
+            user_copy::read(value.cast(), &mut native)?;
             let (tag, payload) = mochios_posix_client::socket::newlib_setsockopt(
                 level,
                 option,
@@ -126,7 +124,7 @@ pub unsafe extern "C" fn getsockopt(
                 if length.is_null() {
                     return Err(EFAULT);
                 }
-                let capacity = unsafe { length.read_unaligned() };
+                let capacity = socket_memory::read_length(length)?;
                 if capacity > i32::MAX as u32 {
                     return Err(EINVAL);
                 }
@@ -153,12 +151,7 @@ pub unsafe extern "C" fn getsockopt(
                 native[..8].copy_from_slice(&((duration / 1_000_000_000) as i64).to_ne_bytes());
                 native[8..]
                     .copy_from_slice(&((duration % 1_000_000_000 / 1000) as i64).to_ne_bytes());
-                unsafe {
-                    if count != 0 {
-                        ptr::copy_nonoverlapping(native.as_ptr(), value.cast::<u8>(), count);
-                    }
-                    length.write_unaligned(count as u32);
-                }
+                socket_memory::write_output(value, length, &native[..count], count as u32)?;
                 return Ok(0);
             }
             let tag = mochios_posix_client::socket::newlib_getsockopt_tag(level, option).map_err(
@@ -167,7 +160,7 @@ pub unsafe extern "C" fn getsockopt(
             if length.is_null() {
                 return Err(EFAULT);
             }
-            let capacity = unsafe { length.read() };
+            let capacity = socket_memory::read_length(length)?;
             if capacity > i32::MAX as u32 {
                 return Err(EINVAL);
             }
@@ -179,16 +172,9 @@ pub unsafe extern "C" fn getsockopt(
             control(**entry, tag, &[], &mut response)?;
             let decoded = mochios_posix_client::socket::newlib_getsockopt_value(tag, &response)
                 .map_err(|_| EIO)?;
-            unsafe {
-                if count != 0 {
-                    ptr::copy_nonoverlapping(
-                        decoded.to_ne_bytes().as_ptr(),
-                        value.cast::<u8>(),
-                        count,
-                    );
-                }
-                length.write(count as u32);
-            }
+            socket_memory::write_output(
+                value, length, &decoded.to_ne_bytes()[..count], count as u32,
+            )?;
             Ok(0)
         },
     );
@@ -221,9 +207,7 @@ unsafe fn connect_io(fd: c_int, address: *const c_void, length: u32) -> Result<c
             if length as usize > bytes.len() {
                 return Err(EINVAL);
             }
-            unsafe {
-                ptr::copy_nonoverlapping(address.cast(), bytes.as_mut_ptr(), length as usize);
-            }
+            user_copy::read(address.cast(), &mut bytes[..length as usize])?;
             Ok(())
         },
         |(entry, pending, bytes)| unsafe {
@@ -525,8 +509,9 @@ pub unsafe extern "C" fn bind(fd: c_int, address: *const c_void, length: u32) ->
             if length as usize > mochios_posix_client::socket::MAX_SOCKADDR_LEN {
                 return Err(EINVAL);
             }
-            let bytes =
-                unsafe { core::slice::from_raw_parts(address.cast::<u8>(), length as usize) };
+            let mut bytes = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
+            let bytes = &mut bytes[..length as usize];
+            user_copy::read(address.cast(), bytes)?;
             let decoded =
                 mochios_posix_client::socket::decode_sockaddr(bytes).map_err(|error| {
                     mochios_posix_client::newlib_errno::from_status(i64::from(error))
@@ -695,7 +680,7 @@ pub(super) unsafe fn socket_name(
             if address.is_null() || length.is_null() {
                 return Err(EFAULT);
             }
-            let capacity = unsafe { length.read() } as usize;
+            let capacity = socket_memory::read_length(length)? as usize;
             let mut encoded = [0; wire::MAX_ADDRESS_LEN];
             let tag = if peer {
                 wire::CONTROL_PEER_ADDRESS
@@ -707,14 +692,9 @@ pub(super) unsafe fn socket_name(
             let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
             let required = mochios_posix_client::socket::encode_sockaddr(decoded, &mut native)
                 .map_err(|_| EIO)?;
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    native.as_ptr(),
-                    address.cast::<u8>(),
-                    capacity.min(required),
-                );
-                length.write(required as u32);
-            }
+            socket_memory::write_output(
+                address, length, &native[..capacity.min(required)], required as u32,
+            )?;
             Ok(0)
         },
     )

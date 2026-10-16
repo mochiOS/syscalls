@@ -9,6 +9,7 @@ mod file_mutation;
 mod file_metadata;
 mod stat_output;
 mod terminal_memory;
+mod socket_memory;
 mod directory_io;
 mod path_io;
 mod user_copy;
