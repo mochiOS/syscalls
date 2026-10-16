@@ -6122,6 +6122,7 @@ pub extern "C" fn tcsetattr(fd: c_int, action: c_int, termios: *const NewlibTerm
 
 #[unsafe(no_mangle)]
 pub extern "C" fn tcdrain(fd: c_int) -> c_int {
+    pthread_testcancel();
     let result = io_resources::with(
         || with_fd_entry(fd),
         |entry| {
@@ -6140,7 +6141,7 @@ pub extern "C" fn tcdrain(fd: c_int) -> c_int {
             }
         },
     );
-    result_with_errno(result, -1)
+    finish_io_cancellation(result_with_errno(result, -1)) as c_int
 }
 
 #[unsafe(no_mangle)]
