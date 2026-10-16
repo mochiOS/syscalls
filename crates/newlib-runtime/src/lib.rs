@@ -5602,26 +5602,28 @@ pub extern "C" fn fchmodat(dirfd: c_int, path: *const c_char, mode: u32, flags: 
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fchmod(fd: c_int, mode: u32) -> c_int {
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        if !matches!(
-            entry.handle.kind,
-            FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
-        ) {
-            return Err(EBADF);
-        }
-        let client = posix_client().map_err(map_posix_client_error)?;
-        client
-            .fchmod(
-                ObjectHandleAttachment {
-                    handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-                    rights: entry.rights,
-                },
-                mode,
-            )
-            .map_err(map_posix_client_error)?;
-        Ok(0)
-    })();
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            if !matches!(
+                entry.handle.kind,
+                FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
+            ) {
+                return Err(EBADF);
+            }
+            let client = posix_client().map_err(map_posix_client_error)?;
+            client
+                .fchmod(
+                    ObjectHandleAttachment {
+                        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+                        rights: entry.rights,
+                    },
+                    mode,
+                )
+                .map_err(map_posix_client_error)?;
+            Ok(0)
+        },
+    );
     result_with_errno(result, -1)
 }
 
@@ -5683,27 +5685,29 @@ pub extern "C" fn fchownat(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fchown(fd: c_int, uid: u32, gid: u32) -> c_int {
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        if !matches!(
-            entry.handle.kind,
-            FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
-        ) {
-            return Err(EBADF);
-        }
-        let client = posix_client().map_err(map_posix_client_error)?;
-        client
-            .fchown(
-                ObjectHandleAttachment {
-                    handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-                    rights: entry.rights,
-                },
-                uid,
-                gid,
-            )
-            .map_err(map_posix_client_error)?;
-        Ok(0)
-    })();
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            if !matches!(
+                entry.handle.kind,
+                FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
+            ) {
+                return Err(EBADF);
+            }
+            let client = posix_client().map_err(map_posix_client_error)?;
+            client
+                .fchown(
+                    ObjectHandleAttachment {
+                        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+                        rights: entry.rights,
+                    },
+                    uid,
+                    gid,
+                )
+                .map_err(map_posix_client_error)?;
+            Ok(0)
+        },
+    );
     result_with_errno(result, -1)
 }
 
@@ -5853,28 +5857,30 @@ pub extern "C" fn readdir(dirp: *mut c_void) -> *mut NewlibDirent {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _lseek(fd: c_int, offset: i64, whence: c_int) -> i64 {
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        if !matches!(
-            entry.handle.kind,
-            FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectSharedMemory
-        ) {
-            return Err(ESPIPE);
-        }
-        let basis = match whence {
-            0 => syscall::HANDLE_SEEK_START,
-            1 => syscall::HANDLE_SEEK_CURRENT,
-            2 => syscall::HANDLE_SEEK_END,
-            _ => return Err(EINVAL),
-        };
-        let next = syscall_errno(syscall::raw_syscall3(
-            syscall::SyscallNumber::HandleSeek,
-            entry.handle.lower_handle,
-            offset as u64,
-            basis,
-        ))?;
-        Ok(next as i64)
-    })();
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            if !matches!(
+                entry.handle.kind,
+                FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectSharedMemory
+            ) {
+                return Err(ESPIPE);
+            }
+            let basis = match whence {
+                0 => syscall::HANDLE_SEEK_START,
+                1 => syscall::HANDLE_SEEK_CURRENT,
+                2 => syscall::HANDLE_SEEK_END,
+                _ => return Err(EINVAL),
+            };
+            let next = syscall_errno(syscall::raw_syscall3(
+                syscall::SyscallNumber::HandleSeek,
+                entry.handle.lower_handle,
+                offset as u64,
+                basis,
+            ))?;
+            Ok(next as i64)
+        },
+    );
     result_with_errno(result, -1)
 }
 
@@ -5889,21 +5895,25 @@ pub extern "C" fn _fsync(fd: c_int) -> c_int {
 }
 
 fn sync_file_descriptor(fd: c_int) -> Result<c_int, c_int> {
-    let entry = with_fd_entry(fd)?;
-    if !matches!(
-        entry.handle.kind,
-        FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
-    ) {
-        return Err(EBADF);
-    }
-    let client = posix_client().map_err(map_posix_client_error)?;
-    client
-        .fsync(ObjectHandleAttachment {
-            handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-            rights: entry.rights,
-        })
-        .map_err(map_posix_client_error)?;
-    Ok(0)
+    io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            if !matches!(
+                entry.handle.kind,
+                FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
+            ) {
+                return Err(EBADF);
+            }
+            let client = posix_client().map_err(map_posix_client_error)?;
+            client
+                .fsync(ObjectHandleAttachment {
+                    handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+                    rights: entry.rights,
+                })
+                .map_err(map_posix_client_error)?;
+            Ok(0)
+        },
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -5949,47 +5959,49 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        if entry.handle.kind == FdKind::ObjectSharedMemory {
-            let status = shared_memory::stat(*entry)?;
-            unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), status) };
-            return Ok(0);
-        }
-        if entry.handle.kind.is_socket() {
-            let status = socket::stat(*entry)?;
-            unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), status) };
-            return Ok(0);
-        }
-        if matches!(
-            entry.handle.kind,
-            FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
-        ) {
-            let handle = u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?;
-            let client = posix_client().map_err(map_posix_client_error)?;
-            let status = client
-                .fstat(ObjectHandleAttachment {
-                    handle,
-                    rights: entry.rights,
-                })
-                .map_err(map_posix_client_error)?;
-            let translated = translate_posix_stat(&status)?;
-            unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), translated) };
-            return Ok(0);
-        }
-        if matches!(
-            entry.handle.kind,
-            FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite
-        ) {
-            unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), stream_stat()) };
-            return Ok(0);
-        }
-        if entry.handle.kind == FdKind::ObjectPty {
-            unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), pty_stat()) };
-            return Ok(0);
-        }
-        Err(EBADF)
-    })();
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            if entry.handle.kind == FdKind::ObjectSharedMemory {
+                let status = shared_memory::stat(**entry)?;
+                unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), status) };
+                return Ok(0);
+            }
+            if entry.handle.kind.is_socket() {
+                let status = socket::stat(**entry)?;
+                unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), status) };
+                return Ok(0);
+            }
+            if matches!(
+                entry.handle.kind,
+                FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
+            ) {
+                let handle = u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?;
+                let client = posix_client().map_err(map_posix_client_error)?;
+                let status = client
+                    .fstat(ObjectHandleAttachment {
+                        handle,
+                        rights: entry.rights,
+                    })
+                    .map_err(map_posix_client_error)?;
+                let translated = translate_posix_stat(&status)?;
+                unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), translated) };
+                return Ok(0);
+            }
+            if matches!(
+                entry.handle.kind,
+                FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite
+            ) {
+                unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), stream_stat()) };
+                return Ok(0);
+            }
+            if entry.handle.kind == FdKind::ObjectPty {
+                unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), pty_stat()) };
+                return Ok(0);
+            }
+            Err(EBADF)
+        },
+    );
     result_with_errno(result, -1)
 }
 
