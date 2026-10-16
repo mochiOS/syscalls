@@ -7344,11 +7344,15 @@ pub extern "C" fn getentropy(buffer: *mut c_void, length: usize) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
+    if (buffer as usize).checked_add(length).is_none() {
+        set_errno(EFAULT);
+        return -1;
+    }
     result_with_errno(
         mochios_posix_client::random::fill_entropy(length, |offset, remaining| {
-            // Safety: offset is within the non-null caller buffer, and the
-            // native operation validates the remaining writable range.
-            let destination = unsafe { buffer.cast::<u8>().add(offset) };
+            // Caller addresses stay integers until the native copy validates
+            // them; a non-null C pointer is not a Rust allocation guarantee.
+            let destination = (buffer as usize).checked_add(offset).ok_or(EFAULT)?;
             syscall_errno(syscall::raw_syscall2(
                 syscall::SyscallNumber::RandomFill,
                 destination as u64,
