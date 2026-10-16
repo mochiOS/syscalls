@@ -7,7 +7,7 @@ use mnu_abi::status::Error;
 pub fn usage(handle: Option<u32>) -> SysResult<ProcessExecutionUsage> {
     let raw = match handle {
         None => 0,
-        Some(0) => return Err(SysError::from_raw(mnu_abi::EINVAL as i64)),
+        Some(0) => return Err(SysError::from_raw(Error::InvalidArgument.into_raw() as i64)),
         Some(handle) => handle,
     };
     let mut usage = ProcessExecutionUsage::default();
@@ -18,7 +18,7 @@ pub fn usage(handle: Option<u32>) -> SysResult<ProcessExecutionUsage> {
         core::mem::size_of::<ProcessExecutionUsage>() as u64,
     )?;
     if status != mnu_abi::SUCCESS || usage.ticks_per_second == 0 || usage.reserved != 0 {
-        return Err(SysError::from_raw(mnu_abi::EIO as i64));
+        return Err(SysError::from_raw(Error::BackingFailure.into_raw() as i64));
     }
     Ok(usage)
 }
