@@ -19,6 +19,7 @@ mod signal_memory;
 mod directory_io;
 mod path_io;
 mod user_copy;
+mod exec_inputs;
 mod io_resources;
 mod mapping_io;
 mod mapping_backing;
@@ -2696,23 +2697,6 @@ fn apply_spawn_file_actions(actions: *const c_void) -> Result<(), c_int> {
     Ok(())
 }
 
-unsafe fn read_exec_vector<'a>(
-    vector: *const *const c_char,
-    output: &mut [&'a [u8]],
-) -> Result<usize, c_int> {
-    if vector.is_null() {
-        return Ok(0);
-    }
-    for index in 0..output.len() {
-        let value = unsafe { vector.add(index).read() };
-        if value.is_null() {
-            return Ok(index);
-        }
-        output[index] = unsafe { c_bytes(value) };
-    }
-    Err(E2BIG)
-}
-
 fn close_object_handle(handle: u32) {
     let _ = syscall_errno(syscall::raw_syscall1(
         syscall::SyscallNumber::HandleClose,
@@ -2842,7 +2826,9 @@ fn replace_process_image(
     envp: *const *const c_char,
     fds: &FdTable<FdObject>,
 ) -> Result<(), c_int> {
-    let path_bytes = unsafe { c_bytes(path) };
+    let mut inputs = exec_inputs::Inputs::new();
+    inputs.capture(path, argv, envp)?;
+    let path_bytes = inputs.path();
     let path_text = core::str::from_utf8(path_bytes).map_err(|_| EINVAL)?;
     let mut identity = [0u8; MAX_EXECUTABLE_PATH_LEN];
     let identity_length = absolute_exec_identity(path_bytes, &mut identity)?;
@@ -2850,8 +2836,7 @@ fn replace_process_image(
     let identity_text = core::str::from_utf8(identity).map_err(|_| EINVAL)?;
     let mut arguments = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
     let mut environment = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
-    let mut argument_count = unsafe { read_exec_vector(argv, &mut arguments) }?;
-    let environment_count = unsafe { read_exec_vector(envp, &mut environment) }?;
+    let (mut argument_count, environment_count) = inputs.vectors(&mut arguments, &mut environment);
     if argument_count == 0 {
         arguments[0] = path_bytes;
         argument_count = 1;

@@ -62,13 +62,24 @@ pub(super) fn capture(
     path: *const c_char,
     output: &mut [u8; posix_protocol::MAX_PATH_LEN],
 ) -> Result<usize, c_int> {
-    if path.is_null() {
+    let length = capture_text(path, output, ENAMETOOLONG)?;
+    if length == 0 { Err(ENOENT) } else { Ok(length) }
+}
+
+/// Snapshot bounded C text, including empty arguments. The caller chooses the
+/// size-limit error; pathname policy is deliberately not applied here.
+pub(super) fn capture_text(
+    source: *const c_char,
+    output: &mut [u8],
+    too_long: c_int,
+) -> Result<usize, c_int> {
+    if source.is_null() {
         return Err(EFAULT);
     }
     let mut length = 0;
     let mut scratch = [0u8; 256];
     loop {
-        let address = (path as usize).checked_add(length).ok_or(EFAULT)?;
+        let address = (source as usize).checked_add(length).ok_or(EFAULT)?;
         let count = scratch
             .len()
             .min(PAGE_SIZE - address % PAGE_SIZE)
@@ -87,10 +98,10 @@ pub(super) fn capture(
             }
             let byte = scratch[index];
             if byte == 0 {
-                return if length == 0 { Err(ENOENT) } else { Ok(length) };
+                return Ok(length);
             }
             if length == output.len() {
-                return Err(ENAMETOOLONG);
+                return Err(too_long);
             }
             output[length] = byte;
             length += 1;
