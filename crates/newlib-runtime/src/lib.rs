@@ -4874,157 +4874,161 @@ fn select_with_deadline(
     control: &ThreadControl,
     caught: u64,
 ) -> Result<c_int, c_int> {
-    let result = (|| {
-        if nfds < 0 || nfds as usize > MAX_FDS {
-            return Err(EINVAL);
-        }
-        let requested_read = if readfds.is_null() {
-            0
-        } else {
-            unsafe { readfds.read().bits[0] }
-        };
-        let requested_write = if writefds.is_null() {
-            0
-        } else {
-            unsafe { writefds.read().bits[0] }
-        };
-        let requested_except = if exceptfds.is_null() {
-            0
-        } else {
-            unsafe { exceptfds.read().bits[0] }
-        };
-        let valid_mask = if nfds == 64 {
-            u64::MAX
-        } else if nfds == 0 {
-            0
-        } else {
-            (1u64 << nfds) - 1
-        };
-        let requested_read = requested_read & valid_mask;
-        let requested_write = requested_write & valid_mask;
-        let requested_except = requested_except & valid_mask;
-        let requested = requested_read | requested_write | requested_except;
-
-        let mut ready_read = 0u64;
-        let mut ready_write = 0u64;
-        let ready_except = 0u64;
-        let mut items = [syscall::HandleWaitItem::default(); MAX_FDS];
-        let mut item_fds = [0usize; MAX_FDS];
-        let mut leases = [const { None }; MAX_FDS];
-        let mut item_count = 0usize;
-        for fd in 0..nfds as usize {
-            let mask = 1u64 << fd;
-            if requested & mask == 0 {
-                continue;
+    io_resources::with(
+        || Ok([const { None }; MAX_FDS]),
+        |leases| {
+            if nfds < 0 || nfds as usize > MAX_FDS {
+                return Err(EINVAL);
             }
-            leases[fd] = Some(with_fd_entry(fd as c_int)?);
-            let entry = leases[fd].as_ref().unwrap();
-            match entry.handle.kind {
-                FdKind::ObjectStreamRead if requested_read & mask != 0 => {
-                    items[item_count] = syscall::HandleWaitItem {
-                        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-                        minimum_write_bytes: 0,
-                        interests: syscall::HANDLE_SIGNAL_READABLE
-                            | syscall::HANDLE_SIGNAL_PEER_CLOSED,
-                        observed: 0,
-                    };
-                    item_fds[item_count] = fd;
-                    item_count += 1;
-                    if requested_write & mask != 0 {
+            let requested_read = if readfds.is_null() {
+                0
+            } else {
+                unsafe { readfds.read().bits[0] }
+            };
+            let requested_write = if writefds.is_null() {
+                0
+            } else {
+                unsafe { writefds.read().bits[0] }
+            };
+            let requested_except = if exceptfds.is_null() {
+                0
+            } else {
+                unsafe { exceptfds.read().bits[0] }
+            };
+            let valid_mask = if nfds == 64 {
+                u64::MAX
+            } else if nfds == 0 {
+                0
+            } else {
+                (1u64 << nfds) - 1
+            };
+            let requested_read = requested_read & valid_mask;
+            let requested_write = requested_write & valid_mask;
+            let requested_except = requested_except & valid_mask;
+            let requested = requested_read | requested_write | requested_except;
+
+            let mut ready_read = 0u64;
+            let mut ready_write = 0u64;
+            let ready_except = 0u64;
+            let mut items = [syscall::HandleWaitItem::default(); MAX_FDS];
+            let mut item_fds = [0usize; MAX_FDS];
+            let mut item_count = 0usize;
+            for fd in 0..nfds as usize {
+                let mask = 1u64 << fd;
+                if requested & mask == 0 {
+                    continue;
+                }
+                {
+                    let _native = defer_native_delivery();
+                    leases[fd] = Some(with_fd_entry(fd as c_int)?);
+                }
+                let entry = leases[fd].as_ref().unwrap();
+                match entry.handle.kind {
+                    FdKind::ObjectStreamRead if requested_read & mask != 0 => {
+                        items[item_count] = syscall::HandleWaitItem {
+                            handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+                            minimum_write_bytes: 0,
+                            interests: syscall::HANDLE_SIGNAL_READABLE
+                                | syscall::HANDLE_SIGNAL_PEER_CLOSED,
+                            observed: 0,
+                        };
+                        item_fds[item_count] = fd;
+                        item_count += 1;
+                        if requested_write & mask != 0 {
+                            ready_write |= requested_write & mask;
+                        }
+                    }
+                    FdKind::ObjectStreamWrite if requested_write & mask != 0 => {
+                        items[item_count] = syscall::HandleWaitItem {
+                            handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+                            minimum_write_bytes: 0,
+                            interests: syscall::HANDLE_SIGNAL_WRITABLE
+                                | syscall::HANDLE_SIGNAL_PEER_CLOSED,
+                            observed: 0,
+                        };
+                        item_fds[item_count] = fd;
+                        item_count += 1;
+                        if requested_read & mask != 0 {
+                            ready_read |= requested_read & mask;
+                        }
+                    }
+                    FdKind::ObjectPty | FdKind::ObjectSocket | FdKind::ObjectDatagram => {
+                        let mut interests = if entry.handle.kind.is_socket() {
+                            0
+                        } else {
+                            syscall::HANDLE_SIGNAL_PEER_CLOSED
+                        };
+                        if requested_read & mask != 0 {
+                            interests |= syscall::HANDLE_SIGNAL_READABLE;
+                        }
+                        if requested_write & mask != 0 {
+                            interests |= syscall::HANDLE_SIGNAL_WRITABLE;
+                        }
+                        items[item_count] = syscall::HandleWaitItem {
+                            handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+                            minimum_write_bytes: 0,
+                            interests,
+                            observed: 0,
+                        };
+                        item_fds[item_count] = fd;
+                        item_count += 1;
+                    }
+                    FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite => {
+                        ready_read |= requested_read & mask;
+                        ready_write |= requested_write & mask;
+                    }
+                    _ => {
+                        ready_read |= requested_read & mask;
                         ready_write |= requested_write & mask;
                     }
                 }
-                FdKind::ObjectStreamWrite if requested_write & mask != 0 => {
-                    items[item_count] = syscall::HandleWaitItem {
-                        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-                        minimum_write_bytes: 0,
-                        interests: syscall::HANDLE_SIGNAL_WRITABLE
-                            | syscall::HANDLE_SIGNAL_PEER_CLOSED,
-                        observed: 0,
-                    };
-                    item_fds[item_count] = fd;
-                    item_count += 1;
-                    if requested_read & mask != 0 {
-                        ready_read |= requested_read & mask;
-                    }
-                }
-                FdKind::ObjectPty | FdKind::ObjectSocket | FdKind::ObjectDatagram => {
-                    let mut interests = if entry.handle.kind.is_socket() {
-                        0
-                    } else {
-                        syscall::HANDLE_SIGNAL_PEER_CLOSED
-                    };
-                    if requested_read & mask != 0 {
-                        interests |= syscall::HANDLE_SIGNAL_READABLE;
-                    }
-                    if requested_write & mask != 0 {
-                        interests |= syscall::HANDLE_SIGNAL_WRITABLE;
-                    }
-                    items[item_count] = syscall::HandleWaitItem {
-                        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-                        minimum_write_bytes: 0,
-                        interests,
-                        observed: 0,
-                    };
-                    item_fds[item_count] = fd;
-                    item_count += 1;
-                }
-                FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite => {
-                    ready_read |= requested_read & mask;
-                    ready_write |= requested_write & mask;
-                }
-                _ => {
-                    ready_read |= requested_read & mask;
-                    ready_write |= requested_write & mask;
-                }
             }
-        }
 
-        let deadline = if ready_read | ready_write | ready_except != 0 {
-            syscall::HANDLE_WAIT_POLL
-        } else {
-            requested_deadline
-        };
-        wait_for_multiplex(&mut items[..item_count], deadline, control, caught)?;
-        for index in 0..item_count {
-            let fd = item_fds[index];
-            let mask = 1u64 << fd;
-            let observed = items[index].observed;
-            if observed & (syscall::HANDLE_SIGNAL_READABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED)
-                != 0
-            {
-                ready_read |= requested_read & mask;
-            }
-            if observed & (syscall::HANDLE_SIGNAL_WRITABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED)
-                != 0
-            {
-                ready_write |= requested_write & mask;
-            }
-        }
-        if !readfds.is_null() {
-            unsafe { readfds.write(FdSet { bits: [ready_read] }) };
-        }
-        if !writefds.is_null() {
-            unsafe {
-                writefds.write(FdSet {
-                    bits: [ready_write],
-                })
+            let deadline = if ready_read | ready_write | ready_except != 0 {
+                syscall::HANDLE_WAIT_POLL
+            } else {
+                requested_deadline
             };
-        }
-        if !exceptfds.is_null() {
-            unsafe {
-                exceptfds.write(FdSet {
-                    bits: [ready_except],
-                })
-            };
-        }
-        Ok(mochios_posix_client::multiplex::select_ready_count(
-            ready_read,
-            ready_write,
-            ready_except,
-        ) as c_int)
-    })();
-    result
+            wait_for_multiplex(&mut items[..item_count], deadline, control, caught)?;
+            for index in 0..item_count {
+                let fd = item_fds[index];
+                let mask = 1u64 << fd;
+                let observed = items[index].observed;
+                if observed & (syscall::HANDLE_SIGNAL_READABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED)
+                    != 0
+                {
+                    ready_read |= requested_read & mask;
+                }
+                if observed & (syscall::HANDLE_SIGNAL_WRITABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED)
+                    != 0
+                {
+                    ready_write |= requested_write & mask;
+                }
+            }
+            if !readfds.is_null() {
+                unsafe { readfds.write(FdSet { bits: [ready_read] }) };
+            }
+            if !writefds.is_null() {
+                unsafe {
+                    writefds.write(FdSet {
+                        bits: [ready_write],
+                    })
+                };
+            }
+            if !exceptfds.is_null() {
+                unsafe {
+                    exceptfds.write(FdSet {
+                        bits: [ready_except],
+                    })
+                };
+            }
+            Ok(mochios_posix_client::multiplex::select_ready_count(
+                ready_read,
+                ready_write,
+                ready_except,
+            ) as c_int)
+        },
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -5056,143 +5060,153 @@ fn poll_with_deadline(
     control: &ThreadControl,
     caught: u64,
 ) -> Result<c_int, c_int> {
-    let result = (|| {
-        let count = usize::try_from(nfds).map_err(|_| EINVAL)?;
-        if count > MAX_FDS {
-            return Err(EINVAL);
-        }
-        if count != 0 && fds.is_null() {
-            return Err(EFAULT);
-        }
-
-        const READ_EVENTS: i16 = mochios_posix_client::multiplex::NORMAL_READ_EVENTS;
-        const WRITE_EVENTS: i16 = mochios_posix_client::multiplex::NORMAL_WRITE_EVENTS;
-        let mut pollfds = [PollFd::default(); MAX_FDS];
-        let mut items = [syscall::HandleWaitItem::default(); MAX_FDS];
-        let mut item_pollfds = [0usize; MAX_FDS];
-        let mut item_kinds = [FdKind::Unused; MAX_FDS];
-        let mut leases = [const { None }; MAX_FDS];
-        let mut item_count = 0usize;
-        let mut immediately_ready = false;
-        for index in 0..count {
-            pollfds[index] = unsafe { fds.add(index).read() };
-            pollfds[index].revents = 0;
-            let fd = pollfds[index].fd;
-            if fd < 0 {
-                continue;
+    let count = usize::try_from(nfds).map_err(|_| EINVAL)?;
+    io_resources::with_initialized(
+        || Ok(([const { None }; MAX_FDS], [PollFd::default(); MAX_FDS])),
+        |(_, pollfds)| {
+            if count > MAX_FDS {
+                return Err(EINVAL);
             }
-            let Ok(entry) = with_fd_entry(fd) else {
-                pollfds[index].revents = POLLNVAL;
-                immediately_ready = true;
-                continue;
-            };
-            leases[index] = Some(entry);
-            let entry = leases[index].as_ref().unwrap();
-            match entry.handle.kind {
-                FdKind::ObjectSocket | FdKind::ObjectDatagram => {
-                    pollfds[index].revents = socket::poll_events(**entry, pollfds[index].events)?;
-                    immediately_ready |= pollfds[index].revents != 0;
-                    let mut interests = syscall::HANDLE_SIGNAL_PEER_CLOSED;
-                    if pollfds[index].events & READ_EVENTS != 0 {
-                        interests |= syscall::HANDLE_SIGNAL_READABLE;
-                    }
-                    if pollfds[index].events & WRITE_EVENTS != 0 {
-                        interests |= syscall::HANDLE_SIGNAL_WRITABLE;
-                    }
-                    items[item_count] = syscall::HandleWaitItem {
-                        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-                        minimum_write_bytes: 0,
-                        interests,
-                        observed: 0,
-                    };
-                    item_pollfds[item_count] = index;
-                    item_kinds[item_count] = entry.handle.kind;
-                    item_count += 1;
+            if count != 0 && fds.is_null() {
+                return Err(EFAULT);
+            }
+            // Capture the entire caller list before any provider may invoke C.
+            for index in 0..count {
+                pollfds[index] = unsafe { fds.add(index).read() };
+            }
+            Ok(())
+        },
+        |(leases, pollfds)| {
+            const READ_EVENTS: i16 = mochios_posix_client::multiplex::NORMAL_READ_EVENTS;
+            const WRITE_EVENTS: i16 = mochios_posix_client::multiplex::NORMAL_WRITE_EVENTS;
+            let mut items = [syscall::HandleWaitItem::default(); MAX_FDS];
+            let mut item_pollfds = [0usize; MAX_FDS];
+            let mut item_kinds = [FdKind::Unused; MAX_FDS];
+            let mut item_count = 0usize;
+            let mut immediately_ready = false;
+            for index in 0..count {
+                pollfds[index].revents = 0;
+                let fd = pollfds[index].fd;
+                if fd < 0 {
+                    continue;
                 }
-                FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite | FdKind::ObjectPty => {
-                    let mut interests = syscall::HANDLE_SIGNAL_PEER_CLOSED;
-                    if matches!(
-                        entry.handle.kind,
-                        FdKind::ObjectStreamRead | FdKind::ObjectPty
-                    ) && pollfds[index].events & READ_EVENTS != 0
-                    {
-                        interests |= syscall::HANDLE_SIGNAL_READABLE;
-                    }
-                    if matches!(
-                        entry.handle.kind,
-                        FdKind::ObjectStreamWrite | FdKind::ObjectPty
-                    ) && pollfds[index].events & WRITE_EVENTS != 0
-                    {
-                        interests |= syscall::HANDLE_SIGNAL_WRITABLE;
-                    }
-                    items[item_count] = syscall::HandleWaitItem {
-                        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-                        minimum_write_bytes: 0,
-                        interests,
-                        observed: 0,
-                    };
-                    item_pollfds[item_count] = index;
-                    item_kinds[item_count] = entry.handle.kind;
-                    item_count += 1;
-                }
-                _ => {
-                    pollfds[index].revents =
-                        mochios_posix_client::multiplex::immediate_file_events(pollfds[index].events);
-                    immediately_ready |= pollfds[index].revents != 0;
-                }
-            }
-        }
-
-        let wait_deadline = if immediately_ready {
-            syscall::HANDLE_WAIT_POLL
-        } else {
-            deadline
-        };
-        wait_for_multiplex(&mut items[..item_count], wait_deadline, control, caught)?;
-        for item_index in 0..item_count {
-            let poll_index = item_pollfds[item_index];
-            if item_kinds[item_index].is_socket() {
-                pollfds[poll_index].revents = socket::poll_events(
-                    **leases[poll_index].as_ref().unwrap(),
-                    pollfds[poll_index].events,
-                )?;
-                continue;
-            }
-            let observed = items[item_index].observed;
-            if observed & syscall::HANDLE_SIGNAL_READABLE != 0 {
-                pollfds[poll_index].revents |= pollfds[poll_index].events & READ_EVENTS;
-            }
-            if observed & syscall::HANDLE_SIGNAL_WRITABLE != 0 {
-                pollfds[poll_index].revents |= pollfds[poll_index].events & WRITE_EVENTS;
-            }
-            if observed & syscall::HANDLE_SIGNAL_PEER_CLOSED != 0 {
-                match item_kinds[item_index] {
-                    FdKind::ObjectStreamRead => {
-                        pollfds[poll_index].revents |= POLLHUP;
-                        pollfds[poll_index].revents |= pollfds[poll_index].events & READ_EVENTS;
-                    }
-                    FdKind::ObjectStreamWrite => pollfds[poll_index].revents |= POLLERR,
-                    FdKind::ObjectPty => {
-                        pollfds[poll_index].revents |= POLLHUP;
-                        pollfds[poll_index].revents |= pollfds[poll_index].events & READ_EVENTS;
-                        if pollfds[poll_index].events & WRITE_EVENTS != 0 {
-                            pollfds[poll_index].revents |= POLLERR;
+                let native = defer_native_delivery();
+                let Ok(entry) = with_fd_entry(fd) else {
+                    pollfds[index].revents = POLLNVAL;
+                    immediately_ready = true;
+                    continue;
+                };
+                leases[index] = Some(entry);
+                drop(native);
+                let entry = leases[index].as_ref().unwrap();
+                match entry.handle.kind {
+                    FdKind::ObjectSocket | FdKind::ObjectDatagram => {
+                        pollfds[index].revents =
+                            socket::poll_events(**entry, pollfds[index].events)?;
+                        immediately_ready |= pollfds[index].revents != 0;
+                        let mut interests = syscall::HANDLE_SIGNAL_PEER_CLOSED;
+                        if pollfds[index].events & READ_EVENTS != 0 {
+                            interests |= syscall::HANDLE_SIGNAL_READABLE;
                         }
+                        if pollfds[index].events & WRITE_EVENTS != 0 {
+                            interests |= syscall::HANDLE_SIGNAL_WRITABLE;
+                        }
+                        items[item_count] = syscall::HandleWaitItem {
+                            handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+                            minimum_write_bytes: 0,
+                            interests,
+                            observed: 0,
+                        };
+                        item_pollfds[item_count] = index;
+                        item_kinds[item_count] = entry.handle.kind;
+                        item_count += 1;
                     }
-                    _ => {}
+                    FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite | FdKind::ObjectPty => {
+                        let mut interests = syscall::HANDLE_SIGNAL_PEER_CLOSED;
+                        if matches!(
+                            entry.handle.kind,
+                            FdKind::ObjectStreamRead | FdKind::ObjectPty
+                        ) && pollfds[index].events & READ_EVENTS != 0
+                        {
+                            interests |= syscall::HANDLE_SIGNAL_READABLE;
+                        }
+                        if matches!(
+                            entry.handle.kind,
+                            FdKind::ObjectStreamWrite | FdKind::ObjectPty
+                        ) && pollfds[index].events & WRITE_EVENTS != 0
+                        {
+                            interests |= syscall::HANDLE_SIGNAL_WRITABLE;
+                        }
+                        items[item_count] = syscall::HandleWaitItem {
+                            handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
+                            minimum_write_bytes: 0,
+                            interests,
+                            observed: 0,
+                        };
+                        item_pollfds[item_count] = index;
+                        item_kinds[item_count] = entry.handle.kind;
+                        item_count += 1;
+                    }
+                    _ => {
+                        pollfds[index].revents =
+                            mochios_posix_client::multiplex::immediate_file_events(
+                                pollfds[index].events,
+                            );
+                        immediately_ready |= pollfds[index].revents != 0;
+                    }
                 }
             }
-        }
-        let mut ready = 0usize;
-        for index in 0..count {
-            if pollfds[index].revents != 0 {
-                ready += 1;
+
+            let wait_deadline = if immediately_ready {
+                syscall::HANDLE_WAIT_POLL
+            } else {
+                deadline
+            };
+            wait_for_multiplex(&mut items[..item_count], wait_deadline, control, caught)?;
+            for item_index in 0..item_count {
+                let poll_index = item_pollfds[item_index];
+                if item_kinds[item_index].is_socket() {
+                    pollfds[poll_index].revents = socket::poll_events(
+                        **leases[poll_index].as_ref().unwrap(),
+                        pollfds[poll_index].events,
+                    )?;
+                    continue;
+                }
+                let observed = items[item_index].observed;
+                if observed & syscall::HANDLE_SIGNAL_READABLE != 0 {
+                    pollfds[poll_index].revents |= pollfds[poll_index].events & READ_EVENTS;
+                }
+                if observed & syscall::HANDLE_SIGNAL_WRITABLE != 0 {
+                    pollfds[poll_index].revents |= pollfds[poll_index].events & WRITE_EVENTS;
+                }
+                if observed & syscall::HANDLE_SIGNAL_PEER_CLOSED != 0 {
+                    match item_kinds[item_index] {
+                        FdKind::ObjectStreamRead => {
+                            pollfds[poll_index].revents |= POLLHUP;
+                            pollfds[poll_index].revents |= pollfds[poll_index].events & READ_EVENTS;
+                        }
+                        FdKind::ObjectStreamWrite => pollfds[poll_index].revents |= POLLERR,
+                        FdKind::ObjectPty => {
+                            pollfds[poll_index].revents |= POLLHUP;
+                            pollfds[poll_index].revents |= pollfds[poll_index].events & READ_EVENTS;
+                            if pollfds[poll_index].events & WRITE_EVENTS != 0 {
+                                pollfds[poll_index].revents |= POLLERR;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
-            unsafe { fds.add(index).write(pollfds[index]) };
-        }
-        c_int::try_from(ready).map_err(|_| EOVERFLOW)
-    })();
-    result
+            let mut ready = 0usize;
+            for index in 0..count {
+                if pollfds[index].revents != 0 {
+                    ready += 1;
+                }
+                unsafe { fds.add(index).write(pollfds[index]) };
+            }
+            c_int::try_from(ready).map_err(|_| EOVERFLOW)
+        },
+    )
 }
 
 fn timespec_deadline(timeout: *const NewlibTimespec) -> Result<u64, c_int> {
