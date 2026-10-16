@@ -8,21 +8,7 @@ pub(super) fn capture(
     path: *const c_char,
     output: &mut [u8; posix_protocol::MAX_PATH_LEN],
 ) -> Result<usize, c_int> {
-    if path.is_null() {
-        return Err(EFAULT);
-    }
-    for length in 0..=output.len() {
-        let address = (path as usize).checked_add(length).ok_or(EFAULT)?;
-        let byte = unsafe { (address as *const u8).read() };
-        if byte == 0 {
-            return if length == 0 { Err(ENOENT) } else { Ok(length) };
-        }
-        if length == output.len() {
-            return Err(ENAMETOOLONG);
-        }
-        output[length] = byte;
-    }
-    Err(ENAMETOOLONG)
+    user_copy::capture(path, output)
 }
 
 struct Resources {
@@ -295,10 +281,10 @@ pub(super) fn readlink(
             .readlink_at(base, path, &mut target[..capacity])
             .map_err(map_posix_client_error)?;
         let bytes = target.get(..read).filter(|_| read <= capacity).ok_or(EIO)?;
-        // Keep the pathname/base scope alive through copyout, so a synchronous
-        // fault followed by a C nonlocal exit still retires its directory pin.
+        // Keep the pathname/base scope alive through faultable copyout. Both an
+        // EFAULT return and an asynchronous nonlocal exit retire its pin.
         // readlink copies a prefix, never a trailing NUL or the advertised size.
-        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), output.cast::<u8>(), read) };
+        user_copy::write(output.cast(), bytes)?;
         isize::try_from(read).map_err(|_| EIO)
     })
 }

@@ -9,6 +9,7 @@ mod file_mutation;
 mod file_metadata;
 mod directory_io;
 mod path_io;
+mod user_copy;
 mod io_resources;
 mod mapping_io;
 mod mapping_backing;

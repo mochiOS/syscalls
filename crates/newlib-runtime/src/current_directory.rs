@@ -22,9 +22,6 @@ pub(super) fn copy(buffer: *mut c_char, size: usize) -> Result<*mut c_char, c_in
     }
     // Only bounded response bytes are copied, not a slice formed from an
     // untrusted size_t. All fallible service/shape/size checks precede writes.
-    unsafe {
-        ptr::copy_nonoverlapping(path.as_ptr(), buffer.cast::<u8>(), length);
-        buffer.add(length).write(0);
-    }
+    user_copy::write_c_string(buffer.cast(), path)?;
     Ok(buffer)
 }

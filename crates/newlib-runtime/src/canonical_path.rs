@@ -39,10 +39,7 @@ pub(super) fn resolve(path: *const c_char, output: *mut c_char) -> Result<*mut c
         if (output as usize).checked_add(needed).is_none() {
             return Err(EFAULT);
         }
-        unsafe {
-            ptr::copy_nonoverlapping(canonical.as_ptr(), output.cast::<u8>(), length);
-            output.add(length).write(0);
-        }
+        user_copy::write_c_string(output.cast(), canonical)?;
         return Ok(output);
     }
     // Allocate only after pathname RPC has completed and its scope retired.
