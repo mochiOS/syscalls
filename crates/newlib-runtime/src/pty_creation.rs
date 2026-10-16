@@ -1,6 +1,6 @@
 //! Configure an owned PTY pair before publishing either local descriptor.
-use super::*;
 use super::fd_creation::{PendingHandles, PendingPair};
+use super::*;
 
 pub(super) fn create(
     master: *mut c_int,
@@ -45,13 +45,13 @@ pub(super) fn create(
             ))
         },
         |(_, _, captured_attributes, captured_window)| {
-            // A synchronous fault can escape this copy. Both Handles and the
-            // reserved slots are already owned by the active resource scope.
+            // Both Handles and reserved slots remain rollback-owned while
+            // faultable input is copied, including inside an active upcall.
             if !attributes.is_null() {
-                *captured_attributes = Some(unsafe { attributes.read_unaligned() });
+                *captured_attributes = Some(terminal_memory::read_attributes(attributes)?);
             }
             if !window.is_null() {
-                *captured_window = Some(unsafe { window.read_unaligned() });
+                *captured_window = Some(terminal_memory::read_window(window)?);
             }
             Ok(())
         },
@@ -71,10 +71,10 @@ pub(super) fn create(
                 set_terminal_window_size(entries[1], *window)?;
             }
             let _native = defer_native_delivery();
-            unsafe {
-                master.write(pending.0[0].descriptor());
-                slave.write(pending.0[1].descriptor());
-            }
+            // An earlier output may have been copied when a later one fails,
+            // but neither descriptor is installed until both copies succeed.
+            user_copy::write(master.cast(), &pending.0[0].descriptor().to_ne_bytes())?;
+            user_copy::write(slave.cast(), &pending.0[1].descriptor().to_ne_bytes())?;
             state()
                 .fds
                 .commit_pair([&pending.0[0], &pending.0[1]], entries)
