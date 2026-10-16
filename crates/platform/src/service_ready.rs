@@ -304,7 +304,7 @@ pub fn notify_handle(
 fn send_when_ready(endpoint: u64, message: &[u8]) -> super::syscall::SysResult<u64> {
     loop {
         match super::ipc::send(endpoint, message) {
-            Err(error) if error.raw() == super::syscall::EAGAIN as i64 => {
+            Err(error) if error.native_error() == Some(super::syscall::NativeError::NotReady) => {
                 super::thread::yield_now()
             }
             result => return result,
@@ -320,7 +320,7 @@ fn send_handles_when_ready(
 ) -> super::syscall::SysResult<u64> {
     loop {
         match super::ipc::send_object_handles(endpoint, message, handles) {
-            Err(error) if error.raw() == super::syscall::EAGAIN as i64 => {
+            Err(error) if error.native_error() == Some(super::syscall::NativeError::NotReady) => {
                 super::thread::yield_now()
             }
             result => return result,
