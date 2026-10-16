@@ -816,27 +816,32 @@ unsafe fn send_record_to(
     if address.is_null() {
         return None;
     }
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        if !entry.handle.kind.is_socket() {
-            return Err(mochios_posix_client::newlib_errno::from_status(-88));
-        }
-        if !is_datagram(*entry)? {
-            return Ok(None);
-        }
-        if address_length as usize > mochios_posix_client::socket::MAX_SOCKADDR_LEN {
-            return Err(EINVAL);
-        }
-        let bytes =
-            unsafe { core::slice::from_raw_parts(address.cast::<u8>(), address_length as usize) };
-        let address = mochios_posix_client::socket::decode_sockaddr(bytes)
-            .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
-        if !matches!(address, wire::Address::UnixPath(_)) {
-            return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
-        }
-        super::socket_record::send_to(*entry, buffer as u64, length, flags, address)
-            .map(|record| Some(record.count))
-    })();
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            if !entry.handle.kind.is_socket() {
+                return Err(mochios_posix_client::newlib_errno::from_status(-88));
+            }
+            if !is_datagram(**entry)? {
+                return Ok(None);
+            }
+            if address_length as usize > mochios_posix_client::socket::MAX_SOCKADDR_LEN {
+                return Err(EINVAL);
+            }
+            let bytes = unsafe {
+                core::slice::from_raw_parts(address.cast::<u8>(), address_length as usize)
+            };
+            let address =
+                mochios_posix_client::socket::decode_sockaddr(bytes).map_err(|error| {
+                    mochios_posix_client::newlib_errno::from_status(i64::from(error))
+                })?;
+            if !matches!(address, wire::Address::UnixPath(_)) {
+                return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
+            }
+            super::socket_record::send_to(**entry, buffer as u64, length, flags, address)
+                .map(|record| Some(record.count))
+        },
+    );
     match result {
         Ok(None) => None,
         Ok(Some(count)) => Some(count),
@@ -852,37 +857,39 @@ unsafe fn receive_record_address(
     address: *mut c_void,
     address_length: *mut u32,
 ) -> Option<isize> {
-    let result = (|| {
-        let entry = with_fd_entry(fd)?;
-        if !entry.handle.kind.is_socket() || !is_datagram(*entry)? {
-            return Ok(None);
-        }
-        let capacity = if address.is_null() {
-            0
-        } else {
-            if address_length.is_null() {
-                return Err(EFAULT);
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| {
+            if !entry.handle.kind.is_socket() || !is_datagram(**entry)? {
+                return Ok(None);
             }
-            unsafe { address_length.read() as usize }
-        };
-        let record = super::socket_record::io(*entry, buffer as u64, length, flags, false)?;
-        if !address.is_null() {
-            let source =
-                wire::Address::decode(&record.source[..record.source_length]).map_err(|_| EIO)?;
-            let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
-            let required = mochios_posix_client::socket::encode_sockaddr(source, &mut native)
-                .map_err(|_| EIO)?;
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    native.as_ptr(),
-                    address.cast::<u8>(),
-                    capacity.min(required),
-                );
-                address_length.write(required as u32);
+            let capacity = if address.is_null() {
+                0
+            } else {
+                if address_length.is_null() {
+                    return Err(EFAULT);
+                }
+                unsafe { address_length.read() as usize }
+            };
+            let record = super::socket_record::io(**entry, buffer as u64, length, flags, false)?;
+            if !address.is_null() {
+                let source = wire::Address::decode(&record.source[..record.source_length])
+                    .map_err(|_| EIO)?;
+                let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
+                let required = mochios_posix_client::socket::encode_sockaddr(source, &mut native)
+                    .map_err(|_| EIO)?;
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        native.as_ptr(),
+                        address.cast::<u8>(),
+                        capacity.min(required),
+                    );
+                    address_length.write(required as u32);
+                }
             }
-        }
-        Ok(Some(record.count))
-    })();
+            Ok(Some(record.count))
+        },
+    );
     match result {
         Ok(None) => None,
         Ok(Some(count)) => Some(count),
