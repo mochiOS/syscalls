@@ -9,6 +9,7 @@ mod file_mutation;
 mod file_metadata;
 mod stat_output;
 mod terminal_memory;
+mod terminal_attributes;
 mod socket_memory;
 mod socket_receive_address;
 mod time_memory;
@@ -6237,7 +6238,7 @@ pub extern "C" fn cfgetispeed(termios: *const NewlibTermios) -> u32 {
     if termios.is_null() {
         return 0;
     }
-    unsafe { (*termios).c_ispeed }
+    result_with_errno(terminal_attributes::speed(termios, true), 0)
 }
 
 #[unsafe(no_mangle)]
@@ -6245,66 +6246,22 @@ pub extern "C" fn cfgetospeed(termios: *const NewlibTermios) -> u32 {
     if termios.is_null() {
         return 0;
     }
-    unsafe { (*termios).c_ospeed }
-}
-
-fn valid_terminal_speed(speed: u32) -> bool {
-    matches!(
-        speed,
-        0 | 50
-            | 75
-            | 110
-            | 134
-            | 150
-            | 200
-            | 300
-            | 600
-            | 1_200
-            | 1_800
-            | 2_400
-            | 4_800
-            | 9_600
-            | 19_200
-            | 38_400
-            | 57_600
-            | 115_200
-    )
+    result_with_errno(terminal_attributes::speed(termios, false), 0)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn cfsetispeed(termios: *mut NewlibTermios, speed: u32) -> c_int {
-    if termios.is_null() {
-        set_errno(EFAULT);
-        return -1;
-    }
-    if !valid_terminal_speed(speed) {
-        set_errno(EINVAL);
-        return -1;
-    }
-    unsafe { (*termios).c_ispeed = speed };
-    0
+    result_with_errno(terminal_attributes::set_speed(termios, speed, true, false), -1)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn cfsetospeed(termios: *mut NewlibTermios, speed: u32) -> c_int {
-    if termios.is_null() {
-        set_errno(EFAULT);
-        return -1;
-    }
-    if !valid_terminal_speed(speed) {
-        set_errno(EINVAL);
-        return -1;
-    }
-    unsafe { (*termios).c_ospeed = speed };
-    0
+    result_with_errno(terminal_attributes::set_speed(termios, speed, false, true), -1)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn cfsetspeed(termios: *mut NewlibTermios, speed: u32) -> c_int {
-    if cfsetispeed(termios, speed) != 0 {
-        return -1;
-    }
-    cfsetospeed(termios, speed)
+    result_with_errno(terminal_attributes::set_speed(termios, speed, true, true), -1)
 }
 
 #[unsafe(no_mangle)]
@@ -6312,25 +6269,9 @@ pub extern "C" fn cfmakeraw(termios: *mut NewlibTermios) {
     if termios.is_null() {
         return;
     }
-    let termios = unsafe { &mut *termios };
-    termios.c_iflag &= !(posix_protocol::TERMINAL_IFLAG_IGNBRK
-        | posix_protocol::TERMINAL_IFLAG_BRKINT
-        | posix_protocol::TERMINAL_IFLAG_PARMRK
-        | posix_protocol::TERMINAL_IFLAG_ISTRIP
-        | posix_protocol::TERMINAL_IFLAG_INLCR
-        | posix_protocol::TERMINAL_IFLAG_IGNCR
-        | posix_protocol::TERMINAL_IFLAG_ICRNL
-        | posix_protocol::TERMINAL_IFLAG_IXON);
-    termios.c_oflag &= !posix_protocol::TERMINAL_OFLAG_OPOST;
-    termios.c_lflag &= !(posix_protocol::TERMINAL_LFLAG_ECHO
-        | posix_protocol::TERMINAL_LFLAG_ECHONL
-        | posix_protocol::TERMINAL_LFLAG_ICANON
-        | posix_protocol::TERMINAL_LFLAG_ISIG
-        | posix_protocol::TERMINAL_LFLAG_IEXTEN);
-    termios.c_cflag &= !((3 << 4) | (1 << 8));
-    termios.c_cflag |= posix_protocol::TERMINAL_CFLAG_CS8;
-    termios.c_cc[posix_protocol::TERMINAL_CC_VMIN] = 1;
-    termios.c_cc[posix_protocol::TERMINAL_CC_VTIME] = 0;
+    if let Err(error) = terminal_attributes::make_raw(termios) {
+        set_errno(error);
+    }
 }
 
 #[unsafe(no_mangle)]
