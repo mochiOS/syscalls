@@ -240,6 +240,10 @@ pub const ACCESS_AT_FLAGS_ALL: u32 = ACCESS_AT_READ
 /// `OP_READDIR`.
 pub const MAX_IO_LEN: usize = MAX_MESSAGE_LEN - HEADER_LEN;
 pub const DIRENT_HEADER_LEN: usize = 16;
+/// A cursor-bearing record extends the legacy header with a provider-defined
+/// continuation position. This is not a byte offset or a process-local FD.
+pub const CURSOR_DIRENT_HEADER_LEN: usize = 24;
+const DIRENT_HAS_CURSOR: u16 = 1;
 pub const METADATA_LEN: usize = 8;
 pub const NODE_STATUS_LEN: usize = 112;
 pub const MAX_NAME_LEN: usize = 255;
@@ -277,6 +281,7 @@ pub struct DirEntryHeader {
     pub node_id: u64,
     pub kind: u32,
     pub name_len: u16,
+    pub next_position: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -557,18 +562,52 @@ pub fn encode_dir_entry(
     name: &[u8],
     output: &mut [u8],
 ) -> Result<usize, ProtocolError> {
+    encode_dir_entry_record(node_id, kind, name, None, output)
+}
+
+/// Encode the exact continuation token selected by the directory provider.
+/// Hidden entries may make successive tokens non-consecutive. Clients must
+/// not derive a token by counting the visible records or their byte lengths.
+/// Readers must support the cursor extension before a producer enables it;
+/// `encode_dir_entry` continues to emit the unchanged legacy format.
+pub fn encode_cursor_dir_entry(
+    node_id: u64,
+    kind: u32,
+    name: &[u8],
+    next_position: u64,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    encode_dir_entry_record(node_id, kind, name, Some(next_position), output)
+}
+
+fn encode_dir_entry_record(
+    node_id: u64,
+    kind: u32,
+    name: &[u8],
+    next_position: Option<u64>,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
     if name.is_empty() || name.len() > MAX_NAME_LEN || name.contains(&0) || name.contains(&b'/') {
         return Err(ProtocolError::InvalidLength);
     }
-    let total = DIRENT_HEADER_LEN + name.len();
+    let header_len = if next_position.is_some() {
+        CURSOR_DIRENT_HEADER_LEN
+    } else {
+        DIRENT_HEADER_LEN
+    };
+    let total = header_len + name.len();
     if output.len() < total {
         return Err(ProtocolError::BufferTooSmall);
     }
-    output[..DIRENT_HEADER_LEN].fill(0);
+    output[..header_len].fill(0);
     put_u64(output, 0, node_id);
     put_u32(output, 8, kind);
     put_u16(output, 12, name.len() as u16);
-    output[DIRENT_HEADER_LEN..total].copy_from_slice(name);
+    if let Some(position) = next_position {
+        put_u16(output, 14, DIRENT_HAS_CURSOR);
+        put_u64(output, DIRENT_HEADER_LEN, position);
+    }
+    output[header_len..total].copy_from_slice(name);
     Ok(total)
 }
 
@@ -576,15 +615,20 @@ pub fn decode_dir_entry(input: &[u8]) -> Result<(DirEntryHeader, &[u8], usize), 
     if input.len() < DIRENT_HEADER_LEN {
         return Err(ProtocolError::BufferTooSmall);
     }
+    let (header_len, has_cursor) = match get_u16(input, 14) {
+        0 => (DIRENT_HEADER_LEN, false),
+        DIRENT_HAS_CURSOR => (CURSOR_DIRENT_HEADER_LEN, true),
+        _ => return Err(ProtocolError::UnsupportedVersion),
+    };
     let name_len = get_u16(input, 12);
     if name_len == 0 || usize::from(name_len) > MAX_NAME_LEN {
         return Err(ProtocolError::InvalidLength);
     }
-    let total = DIRENT_HEADER_LEN
+    let total = header_len
         .checked_add(usize::from(name_len))
         .ok_or(ProtocolError::InvalidLength)?;
     let name = input
-        .get(DIRENT_HEADER_LEN..total)
+        .get(header_len..total)
         .ok_or(ProtocolError::BufferTooSmall)?;
     if name.contains(&0) || name.contains(&b'/') {
         return Err(ProtocolError::InvalidLength);
@@ -594,6 +638,11 @@ pub fn decode_dir_entry(input: &[u8]) -> Result<(DirEntryHeader, &[u8], usize), 
             node_id: get_u64(input, 0),
             kind: get_u32(input, 8),
             name_len,
+            next_position: if has_cursor {
+                Some(get_u64(input, DIRENT_HEADER_LEN))
+            } else {
+                None
+            },
         },
         name,
         total,

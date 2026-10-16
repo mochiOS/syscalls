@@ -7,6 +7,8 @@ pub struct DirectoryEntry<'a> {
     pub object_id: u64,
     pub kind: u32,
     pub name: &'a str,
+    /// Provider-defined continuation position, absent on legacy records.
+    pub next_position: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +54,7 @@ impl<'a> Iterator for DirectoryEntries<'a> {
             object_id: header.node_id,
             kind: header.kind,
             name,
+            next_position: header.next_position,
         }))
     }
 }
