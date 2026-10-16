@@ -5691,6 +5691,11 @@ pub extern "C" fn opendir(path: *const c_char) -> *mut c_void {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn fdopendir(fd: c_int) -> *mut c_void {
+    result_with_errno(directory_io::adopt(fd), ptr::null_mut())
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn dirfd(dirp: *mut c_void) -> c_int {
     if dirp.is_null() {
         set_errno(EFAULT);
