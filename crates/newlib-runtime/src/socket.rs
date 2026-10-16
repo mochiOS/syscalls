@@ -675,8 +675,10 @@ fn message_io(
     flags: c_int,
     sending: bool,
 ) -> Result<isize, c_int> {
-    let entry = with_fd_entry(fd)?;
-    message_entry(*entry, buffer, length, flags, sending)
+    io_resources::with(
+        || with_fd_entry(fd),
+        |entry| message_entry(**entry, buffer, length, flags, sending),
+    )
 }
 
 pub(super) fn is_datagram(entry: FdEntry) -> Result<bool, c_int> {
