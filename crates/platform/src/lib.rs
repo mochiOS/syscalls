@@ -367,7 +367,9 @@ pub mod thread {
         guard: &syscall::HandleWaitGuard,
     ) -> SysResult<usize> {
         if items.len() > syscall::HANDLE_WAIT_MANY_MAX_ITEMS {
-            return Err(syscall::SysError::from_raw(syscall::EINVAL as i64));
+            return Err(syscall::SysError::from_raw(
+                syscall::NativeError::InvalidArgument.into_raw() as i64,
+            ));
         }
         let index = syscall::call4(
             syscall::SyscallNumber::HandleWaitManyGuarded,
@@ -379,7 +381,9 @@ pub mod thread {
         usize::try_from(index)
             .ok()
             .filter(|index| *index < items.len())
-            .ok_or_else(|| syscall::SysError::from_raw(syscall::EIO as i64))
+            .ok_or_else(|| {
+                syscall::SysError::from_raw(syscall::NativeError::BackingFailure.into_raw() as i64)
+            })
     }
 
     pub fn exit(code: u64) -> ! {
@@ -554,7 +558,9 @@ pub mod process {
         deadline_nanoseconds: u64,
     ) -> SysResult<usize> {
         if items.len() > syscall::HANDLE_WAIT_MANY_MAX_ITEMS {
-            return Err(syscall::SysError::from_raw(syscall::EINVAL as i64));
+            return Err(syscall::SysError::from_raw(
+                syscall::NativeError::InvalidArgument.into_raw() as i64,
+            ));
         }
         let index = syscall::call3(
             syscall::SyscallNumber::HandleWaitMany,
@@ -565,7 +571,9 @@ pub mod process {
         usize::try_from(index)
             .ok()
             .filter(|index| *index < items.len())
-            .ok_or_else(|| syscall::SysError::from_raw(syscall::EIO as i64))
+            .ok_or_else(|| {
+                syscall::SysError::from_raw(syscall::NativeError::BackingFailure.into_raw() as i64)
+            })
     }
 
     pub fn exit(code: u64) -> ! {
