@@ -36,42 +36,47 @@ pub(super) fn read_timespec(source: *const NewlibTimespec) -> Result<NewlibTimes
     })
 }
 
-fn poll_address(base: usize, index: usize) -> Result<usize, c_int> {
-    base.checked_add(
-        index
-            .checked_mul(core::mem::size_of::<PollFd>())
-            .ok_or(EFAULT)?,
-    )
-    .ok_or(EFAULT)
-}
-
-pub(super) fn read_pollfd(source: *const PollFd, index: usize) -> Result<PollFd, c_int> {
-    let address = poll_address(source as usize, index)?;
-    let mut bytes = [0; core::mem::size_of::<PollFd>()];
-    user_copy::read(address as *const u8, &mut bytes)?;
-    Ok(PollFd {
-        fd: read_field!(bytes, PollFd, fd, c_int),
-        events: read_field!(bytes, PollFd, events, i16),
-        revents: read_field!(bytes, PollFd, revents, i16),
-    })
-}
-
-pub(super) fn write_pollfd(
-    destination: *mut PollFd,
-    index: usize,
-    value: PollFd,
-) -> Result<(), c_int> {
-    let address = poll_address(destination as usize, index)?;
-    let mut bytes = [0; core::mem::size_of::<PollFd>()];
-    macro_rules! field {
-        ($field:ident) => {{
-            let start = core::mem::offset_of!(PollFd, $field);
-            let value = value.$field.to_ne_bytes();
-            bytes[start..start + value.len()].copy_from_slice(&value);
-        }};
+pub(super) fn read_pollfds(source: *const PollFd, output: &mut [PollFd]) -> Result<(), c_int> {
+    if output.len() > MAX_FDS {
+        return Err(EINVAL);
     }
-    field!(fd);
-    field!(events);
-    field!(revents);
-    user_copy::write(address as *mut u8, &bytes)
+    let mut bytes = [0; MAX_FDS * core::mem::size_of::<PollFd>()];
+    let length = output.len() * core::mem::size_of::<PollFd>();
+    // Import the whole bounded list before decoding or acquiring any FD pins.
+    user_copy::read(source.cast(), &mut bytes[..length])?;
+    for (value, bytes) in output
+        .iter_mut()
+        .zip(bytes[..length].chunks_exact(core::mem::size_of::<PollFd>()))
+    {
+        *value = PollFd {
+            fd: read_field!(bytes, PollFd, fd, c_int),
+            events: read_field!(bytes, PollFd, events, i16),
+            revents: read_field!(bytes, PollFd, revents, i16),
+        };
+    }
+    Ok(())
+}
+
+pub(super) fn write_pollfds(destination: *mut PollFd, values: &[PollFd]) -> Result<(), c_int> {
+    if values.len() > MAX_FDS {
+        return Err(EINVAL);
+    }
+    let mut bytes = [0; MAX_FDS * core::mem::size_of::<PollFd>()];
+    let length = values.len() * core::mem::size_of::<PollFd>();
+    for (value, bytes) in values
+        .iter()
+        .zip(bytes[..length].chunks_exact_mut(core::mem::size_of::<PollFd>()))
+    {
+        macro_rules! field {
+            ($field:ident) => {{
+                let start = core::mem::offset_of!(PollFd, $field);
+                let value = value.$field.to_ne_bytes();
+                bytes[start..start + value.len()].copy_from_slice(&value);
+            }};
+        }
+        field!(fd);
+        field!(events);
+        field!(revents);
+    }
+    user_copy::write(destination.cast(), &bytes[..length])
 }

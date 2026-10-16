@@ -5073,9 +5073,7 @@ fn poll_with_deadline(
                 return Err(EFAULT);
             }
             // Capture the entire caller list before any provider may invoke C.
-            for index in 0..count {
-                pollfds[index] = multiplex_memory::read_pollfd(fds, index)?;
-            }
+            multiplex_memory::read_pollfds(fds, &mut pollfds[..count])?;
             Ok(())
         },
         |(leases, pollfds)| {
@@ -5204,8 +5202,8 @@ fn poll_with_deadline(
                 if pollfds[index].revents != 0 {
                     ready += 1;
                 }
-                multiplex_memory::write_pollfd(fds, index, pollfds[index])?;
             }
+            multiplex_memory::write_pollfds(fds, &pollfds[..count])?;
             c_int::try_from(ready).map_err(|_| EOVERFLOW)
         },
     )
