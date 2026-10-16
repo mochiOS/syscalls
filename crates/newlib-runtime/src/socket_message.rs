@@ -51,6 +51,13 @@ struct Incoming {
     count: usize,
 }
 
+struct Receiving {
+    entry: fd_lease::Lease,
+    ram: Option<OwnedHandle>,
+    incoming: Option<Incoming>,
+    receipt: Option<OwnedHandle>,
+}
+
 struct ReceiveCall<'a> {
     entry: FdEntry,
     thread: &'a ThreadControl,
@@ -465,7 +472,7 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
     }
     // As for readv, C metadata must be readable. Snapshot it once so concurrent
     // caller edits cannot change lengths after validation or record consumption.
-    let mut message = unsafe { output.read_unaligned() };
+    let message = unsafe { output.read_unaligned() };
     if message.vector_count > mochios_posix_client::io_vector::IOV_MAX {
         return Err(EINVAL);
     }
@@ -493,18 +500,39 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
         (vectors[index].base.is_null(), vectors[index].length)
     })
     .map_err(vector_errno)?;
-    let entry = with_fd_entry(fd)?;
+    io_resources::with(
+        || {
+            Ok(Receiving {
+                entry: with_fd_entry(fd)?,
+                ram: None,
+                incoming: None,
+                receipt: None,
+            })
+        },
+        |receiving| unsafe { receive_vectors(message, output, flags, vectors, total, receiving) },
+    )
+}
+
+unsafe fn receive_vectors(
+    mut message: Message,
+    output: *mut Message,
+    flags: c_int,
+    vectors: &mut [Vector],
+    total: usize,
+    receiving: &mut Receiving,
+) -> Result<isize, c_int> {
+    let entry = *receiving.entry;
     if !entry.handle.kind.is_socket() {
         return Err(mochios_posix_client::newlib_errno::from_status(-88));
     }
     let wait_all =
-        !socket::is_datagram(*entry)? && flags & MSG_WAITALL != 0 && flags & MSG_PEEK == 0;
+        !socket::is_datagram(entry)? && flags & MSG_WAITALL != 0 && flags & MSG_PEEK == 0;
     let (_, thread) = register_current_thread().ok_or(EAGAIN)?;
     let mut call = ReceiveCall {
-        entry: *entry,
+        entry,
         thread,
         caught: thread.nonrestart_signal_generation.load(Ordering::Acquire),
-        wait: socket::SocketWait::new(*entry, syscall::HANDLE_SIGNAL_READABLE)?,
+        wait: socket::SocketWait::new(entry, syscall::HANDLE_SIGNAL_READABLE)?,
     };
     let original = message;
     let mut copied = 0;
@@ -522,12 +550,22 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
                 } else {
                     flags
                 },
+                receiving,
             )
         };
         let count = match result {
             Ok(count) => count as usize,
-            Err(error) if copied == 0 => return Err(error),
-            Err(_) => break,
+            Err(error) => {
+                // A failed later WAITALL part must not publish its received
+                // FDs when returning an earlier successful byte prefix.
+                let _native = defer_native_delivery();
+                drop(receiving.receipt.take());
+                drop(receiving.incoming.take());
+                if copied == 0 {
+                    return Err(error);
+                }
+                break;
+            }
         };
         copied += count;
         message = part;
@@ -554,7 +592,25 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
             }
         }
     }
+    let _native = defer_native_delivery();
+    // All fallible caller-memory writes precede FD publication. A synchronous
+    // fault may abandon this frame, but the scope still owns every reference.
     unsafe { output.write_unaligned(message) };
+    if let Some(incoming) = receiving.incoming.as_mut() {
+        let entries = core::array::from_fn::<_, { control::MAX_RIGHTS }, _>(|index| {
+            incoming.entries[index].unwrap_or(entry)
+        });
+        let mut descriptors = [0; control::MAX_RIGHTS];
+        state()
+            .fds
+            .commit_group(
+                &incoming.reservation,
+                &entries[..incoming.count],
+                &mut descriptors,
+            )
+            .map_err(|_| EIO)?;
+        incoming.entries.fill(None);
+    }
     Ok(copied as isize)
 }
 
@@ -564,6 +620,7 @@ unsafe fn receive_once(
     vectors: &[Vector],
     total: usize,
     flags: c_int,
+    receiving: &mut Receiving,
 ) -> Result<isize, c_int> {
     let entry = call.entry;
     let mut message = *output;
@@ -582,73 +639,89 @@ unsafe fn receive_once(
     let capacity = message.control_length.saturating_sub(control::HEADER_LEN) / 4;
     let maximum = capacity.min(control::MAX_RIGHTS);
     let length = total.min(posix_protocol::socket_record::MAX_RECORD_SIZE);
-    let raw = syscall_errno(syscall::raw_syscall2(
-        syscall::SyscallNumber::MemoryObjectCreate,
-        ((length.max(1) + 4095) & !4095) as u64,
-        0,
-    ))?;
-    let ram = OwnedHandle(u32::try_from(raw).map_err(|_| EIO)?);
-    let ram_rights = syscall_errno(syscall::raw_syscall1(
-        syscall::SyscallNumber::HandleRightsGet,
-        raw,
-    ))?;
+    let (raw, ram_rights) = {
+        let _native = defer_native_delivery();
+        drop(receiving.receipt.take());
+        drop(receiving.incoming.take());
+        drop(receiving.ram.take());
+        let raw = syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::MemoryObjectCreate,
+            ((length.max(1) + 4095) & !4095) as u64,
+            0,
+        ))?;
+        receiving.ram = Some(OwnedHandle(u32::try_from(raw).map_err(|_| EIO)?));
+        let ram_rights = syscall_errno(syscall::raw_syscall1(
+            syscall::SyscallNumber::HandleRightsGet,
+            raw,
+        ))?;
+        (raw, ram_rights)
+    };
     let transport = socket_record::endpoint()?;
     let thread = call.thread;
     let caught = call.caught;
     let mut response = [0; wire::MAX_RECEIVE_REPLY_LEN];
-    let (received, mut incoming) = loop {
+    let received = loop {
         if io_cancellation_requested(thread)
             || thread.nonrestart_signal_generation.load(Ordering::Acquire) != caught
         {
             return Err(EINTR);
         }
-        let limit = if maximum == 0 { 0 } else { process_fd_limit()? };
-        let incoming = Incoming {
-            reservation: state()
-                .fds
-                .reserve_up_to(0, limit, maximum)
-                .map_err(|_| EMFILE)?,
-            entries: [None; control::MAX_RIGHTS],
-            count: 0,
-        };
-        let source = ObjectHandleAttachment {
-            handle: entry.handle.lower_handle as u32,
-            rights: entry.rights,
-        };
-        let buffer = ObjectHandleAttachment {
-            handle: ram.0,
-            rights: ram_rights,
-        };
-        let result = if options.peek {
-            socket_transfer::peek(
-                &transport,
-                source,
-                buffer,
-                0,
-                length as u32,
-                incoming.reservation.len() as u16,
-                &mut response,
-                close_object_handle,
-            )
-        } else {
-            socket_transfer::receive(
-                &transport,
-                source,
-                buffer,
-                0,
-                length as u32,
-                incoming.reservation.len() as u16,
-                &mut response,
-                close_object_handle,
-            )
+        let result = {
+            let _native = defer_native_delivery();
+            let limit = if maximum == 0 { 0 } else { process_fd_limit()? };
+            receiving.incoming = Some(Incoming {
+                reservation: state()
+                    .fds
+                    .reserve_up_to(0, limit, maximum)
+                    .map_err(|_| EMFILE)?,
+                entries: [None; control::MAX_RIGHTS],
+                count: 0,
+            });
+            let incoming = receiving.incoming.as_ref().unwrap();
+            let source = ObjectHandleAttachment {
+                handle: entry.handle.lower_handle as u32,
+                rights: entry.rights,
+            };
+            let buffer = ObjectHandleAttachment {
+                handle: raw as u32,
+                rights: ram_rights,
+            };
+            let result = if options.peek {
+                socket_transfer::peek(
+                    &transport,
+                    source,
+                    buffer,
+                    0,
+                    length as u32,
+                    incoming.reservation.len() as u16,
+                    &mut response,
+                    close_object_handle,
+                )
+            } else {
+                socket_transfer::receive(
+                    &transport,
+                    source,
+                    buffer,
+                    0,
+                    length as u32,
+                    incoming.reservation.len() as u16,
+                    &mut response,
+                    close_object_handle,
+                )
+            };
+            if let Ok(received) = &result {
+                receiving.receipt = received.receipt.map(|receipt| OwnedHandle(receipt.handle));
+            } else {
+                drop(receiving.incoming.take());
+            }
+            result
         };
         match result {
-            Ok(received) => break (received, incoming),
+            Ok(received) => break received,
             Err(PosixClientError::Remote(-11))
                 if !options.dont_wait && !handle_is_nonblocking(entry)? =>
             {
                 // Do not monopolize the local FD table while waiting for data.
-                drop(incoming);
                 wait_for_handle_capacity(
                     entry,
                     syscall::HANDLE_SIGNAL_READABLE,
@@ -661,9 +734,10 @@ unsafe fn receive_once(
             Err(error) => return Err(map_posix_client_error(error)),
         }
     };
-    let _receipt = received.receipt.map(|receipt| OwnedHandle(receipt.handle));
+    let incoming = receiving.incoming.as_mut().unwrap();
     if let Some(receipt) = received.receipt {
         while incoming.count < received.message.available_rights as usize {
+            let _native = defer_native_delivery();
             let remaining = received.message.available_rights as usize - incoming.count;
             let batch = socket_transfer::deliver(
                 &transport,
@@ -703,7 +777,7 @@ unsafe fn receive_once(
             }
         }
     }
-    unsafe { scatter(vectors, ram.0, received.message.copied as usize) }?;
+    unsafe { scatter(vectors, raw as u32, received.message.copied as usize) }?;
     let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
     let required =
         mochios_posix_client::socket::encode_sockaddr(received.message.source, &mut native)
@@ -720,33 +794,14 @@ unsafe fn receive_once(
         };
         message.name_length = required as u32;
     }
-    let entries = core::array::from_fn::<_, { control::MAX_RIGHTS }, _>(|index| {
-        incoming.entries[index].unwrap_or(entry)
-    });
     let mut descriptors = [0; control::MAX_RIGHTS];
-    state()
-        .fds
-        .commit_group(
-            &incoming.reservation,
-            &entries[..incoming.count],
-            &mut descriptors,
-        )
-        .map_err(|_| EIO)?;
-    // Entries now belong to the table, not the rollback guard.
-    incoming.entries.fill(None);
+    for (index, descriptor) in descriptors[..incoming.count].iter_mut().enumerate() {
+        *descriptor = incoming.reservation.descriptor(index).ok_or(EIO)?;
+    }
     let mut ancillary = [0; control::HEADER_LEN + 4 * (control::MAX_RIGHTS + 1)];
     let bound = message.control_length.min(ancillary.len());
     let encoded = control::encode_rights(&descriptors[..incoming.count], &mut ancillary[..bound]);
-    let encoded = match encoded {
-        Ok(encoded) => encoded,
-        Err(_) => {
-            let mut state = state();
-            for &fd in &descriptors[..incoming.count] {
-                let _ = close_fd_entry(&mut state.fds, fd);
-            }
-            return Err(EIO);
-        }
-    };
+    let encoded = encoded.map_err(|_| EIO)?;
     if encoded.length != 0 {
         unsafe {
             ptr::copy_nonoverlapping(ancillary.as_ptr(), message.control.cast(), encoded.length)
