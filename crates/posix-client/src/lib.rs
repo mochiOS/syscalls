@@ -1055,7 +1055,7 @@ impl<T: ObjectTransport> Client<T> {
         base: OpenAtBase<T::Handle>,
         options: u32,
         mode: u32,
-        path: &str,
+        path: impl AsRef<[u8]>,
     ) -> Result<ObjectHandleAttachment<T::Handle>, ClientError<T::Error>> {
         let (base, directory) = match base {
             OpenAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
@@ -1068,7 +1068,7 @@ impl<T: ObjectTransport> Client<T> {
                 base,
                 options,
                 mode,
-                path,
+                path: path.as_ref(),
             },
             &mut payload,
         )
@@ -1104,7 +1104,7 @@ impl<T: ObjectTransport> Client<T> {
     pub fn canonical_path_at(
         &self,
         base: StatAtBase<T::Handle>,
-        path: &str,
+        path: impl AsRef<[u8]>,
         output: &mut [u8],
     ) -> Result<usize, ClientError<T::Error>> {
         let (base, directory) = match base {
@@ -1117,7 +1117,7 @@ impl<T: ObjectTransport> Client<T> {
             protocol::StatAtRequest {
                 base,
                 flags: 0,
-                path,
+                path: path.as_ref(),
             },
             &mut payload,
         )
@@ -1140,7 +1140,7 @@ impl<T: ObjectTransport> Client<T> {
         &self,
         base: StatAtBase<T::Handle>,
         flags: u32,
-        path: &str,
+        path: impl AsRef<[u8]>,
     ) -> Result<protocol::FileStatus, ClientError<T::Error>> {
         let (base, directory) = match base {
             StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
@@ -1148,9 +1148,15 @@ impl<T: ObjectTransport> Client<T> {
             StatAtBase::Directory(handle) => (protocol::OpenBase::AttachedDirectory, Some(handle)),
         };
         let mut payload = [0u8; protocol::STAT_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
-        let payload_len =
-            protocol::encode_stat_at(protocol::StatAtRequest { base, flags, path }, &mut payload)
-                .map_err(ClientError::Protocol)?;
+        let payload_len = protocol::encode_stat_at(
+            protocol::StatAtRequest {
+                base,
+                flags,
+                path: path.as_ref(),
+            },
+            &mut payload,
+        )
+        .map_err(ClientError::Protocol)?;
         let mut handles = ObjectHandles::new();
         if let Some(directory) = directory {
             handles
@@ -1181,7 +1187,7 @@ impl<T: ObjectTransport> Client<T> {
         base: AccessAtBase<T::Handle>,
         flags: u32,
         modes: u32,
-        path: &str,
+        path: impl AsRef<[u8]>,
     ) -> Result<(), ClientError<T::Error>> {
         let (base, directory) = match base {
             AccessAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
@@ -1196,7 +1202,7 @@ impl<T: ObjectTransport> Client<T> {
                 base,
                 flags,
                 modes,
-                path,
+                path: path.as_ref(),
             },
             &mut payload,
         )
@@ -1219,7 +1225,7 @@ impl<T: ObjectTransport> Client<T> {
     pub fn chdir_at(
         &self,
         base: StatAtBase<T::Handle>,
-        path: &str,
+        path: impl AsRef<[u8]>,
     ) -> Result<(), ClientError<T::Error>> {
         let (base, directory) = match base {
             StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
@@ -1231,7 +1237,7 @@ impl<T: ObjectTransport> Client<T> {
             protocol::StatAtRequest {
                 base,
                 flags: 0,
-                path,
+                path: path.as_ref(),
             },
             &mut payload,
         )
@@ -1254,7 +1260,7 @@ impl<T: ObjectTransport> Client<T> {
     pub fn chroot_at(
         &self,
         base: StatAtBase<T::Handle>,
-        path: &str,
+        path: impl AsRef<[u8]>,
     ) -> Result<(), ClientError<T::Error>> {
         let (base, directory) = match base {
             StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
@@ -1266,7 +1272,7 @@ impl<T: ObjectTransport> Client<T> {
             protocol::StatAtRequest {
                 base,
                 flags: 0,
-                path,
+                path: path.as_ref(),
             },
             &mut payload,
         )
@@ -1385,7 +1391,7 @@ impl<T: ObjectTransport> Client<T> {
         &self,
         base: OpenAtBase<T::Handle>,
         mode: u32,
-        path: &str,
+        path: impl AsRef<[u8]>,
     ) -> Result<(), ClientError<T::Error>> {
         let (base, directory) = match base {
             OpenAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
@@ -1398,7 +1404,7 @@ impl<T: ObjectTransport> Client<T> {
                 base,
                 options: 0,
                 mode,
-                path,
+                path: path.as_ref(),
             },
             &mut payload,
         )
@@ -1422,7 +1428,7 @@ impl<T: ObjectTransport> Client<T> {
         &self,
         base: StatAtBase<T::Handle>,
         flags: u32,
-        path: &str,
+        path: impl AsRef<[u8]>,
     ) -> Result<(), ClientError<T::Error>> {
         let (base, directory) = match base {
             StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
@@ -1430,9 +1436,15 @@ impl<T: ObjectTransport> Client<T> {
             StatAtBase::Directory(handle) => (protocol::OpenBase::AttachedDirectory, Some(handle)),
         };
         let mut payload = [0u8; protocol::STAT_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
-        let payload_len =
-            protocol::encode_stat_at(protocol::StatAtRequest { base, flags, path }, &mut payload)
-                .map_err(ClientError::Protocol)?;
+        let payload_len = protocol::encode_stat_at(
+            protocol::StatAtRequest {
+                base,
+                flags,
+                path: path.as_ref(),
+            },
+            &mut payload,
+        )
+        .map_err(ClientError::Protocol)?;
         let mut handles = ObjectHandles::new();
         if let Some(directory) = directory {
             handles
@@ -1451,9 +1463,9 @@ impl<T: ObjectTransport> Client<T> {
     pub fn rename_at(
         &self,
         old_base: StatAtBase<T::Handle>,
-        old_path: &str,
+        old_path: impl AsRef<[u8]>,
         new_base: StatAtBase<T::Handle>,
-        new_path: &str,
+        new_path: impl AsRef<[u8]>,
     ) -> Result<(), ClientError<T::Error>> {
         fn split_base<H: Copy>(
             base: StatAtBase<H>,
@@ -1473,8 +1485,8 @@ impl<T: ObjectTransport> Client<T> {
             protocol::RenameAtRequest {
                 old_base,
                 new_base,
-                old_path,
-                new_path,
+                old_path: old_path.as_ref(),
+                new_path: new_path.as_ref(),
             },
             &mut payload,
         )
@@ -1497,9 +1509,9 @@ impl<T: ObjectTransport> Client<T> {
     pub fn link_at(
         &self,
         old_base: StatAtBase<T::Handle>,
-        old_path: &str,
+        old_path: impl AsRef<[u8]>,
         new_base: StatAtBase<T::Handle>,
-        new_path: &str,
+        new_path: impl AsRef<[u8]>,
         flags: u32,
     ) -> Result<(), ClientError<T::Error>> {
         fn split_base<H: Copy>(
@@ -1521,8 +1533,8 @@ impl<T: ObjectTransport> Client<T> {
                 old_base,
                 new_base,
                 flags,
-                old_path,
-                new_path,
+                old_path: old_path.as_ref(),
+                new_path: new_path.as_ref(),
             },
             &mut payload,
         )
@@ -1545,7 +1557,7 @@ impl<T: ObjectTransport> Client<T> {
     pub fn truncate_at(
         &self,
         base: StatAtBase<T::Handle>,
-        path: &str,
+        path: impl AsRef<[u8]>,
         length: u64,
     ) -> Result<(), ClientError<T::Error>> {
         let (base, directory) = match base {
@@ -1555,7 +1567,11 @@ impl<T: ObjectTransport> Client<T> {
         };
         let mut payload = [0u8; protocol::TRUNCATE_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
         let payload_len = protocol::encode_truncate_at(
-            protocol::TruncateAtRequest { base, length, path },
+            protocol::TruncateAtRequest {
+                base,
+                length,
+                path: path.as_ref(),
+            },
             &mut payload,
         )
         .map_err(ClientError::Protocol)?;
@@ -1576,9 +1592,9 @@ impl<T: ObjectTransport> Client<T> {
 
     pub fn symlink_at(
         &self,
-        target: &str,
+        target: impl AsRef<[u8]>,
         base: StatAtBase<T::Handle>,
-        link_path: &str,
+        link_path: impl AsRef<[u8]>,
     ) -> Result<(), ClientError<T::Error>> {
         let (base, directory) = match base {
             StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
@@ -1589,8 +1605,8 @@ impl<T: ObjectTransport> Client<T> {
         let payload_len = protocol::encode_symlink_at(
             protocol::SymlinkAtRequest {
                 base,
-                target,
-                link_path,
+                target: target.as_ref(),
+                link_path: link_path.as_ref(),
             },
             &mut payload,
         )
@@ -1614,7 +1630,7 @@ impl<T: ObjectTransport> Client<T> {
     pub fn readlink_at(
         &self,
         base: StatAtBase<T::Handle>,
-        path: &str,
+        path: impl AsRef<[u8]>,
         output: &mut [u8],
     ) -> Result<usize, ClientError<T::Error>> {
         let (base, directory) = match base {
@@ -1627,7 +1643,7 @@ impl<T: ObjectTransport> Client<T> {
             protocol::StatAtRequest {
                 base,
                 flags: 0,
-                path,
+                path: path.as_ref(),
             },
             &mut payload,
         )
@@ -1653,7 +1669,7 @@ impl<T: ObjectTransport> Client<T> {
     pub fn chmod_at(
         &self,
         base: StatAtBase<T::Handle>,
-        path: &str,
+        path: impl AsRef<[u8]>,
         mode: u32,
     ) -> Result<(), ClientError<T::Error>> {
         let (base, directory) = match base {
@@ -1667,7 +1683,7 @@ impl<T: ObjectTransport> Client<T> {
                 base,
                 options: 0,
                 mode,
-                path,
+                path: path.as_ref(),
             },
             &mut payload,
         )
@@ -1690,7 +1706,7 @@ impl<T: ObjectTransport> Client<T> {
     pub fn chown_at(
         &self,
         base: StatAtBase<T::Handle>,
-        path: &str,
+        path: impl AsRef<[u8]>,
         uid: u32,
         gid: u32,
         flags: u32,
@@ -1707,7 +1723,7 @@ impl<T: ObjectTransport> Client<T> {
                 flags,
                 uid,
                 gid,
-                path,
+                path: path.as_ref(),
             },
             &mut payload,
         )

@@ -98,7 +98,7 @@ impl<T: ObjectTransport> Client<T> {
         base: OpenAtBase<T::Handle>,
         options: u32,
         mode: u32,
-        path: &str,
+        path: impl AsRef<[u8]>,
         wait: impl FnMut(&ObjectHandleAttachment<T::Handle>) -> Result<(), W>,
     ) -> Result<ObjectHandleAttachment<T::Handle>, Error<T::Error, W>> {
         let prepared = self.prepare_open_at(base, options, mode, path)?;
@@ -111,7 +111,7 @@ impl<T: ObjectTransport> Client<T> {
         base: OpenAtBase<T::Handle>,
         options: u32,
         mode: u32,
-        path: &str,
+        path: impl AsRef<[u8]>,
     ) -> Result<PreparedOpen<T::Handle>, ClientError<T::Error>> {
         let (base, directory) = match base {
             OpenAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
@@ -125,7 +125,7 @@ impl<T: ObjectTransport> Client<T> {
                 base,
                 options,
                 mode,
-                path,
+                path: path.as_ref(),
             },
             &mut payload,
         )
@@ -171,7 +171,7 @@ impl<T: ObjectTransport> Client<T> {
     pub fn truncate_at_with_wait<W>(
         &self,
         base: StatAtBase<T::Handle>,
-        path: &str,
+        path: impl AsRef<[u8]>,
         length: u64,
         wait: impl FnMut(&ObjectHandleAttachment<T::Handle>) -> Result<(), W>,
     ) -> Result<(), Error<T::Error, W>> {
@@ -182,7 +182,7 @@ impl<T: ObjectTransport> Client<T> {
     pub fn prepare_truncate_at(
         &self,
         base: StatAtBase<T::Handle>,
-        path: &str,
+        path: impl AsRef<[u8]>,
         length: u64,
     ) -> Result<PreparedTruncate<T::Handle>, ClientError<T::Error>> {
         let (base, directory) = match base {
@@ -193,7 +193,11 @@ impl<T: ObjectTransport> Client<T> {
         let mut payload =
             [0; protocol::HEADER_LEN + protocol::TRUNCATE_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
         let len = protocol::encode_truncate_at(
-            protocol::TruncateAtRequest { base, length, path },
+            protocol::TruncateAtRequest {
+                base,
+                length,
+                path: path.as_ref(),
+            },
             &mut payload,
         )
         .map_err(ClientError::Protocol)?;

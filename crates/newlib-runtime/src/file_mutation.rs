@@ -161,7 +161,7 @@ pub(super) fn truncate(path: *const c_char, length: u64) -> Result<c_int, c_int>
     let prepared = {
         // No application callback may mutate/free this buffer until encoding
         // has finished. No borrowed string survives into the waiting loop.
-        let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+        let path = unsafe { c_bytes(path) };
         client
             .prepare_truncate_at(StatAtBase::ProcessCwd, path, length)
             .map_err(map_posix_client_error)?
@@ -250,7 +250,7 @@ fn open_in_slot(
     let client = posix_client().map_err(map_posix_client_error)?;
     let options = posix_open_options(flags)?;
     let (prepared, directory) = {
-        let path = core::str::from_utf8(unsafe { c_bytes(path) }).map_err(|_| EINVAL)?;
+        let path = unsafe { c_bytes(path) };
         // Invalid C pathnames are POSIX errors, not malformed wire replies.
         if path.is_empty() {
             return Err(ENOENT);

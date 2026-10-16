@@ -8000,9 +8000,9 @@ pub extern "C" fn _rename(old_path: *const c_char, new_path: *const c_char) -> c
 
 fn rename_posix_base(
     dirfd: c_int,
-    path: &str,
+    path: impl AsRef<[u8]>,
 ) -> Result<(StatAtBase<u32>, Option<fd_lease::Lease>), c_int> {
-    if path.starts_with('/') {
+    if path.as_ref().first() == Some(&b'/') {
         return Ok((StatAtBase::ProcessRoot, None));
     }
     if dirfd == -2 || i64::from(dirfd) == AT_FDCWD {

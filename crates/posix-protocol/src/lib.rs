@@ -710,19 +710,21 @@ impl OpenBase {
     }
 }
 
+/// POSIX pathnames are bounded, nonempty byte strings without embedded NUL.
+/// No encoding normalization or Unicode validation is performed on the wire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpenAtRequest<'a> {
     pub base: OpenBase,
     pub options: u32,
     pub mode: u32,
-    pub path: &'a str,
+    pub path: &'a [u8],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StatAtRequest<'a> {
     pub base: OpenBase,
     pub flags: u32,
-    pub path: &'a str,
+    pub path: &'a [u8],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -730,15 +732,15 @@ pub struct AccessAtRequest<'a> {
     pub base: OpenBase,
     pub flags: u32,
     pub modes: u32,
-    pub path: &'a str,
+    pub path: &'a [u8],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RenameAtRequest<'a> {
     pub old_base: OpenBase,
     pub new_base: OpenBase,
-    pub old_path: &'a str,
-    pub new_path: &'a str,
+    pub old_path: &'a [u8],
+    pub new_path: &'a [u8],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -746,22 +748,22 @@ pub struct LinkAtRequest<'a> {
     pub old_base: OpenBase,
     pub new_base: OpenBase,
     pub flags: u32,
-    pub old_path: &'a str,
-    pub new_path: &'a str,
+    pub old_path: &'a [u8],
+    pub new_path: &'a [u8],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TruncateAtRequest<'a> {
     pub base: OpenBase,
     pub length: u64,
-    pub path: &'a str,
+    pub path: &'a [u8],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SymlinkAtRequest<'a> {
     pub base: OpenBase,
-    pub target: &'a str,
-    pub link_path: &'a str,
+    pub target: &'a [u8],
+    pub link_path: &'a [u8],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -770,7 +772,7 @@ pub struct ChownAtRequest<'a> {
     pub flags: u32,
     pub uid: u32,
     pub gid: u32,
-    pub path: &'a str,
+    pub path: &'a [u8],
 }
 
 /// Architecture-independent representation of the POSIX `struct stat` data.
@@ -1593,7 +1595,7 @@ pub fn encode_open_at(
     request: OpenAtRequest<'_>,
     output: &mut [u8],
 ) -> Result<usize, ProtocolError> {
-    let path = request.path.as_bytes();
+    let path = request.path;
     if path.is_empty()
         || path.len() > MAX_PATH_LEN
         || path.contains(&0)
@@ -1633,7 +1635,7 @@ pub fn decode_open_at(input: &[u8]) -> Result<OpenAtRequest<'_>, ProtocolError> 
     if path_bytes.contains(&0) {
         return Err(ProtocolError::InvalidLength);
     }
-    let path = core::str::from_utf8(path_bytes).map_err(|_| ProtocolError::InvalidLength)?;
+    let path = path_bytes;
     Ok(OpenAtRequest {
         base,
         options,
@@ -1646,7 +1648,7 @@ pub fn encode_stat_at(
     request: StatAtRequest<'_>,
     output: &mut [u8],
 ) -> Result<usize, ProtocolError> {
-    let path = request.path.as_bytes();
+    let path = request.path;
     if path.is_empty()
         || path.len() > MAX_PATH_LEN
         || path.contains(&0)
@@ -1685,7 +1687,7 @@ pub fn decode_stat_at(input: &[u8]) -> Result<StatAtRequest<'_>, ProtocolError> 
     if path_bytes.contains(&0) {
         return Err(ProtocolError::InvalidLength);
     }
-    let path = core::str::from_utf8(path_bytes).map_err(|_| ProtocolError::InvalidLength)?;
+    let path = path_bytes;
     Ok(StatAtRequest { base, flags, path })
 }
 
@@ -1693,8 +1695,8 @@ pub fn encode_rename_at(
     request: RenameAtRequest<'_>,
     output: &mut [u8],
 ) -> Result<usize, ProtocolError> {
-    let old_path = request.old_path.as_bytes();
-    let new_path = request.new_path.as_bytes();
+    let old_path = request.old_path;
+    let new_path = request.new_path;
     if old_path.is_empty()
         || new_path.is_empty()
         || old_path.len() > MAX_PATH_LEN
@@ -1742,8 +1744,8 @@ pub fn decode_rename_at(input: &[u8]) -> Result<RenameAtRequest<'_>, ProtocolErr
     if old_bytes.contains(&0) || new_bytes.contains(&0) {
         return Err(ProtocolError::InvalidLength);
     }
-    let old_path = core::str::from_utf8(old_bytes).map_err(|_| ProtocolError::InvalidLength)?;
-    let new_path = core::str::from_utf8(new_bytes).map_err(|_| ProtocolError::InvalidLength)?;
+    let old_path = old_bytes;
+    let new_path = new_bytes;
     Ok(RenameAtRequest {
         old_base,
         new_base,
@@ -1756,8 +1758,8 @@ pub fn encode_link_at(
     request: LinkAtRequest<'_>,
     output: &mut [u8],
 ) -> Result<usize, ProtocolError> {
-    let old_path = request.old_path.as_bytes();
-    let new_path = request.new_path.as_bytes();
+    let old_path = request.old_path;
+    let new_path = request.new_path;
     if old_path.is_empty()
         || new_path.is_empty()
         || old_path.len() > MAX_PATH_LEN
@@ -1813,8 +1815,8 @@ pub fn decode_link_at(input: &[u8]) -> Result<LinkAtRequest<'_>, ProtocolError> 
         old_base,
         new_base,
         flags,
-        old_path: core::str::from_utf8(old_bytes).map_err(|_| ProtocolError::InvalidLength)?,
-        new_path: core::str::from_utf8(new_bytes).map_err(|_| ProtocolError::InvalidLength)?,
+        old_path: old_bytes,
+        new_path: new_bytes,
     })
 }
 
@@ -1822,7 +1824,7 @@ pub fn encode_truncate_at(
     request: TruncateAtRequest<'_>,
     output: &mut [u8],
 ) -> Result<usize, ProtocolError> {
-    let path = request.path.as_bytes();
+    let path = request.path;
     if path.is_empty() || path.len() > MAX_PATH_LEN || path.contains(&0) {
         return Err(ProtocolError::InvalidLength);
     }
@@ -1855,7 +1857,7 @@ pub fn decode_truncate_at(input: &[u8]) -> Result<TruncateAtRequest<'_>, Protoco
     if path_bytes.contains(&0) {
         return Err(ProtocolError::InvalidLength);
     }
-    let path = core::str::from_utf8(path_bytes).map_err(|_| ProtocolError::InvalidLength)?;
+    let path = path_bytes;
     Ok(TruncateAtRequest { base, length, path })
 }
 
@@ -1863,8 +1865,8 @@ pub fn encode_symlink_at(
     request: SymlinkAtRequest<'_>,
     output: &mut [u8],
 ) -> Result<usize, ProtocolError> {
-    let target = request.target.as_bytes();
-    let link_path = request.link_path.as_bytes();
+    let target = request.target;
+    let link_path = request.link_path;
     if target.is_empty()
         || link_path.is_empty()
         || target.len() > MAX_PATH_LEN
@@ -1910,8 +1912,8 @@ pub fn decode_symlink_at(input: &[u8]) -> Result<SymlinkAtRequest<'_>, ProtocolE
     if target_bytes.contains(&0) || link_bytes.contains(&0) {
         return Err(ProtocolError::InvalidLength);
     }
-    let target = core::str::from_utf8(target_bytes).map_err(|_| ProtocolError::InvalidLength)?;
-    let link_path = core::str::from_utf8(link_bytes).map_err(|_| ProtocolError::InvalidLength)?;
+    let target = target_bytes;
+    let link_path = link_bytes;
     Ok(SymlinkAtRequest {
         base,
         target,
@@ -1923,7 +1925,7 @@ pub fn encode_chown_at(
     request: ChownAtRequest<'_>,
     output: &mut [u8],
 ) -> Result<usize, ProtocolError> {
-    let path = request.path.as_bytes();
+    let path = request.path;
     if path.is_empty()
         || path.len() > MAX_PATH_LEN
         || path.contains(&0)
@@ -1965,7 +1967,7 @@ pub fn decode_chown_at(input: &[u8]) -> Result<ChownAtRequest<'_>, ProtocolError
     if path_bytes.contains(&0) {
         return Err(ProtocolError::InvalidLength);
     }
-    let path = core::str::from_utf8(path_bytes).map_err(|_| ProtocolError::InvalidLength)?;
+    let path = path_bytes;
     Ok(ChownAtRequest {
         base,
         flags,
@@ -1995,7 +1997,7 @@ pub fn encode_access_at(
     request: AccessAtRequest<'_>,
     output: &mut [u8],
 ) -> Result<usize, ProtocolError> {
-    let path = request.path.as_bytes();
+    let path = request.path;
     if path.is_empty()
         || path.len() > MAX_PATH_LEN
         || path.contains(&0)
@@ -2037,7 +2039,7 @@ pub fn decode_access_at(input: &[u8]) -> Result<AccessAtRequest<'_>, ProtocolErr
     if path_bytes.contains(&0) {
         return Err(ProtocolError::InvalidLength);
     }
-    let path = core::str::from_utf8(path_bytes).map_err(|_| ProtocolError::InvalidLength)?;
+    let path = path_bytes;
     Ok(AccessAtRequest {
         base,
         flags,

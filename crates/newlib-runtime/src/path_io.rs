@@ -42,27 +42,27 @@ impl Resources {
             return Err(ENOENT);
         }
         resources.length = length;
-        let path = core::str::from_utf8(&resources.path[..length]).map_err(|_| EINVAL)?;
+        let path = &resources.path[..length];
         let (base, directory) = rename_posix_base(dirfd, path)?;
         resources.directory = directory;
         resources.base = base;
         Ok(())
     }
 
-    fn text(&self) -> Result<&str, c_int> {
-        core::str::from_utf8(&self.path[..self.length]).map_err(|_| EINVAL)
+    fn bytes(&self) -> &[u8] {
+        &self.path[..self.length]
     }
 }
 
 pub(super) fn at<T: Copy>(
     dirfd: c_int,
     path: *const c_char,
-    operation: impl FnOnce(StatAtBase<u32>, &str) -> Result<T, c_int>,
+    operation: impl FnOnce(StatAtBase<u32>, &[u8]) -> Result<T, c_int>,
 ) -> Result<T, c_int> {
     io_resources::with_initialized(
         || Ok(Resources::empty()),
         |resources| resources.capture(dirfd, path),
-        |resources| operation(resources.base, resources.text()?),
+        |resources| operation(resources.base, resources.bytes()),
     )
 }
 
@@ -71,7 +71,7 @@ pub(super) fn pair<T: Copy>(
     old_path: *const c_char,
     new_dirfd: c_int,
     new_path: *const c_char,
-    operation: impl FnOnce(StatAtBase<u32>, &str, StatAtBase<u32>, &str) -> Result<T, c_int>,
+    operation: impl FnOnce(StatAtBase<u32>, &[u8], StatAtBase<u32>, &[u8]) -> Result<T, c_int>,
 ) -> Result<T, c_int> {
     io_resources::with_initialized(
         || Ok([Resources::empty(), Resources::empty()]),
@@ -84,9 +84,9 @@ pub(super) fn pair<T: Copy>(
         |resources| {
             operation(
                 resources[0].base,
-                resources[0].text()?,
+                resources[0].bytes(),
                 resources[1].base,
-                resources[1].text()?,
+                resources[1].bytes(),
             )
         },
     )
