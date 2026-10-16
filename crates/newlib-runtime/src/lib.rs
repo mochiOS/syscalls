@@ -7,6 +7,7 @@ mod fd_creation;
 mod callback_resources;
 mod file_mutation;
 mod file_metadata;
+mod stat_output;
 mod directory_io;
 mod path_io;
 mod user_copy;
@@ -5926,13 +5927,11 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
         |entry| {
             if entry.handle.kind == FdKind::ObjectSharedMemory {
                 let status = shared_memory::stat(**entry)?;
-                unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), status) };
-                return Ok(0);
+                return stat_output::write(stat_buf, &status);
             }
             if entry.handle.kind.is_socket() {
                 let status = socket::stat(**entry)?;
-                unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), status) };
-                return Ok(0);
+                return stat_output::write(stat_buf, &status);
             }
             if matches!(
                 entry.handle.kind,
@@ -5947,19 +5946,16 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
                     })
                     .map_err(map_posix_client_error)?;
                 let translated = translate_posix_stat(&status)?;
-                unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), translated) };
-                return Ok(0);
+                return stat_output::write(stat_buf, &translated);
             }
             if matches!(
                 entry.handle.kind,
                 FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite
             ) {
-                unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), stream_stat()) };
-                return Ok(0);
+                return stat_output::write(stat_buf, &stream_stat());
             }
             if entry.handle.kind == FdKind::ObjectPty {
-                unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), pty_stat()) };
-                return Ok(0);
+                return stat_output::write(stat_buf, &pty_stat());
             }
             Err(EBADF)
         },
@@ -5988,8 +5984,7 @@ fn stat_at_with_flags(
     }
     let result = (|| {
         let translated = file_metadata::at(dirfd, path, flags)?;
-        unsafe { ptr::write(stat_buf.cast::<NewlibStat>(), translated) };
-        Ok(0)
+        stat_output::write(stat_buf, &translated)
     })();
     result_with_errno(result, -1)
 }
