@@ -23,6 +23,14 @@ pub const fn unmap_errno(status: i64) -> i32 {
     }
 }
 
+/// POSIX msync reports an unmapped portion of the requested range as ENOMEM.
+pub const fn sync_errno(status: i64) -> i32 {
+    match mnu_abi::status::Error::from_raw(status as u64) {
+        Some(mnu_abi::status::Error::InvalidAddress) => crate::newlib_errno::ENOMEM,
+        _ => crate::newlib_errno::from_status(status),
+    }
+}
+
 pub const MAP_SHARED: i32 = 0x01;
 pub const MAP_PRIVATE: i32 = 0x02;
 pub const MAP_FIXED: i32 = 0x10;

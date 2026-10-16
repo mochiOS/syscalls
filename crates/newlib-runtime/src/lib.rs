@@ -6431,12 +6431,14 @@ pub extern "C" fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c_int {
         if policy.asynchronous || policy.invalidate {
             return Err(ENOSYS);
         }
-        let _ = syscall_errno(syscall::raw_syscall3(
+        let _ = syscall::raw_syscall3(
             syscall::SyscallNumber::MemorySync,
             addr as u64,
             len as u64,
             0,
-        ))?;
+        )
+        .into_result()
+        .map_err(|error| mochios_posix_client::memory::sync_errno(error.raw()))?;
         Ok(0)
     })();
     result_with_errno(result, -1)
