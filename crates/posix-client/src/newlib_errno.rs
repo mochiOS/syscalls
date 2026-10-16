@@ -44,6 +44,9 @@ pub const fn from_status(status: i64) -> i32 {
     if let Some(error) = mnu_abi::status::Error::from_raw(native) {
         return match error {
             mnu_abi::status::Error::LimitExceeded => EOVERFLOW,
+            mnu_abi::status::Error::InvalidAddress => EFAULT,
+            mnu_abi::status::Error::ResourceUnavailable => ENOMEM,
+            mnu_abi::status::Error::BackingFailure => EIO,
         };
     }
     match status.unsigned_abs() {
