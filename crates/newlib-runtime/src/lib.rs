@@ -10,6 +10,7 @@ mod file_metadata;
 mod directory_io;
 mod path_io;
 mod io_resources;
+mod mapping_io;
 mod pipe;
 mod pty_creation;
 mod vector_metadata;
@@ -6388,49 +6389,48 @@ pub extern "C" fn mmap(
         }
         let access = mochios_posix_client::memory::native_access(prot).ok_or(EINVAL)?;
         let mapping = mochios_posix_client::memory::native_map(flags).ok_or(EINVAL)?;
-        let mut shared_backing = None;
-        let backing_lease;
-        let backing_handle = if mapping.anonymous {
-            if offset != 0 {
-                return Err(EINVAL);
-            }
-            0
-        } else {
-            backing_lease = with_fd_entry(fd)?;
-            let entry = &backing_lease;
-            if entry.handle.kind == FdKind::ObjectSharedMemory {
-                let writable = mapping.options & mnu_abi::MEMORY_MAP_SHARED != 0
-                    && access & mnu_abi::MEMORY_ACCESS_WRITE != 0;
-                shared_backing = Some(shared_memory::mapping(**entry, writable)?);
-                u64::from(shared_backing.as_ref().unwrap().0)
+        if mapping.anonymous && offset != 0 {
+            return Err(EINVAL);
+        }
+        mapping_io::with_source(mapping.anonymous, fd, |entry| {
+            let mut shared_backing = None;
+            let backing_handle = if let Some(entry) = entry {
+                if entry.handle.kind == FdKind::ObjectSharedMemory {
+                    let writable = mapping.options & mnu_abi::MEMORY_MAP_SHARED != 0
+                        && access & mnu_abi::MEMORY_ACCESS_WRITE != 0;
+                    shared_backing = Some(shared_memory::mapping(entry, writable)?);
+                    u64::from(shared_backing.as_ref().unwrap().0)
+                } else {
+                    if !matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSpecial) {
+                        return Err(EACCES);
+                    }
+                    let mut required = syscall::HANDLE_RIGHT_MAP | syscall::HANDLE_RIGHT_READ;
+                    if mapping.options & mnu_abi::MEMORY_MAP_SHARED != 0
+                        && access & mnu_abi::MEMORY_ACCESS_WRITE != 0
+                    {
+                        required |= syscall::HANDLE_RIGHT_WRITE;
+                    }
+                    if entry.rights & required != required {
+                        return Err(EACCES);
+                    }
+                    entry.handle.lower_handle
+                }
             } else {
-                if !matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSpecial) {
-                    return Err(EACCES);
-                }
-                let mut required = syscall::HANDLE_RIGHT_MAP | syscall::HANDLE_RIGHT_READ;
-                if mapping.options & mnu_abi::MEMORY_MAP_SHARED != 0
-                    && access & mnu_abi::MEMORY_ACCESS_WRITE != 0
-                {
-                    required |= syscall::HANDLE_RIGHT_WRITE;
-                }
-                if entry.rights & required != required {
-                    return Err(EACCES);
-                }
-                entry.handle.lower_handle
-            }
-        };
-        let mapped = address_space::current()?.map(
-            addr as u64,
-            len as u64,
-            access,
-            mapping.options,
-            backing_handle,
-            offset as u64,
-        )?;
-        // Native MemoryMap retained the backing; RAII also closes it if map
-        // failed. The FD continues to own its independent Provider reference.
-        drop(shared_backing);
-        Ok(mapped as *mut c_void)
+                0
+            };
+            let mapped = address_space::current()?.map(
+                addr as u64,
+                len as u64,
+                access,
+                mapping.options,
+                backing_handle,
+                offset as u64,
+            )?;
+            // Native MemoryMap retained the backing; RAII also closes it if map
+            // failed. The FD continues to own its independent Provider reference.
+            drop(shared_backing);
+            Ok(mapped as *mut c_void)
+        })
     })();
     result_with_errno(result, MAP_FAILED)
 }
