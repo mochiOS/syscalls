@@ -1294,7 +1294,7 @@ pub mod service_ready;
 
 pub mod time {
     use super::syscall::{self, SysResult};
-    use mnu_abi::{ClockId, ClockInstant, EOVERFLOW};
+    use mnu_abi::{ClockId, ClockInstant};
 
     pub fn ticks() -> SysResult<u64> {
         syscall::call0(syscall::SyscallNumber::TimeNow)
@@ -1307,6 +1307,9 @@ pub mod time {
             ClockId::Realtime as u64,
             (&mut instant as *mut ClockInstant) as u64,
         )?;
+        if instant.nanoseconds >= 1_000_000_000 || instant.reserved != 0 {
+            return Err(syscall::NativeError::BackingFailure.into_raw().into());
+        }
         Ok(instant.seconds)
     }
 
@@ -1318,7 +1321,7 @@ pub mod time {
             (&mut instant as *mut ClockInstant) as u64,
         )?;
         if instant.nanoseconds >= 1_000_000_000 || instant.reserved != 0 {
-            return Err(syscall::SysError::from_raw(syscall::EIO as i64));
+            return Err(syscall::NativeError::BackingFailure.into_raw().into());
         }
         instant
             .seconds
@@ -1326,7 +1329,7 @@ pub mod time {
             .and_then(|milliseconds| {
                 milliseconds.checked_add(u64::from(instant.nanoseconds) / 1_000_000)
             })
-            .ok_or_else(|| syscall::SysError::from_raw(EOVERFLOW as i64))
+            .ok_or_else(|| syscall::NativeError::LimitExceeded.into_raw().into())
     }
 
     pub fn monotonic_nanoseconds() -> SysResult<u64> {
@@ -1337,13 +1340,13 @@ pub mod time {
             (&mut instant as *mut ClockInstant) as u64,
         )?;
         if instant.nanoseconds >= 1_000_000_000 || instant.reserved != 0 {
-            return Err(syscall::SysError::from_raw(syscall::EIO as i64));
+            return Err(syscall::NativeError::BackingFailure.into_raw().into());
         }
         instant
             .seconds
             .checked_mul(1_000_000_000)
             .and_then(|seconds| seconds.checked_add(u64::from(instant.nanoseconds)))
-            .ok_or_else(|| syscall::SysError::from_raw(EOVERFLOW as i64))
+            .ok_or_else(|| syscall::NativeError::LimitExceeded.into_raw().into())
     }
 }
 
@@ -1374,7 +1377,7 @@ pub mod synchronization {
             deadline_nanoseconds,
         )?;
         AddressWaitResult::from_raw(raw)
-            .ok_or_else(|| syscall::SysError::from_raw(syscall::EIO as i64))
+            .ok_or_else(|| syscall::NativeError::BackingFailure.into_raw().into())
     }
 
     /// Wakes up to `maximum_count` waiters for `address`.
@@ -1389,7 +1392,11 @@ pub mod synchronization {
             address as u64,
             maximum_count as u64,
         )?;
-        usize::try_from(count).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+        if count > maximum_count as u64 {
+            return Err(syscall::NativeError::BackingFailure.into_raw().into());
+        }
+        usize::try_from(count)
+            .map_err(|_| syscall::NativeError::LimitExceeded.into_raw().into())
     }
 }
 
@@ -1403,7 +1410,7 @@ pub mod random {
             destination.len() as u64,
         )?;
         if written != destination.len() as u64 {
-            return Err(syscall::SysError::from_raw(syscall::EIO as i64));
+            return Err(syscall::NativeError::BackingFailure.into_raw().into());
         }
         Ok(())
     }
