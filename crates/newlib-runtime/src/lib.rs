@@ -11,6 +11,7 @@ mod stat_output;
 mod terminal_memory;
 mod socket_memory;
 mod socket_receive_address;
+mod time_memory;
 mod directory_io;
 mod path_io;
 mod user_copy;
@@ -7377,7 +7378,7 @@ pub extern "C" fn _times(buf: *mut Tms) -> u64 {
         };
         let elapsed = elapsed_clock_ticks()?;
         // No partial output on an unavailable service, bad metadata, or overflow.
-        unsafe { buf.write(value) };
+        time_memory::write_accounting(buf, value)?;
         Ok(elapsed)
     })();
     result_with_errno(result, u64::MAX)
@@ -7490,9 +7491,10 @@ pub extern "C" fn clock_getres(clock_id: u64, resolution: *mut Timespec) -> c_in
             mochios_posix_client::time::clock_resolution(info.quantum_nanoseconds)?;
         // POSIX permits a NULL result while still checking clock validity.
         if !resolution.is_null() {
-            unsafe {
-                resolution.write(Timespec { tv_sec: seconds, tv_nsec: nanoseconds });
-            }
+            time_memory::write_timespec(
+                resolution,
+                Timespec { tv_sec: seconds, tv_nsec: nanoseconds },
+            )?;
         }
         Ok(0)
     });
@@ -7531,12 +7533,13 @@ pub extern "C" fn clock_gettime(clock_id: u64, tp: *mut Timespec) -> c_int {
             return Err(EIO);
         }
         let seconds = i64::try_from(instant.seconds).map_err(|_| EOVERFLOW)?;
-        unsafe {
-            tp.write(Timespec {
+        time_memory::write_timespec(
+            tp,
+            Timespec {
                 tv_sec: seconds,
                 tv_nsec: i64::from(instant.nanoseconds),
-            });
-        }
+            },
+        )?;
         Ok(0)
     });
     result_with_errno(result, -1)
@@ -7565,7 +7568,7 @@ pub unsafe extern "C" fn clock_nanosleep(
         if request.is_null() {
             return Err(EFAULT);
         }
-        let request = unsafe { request.read() };
+        let request = time_memory::read_timespec(request)?;
         let clock_id = c_int::try_from(clock_id).map_err(|_| EINVAL)?;
         let spec = ClockSleep::parse(clock_id, flags, request.tv_sec, request.tv_nsec)?;
         if !spec.absolute && spec.nanoseconds == 0 {
@@ -7629,12 +7632,13 @@ pub unsafe extern "C" fn clock_nanosleep(
                     remaining_nanoseconds,
                 } => {
                     if !spec.absolute && !remaining.is_null() {
-                        unsafe {
-                            remaining.write(Timespec {
+                        time_memory::write_timespec(
+                            remaining,
+                            Timespec {
                                 tv_sec: (remaining_nanoseconds / 1_000_000_000) as i64,
                                 tv_nsec: (remaining_nanoseconds % 1_000_000_000) as i64,
-                            });
-                        }
+                            },
+                        )?;
                     }
                     return Err(EINTR);
                 }
@@ -7696,7 +7700,13 @@ pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Tim
         set_errno(EFAULT);
         return -1;
     }
-    let request = unsafe { &*request };
+    let request = match time_memory::read_timespec(request) {
+        Ok(request) => request,
+        Err(error) => {
+            set_errno(error);
+            return -1;
+        }
+    };
     if request.tv_sec < 0 || !(0..1_000_000_000).contains(&request.tv_nsec) {
         set_errno(EINVAL);
         return -1;
@@ -7751,12 +7761,16 @@ pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Tim
                     remaining_nanoseconds,
                 } => {
                     if !remaining.is_null() {
-                        unsafe {
-                            remaining.write(Timespec {
+                        if let Err(error) = time_memory::write_timespec(
+                            remaining,
+                            Timespec {
                                 tv_sec: (remaining_nanoseconds / 1_000_000_000) as i64,
                                 tv_nsec: (remaining_nanoseconds % 1_000_000_000) as i64,
-                            })
-                        };
+                            },
+                        ) {
+                            set_errno(error);
+                            return -1;
+                        }
                     }
                     set_errno(EINTR);
                     return -1;
@@ -7775,12 +7789,16 @@ pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Tim
     }
     pthread_testcancel();
     if !remaining.is_null() {
-        unsafe {
-            remaining.write(Timespec {
+        if let Err(error) = time_memory::write_timespec(
+            remaining,
+            Timespec {
                 tv_sec: 0,
                 tv_nsec: 0,
-            })
-        };
+            },
+        ) {
+            set_errno(error);
+            return -1;
+        }
     }
     0
 }
