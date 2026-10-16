@@ -42,6 +42,7 @@ use heap::HeapState;
 mod atfork;
 mod thread_lifecycle;
 mod thread_stack;
+mod pthread_attr;
 mod credentials;
 mod groups;
 mod pthread_mutex;
