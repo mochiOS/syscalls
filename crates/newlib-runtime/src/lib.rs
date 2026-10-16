@@ -8,6 +8,7 @@ mod callback_resources;
 mod file_mutation;
 mod file_metadata;
 mod stat_output;
+mod terminal_memory;
 mod directory_io;
 mod path_io;
 mod user_copy;
@@ -3556,14 +3557,15 @@ pub unsafe extern "C" fn tcgetwinsize(fd: c_int, size: *mut NewlibWinSize) -> c_
                 return Err(EIO);
             }
             let window = posix_protocol::decode_terminal_window_size(&bytes).map_err(|_| EIO)?;
-            unsafe {
-                size.write(NewlibWinSize {
+            terminal_memory::write_window(
+                size,
+                NewlibWinSize {
                     ws_row: window.rows,
                     ws_col: window.columns,
                     ws_xpixel: window.pixel_width,
                     ws_ypixel: window.pixel_height,
-                })
-            };
+                },
+            )?;
             Ok(0)
         },
     );
@@ -3579,7 +3581,7 @@ pub unsafe extern "C" fn tcsetwinsize(fd: c_int, size: *const NewlibWinSize) -> 
     let result = io_resources::with_initialized(
         || Ok((with_fd_entry(fd)?, None)),
         |(_, window)| {
-            *window = Some(unsafe { size.read() });
+            *window = Some(terminal_memory::read_window(size)?);
             Ok(())
         },
         |(entry, window)| {
@@ -6062,7 +6064,7 @@ pub extern "C" fn tcgetattr(fd: c_int, termios: *mut NewlibTermios) -> c_int {
             }
             let attributes =
                 posix_protocol::decode_terminal_attributes(&encoded).map_err(|_| EIO)?;
-            unsafe { termios.write(terminal_attributes_to_newlib(attributes)) };
+            terminal_memory::write_attributes(termios, terminal_attributes_to_newlib(attributes))?;
             Ok(0)
         },
     );
@@ -6078,7 +6080,7 @@ pub extern "C" fn tcsetattr(fd: c_int, action: c_int, termios: *const NewlibTerm
     let result = io_resources::with_initialized(
         || Ok((with_fd_entry(fd)?, None)),
         |(_, attributes)| {
-            *attributes = Some(unsafe { termios.read() });
+            *attributes = Some(terminal_memory::read_attributes(termios)?);
             Ok(())
         },
         |(entry, attributes)| {

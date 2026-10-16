@@ -20,6 +20,21 @@ fn transfer(destination: usize, source: usize, length: usize) -> Result<(), c_in
     Ok(())
 }
 
+pub(super) fn read(source: *const u8, bytes: &mut [u8]) -> Result<(), c_int> {
+    (source as usize).checked_add(bytes.len()).ok_or(EFAULT)?;
+    for (index, chunk) in bytes
+        .chunks_mut(mnu_abi::memory_copy::MAX_BYTES)
+        .enumerate()
+    {
+        transfer(
+            chunk.as_mut_ptr() as usize,
+            source as usize + index * mnu_abi::memory_copy::MAX_BYTES,
+            chunk.len(),
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) fn write(destination: *mut u8, bytes: &[u8]) -> Result<(), c_int> {
     (destination as usize)
         .checked_add(bytes.len())
