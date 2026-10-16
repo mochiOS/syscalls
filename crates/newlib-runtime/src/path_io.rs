@@ -112,13 +112,24 @@ pub(super) fn rename(
     )
 }
 
+// Public newlib ABI, not the Linux syscall ABI or the IPC wire flags.
+pub(super) const AT_SYMLINK_FOLLOW: c_int = 0x0004;
+
 pub(super) fn link(
     old_dirfd: c_int,
     old_path: *const c_char,
     new_dirfd: c_int,
     new_path: *const c_char,
-    flags: u32,
+    flags: c_int,
 ) -> Result<(), c_int> {
+    if flags & !AT_SYMLINK_FOLLOW != 0 {
+        return Err(EINVAL);
+    }
+    let flags = if flags & AT_SYMLINK_FOLLOW != 0 {
+        posix_protocol::LINK_FOLLOW_SOURCE
+    } else {
+        0
+    };
     pair(
         old_dirfd,
         old_path,

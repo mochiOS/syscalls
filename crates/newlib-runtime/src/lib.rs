@@ -87,7 +87,6 @@ const NATIVE_READ_WRITE: u64 = mnu_abi::MEMORY_ACCESS_READ | mnu_abi::MEMORY_ACC
 const MAP_FAILED: *mut c_void = (-1isize) as *mut c_void;
 const AT_FDCWD: i64 = -100;
 const AT_SYMLINK_NOFOLLOW: u64 = 2;
-const AT_SYMLINK_FOLLOW: c_int = 0x0400;
 const SC_OPEN_MAX: c_int = 4;
 const SC_PAGESIZE: c_int = 8;
 const SC_NPROCESSORS_CONF: c_int = 9;
@@ -7842,15 +7841,7 @@ fn link_posix_at(
     new_path: *const c_char,
     flags: c_int,
 ) -> Result<(), c_int> {
-    if flags & !AT_SYMLINK_FOLLOW != 0 {
-        return Err(EINVAL);
-    }
-    let protocol_flags = if flags & AT_SYMLINK_FOLLOW != 0 {
-        posix_protocol::LINK_FOLLOW_SOURCE
-    } else {
-        0
-    };
-    path_io::link(old_dirfd, old_path, new_dirfd, new_path, protocol_flags)
+    path_io::link(old_dirfd, old_path, new_dirfd, new_path, flags)
 }
 
 #[unsafe(no_mangle)]
