@@ -1599,14 +1599,18 @@ fn native_thread_retired(control: &ThreadControl) -> Result<bool, c_int> {
         return Err(ESRCH);
     }
     let mut status = syscall::ThreadStatus::default();
-    match syscall_errno(syscall::raw_syscall2(
+    match syscall::raw_syscall2(
         syscall::SyscallNumber::ThreadHandleStatus,
         u64::from(handle),
         (&mut status as *mut syscall::ThreadStatus) as u64,
-    )) {
+    )
+    .into_result()
+    {
         Ok(_) => Ok(status.state == mnu_abi::THREAD_STATE_TERMINATED),
-        Err(ESRCH) => Ok(true), // The native thread record has been removed.
-        Err(error) => Err(error),
+        // Only absence of the retained thread target proves retirement.
+        // Invalid selectors/authority or failed copies must not free stacks.
+        Err(error) if error.native_error() == Some(mnu_abi::status::Error::NotFound) => Ok(true),
+        Err(error) => Err(map_kernel_errno(error.raw())),
     }
 }
 
