@@ -6751,14 +6751,20 @@ fn update_current_signal_mask(how: c_int, set: *const u64, old_set: *mut u64) ->
         (operation, signal_memory::read_set(set)?)
     };
     let previous = service_signal_mask(control, operation, requested)?;
-    if !old_set.is_null() {
-        signal_memory::write_set(old_set, previous)?;
-    }
+    let output = if old_set.is_null() {
+        Ok(())
+    } else {
+        signal_memory::write_set(old_set, previous)
+    };
     let updated = control.signal_mask.load(Ordering::Acquire);
-    if previous & !updated != 0 {
-        drain_pending_signals()?;
-    }
-    Ok(())
+    // The mask change already committed. Complete newly unblocked delivery
+    // even if the old-mask copy failed, retaining that copy error for the caller.
+    let delivery = if previous & !updated != 0 {
+        drain_pending_signals()
+    } else {
+        Ok(())
+    };
+    output.and(delivery)
 }
 
 #[unsafe(no_mangle)]
