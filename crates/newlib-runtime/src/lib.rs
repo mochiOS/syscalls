@@ -11,6 +11,7 @@ mod directory_io;
 mod path_io;
 mod io_resources;
 mod mapping_io;
+mod mapping_backing;
 mod pipe;
 mod pty_creation;
 mod vector_metadata;
@@ -6393,13 +6394,23 @@ pub extern "C" fn mmap(
             return Err(EINVAL);
         }
         mapping_io::with_source(mapping.anonymous, fd, |entry| {
-            let mut shared_backing = None;
+            let map = |backing_handle| {
+                address_space::current()?
+                    .map(
+                        addr as u64,
+                        len as u64,
+                        access,
+                        mapping.options,
+                        backing_handle,
+                        offset as u64,
+                    )
+                    .map(|mapped| mapped as *mut c_void)
+            };
             let backing_handle = if let Some(entry) = entry {
                 if entry.handle.kind == FdKind::ObjectSharedMemory {
                     let writable = mapping.options & mnu_abi::MEMORY_MAP_SHARED != 0
                         && access & mnu_abi::MEMORY_ACCESS_WRITE != 0;
-                    shared_backing = Some(shared_memory::mapping(entry, writable)?);
-                    u64::from(shared_backing.as_ref().unwrap().0)
+                    return mapping_backing::with(entry, writable, map);
                 } else {
                     if !matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSpecial) {
                         return Err(EACCES);
@@ -6418,18 +6429,7 @@ pub extern "C" fn mmap(
             } else {
                 0
             };
-            let mapped = address_space::current()?.map(
-                addr as u64,
-                len as u64,
-                access,
-                mapping.options,
-                backing_handle,
-                offset as u64,
-            )?;
-            // Native MemoryMap retained the backing; RAII also closes it if map
-            // failed. The FD continues to own its independent Provider reference.
-            drop(shared_backing);
-            Ok(mapped as *mut c_void)
+            map(backing_handle)
         })
     })();
     result_with_errno(result, MAP_FAILED)

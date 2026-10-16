@@ -163,22 +163,3 @@ pub(super) fn update_status_flags(entry: FdEntry, mask: u32, flags: u32) -> Resu
     }
     Ok(())
 }
-
-pub(super) struct MappingBacking(pub u32);
-impl Drop for MappingBacking {
-    fn drop(&mut self) {
-        close_object_handle(self.0);
-    }
-}
-
-pub(super) fn mapping(entry: FdEntry, writable: bool) -> Result<MappingBacking, c_int> {
-    let descriptor = ObjectHandleAttachment {
-        handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
-        rights: entry.rights,
-    };
-    let backing = posix_client()
-        .map_err(map_posix_client_error)?
-        .shared_memory_backing(descriptor, writable, close_object_handle)
-        .map_err(map_posix_client_error)?;
-    Ok(MappingBacking(backing.handle))
-}
