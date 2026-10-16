@@ -359,7 +359,7 @@ pub mod thread {
     }
 
     /// Waits on native handles only while the caller's guard word still equals
-    /// its expected value. A changed guard returns native EAGAIN, not a signal
+    /// its expected value. A changed guard returns native NotReady, not a signal
     /// policy result. See HandleWaitGuard for the notification requirement.
     pub fn wait_many_guarded(
         items: &mut [syscall::HandleWaitItem],
