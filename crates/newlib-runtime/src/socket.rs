@@ -6,6 +6,20 @@ use mochios_posix_protocol::socket as wire;
 
 struct PendingPair([FdReservation; 2]);
 
+struct PendingSocketHandles<const N: usize> {
+    handles: [ObjectHandleAttachment<u32>; N],
+    installed: bool,
+}
+impl<const N: usize> Drop for PendingSocketHandles<N> {
+    fn drop(&mut self) {
+        if !self.installed {
+            for handle in self.handles {
+                close_object_handle(handle.handle);
+            }
+        }
+    }
+}
+
 pub(super) struct SocketWait {
     started: Option<(u64, u64)>,
     deadline: Option<u64>,
@@ -529,31 +543,45 @@ pub extern "C" fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int {
     let result = (|| {
         let (create, cloexec) = mochios_posix_client::socket::newlib_create(domain, kind, protocol)
             .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
-        let limit = process_fd_limit()?;
-        let pending = PendingFdReservation(state().fds.reserve_from(0, limit).map_err(|_| EMFILE)?);
-        let opened = posix_client()
-            .map_err(map_posix_client_error)?
-            .open_socket(create, close_object_handle)
-            .map_err(map_posix_client_error)?;
-        let flags = 2 | if cloexec { O_CLOEXEC } else { 0 };
-        let entry = object_entry(
-            u64::from(opened.handle),
-            opened.rights,
-            if create.kind == wire::Kind::Datagram {
-                FdKind::ObjectDatagram
-            } else {
-                FdKind::ObjectSocket
+        io_resources::with(
+            || {
+                let limit = process_fd_limit()?;
+                let pending =
+                    PendingFdReservation(state().fds.reserve_from(0, limit).map_err(|_| EMFILE)?);
+                let opened = posix_client()
+                    .map_err(map_posix_client_error)?
+                    .open_socket(create, close_object_handle)
+                    .map_err(map_posix_client_error)?;
+                Ok((
+                    pending,
+                    PendingSocketHandles {
+                        handles: [opened],
+                        installed: false,
+                    },
+                ))
             },
-            flags,
-        );
-        let result = state().fds.commit_reservation(&pending.0, entry);
-        match result {
-            Ok(fd) => Ok(fd),
-            Err(_) => {
-                close_object_handle(opened.handle);
-                Err(EIO)
-            }
-        }
+            |(pending, opened)| {
+                let _native = defer_native_delivery();
+                let handle = opened.handles[0];
+                let flags = 2 | if cloexec { O_CLOEXEC } else { 0 };
+                let entry = object_entry(
+                    u64::from(handle.handle),
+                    handle.rights,
+                    if create.kind == wire::Kind::Datagram {
+                        FdKind::ObjectDatagram
+                    } else {
+                        FdKind::ObjectSocket
+                    },
+                    flags,
+                );
+                let fd = state()
+                    .fds
+                    .commit_reservation(&pending.0, entry)
+                    .map_err(|_| EIO)?;
+                opened.installed = true;
+                Ok(fd)
+            },
+        )
     })();
     result_with_errno(result, -1)
 }
