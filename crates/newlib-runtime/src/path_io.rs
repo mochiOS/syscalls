@@ -148,6 +148,39 @@ pub(super) fn symlink(
     })
 }
 
+pub(super) fn access(
+    dirfd: c_int,
+    path: *const c_char,
+    mode: c_int,
+    flags: c_int,
+) -> Result<(), c_int> {
+    const AT_EACCESS: c_int = 1;
+    const AT_NOFOLLOW: c_int = 2;
+    if mode & !7 != 0 || flags & !(AT_EACCESS | AT_NOFOLLOW) != 0 {
+        return Err(EINVAL);
+    }
+    let options = if flags & AT_EACCESS != 0 {
+        posix_protocol::ACCESS_EFFECTIVE_IDS
+    } else {
+        0
+    } | if flags & AT_NOFOLLOW != 0 {
+        posix_protocol::ACCESS_NOFOLLOW
+    } else {
+        0
+    };
+    at(dirfd, path, |base, path| {
+        let base = match base {
+            StatAtBase::ProcessRoot => AccessAtBase::ProcessRoot,
+            StatAtBase::ProcessCwd => AccessAtBase::ProcessCwd,
+            StatAtBase::Directory(handle) => AccessAtBase::Directory(handle),
+        };
+        posix_client()
+            .map_err(map_posix_client_error)?
+            .access_at(base, options, mode as u32, path)
+            .map_err(map_posix_client_error)
+    })
+}
+
 pub(super) fn chmod(dirfd: c_int, path: *const c_char, mode: u32) -> Result<(), c_int> {
     at(dirfd, path, |base, path| {
         posix_client()

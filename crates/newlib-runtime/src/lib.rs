@@ -77,7 +77,7 @@ use mochios_posix_client::signal_context::{SigInfo, UContext};
 use mochios_posix_client::{
     Client as PosixClient, ClientError as PosixClientError, StatAtBase, SyscallEndpointTransport,
 };
-use mochios_posix_client::{ObjectHandleAttachment, OpenAtBase};
+use mochios_posix_client::{AccessAtBase, ObjectHandleAttachment, OpenAtBase};
 use mochios_posix_protocol as posix_protocol;
 use mochios_posix_protocol::{FileStatus as PosixFileStatus, STAT_NOFOLLOW};
 
@@ -5494,6 +5494,30 @@ pub extern "C" fn setregid(real: credentials::Id, effective: credentials::Id) ->
         })
         .map(|_| 0);
     result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn faccessat(dirfd: c_int, path: *const c_char, mode: c_int, flags: c_int) -> c_int {
+    if path.is_null() {
+        set_errno(EFAULT);
+        return -1;
+    }
+    result_with_errno(path_io::access(dirfd, path, mode, flags).map(|_| 0), -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
+    faccessat(-2, path, mode, 0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn eaccess(path: *const c_char, mode: c_int) -> c_int {
+    faccessat(-2, path, mode, 1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn euidaccess(path: *const c_char, mode: c_int) -> c_int {
+    eaccess(path, mode)
 }
 
 #[unsafe(no_mangle)]
