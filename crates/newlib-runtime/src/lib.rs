@@ -7,6 +7,7 @@ mod fd_creation;
 mod callback_resources;
 mod file_mutation;
 mod file_metadata;
+mod directory_io;
 mod io_resources;
 mod pipe;
 mod pty_creation;
@@ -4064,19 +4065,7 @@ fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<is
 }
 
 fn refill_dir_stream(stream: &mut DirStream) -> Result<bool, c_int> {
-    let entry = with_fd_entry(stream.fd)?;
-    if entry.handle.kind != FdKind::ObjectDirectory {
-        return Err(EBADF);
-    }
-    let read = syscall_errno(syscall::raw_syscall3(
-        syscall::SyscallNumber::HandleRead,
-        entry.handle.lower_handle,
-        stream.buffer.as_mut_ptr() as u64,
-        stream.buffer.len() as u64,
-    ))?;
-    stream.buffer_offset = 0;
-    stream.buffer_len = read as usize;
-    Ok(stream.buffer_len != 0)
+    directory_io::refill(stream)
 }
 
 fn next_dirent(stream: &mut DirStream) -> Result<Option<NewlibDirent>, c_int> {
