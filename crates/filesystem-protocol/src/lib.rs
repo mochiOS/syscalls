@@ -101,6 +101,9 @@ pub const OP_OPEN_SOCKET_AT: u16 = 39;
 /// CONTROL|TRANSFER attachment identifies the open description; inline IDs
 /// confer no authority. Removing CONTROL prevents changes to shared flags.
 pub const OP_UPDATE_FLAGS_HANDLE: u16 = 40;
+/// Resolve an existing path, following symlinks, and return its canonical
+/// root-relative name. Uses STAT_AT root/base flags and authenticated credentials.
+pub const OP_CANONICAL_PATH_AT: u16 = 41;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const OPEN_STATUS_APPEND: u32 = 1 << 0;
