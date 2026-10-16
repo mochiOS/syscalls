@@ -13,6 +13,7 @@ mod socket_memory;
 mod socket_receive_address;
 mod time_memory;
 mod multiplex_memory;
+mod resource_limit_memory;
 mod directory_io;
 mod path_io;
 mod user_copy;
@@ -6559,35 +6560,12 @@ fn resource_limit_impl(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getrlimit(resource: c_int, limit: *mut NewlibRlimit) -> c_int {
-    if limit.is_null() {
-        set_errno(EFAULT);
-        return -1;
-    }
-    match resource_limit_impl(0, resource, None) {
-        Ok(value) => {
-            // Safety: the caller supplied a non-null writable C output pointer.
-            unsafe { ptr::write(limit, value) };
-            0
-        }
-        Err(error) => {
-            set_errno(error);
-            -1
-        }
-    }
+    result_with_errno(resource_limit_memory::get(resource, limit), -1)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn setrlimit(resource: c_int, limit: *const NewlibRlimit) -> c_int {
-    if limit.is_null() {
-        set_errno(EFAULT);
-        return -1;
-    }
-    // Safety: the caller supplied a non-null readable C input pointer.
-    let replacement = unsafe { ptr::read(limit) };
-    result_with_errno(
-        resource_limit_impl(0, resource, Some(replacement)).map(|_| 0),
-        -1,
-    )
+    result_with_errno(resource_limit_memory::set(resource, limit), -1)
 }
 
 #[unsafe(no_mangle)]
@@ -6597,25 +6575,10 @@ pub unsafe extern "C" fn prlimit(
     new_limit: *const NewlibRlimit,
     old_limit: *mut NewlibRlimit,
 ) -> c_int {
-    let replacement = if new_limit.is_null() {
-        None
-    } else {
-        // Safety: the caller supplied a non-null readable C input pointer.
-        Some(unsafe { ptr::read(new_limit) })
-    };
-    match resource_limit_impl(process_id, resource, replacement) {
-        Ok(previous) => {
-            if !old_limit.is_null() {
-                // Safety: the caller supplied a non-null writable C output pointer.
-                unsafe { ptr::write(old_limit, previous) };
-            }
-            0
-        }
-        Err(error) => {
-            set_errno(error);
-            -1
-        }
-    }
+    result_with_errno(
+        resource_limit_memory::exchange(process_id, resource, new_limit, old_limit),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]
