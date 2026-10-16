@@ -7831,19 +7831,12 @@ fn link_posix_at(
     if flags & !AT_SYMLINK_FOLLOW != 0 {
         return Err(EINVAL);
     }
-    let old_path = core::str::from_utf8(unsafe { c_bytes(old_path) }).map_err(|_| EINVAL)?;
-    let new_path = core::str::from_utf8(unsafe { c_bytes(new_path) }).map_err(|_| EINVAL)?;
-    let (old_base, _old_base_lease) = rename_posix_base(old_dirfd, old_path)?;
-    let (new_base, _new_base_lease) = rename_posix_base(new_dirfd, new_path)?;
     let protocol_flags = if flags & AT_SYMLINK_FOLLOW != 0 {
         posix_protocol::LINK_FOLLOW_SOURCE
     } else {
         0
     };
-    let client = posix_client().map_err(map_posix_client_error)?;
-    client
-        .link_at(old_base, old_path, new_base, new_path, protocol_flags)
-        .map_err(map_posix_client_error)
+    path_io::link(old_dirfd, old_path, new_dirfd, new_path, protocol_flags)
 }
 
 #[unsafe(no_mangle)]
@@ -7884,13 +7877,7 @@ fn symlink_posix_at(
     dirfd: c_int,
     link_path: *const c_char,
 ) -> Result<(), c_int> {
-    let target = core::str::from_utf8(unsafe { c_bytes(target) }).map_err(|_| EINVAL)?;
-    let link_path = core::str::from_utf8(unsafe { c_bytes(link_path) }).map_err(|_| EINVAL)?;
-    let (base, _base_lease) = rename_posix_base(dirfd, link_path)?;
-    let client = posix_client().map_err(map_posix_client_error)?;
-    client
-        .symlink_at(target, base, link_path)
-        .map_err(map_posix_client_error)
+    path_io::symlink(target, dirfd, link_path)
 }
 
 #[unsafe(no_mangle)]
@@ -8029,14 +8016,7 @@ fn rename_posix_at(
     new_dirfd: c_int,
     new_path: *const c_char,
 ) -> Result<(), c_int> {
-    let old_path = core::str::from_utf8(unsafe { c_bytes(old_path) }).map_err(|_| EINVAL)?;
-    let new_path = core::str::from_utf8(unsafe { c_bytes(new_path) }).map_err(|_| EINVAL)?;
-    let (old_base, _old_base_lease) = rename_posix_base(old_dirfd, old_path)?;
-    let (new_base, _new_base_lease) = rename_posix_base(new_dirfd, new_path)?;
-    let client = posix_client().map_err(map_posix_client_error)?;
-    client
-        .rename_at(old_base, old_path, new_base, new_path)
-        .map_err(map_posix_client_error)
+    path_io::rename(old_dirfd, old_path, new_dirfd, new_path)
 }
 
 #[unsafe(no_mangle)]

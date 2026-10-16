@@ -9,54 +9,143 @@ struct Resources {
     directory: Option<fd_lease::Lease>,
 }
 
+impl Resources {
+    fn empty() -> Self {
+        Self {
+            path: [0; posix_protocol::MAX_PATH_LEN],
+            length: 0,
+            base: StatAtBase::ProcessCwd,
+            directory: None,
+        }
+    }
+
+    fn capture(&mut self, dirfd: c_int, path: *const c_char) -> Result<(), c_int> {
+        let resources = self;
+        if path.is_null() {
+            return Err(EFAULT);
+        }
+        // Bound reads as well as the resulting wire pathname. No borrowed
+        // caller string survives into a wait or application callback.
+        let mut length = 0;
+        loop {
+            let byte = unsafe { path.cast::<u8>().add(length).read() };
+            if byte == 0 {
+                break;
+            }
+            if length == resources.path.len() {
+                return Err(ENAMETOOLONG);
+            }
+            resources.path[length] = byte;
+            length += 1;
+        }
+        if length == 0 {
+            return Err(ENOENT);
+        }
+        resources.length = length;
+        let path = core::str::from_utf8(&resources.path[..length]).map_err(|_| EINVAL)?;
+        let (base, directory) = rename_posix_base(dirfd, path)?;
+        resources.directory = directory;
+        resources.base = base;
+        Ok(())
+    }
+
+    fn text(&self) -> Result<&str, c_int> {
+        core::str::from_utf8(&self.path[..self.length]).map_err(|_| EINVAL)
+    }
+}
+
 pub(super) fn at<T: Copy>(
     dirfd: c_int,
     path: *const c_char,
     operation: impl FnOnce(StatAtBase<u32>, &str) -> Result<T, c_int>,
 ) -> Result<T, c_int> {
     io_resources::with_initialized(
-        || {
-            Ok(Resources {
-                path: [0; posix_protocol::MAX_PATH_LEN],
-                length: 0,
-                base: StatAtBase::ProcessCwd,
-                directory: None,
-            })
+        || Ok(Resources::empty()),
+        |resources| resources.capture(dirfd, path),
+        |resources| operation(resources.base, resources.text()?),
+    )
+}
+
+pub(super) fn pair<T: Copy>(
+    old_dirfd: c_int,
+    old_path: *const c_char,
+    new_dirfd: c_int,
+    new_path: *const c_char,
+    operation: impl FnOnce(StatAtBase<u32>, &str, StatAtBase<u32>, &str) -> Result<T, c_int>,
+) -> Result<T, c_int> {
+    io_resources::with_initialized(
+        || Ok([Resources::empty(), Resources::empty()]),
+        |resources| {
+            // Both owners are registered before the first input read. A fault
+            // in the second pathname must also retire the first directory.
+            resources[0].capture(old_dirfd, old_path)?;
+            resources[1].capture(new_dirfd, new_path)
         },
         |resources| {
-            if path.is_null() {
-                return Err(EFAULT);
-            }
-            // Bound reads as well as the resulting wire pathname. No borrowed
-            // caller string survives into a wait or application callback.
-            let mut length = 0;
-            loop {
-                let byte = unsafe { path.cast::<u8>().add(length).read() };
-                if byte == 0 {
-                    break;
-                }
-                if length == resources.path.len() {
-                    return Err(ENAMETOOLONG);
-                }
-                resources.path[length] = byte;
-                length += 1;
-            }
-            if length == 0 {
-                return Err(ENOENT);
-            }
-            resources.length = length;
-            let path = core::str::from_utf8(&resources.path[..length]).map_err(|_| EINVAL)?;
-            let (base, directory) = rename_posix_base(dirfd, path)?;
-            resources.directory = directory;
-            resources.base = base;
-            Ok(())
-        },
-        |resources| {
-            let path =
-                core::str::from_utf8(&resources.path[..resources.length]).map_err(|_| EINVAL)?;
-            operation(resources.base, path)
+            operation(
+                resources[0].base,
+                resources[0].text()?,
+                resources[1].base,
+                resources[1].text()?,
+            )
         },
     )
+}
+
+pub(super) fn rename(
+    old_dirfd: c_int,
+    old_path: *const c_char,
+    new_dirfd: c_int,
+    new_path: *const c_char,
+) -> Result<(), c_int> {
+    pair(
+        old_dirfd,
+        old_path,
+        new_dirfd,
+        new_path,
+        |old_base, old_path, new_base, new_path| {
+            posix_client()
+                .map_err(map_posix_client_error)?
+                .rename_at(old_base, old_path, new_base, new_path)
+                .map_err(map_posix_client_error)
+        },
+    )
+}
+
+pub(super) fn link(
+    old_dirfd: c_int,
+    old_path: *const c_char,
+    new_dirfd: c_int,
+    new_path: *const c_char,
+    flags: u32,
+) -> Result<(), c_int> {
+    pair(
+        old_dirfd,
+        old_path,
+        new_dirfd,
+        new_path,
+        |old_base, old_path, new_base, new_path| {
+            posix_client()
+                .map_err(map_posix_client_error)?
+                .link_at(old_base, old_path, new_base, new_path, flags)
+                .map_err(map_posix_client_error)
+        },
+    )
+}
+
+pub(super) fn symlink(
+    target: *const c_char,
+    dirfd: c_int,
+    path: *const c_char,
+) -> Result<(), c_int> {
+    // The target is literal text: the synthetic cwd base never borrows a FD
+    // or resolves it. Only the link's parent supplies directory authority.
+    pair(-2, target, dirfd, path, |_, target, base, path| {
+        posix_client()
+            .map_err(map_posix_client_error)?
+            .symlink_at(target, base, path)
+            .map_err(map_posix_client_error)
+    })
 }
 
 pub(super) fn chmod(dirfd: c_int, path: *const c_char, mode: u32) -> Result<(), c_int> {
