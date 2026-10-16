@@ -491,11 +491,25 @@ pub const UNLINK_FLAGS_ALL: u32 = UNLINK_REMOVE_DIRECTORY;
 
 pub const WAIT_NOHANG: u32 = 1 << 0;
 pub const WAIT_UNTRACED: u32 = 1 << 1;
+pub const WAIT_EXITED: u32 = 1 << 2;
 pub const WAIT_CONTINUED: u32 = 1 << 3;
 /// Observe a selected child event without consuming it or charging its CPU
 /// time to the parent's already-waited accounting. This is userspace policy.
 pub const WAIT_NOWAIT: u32 = 1 << 4;
-pub const WAIT_OPTIONS_ALL: u32 = WAIT_NOHANG | WAIT_UNTRACED | WAIT_CONTINUED | WAIT_NOWAIT;
+/// Without this marker, waitpid's implicit exit selection is preserved.
+/// With it, at least one event kind must be explicitly requested.
+pub const WAIT_SELECT_EVENTS: u32 = 1 << 5;
+pub const WAIT_EVENT_KINDS: u32 = WAIT_EXITED | WAIT_UNTRACED | WAIT_CONTINUED;
+pub const WAIT_OPTIONS_ALL: u32 = WAIT_NOHANG | WAIT_EVENT_KINDS | WAIT_NOWAIT | WAIT_SELECT_EVENTS;
+
+pub const fn wait_selects_exit(options: u32) -> bool {
+    options & WAIT_SELECT_EVENTS == 0 || options & WAIT_EXITED != 0
+}
+
+pub const fn wait_options_valid(options: u32) -> bool {
+    options & !WAIT_OPTIONS_ALL == 0
+        && (options & WAIT_SELECT_EVENTS == 0 || options & WAIT_EVENT_KINDS != 0)
+}
 pub const WAIT_STATUS_CONTINUED: u32 = 0xffff;
 
 pub const RESOURCE_LIMIT_SET: u32 = 1 << 0;
