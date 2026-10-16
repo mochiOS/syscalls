@@ -41,6 +41,7 @@ mod heap;
 use heap::HeapState;
 mod atfork;
 mod thread_lifecycle;
+mod thread_stack;
 mod credentials;
 mod groups;
 mod pthread_mutex;
@@ -8183,24 +8184,16 @@ pub unsafe extern "C" fn pthread_create(
             attr.detachstate,
         )
     };
-    let stack_size = if owns_stack {
-        match align_up(stack_size, PAGE_SIZE) {
-            Some(size) => size,
-            None => return EINVAL,
-        }
-    } else {
-        stack_size
-    };
-    let stack_base = if owns_stack {
-        match address_space::current()
-            .and_then(|limit| limit.map(0, stack_size as u64, NATIVE_READ_WRITE, 0, 0, 0))
-        {
-            Ok(address) => address as usize,
+    // Owned mappings include the inaccessible guard prefix. Track the whole
+    // reservation so every failure, join, detach and fork cleanup releases it.
+    let (stack_base, stack_size) = if owns_stack {
+        match thread_stack::allocate(stack_size) {
+            Ok(mapping) => mapping,
             Err(ENOMEM) => return EAGAIN,
             Err(error) => return error,
         }
     } else {
-        stack_address as usize
+        (stack_address as usize, stack_size)
     };
     let Some((token, control, _preparation)) = reserve_thread_control() else {
         if owns_stack {
