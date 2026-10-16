@@ -824,7 +824,8 @@ pub mod handle {
 
     /// Reads metadata for all currently owned Handles, without acquiring any
     /// reference. An empty slice queries the count. A too-small slice returns
-    /// ENOSPC rather than a truncated list. Later transfers revalidate rights.
+    /// native LimitExceeded rather than a truncated list. Later transfers
+    /// revalidate rights; the count query does not reserve table entries.
     pub fn table_read(output: &mut [syscall::HandleInfo]) -> SysResult<usize> {
         syscall::call2(
             syscall::SyscallNumber::HandleTableRead,
