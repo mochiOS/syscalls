@@ -12,6 +12,7 @@ mod terminal_memory;
 mod socket_memory;
 mod socket_receive_address;
 mod time_memory;
+mod multiplex_memory;
 mod directory_io;
 mod path_io;
 mod user_copy;
@@ -4836,7 +4837,7 @@ fn select_deadline(timeout: *const Timeval) -> Result<u64, c_int> {
     if timeout.is_null() {
         return Ok(syscall::HANDLE_WAIT_INFINITE);
     }
-    let timeout = unsafe { timeout.read() };
+    let timeout = multiplex_memory::read_timeval(timeout)?;
     if timeout.tv_sec < 0 || !(0..1_000_000).contains(&timeout.tv_usec) {
         return Err(EINVAL);
     }
@@ -4892,17 +4893,17 @@ fn select_with_deadline(
             let requested_read = if readfds.is_null() {
                 0
             } else {
-                unsafe { readfds.read().bits[0] }
+                multiplex_memory::read_mask(readfds.cast())?
             };
             let requested_write = if writefds.is_null() {
                 0
             } else {
-                unsafe { writefds.read().bits[0] }
+                multiplex_memory::read_mask(writefds.cast())?
             };
             let requested_except = if exceptfds.is_null() {
                 0
             } else {
-                unsafe { exceptfds.read().bits[0] }
+                multiplex_memory::read_mask(exceptfds.cast())?
             };
             let valid_mask = if nfds == 64 {
                 u64::MAX
@@ -5015,21 +5016,13 @@ fn select_with_deadline(
                 }
             }
             if !readfds.is_null() {
-                unsafe { readfds.write(FdSet { bits: [ready_read] }) };
+                user_copy::write(readfds.cast(), &ready_read.to_ne_bytes())?;
             }
             if !writefds.is_null() {
-                unsafe {
-                    writefds.write(FdSet {
-                        bits: [ready_write],
-                    })
-                };
+                user_copy::write(writefds.cast(), &ready_write.to_ne_bytes())?;
             }
             if !exceptfds.is_null() {
-                unsafe {
-                    exceptfds.write(FdSet {
-                        bits: [ready_except],
-                    })
-                };
+                user_copy::write(exceptfds.cast(), &ready_except.to_ne_bytes())?;
             }
             Ok(mochios_posix_client::multiplex::select_ready_count(
                 ready_read,
@@ -5081,7 +5074,7 @@ fn poll_with_deadline(
             }
             // Capture the entire caller list before any provider may invoke C.
             for index in 0..count {
-                pollfds[index] = unsafe { fds.add(index).read() };
+                pollfds[index] = multiplex_memory::read_pollfd(fds, index)?;
             }
             Ok(())
         },
@@ -5211,7 +5204,7 @@ fn poll_with_deadline(
                 if pollfds[index].revents != 0 {
                     ready += 1;
                 }
-                unsafe { fds.add(index).write(pollfds[index]) };
+                multiplex_memory::write_pollfd(fds, index, pollfds[index])?;
             }
             c_int::try_from(ready).map_err(|_| EOVERFLOW)
         },
@@ -5222,7 +5215,7 @@ fn timespec_deadline(timeout: *const NewlibTimespec) -> Result<u64, c_int> {
     if timeout.is_null() {
         return Ok(syscall::HANDLE_WAIT_INFINITE);
     }
-    let value = unsafe { timeout.read() };
+    let value = multiplex_memory::read_timespec(timeout)?;
     let duration =
         mochios_posix_client::multiplex::timespec_timeout_nanoseconds(value.tv_sec, value.tv_nsec)
             .ok_or(EINVAL)?;
@@ -5240,7 +5233,7 @@ fn masked_multiplex(
     let mask = if mask.is_null() {
         None
     } else {
-        Some(unsafe { mask.read() })
+        Some(multiplex_memory::read_mask(mask)?)
     };
     let result = mochios_posix_client::multiplex::with_signal_mask(
         mask,
