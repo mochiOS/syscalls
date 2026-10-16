@@ -4269,7 +4269,7 @@ pub unsafe extern "C" fn writev(fd: c_int, iov: *const IoVec, iovcnt: c_int) -> 
         set_errno(EFAULT);
         return -1;
     }
-    let result = io_resources::with(
+    let result = io_resources::with_initialized(
         || {
             Ok((
                 with_fd_entry(fd)?,
@@ -4277,19 +4277,19 @@ pub unsafe extern "C" fn writev(fd: c_int, iov: *const IoVec, iovcnt: c_int) -> 
                 None::<VectorBuffer>,
             ))
         },
+        |(_, metadata, buffer)| {
+            let total = mochios_posix_client::io_vector::validate(iovcnt, |index| {
+                // Copy each record once; a returning handler may change
+                // or even unmap the caller's array while I/O is waiting.
+                let part = unsafe { iov.add(index).read_unaligned() };
+                metadata.set(index, part.iov_base.cast_mut(), part.iov_len);
+                (part.iov_base.is_null(), part.iov_len)
+            })
+            .map_err(vector_errno)?;
+            *buffer = Some(VectorBuffer::new(total)?);
+            Ok(())
+        },
         |(entry, metadata, buffer)| {
-            {
-                let _native = defer_native_delivery();
-                let total = mochios_posix_client::io_vector::validate(iovcnt, |index| {
-                    // Copy each record once; a returning handler may change
-                    // or even unmap the caller's array while I/O is waiting.
-                    let part = unsafe { iov.add(index).read_unaligned() };
-                    metadata.set(index, part.iov_base.cast_mut(), part.iov_len);
-                    (part.iov_base.is_null(), part.iov_len)
-                })
-                .map_err(vector_errno)?;
-                *buffer = Some(VectorBuffer::new(total)?);
-            }
             mochios_posix_client::io_vector::write(
                 iovcnt as usize,
                 buffer.as_mut().unwrap().bytes(),
@@ -4438,7 +4438,7 @@ pub unsafe extern "C" fn readv(fd: c_int, iov: *const IoVecMut, iovcnt: c_int) -
         set_errno(EFAULT);
         return -1;
     }
-    let result = io_resources::with(
+    let result = io_resources::with_initialized(
         || {
             Ok((
                 with_fd_entry(fd)?,
@@ -4446,17 +4446,17 @@ pub unsafe extern "C" fn readv(fd: c_int, iov: *const IoVecMut, iovcnt: c_int) -
                 None::<VectorBuffer>,
             ))
         },
+        |(_, metadata, buffer)| {
+            let total = mochios_posix_client::io_vector::validate(iovcnt, |index| {
+                let part = unsafe { iov.add(index).read_unaligned() };
+                metadata.set(index, part.iov_base, part.iov_len);
+                (part.iov_base.is_null(), part.iov_len)
+            })
+            .map_err(vector_errno)?;
+            *buffer = Some(VectorBuffer::new(total)?);
+            Ok(())
+        },
         |(entry, metadata, buffer)| {
-            {
-                let _native = defer_native_delivery();
-                let total = mochios_posix_client::io_vector::validate(iovcnt, |index| {
-                    let part = unsafe { iov.add(index).read_unaligned() };
-                    metadata.set(index, part.iov_base, part.iov_len);
-                    (part.iov_base.is_null(), part.iov_len)
-                })
-                .map_err(vector_errno)?;
-                *buffer = Some(VectorBuffer::new(total)?);
-            }
             mochios_posix_client::io_vector::read(
                 iovcnt as usize,
                 buffer.as_mut().unwrap().bytes(),
