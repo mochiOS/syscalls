@@ -5679,7 +5679,10 @@ pub extern "C" fn opendir(path: *const c_char) -> *mut c_void {
         return ptr::null_mut();
     }
 
-    let fd = _open(path, 0, 0);
+    // Ask the filesystem for a directory atomically; never accept a regular
+    // file and discover the mismatch only on the first readdir call.
+    const O_DIRECTORY: c_int = 0x200000;
+    let fd = _open(path, O_DIRECTORY | O_CLOEXEC, 0);
     if fd < 0 {
         return ptr::null_mut();
     }
