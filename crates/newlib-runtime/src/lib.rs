@@ -256,15 +256,18 @@ impl PosixSpawnAttr {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct PthreadAttr {
+    // pthread_attr_t is opaque to callers. Keep the SDK's 40-byte, 8-aligned
+    // storage contract, not upstream newlib's private field interpretation.
     is_initialized: c_int,
-    stackaddr: *mut c_void,
-    stacksize: c_int,
-    contentionscope: c_int,
-    inheritsched: c_int,
-    schedpolicy: c_int,
-    schedparam_priority: c_int,
     detachstate: c_int,
+    stackaddr: *mut c_void,
+    stacksize: usize,
+    guardsize: usize,
+    reserved: [u32; 2],
 }
+
+const _: [(); 40] = [(); core::mem::size_of::<PthreadAttr>()];
+const _: [(); 8] = [(); core::mem::align_of::<PthreadAttr>()];
 
 struct ThreadControl {
     state: AtomicU32,
@@ -8155,17 +8158,17 @@ pub unsafe extern "C" fn pthread_create(
         None => return EAGAIN,
     };
 
-    let (stack_address, stack_size, owns_stack, detachstate) = if attr.is_null() {
+    let (stack_address, stack_size, guard_size, owns_stack, detachstate) = if attr.is_null() {
         (
             ptr::null_mut(),
             PTHREAD_DEFAULT_STACK_SIZE,
+            PAGE_SIZE,
             true,
             PTHREAD_CREATE_JOINABLE,
         )
     } else {
         let attr = unsafe { &*attr };
         if attr.is_initialized == 0
-            || attr.stacksize < 0
             || !matches!(
                 attr.detachstate,
                 PTHREAD_CREATE_DETACHED | PTHREAD_CREATE_JOINABLE
@@ -8173,13 +8176,14 @@ pub unsafe extern "C" fn pthread_create(
         {
             return EINVAL;
         }
-        let size = attr.stacksize as usize;
+        let size = attr.stacksize;
         if size < PTHREAD_STACK_MIN {
             return EINVAL;
         }
         (
             attr.stackaddr,
             size,
+            attr.guardsize,
             attr.stackaddr.is_null(),
             attr.detachstate,
         )
@@ -8187,7 +8191,7 @@ pub unsafe extern "C" fn pthread_create(
     // Owned mappings include the inaccessible guard prefix. Track the whole
     // reservation so every failure, join, detach and fork cleanup releases it.
     let (stack_base, stack_size) = if owns_stack {
-        match thread_stack::allocate(stack_size) {
+        match thread_stack::allocate(stack_size, guard_size) {
             Ok(mapping) => mapping,
             Err(ENOMEM) => return EAGAIN,
             Err(error) => return error,
@@ -8633,11 +8637,9 @@ pub unsafe extern "C" fn pthread_attr_init(attr: *mut PthreadAttr) -> c_int {
         attr.write(PthreadAttr {
             is_initialized: 1,
             stackaddr: ptr::null_mut(),
-            stacksize: PTHREAD_DEFAULT_STACK_SIZE as c_int,
-            contentionscope: 0,
-            inheritsched: 1,
-            schedpolicy: 0,
-            schedparam_priority: 0,
+            stacksize: PTHREAD_DEFAULT_STACK_SIZE,
+            guardsize: PAGE_SIZE,
+            reserved: [0; 2],
             detachstate: PTHREAD_CREATE_JOINABLE,
         })
     };
@@ -8661,11 +8663,10 @@ pub unsafe extern "C" fn pthread_attr_setstacksize(
     if attr.is_null()
         || unsafe { (*attr).is_initialized } == 0
         || stack_size < PTHREAD_STACK_MIN
-        || stack_size > c_int::MAX as usize
     {
         return EINVAL;
     }
-    unsafe { (*attr).stacksize = stack_size as c_int };
+    unsafe { (*attr).stacksize = stack_size };
     0
 }
 
@@ -8677,7 +8678,7 @@ pub unsafe extern "C" fn pthread_attr_getstacksize(
     if attr.is_null() || stack_size.is_null() || unsafe { (*attr).is_initialized } == 0 {
         return EINVAL;
     }
-    unsafe { stack_size.write((*attr).stacksize as usize) };
+    unsafe { stack_size.write((*attr).stacksize) };
     0
 }
 
@@ -8691,13 +8692,12 @@ pub unsafe extern "C" fn pthread_attr_setstack(
         || stack_address.is_null()
         || unsafe { (*attr).is_initialized } == 0
         || stack_size < PTHREAD_STACK_MIN
-        || stack_size > c_int::MAX as usize
     {
         return EINVAL;
     }
     unsafe {
         (*attr).stackaddr = stack_address;
-        (*attr).stacksize = stack_size as c_int;
+        (*attr).stacksize = stack_size;
     }
     0
 }
@@ -8717,7 +8717,7 @@ pub unsafe extern "C" fn pthread_attr_getstack(
     }
     unsafe {
         stack_address.write((*attr).stackaddr);
-        stack_size.write((*attr).stacksize as usize);
+        stack_size.write((*attr).stacksize);
     }
     0
 }
@@ -8749,6 +8749,32 @@ pub unsafe extern "C" fn pthread_attr_getdetachstate(
         return EINVAL;
     }
     unsafe { detachstate.write((*attr).detachstate) };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_setguardsize(
+    attr: *mut PthreadAttr,
+    guard_size: usize,
+) -> c_int {
+    if attr.is_null() || unsafe { (*attr).is_initialized } == 0 {
+        return EINVAL;
+    }
+    // Preserve the requested size. Only allocation rounds to a whole page;
+    // pthread_attr_getguardsize returns exactly the caller's value.
+    unsafe { (*attr).guardsize = guard_size };
+    0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_attr_getguardsize(
+    attr: *const PthreadAttr,
+    guard_size: *mut usize,
+) -> c_int {
+    if attr.is_null() || guard_size.is_null() || unsafe { (*attr).is_initialized } == 0 {
+        return EINVAL;
+    }
+    unsafe { guard_size.write((*attr).guardsize) };
     0
 }
 

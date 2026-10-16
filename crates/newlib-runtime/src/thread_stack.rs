@@ -2,8 +2,8 @@
 use super::{EINVAL, NATIVE_READ_WRITE, PAGE_SIZE, address_space, c_int, syscall, syscall_errno};
 use mochios_posix_client::thread_stack::Layout;
 
-pub(super) fn allocate(stack_size: usize) -> Result<(usize, usize), c_int> {
-    let layout = Layout::new(stack_size, PAGE_SIZE, PAGE_SIZE).ok_or(EINVAL)?;
+pub(super) fn allocate(stack_size: usize, guard_size: usize) -> Result<(usize, usize), c_int> {
+    let layout = Layout::new(stack_size, guard_size, PAGE_SIZE).ok_or(EINVAL)?;
     // Reserve the guard and stack together. The AS admission limit includes
     // both, and another mapping cannot occupy the guard while the thread lives.
     let base = address_space::current()?.map(0, layout.mapping_size as u64, 0, 0, 0, 0)? as usize;
