@@ -979,13 +979,15 @@ fn posix_client()
 }
 
 fn has_posix_environment() -> Result<bool, c_int> {
-    match syscall_errno(syscall::raw_syscall1(
+    match syscall::raw_syscall1(
         syscall::SyscallNumber::LaunchHandleGet,
         posix_protocol::CONTROL_HANDLE_KEY,
-    )) {
+    )
+    .into_result()
+    {
         Ok(_) => Ok(true),
-        Err(EBADF) => Ok(false),
-        Err(error) => Err(error),
+        Err(error) if error.native_error() == Some(mnu_abi::status::Error::NotFound) => Ok(false),
+        Err(error) => Err(map_kernel_errno(error.raw())),
     }
 }
 
@@ -2267,30 +2269,34 @@ impl LaunchContextOps<FdObject> for RuntimeLaunchContext {
 
     fn get_value(&mut self, key: u64) -> Result<Option<u64>, Self::Error> {
         let mut value = 0u64;
-        match syscall_errno(syscall::raw_syscall2(
+        match syscall::raw_syscall2(
             syscall::SyscallNumber::LaunchValueGet,
             key,
             (&mut value as *mut u64) as u64,
-        )) {
+        )
+        .into_result()
+        {
             Ok(_) => Ok(Some(value)),
-            Err(EBADF) => Ok(None),
-            Err(error) => Err(error),
+            Err(error) if error.native_error() == Some(mnu_abi::status::Error::NotFound) => Ok(None),
+            Err(error) => Err(map_kernel_errno(error.raw())),
         }
     }
 
     fn get_handle(&mut self, key: u64) -> Result<Option<FdObject>, Self::Error> {
-        match syscall_errno(syscall::raw_syscall1(
+        match syscall::raw_syscall1(
             syscall::SyscallNumber::LaunchHandleGet,
             key,
-        )) {
+        )
+        .into_result()
+        {
             Ok(lower_handle) => Ok(Some(FdObject {
                 lower_handle,
                 kind: FdKind::Unused,
                 open_flags: 0,
                 close_owned: true,
             })),
-            Err(EBADF) => Ok(None),
-            Err(error) => Err(error),
+            Err(error) if error.native_error() == Some(mnu_abi::status::Error::NotFound) => Ok(None),
+            Err(error) => Err(map_kernel_errno(error.raw())),
         }
     }
 
