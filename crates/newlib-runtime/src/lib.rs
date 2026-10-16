@@ -20,6 +20,7 @@ mod directory_io;
 mod path_io;
 mod user_copy;
 mod exec_inputs;
+mod wait_output;
 mod io_resources;
 mod mapping_io;
 mod mapping_backing;
@@ -8116,14 +8117,7 @@ pub extern "C" fn _waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_
                 }
             }
         };
-        if waited.process_id == 0 {
-            return Ok(0);
-        }
-        let waited_pid = c_int::try_from(waited.process_id).map_err(|_| EOVERFLOW)?;
-        if !status.is_null() {
-            unsafe { status.write(waited.status as c_int) };
-        }
-        Ok(waited_pid)
+        wait_output::publish(waited.process_id, waited.status, status)
     })();
     result_with_errno(result, -1)
 }
