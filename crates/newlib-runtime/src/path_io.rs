@@ -2,6 +2,29 @@
 //! through service calls and caller-memory copies, including nonlocal exits.
 use super::*;
 
+/// Snapshot at most MAX_PATH_LEN bytes plus the terminator probe. No FD or
+/// allocation is acquired here; callers publish any existing owners first.
+pub(super) fn capture(
+    path: *const c_char,
+    output: &mut [u8; posix_protocol::MAX_PATH_LEN],
+) -> Result<usize, c_int> {
+    if path.is_null() {
+        return Err(EFAULT);
+    }
+    for length in 0..=output.len() {
+        let address = (path as usize).checked_add(length).ok_or(EFAULT)?;
+        let byte = unsafe { (address as *const u8).read() };
+        if byte == 0 {
+            return if length == 0 { Err(ENOENT) } else { Ok(length) };
+        }
+        if length == output.len() {
+            return Err(ENAMETOOLONG);
+        }
+        output[length] = byte;
+    }
+    Err(ENAMETOOLONG)
+}
+
 struct Resources {
     path: [u8; posix_protocol::MAX_PATH_LEN],
     length: usize,
@@ -21,26 +44,9 @@ impl Resources {
 
     fn capture(&mut self, dirfd: c_int, path: *const c_char) -> Result<(), c_int> {
         let resources = self;
-        if path.is_null() {
-            return Err(EFAULT);
-        }
         // Bound reads as well as the resulting wire pathname. No borrowed
         // caller string survives into a wait or application callback.
-        let mut length = 0;
-        loop {
-            let byte = unsafe { path.cast::<u8>().add(length).read() };
-            if byte == 0 {
-                break;
-            }
-            if length == resources.path.len() {
-                return Err(ENAMETOOLONG);
-            }
-            resources.path[length] = byte;
-            length += 1;
-        }
-        if length == 0 {
-            return Err(ENOENT);
-        }
+        let length = capture(path, &mut resources.path)?;
         resources.length = length;
         let path = &resources.path[..length];
         let (base, directory) = rename_posix_base(dirfd, path)?;

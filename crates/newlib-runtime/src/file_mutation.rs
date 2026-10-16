@@ -159,9 +159,11 @@ pub(super) fn truncate(path: *const c_char, length: u64) -> Result<c_int, c_int>
     let native = delivery(control);
     let client = posix_client().map_err(map_posix_client_error)?;
     let prepared = {
-        // No application callback may mutate/free this buffer until encoding
-        // has finished. No borrowed string survives into the waiting loop.
-        let path = unsafe { c_bytes(path) };
+        // Capture before acquiring mutation resources or reopening callbacks;
+        // never scan beyond the wire pathname bound looking for a NUL.
+        let mut snapshot = [0u8; posix_protocol::MAX_PATH_LEN];
+        let length_of_path = path_io::capture(path, &mut snapshot)?;
+        let path = &snapshot[..length_of_path];
         client
             .prepare_truncate_at(StatAtBase::ProcessCwd, path, length)
             .map_err(map_posix_client_error)?
@@ -250,14 +252,9 @@ fn open_in_slot(
     let client = posix_client().map_err(map_posix_client_error)?;
     let options = posix_open_options(flags)?;
     let (prepared, directory) = {
-        let path = unsafe { c_bytes(path) };
-        // Invalid C pathnames are POSIX errors, not malformed wire replies.
-        if path.is_empty() {
-            return Err(ENOENT);
-        }
-        if path.len() > posix_protocol::MAX_PATH_LEN {
-            return Err(ENAMETOOLONG);
-        }
+        let mut snapshot = [0u8; posix_protocol::MAX_PATH_LEN];
+        let length = path_io::capture(path, &mut snapshot)?;
+        let path = &snapshot[..length];
         let (base, directory) = rename_posix_base(dirfd, path)?;
         let base = match base {
             StatAtBase::ProcessRoot => OpenAtBase::ProcessRoot,
