@@ -5706,12 +5706,7 @@ pub extern "C" fn closedir(dirp: *mut c_void) -> c_int {
         set_errno(EFAULT);
         return -1;
     }
-    let stream = unsafe { &mut *(dirp as *mut DirStream) };
-    let fd = stream.fd;
-    unsafe {
-        free(dirp);
-    }
-    _close(fd)
+    unsafe { directory_io::close(dirp.cast()) }
 }
 
 #[unsafe(no_mangle)]

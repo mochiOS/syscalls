@@ -84,3 +84,12 @@ pub(super) fn refill(stream: &mut DirStream) -> Result<bool, c_int> {
         },
     )
 }
+
+/// Retire the DIR allocation and its FD as one non-callback boundary. No
+/// application handler may abandon the frame after free but before close.
+pub(super) unsafe fn close(allocation: *mut DirStream) -> c_int {
+    let _native = defer_native_delivery();
+    let fd = unsafe { (*allocation).fd };
+    unsafe { free(allocation.cast()) };
+    _close(fd)
+}
