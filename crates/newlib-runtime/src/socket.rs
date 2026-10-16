@@ -671,31 +671,32 @@ pub(super) unsafe fn socket_name(
 ) -> Result<c_int, c_int> {
     io_resources::with(
         || with_fd_entry(fd),
-        |entry| {
-            if !entry.handle.kind.is_socket() {
-                return Err(mochios_posix_client::newlib_errno::from_status(-88));
-            }
-            if address.is_null() || length.is_null() {
-                return Err(EFAULT);
-            }
-            let capacity = socket_memory::read_length(length)? as usize;
-            let mut encoded = [0; wire::MAX_ADDRESS_LEN];
-            let tag = if peer {
-                wire::CONTROL_PEER_ADDRESS
-            } else {
-                wire::CONTROL_LOCAL_ADDRESS
-            };
-            let count = query_control(**entry, tag, &[], &mut encoded)?;
-            let decoded = wire::Address::decode(&encoded[..count]).map_err(|_| EIO)?;
-            let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
-            let required = mochios_posix_client::socket::encode_sockaddr(decoded, &mut native)
-                .map_err(|_| EIO)?;
-            socket_memory::write_output(
-                address, length, &native[..capacity.min(required)], required as u32,
-            )?;
-            Ok(0)
-        },
+        |entry| socket_name_entry(**entry, address, length, peer),
     )
+}
+
+pub(super) fn socket_name_entry(
+    entry: FdEntry,
+    address: *mut c_void,
+    length: *mut u32,
+    peer: bool,
+) -> Result<c_int, c_int> {
+    if !entry.handle.kind.is_socket() {
+        return Err(mochios_posix_client::newlib_errno::from_status(-88));
+    }
+    if address.is_null() || length.is_null() {
+        return Err(EFAULT);
+    }
+    let capacity = socket_memory::read_length(length)? as usize;
+    let mut encoded = [0; wire::MAX_ADDRESS_LEN];
+    let tag = if peer { wire::CONTROL_PEER_ADDRESS } else { wire::CONTROL_LOCAL_ADDRESS };
+    let count = query_control(entry, tag, &[], &mut encoded)?;
+    let decoded = wire::Address::decode(&encoded[..count]).map_err(|_| EIO)?;
+    let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
+    let required = mochios_posix_client::socket::encode_sockaddr(decoded, &mut native)
+        .map_err(|_| EIO)?;
+    socket_memory::write_output(address, length, &native[..capacity.min(required)], required as u32)?;
+    Ok(0)
 }
 
 #[unsafe(no_mangle)]
@@ -913,96 +914,37 @@ pub extern "C" fn recv(fd: c_int, buffer: *mut c_void, length: usize, flags: c_i
     ))
 }
 
-unsafe fn send_record_to(
-    fd: c_int,
+fn send_record_to(
+    entry: FdEntry,
     buffer: *const c_void,
     length: usize,
     flags: c_int,
     address: *const c_void,
     address_length: u32,
-) -> Option<isize> {
+) -> Result<isize, c_int> {
     if address.is_null() {
-        return None;
+        return message_entry(entry, buffer as u64, length, flags, true);
     }
-    let result = io_resources::with(
-        || with_fd_entry(fd),
-        |entry| {
-            if !entry.handle.kind.is_socket() {
-                return Err(mochios_posix_client::newlib_errno::from_status(-88));
-            }
-            if !is_datagram(**entry)? {
-                return Ok(None);
-            }
-            if address_length as usize > mochios_posix_client::socket::MAX_SOCKADDR_LEN {
-                return Err(EINVAL);
-            }
-            let bytes = unsafe {
-                core::slice::from_raw_parts(address.cast::<u8>(), address_length as usize)
-            };
-            let address =
-                mochios_posix_client::socket::decode_sockaddr(bytes).map_err(|error| {
-                    mochios_posix_client::newlib_errno::from_status(i64::from(error))
-                })?;
-            if !matches!(address, wire::Address::UnixPath(_)) {
-                return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
-            }
-            super::socket_record::send_to(**entry, buffer as u64, length, flags, address)
-                .map(|record| Some(record.count))
-        },
-    );
-    match result {
-        Ok(None) => None,
-        Ok(Some(count)) => Some(count),
-        Err(error) => Some(finish_io_cancellation(result_with_errno(Err(error), -1))),
+    if !entry.handle.kind.is_socket() {
+        return Err(mochios_posix_client::newlib_errno::from_status(-88));
     }
-}
-
-unsafe fn receive_record_address(
-    fd: c_int,
-    buffer: *mut c_void,
-    length: usize,
-    flags: c_int,
-    address: *mut c_void,
-    address_length: *mut u32,
-) -> Option<isize> {
-    let result = io_resources::with(
-        || with_fd_entry(fd),
-        |entry| {
-            if !entry.handle.kind.is_socket() || !is_datagram(**entry)? {
-                return Ok(None);
-            }
-            let capacity = if address.is_null() {
-                0
-            } else {
-                if address_length.is_null() {
-                    return Err(EFAULT);
-                }
-                unsafe { address_length.read() as usize }
-            };
-            let record = super::socket_record::io(**entry, buffer as u64, length, flags, false)?;
-            if !address.is_null() {
-                let source = wire::Address::decode(&record.source[..record.source_length])
-                    .map_err(|_| EIO)?;
-                let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
-                let required = mochios_posix_client::socket::encode_sockaddr(source, &mut native)
-                    .map_err(|_| EIO)?;
-                unsafe {
-                    ptr::copy_nonoverlapping(
-                        native.as_ptr(),
-                        address.cast::<u8>(),
-                        capacity.min(required),
-                    );
-                    address_length.write(required as u32);
-                }
-            }
-            Ok(Some(record.count))
-        },
-    );
-    match result {
-        Ok(None) => None,
-        Ok(Some(count)) => Some(count),
-        Err(error) => Some(finish_io_cancellation(result_with_errno(Err(error), -1))),
+    if !is_datagram(entry)? {
+        return message_entry(entry, buffer as u64, length, flags, true);
     }
+    if address_length as usize > mochios_posix_client::socket::MAX_SOCKADDR_LEN {
+        return Err(EINVAL);
+    }
+    let mut bytes = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
+    let bytes = &mut bytes[..address_length as usize];
+    user_copy::read(address.cast(), bytes)?;
+    let address = mochios_posix_client::socket::decode_sockaddr(bytes).map_err(|error| {
+        mochios_posix_client::newlib_errno::from_status(i64::from(error))
+    })?;
+    if !matches!(address, wire::Address::UnixPath(_)) {
+        return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
+    }
+    super::socket_record::send_to(entry, buffer as u64, length, flags, address)
+        .map(|record| record.count)
 }
 
 #[unsafe(no_mangle)]
@@ -1015,12 +957,11 @@ pub extern "C" fn sendto(
     address_length: u32,
 ) -> isize {
     pthread_testcancel();
-    if let Some(result) =
-        unsafe { send_record_to(fd, buffer, length, flags, address, address_length) }
-    {
-        return result;
-    }
-    send(fd, buffer, length, flags)
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| send_record_to(**entry, buffer, length, flags, address, address_length),
+    );
+    finish_io_cancellation(result_with_errno(result, -1))
 }
 
 #[unsafe(no_mangle)]
@@ -1033,37 +974,11 @@ pub unsafe extern "C" fn recvfrom(
     address_length: *mut u32,
 ) -> isize {
     pthread_testcancel();
-    if let Some(result) =
-        unsafe { receive_record_address(fd, buffer, length, flags, address, address_length) }
-    {
-        return result;
-    }
-    if address.is_null() {
-        // With no requested address, address_length is not accessed.
-        return recv(fd, buffer, length, flags);
-    }
-    if address_length.is_null() {
-        return result_with_errno(Err(EFAULT), -1);
-    }
-    let capacity = unsafe { address_length.read() } as usize;
-    let mut peer = [0u8; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
-    let mut required = peer.len() as u32;
-    // A stream's peer cannot change after connection. Snapshot it before
-    // consuming bytes, but publish it only on success (including EOF).
-    // Datagrams need the source returned atomically with the received record.
-    if let Err(error) = unsafe { socket_name(fd, peer.as_mut_ptr().cast(), &mut required, true) } {
-        return result_with_errno(Err(error), -1);
-    }
-    let count = recv(fd, buffer, length, flags);
-    if count >= 0 {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                peer.as_ptr(),
-                address.cast::<u8>(),
-                capacity.min(required as usize),
-            );
-            address_length.write(required);
-        }
-    }
-    count
+    let result = io_resources::with(
+        || with_fd_entry(fd),
+        |entry| socket_receive_address::receive(
+            **entry, buffer, length, flags, address, address_length,
+        ),
+    );
+    finish_io_cancellation(result_with_errno(result, -1))
 }
