@@ -54,6 +54,7 @@ pub mod pthread_cond;
 pub mod thread;
 pub mod thread_stack;
 pub mod time;
+pub mod wait;
 
 pub trait Transport {
     type Error;
@@ -339,6 +340,26 @@ impl<T: Transport> Client<T> {
         let mut response = [0; protocol::WAIT_RESULT_LEN];
         let length = self.request(protocol::OP_WAIT_CHILD_GUARDED, 0, &request, &mut response)?;
         protocol::decode_wait_result(&response[..length]).map_err(ClientError::Protocol)
+    }
+
+    /// Detailed child event and UID from the same server transaction. No
+    /// caller PID, identity or address is serialized in this guarded request.
+    pub fn wait_child_info_since(
+        &self,
+        selector: i64,
+        options: u32,
+        epoch: u64,
+    ) -> Result<protocol::WaitInfo, ClientError<T::Error>> {
+        let mut request = [0; protocol::WAIT_GUARDED_REQUEST_LEN];
+        protocol::encode_guarded_wait_request(
+            protocol::WaitRequest { selector, options },
+            epoch,
+            &mut request,
+        )
+        .map_err(ClientError::Protocol)?;
+        let mut response = [0; protocol::WAIT_INFO_LEN];
+        let length = self.request(protocol::OP_WAIT_CHILD_INFO, 0, &request, &mut response)?;
+        protocol::decode_wait_info(&response[..length]).map_err(ClientError::Protocol)
     }
 
     /// Reports a default job-control stop for the authenticated calling

@@ -298,6 +298,8 @@ pub const OP_RESOURCE_POLICY: u16 = 94;
 /// StatAtRequest with zero flags; returns an existing path's canonical bytes.
 /// Directory authority is attached, never represented by a process-local FD.
 pub const OP_CANONICAL_PATH_AT: u16 = 95;
+/// Guarded WaitRequest; returns WaitInfo including pre-reap POSIX real UID.
+pub const OP_WAIT_CHILD_INFO: u16 = 96;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -427,6 +429,7 @@ pub const CHOWN_AT_HEADER_LEN: usize = 20;
 pub const FILE_STATUS_LEN: usize = 112;
 pub const WAIT_REQUEST_LEN: usize = 16;
 pub const WAIT_RESULT_LEN: usize = 16;
+pub const WAIT_INFO_LEN: usize = 24;
 pub const PROCESS_ID_REQUEST_LEN: usize = 8;
 pub const PROCESS_GROUP_REQUEST_LEN: usize = 16;
 pub const PROCESS_INFO_LEN: usize = 32;
@@ -499,8 +502,11 @@ pub const WAIT_NOWAIT: u32 = 1 << 4;
 /// Without this marker, waitpid's implicit exit selection is preserved.
 /// With it, at least one event kind must be explicitly requested.
 pub const WAIT_SELECT_EVENTS: u32 = 1 << 5;
+/// Interpret a nonnegative selector as a process group (zero: current group).
+/// This represents group 1 without colliding with waitpid's -1 selector.
+pub const WAIT_SELECT_GROUP: u32 = 1 << 6;
 pub const WAIT_EVENT_KINDS: u32 = WAIT_EXITED | WAIT_UNTRACED | WAIT_CONTINUED;
-pub const WAIT_OPTIONS_ALL: u32 = WAIT_NOHANG | WAIT_EVENT_KINDS | WAIT_NOWAIT | WAIT_SELECT_EVENTS;
+pub const WAIT_OPTIONS_ALL: u32 = WAIT_NOHANG | WAIT_EVENT_KINDS | WAIT_NOWAIT | WAIT_SELECT_EVENTS | WAIT_SELECT_GROUP;
 
 pub const fn wait_selects_exit(options: u32) -> bool {
     options & WAIT_SELECT_EVENTS == 0 || options & WAIT_EXITED != 0
@@ -843,6 +849,12 @@ pub struct WaitResult {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WaitInfo {
+    pub result: WaitResult,
+    pub real_uid: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SignalDelivery {
     pub signal: u32,
     pub token: u64,
@@ -1177,6 +1189,26 @@ pub fn decode_wait_result(input: &[u8]) -> Result<WaitResult, ProtocolError> {
     Ok(WaitResult {
         process_id: get_u64(input, 0),
         status: get_u32(input, 8),
+    })
+}
+
+pub fn encode_wait_info(info: WaitInfo, output: &mut [u8]) -> Result<(), ProtocolError> {
+    if output.len() < WAIT_INFO_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    output[..WAIT_INFO_LEN].fill(0);
+    encode_wait_result(info.result, &mut output[..WAIT_RESULT_LEN])?;
+    put_u32(output, WAIT_RESULT_LEN, info.real_uid);
+    Ok(())
+}
+
+pub fn decode_wait_info(input: &[u8]) -> Result<WaitInfo, ProtocolError> {
+    if input.len() != WAIT_INFO_LEN || get_u32(input, 20) != 0 {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(WaitInfo {
+        result: decode_wait_result(&input[..WAIT_RESULT_LEN])?,
+        real_uid: get_u32(input, WAIT_RESULT_LEN),
     })
 }
 

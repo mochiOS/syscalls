@@ -21,6 +21,7 @@ mod path_io;
 mod user_copy;
 mod exec_inputs;
 mod wait_output;
+mod wait_id;
 mod io_resources;
 mod mapping_io;
 mod mapping_backing;
