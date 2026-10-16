@@ -607,48 +607,56 @@ pub unsafe extern "C" fn socketpair(
         }
         let (create, cloexec) = mochios_posix_client::socket::newlib_create(domain, kind, protocol)
             .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
-        let limit = process_fd_limit()?;
-        let pending = PendingPair(
-            state()
-                .fds
-                .reserve_pair_from(0, limit)
-                .map_err(|_| EMFILE)?,
-        );
-        let opened = posix_client()
-            .map_err(map_posix_client_error)?
-            .socket_pair(create, close_object_handle)
-            .map_err(map_posix_client_error)?;
-        let flags = 2 | if cloexec { O_CLOEXEC } else { 0 };
-        let entries = opened.map(|opened| {
-            object_entry(
-                u64::from(opened.handle),
-                opened.rights,
-                if create.kind == wire::Kind::Datagram {
-                    FdKind::ObjectDatagram
-                } else {
-                    FdKind::ObjectSocket
-                },
-                flags,
-            )
-        });
-        let installed = state()
-            .fds
-            .commit_pair([&pending.0[0], &pending.0[1]], entries);
-        match installed {
-            Ok(fds) => {
+        io_resources::with(
+            || {
+                let limit = process_fd_limit()?;
+                let pending = PendingPair(
+                    state()
+                        .fds
+                        .reserve_pair_from(0, limit)
+                        .map_err(|_| EMFILE)?,
+                );
+                let opened = posix_client()
+                    .map_err(map_posix_client_error)?
+                    .socket_pair(create, close_object_handle)
+                    .map_err(map_posix_client_error)?;
+                Ok((
+                    pending,
+                    PendingSocketHandles {
+                        handles: opened,
+                        installed: false,
+                    },
+                ))
+            },
+            |(pending, opened)| {
+                let _native = defer_native_delivery();
+                let flags = 2 | if cloexec { O_CLOEXEC } else { 0 };
+                let entries = opened.handles.map(|opened| {
+                    object_entry(
+                        u64::from(opened.handle),
+                        opened.rights,
+                        if create.kind == wire::Kind::Datagram {
+                            FdKind::ObjectDatagram
+                        } else {
+                            FdKind::ObjectSocket
+                        },
+                        flags,
+                    )
+                });
+                // Neither label is an open FD until every caller-memory write succeeds.
+                // The active scope owns both Handles and reservations on a fault.
                 unsafe {
-                    output.write(fds[0]);
-                    output.add(1).write(fds[1]);
+                    output.write(pending.0[0].descriptor());
+                    output.add(1).write(pending.0[1].descriptor());
                 }
+                state()
+                    .fds
+                    .commit_pair([&pending.0[0], &pending.0[1]], entries)
+                    .map_err(|_| EIO)?;
+                opened.installed = true;
                 Ok(0)
-            }
-            Err(_) => {
-                for opened in opened {
-                    close_object_handle(opened.handle);
-                }
-                Err(EIO)
-            }
-        }
+            },
+        )
     })();
     result_with_errno(result, -1)
 }
