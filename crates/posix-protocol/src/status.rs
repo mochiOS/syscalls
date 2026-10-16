@@ -18,6 +18,7 @@ pub const fn normalize_failure(status: i64) -> i32 {
             mnu_abi::status::Error::InvalidArgument => -22,
             mnu_abi::status::Error::AccessDenied => -13,
             mnu_abi::status::Error::NotReady => crate::STATUS_EAGAIN,
+            mnu_abi::status::Error::AlreadyExists => -17,
         },
         None if mnu_abi::status::is_error(negative as u64) => crate::STATUS_EIO,
         None => negative as i32,
