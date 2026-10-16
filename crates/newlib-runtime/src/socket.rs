@@ -339,7 +339,7 @@ unsafe fn accept_io(
             *capacity = if address.is_null() {
                 0
             } else {
-                (unsafe { length.read() }) as usize
+                socket_memory::read_length(length)? as usize
             };
             let limit = process_fd_limit()?;
             *pending = Some(PendingFdReservation(
@@ -420,14 +420,12 @@ unsafe fn accept_entry(
         let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
         let required =
             mochios_posix_client::socket::encode_sockaddr(peer, &mut native).map_err(|_| EIO)?;
-        unsafe {
-            ptr::copy_nonoverlapping(
-                native.as_ptr(),
-                address.cast::<u8>(),
-                capacity.min(required),
-            );
-            length.write(required as u32);
-        }
+        socket_memory::write_output(
+            address,
+            length,
+            &native[..capacity.min(required)],
+            required as u32,
+        )?;
     }
     let local_flags = 2 | if flags & mochios_posix_client::socket::SOCK_CLOEXEC != 0 {
         O_CLOEXEC
