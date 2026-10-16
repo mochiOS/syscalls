@@ -99,6 +99,13 @@ pub struct FdReservation {
     generation: u64,
 }
 
+impl FdReservation {
+    /// Reserved label only; no file is visible until the reservation commits.
+    pub fn descriptor(&self) -> i32 {
+        self.index as i32
+    }
+}
+
 /// Slots reserved for one ancillary receive. Not inherited by a fork snapshot.
 /// Use only with the issuing table, and explicitly commit or cancel every group.
 #[derive(Debug)]
