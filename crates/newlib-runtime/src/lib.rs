@@ -6391,12 +6391,14 @@ pub extern "C" fn mprotect(addr: *mut c_void, len: usize, prot: c_int) -> c_int 
             return Err(EINVAL);
         }
         let access = mochios_posix_client::memory::native_access(prot).ok_or(EINVAL)?;
-        let _ = syscall_errno(syscall::raw_syscall3(
+        let _ = syscall::raw_syscall3(
             syscall::SyscallNumber::MemoryProtect,
             addr as u64,
             len as u64,
             access,
-        ))?;
+        )
+        .into_result()
+        .map_err(|error| mochios_posix_client::memory::protection_errno(error.raw()))?;
         Ok(0)
     })();
     result_with_errno(result, -1)

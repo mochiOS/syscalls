@@ -4,6 +4,15 @@ pub const PROT_WRITE: i32 = 1 << 1;
 pub const PROT_EXEC: i32 = 1 << 2;
 pub const PROTECTION_ALL: i32 = PROT_READ | PROT_WRITE | PROT_EXEC;
 
+/// A missing range is a POSIX mprotect ENOMEM, not a faultable-copy EFAULT.
+/// The native VM mechanism never chooses this operation-specific errno.
+pub const fn protection_errno(status: i64) -> i32 {
+    match mnu_abi::status::Error::from_raw(status as u64) {
+        Some(mnu_abi::status::Error::InvalidAddress) => crate::newlib_errno::ENOMEM,
+        _ => crate::newlib_errno::from_status(status),
+    }
+}
+
 pub const MAP_SHARED: i32 = 0x01;
 pub const MAP_PRIVATE: i32 = 0x02;
 pub const MAP_FIXED: i32 = 0x10;
