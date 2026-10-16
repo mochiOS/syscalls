@@ -8,6 +8,7 @@ mod callback_resources;
 mod file_mutation;
 mod file_metadata;
 mod io_resources;
+mod pipe;
 mod vector_metadata;
 use vector_metadata::VectorMetadata;
 mod image_startup;
@@ -4652,75 +4653,7 @@ pub extern "C" fn _pipe2(fds: *mut c_int, flags: c_int) -> c_int {
         set_errno(EINVAL);
         return -1;
     }
-    let result = (|| {
-        let mut pair = syscall::StreamPair::default();
-        let _ = syscall_errno(syscall::raw_syscall1(
-            syscall::SyscallNumber::StreamPairCreate,
-            (&mut pair as *mut syscall::StreamPair) as u64,
-        ))?;
-        let read_rights = syscall::HANDLE_RIGHT_READ
-            | syscall::HANDLE_RIGHT_WAIT
-            | syscall::HANDLE_RIGHT_CONTROL
-            | syscall::HANDLE_RIGHT_DUPLICATE
-            | syscall::HANDLE_RIGHT_TRANSFER;
-        let write_rights = syscall::HANDLE_RIGHT_WRITE
-            | syscall::HANDLE_RIGHT_WAIT
-            | syscall::HANDLE_RIGHT_CONTROL
-            | syscall::HANDLE_RIGHT_DUPLICATE
-            | syscall::HANDLE_RIGHT_TRANSFER;
-        if flags & O_NONBLOCK != 0 {
-            for handle in [pair.read, pair.write] {
-                if let Err(errno) = syscall_errno(syscall::raw_syscall2(
-                    syscall::SyscallNumber::HandleOptionsSet,
-                    u64::from(handle),
-                    syscall::HANDLE_OPTION_NONBLOCKING,
-                )) {
-                    let _ = syscall_errno(syscall::raw_syscall1(
-                        syscall::SyscallNumber::HandleClose,
-                        u64::from(pair.read),
-                    ));
-                    let _ = syscall_errno(syscall::raw_syscall1(
-                        syscall::SyscallNumber::HandleClose,
-                        u64::from(pair.write),
-                    ));
-                    return Err(errno);
-                }
-            }
-        }
-        let read_fd =
-            match allocate_object_fd(pair.read, read_rights, FdKind::ObjectStreamRead, flags) {
-                Ok(fd) => fd,
-                Err(errno) => {
-                    let _ = syscall_errno(syscall::raw_syscall1(
-                        syscall::SyscallNumber::HandleClose,
-                        u64::from(pair.read),
-                    ));
-                    let _ = syscall_errno(syscall::raw_syscall1(
-                        syscall::SyscallNumber::HandleClose,
-                        u64::from(pair.write),
-                    ));
-                    return Err(errno);
-                }
-            };
-        let write_fd =
-            match allocate_object_fd(pair.write, write_rights, FdKind::ObjectStreamWrite, flags) {
-                Ok(fd) => fd,
-                Err(errno) => {
-                    let _ = _close(read_fd);
-                    let _ = syscall_errno(syscall::raw_syscall1(
-                        syscall::SyscallNumber::HandleClose,
-                        u64::from(pair.write),
-                    ));
-                    return Err(errno);
-                }
-            };
-        unsafe {
-            fds.write(read_fd);
-            fds.add(1).write(write_fd);
-        }
-        Ok(0)
-    })();
-    result_with_errno(result, -1)
+    result_with_errno(pipe::create(fds, flags), -1)
 }
 
 #[unsafe(no_mangle)]
