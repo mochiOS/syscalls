@@ -4717,13 +4717,13 @@ fn native_monotonic_nanoseconds() -> Result<u64, syscall::SysError> {
     )
     .into_result()?;
     if instant.nanoseconds >= 1_000_000_000 || instant.reserved != 0 {
-        return Err(syscall::SysError::from_raw(syscall::EIO as i64));
+        return Err(syscall::NativeError::BackingFailure.into_raw().into());
     }
     instant
         .seconds
         .checked_mul(1_000_000_000)
         .and_then(|seconds| seconds.checked_add(u64::from(instant.nanoseconds)))
-        .ok_or_else(|| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+        .ok_or_else(|| syscall::NativeError::LimitExceeded.into_raw().into())
 }
 
 fn monotonic_nanoseconds() -> Result<u64, c_int> {
@@ -4748,17 +4748,20 @@ pub extern "C" fn __mochios_wait_on_address_u32(
     timeout_nanoseconds: u64,
 ) -> u64 {
     if address.is_null() {
-        return syscall::EFAULT;
+        return syscall::NativeError::InvalidAddress.into_raw();
     }
     let deadline = if timeout_nanoseconds == u64::MAX {
         syscall::ADDRESS_WAIT_INFINITE
     } else {
         match native_monotonic_nanoseconds() {
-            Ok(now) => now.saturating_add(timeout_nanoseconds),
+            Ok(now) => match now.checked_add(timeout_nanoseconds) {
+                Some(deadline) if deadline != syscall::ADDRESS_WAIT_INFINITE => deadline,
+                _ => return syscall::NativeError::LimitExceeded.into_raw(),
+            },
             Err(error) => return error.raw() as u64,
         }
     };
-    match mochios_posix_client::synchronization::wait_u32(unsafe { &*address }, expected, deadline)
+    match mochios_posix_client::synchronization::wait_u32_address(address as u64, expected, deadline)
     {
         Ok(mochios_posix_client::synchronization::WaitStatus::Awoken) => {
             syscall::AddressWaitResult::Awoken as u64
@@ -4781,9 +4784,9 @@ pub extern "C" fn __mochios_wake_address_u32(
     maximum_count: usize,
 ) -> u64 {
     if address.is_null() {
-        return syscall::EFAULT;
+        return syscall::NativeError::InvalidAddress.into_raw();
     }
-    match mochios_posix_client::synchronization::wake_u32(unsafe { &*address }, maximum_count) {
+    match mochios_posix_client::synchronization::wake_u32_address(address as u64, maximum_count) {
         Ok(count) => count as u64,
         Err(error) => error.raw() as u64,
     }
