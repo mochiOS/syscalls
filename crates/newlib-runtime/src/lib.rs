@@ -9,6 +9,7 @@ mod file_mutation;
 mod file_metadata;
 mod io_resources;
 mod pipe;
+mod pty_creation;
 mod vector_metadata;
 use vector_metadata::VectorMetadata;
 mod image_startup;
@@ -3560,29 +3561,34 @@ pub unsafe extern "C" fn tcsetwinsize(fd: c_int, size: *const NewlibWinSize) -> 
         }
         let entry = with_fd_entry(fd)?;
         let window = unsafe { size.read() };
-        let mut bytes = [0; posix_protocol::TERMINAL_WINDOW_SIZE_LEN];
-        posix_protocol::encode_terminal_window_size(
-            posix_protocol::TerminalWindowSize {
-                rows: window.ws_row,
-                columns: window.ws_col,
-                pixel_width: window.ws_xpixel,
-                pixel_height: window.ws_ypixel,
-            },
-            &mut bytes,
-        )
-        .map_err(|_| EINVAL)?;
-        let length = terminal_control(
-            *entry,
-            posix_protocol::PTY_CONTROL_SET_WINDOW_SIZE,
-            &bytes,
-            &mut [],
-        )?;
-        if length != 0 {
-            return Err(EIO);
-        }
+        set_terminal_window_size(*entry, window)?;
         Ok(0)
     })();
     result_with_errno(result, -1)
+}
+
+fn set_terminal_window_size(entry: FdEntry, window: NewlibWinSize) -> Result<(), c_int> {
+    let mut bytes = [0; posix_protocol::TERMINAL_WINDOW_SIZE_LEN];
+    posix_protocol::encode_terminal_window_size(
+        posix_protocol::TerminalWindowSize {
+            rows: window.ws_row,
+            columns: window.ws_col,
+            pixel_width: window.ws_xpixel,
+            pixel_height: window.ws_ypixel,
+        },
+        &mut bytes,
+    )
+    .map_err(|_| EINVAL)?;
+    let length = terminal_control(
+        entry,
+        posix_protocol::PTY_CONTROL_SET_WINDOW_SIZE,
+        &bytes,
+        &mut [],
+    )?;
+    if length != 0 {
+        return Err(EIO);
+    }
+    Ok(())
 }
 
 fn terminal_attachment(fd: c_int) -> Result<(fd_lease::Lease, ObjectHandleAttachment<u32>), c_int> {
@@ -4577,70 +4583,10 @@ pub extern "C" fn openpty(
         set_errno(ENOTSUP);
         return -1;
     }
-    let result = (|| {
-        let pair = posix_client()
-            .and_then(|client| client.open_pty())
-            .map_err(map_posix_client_error)?;
-        let required_rights = syscall::HANDLE_RIGHT_READ
-            | syscall::HANDLE_RIGHT_WRITE
-            | syscall::HANDLE_RIGHT_WAIT
-            | syscall::HANDLE_RIGHT_CONTROL
-            | syscall::HANDLE_RIGHT_DUPLICATE
-            | syscall::HANDLE_RIGHT_TRANSFER;
-        if pair.master.rights & required_rights != required_rights
-            || pair.slave.rights & required_rights != required_rights
-        {
-            close_object_handle(pair.master.handle);
-            close_object_handle(pair.slave.handle);
-            return Err(EACCES);
-        }
-        let master_fd = match allocate_object_fd(
-            pair.master.handle,
-            pair.master.rights,
-            FdKind::ObjectPty,
-            2,
-        ) {
-            Ok(fd) => fd,
-            Err(errno) => {
-                close_object_handle(pair.master.handle);
-                close_object_handle(pair.slave.handle);
-                return Err(errno);
-            }
-        };
-        let slave_fd =
-            match allocate_object_fd(pair.slave.handle, pair.slave.rights, FdKind::ObjectPty, 2) {
-                Ok(fd) => fd,
-                Err(errno) => {
-                    let _ = _close(master_fd);
-                    close_object_handle(pair.slave.handle);
-                    return Err(errno);
-                }
-            };
-        if !termios.is_null() {
-            let configure = with_fd_entry(slave_fd).and_then(|entry| {
-                set_terminal_attributes(*entry, TCSANOW, unsafe { termios.read() })
-            });
-            if let Err(errno) = configure {
-                let _ = _close(master_fd);
-                let _ = _close(slave_fd);
-                return Err(errno);
-            }
-        }
-        if !window_size.is_null()
-            && unsafe { tcsetwinsize(slave_fd, window_size.cast::<NewlibWinSize>()) } != 0
-        {
-            let errno = unsafe { *__errno() };
-            let _ = _close(master_fd);
-            let _ = _close(slave_fd);
-            return Err(errno);
-        }
-        unsafe {
-            master.write(master_fd);
-            slave.write(slave_fd);
-        }
-        Ok(0)
-    })();
-    result_with_errno(result, -1)
+    result_with_errno(
+        pty_creation::create(master, slave, termios, window_size.cast()),
+        -1,
+    )
 }
 
 #[unsafe(no_mangle)]

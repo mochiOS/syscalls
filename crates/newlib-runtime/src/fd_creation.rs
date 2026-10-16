@@ -1,4 +1,4 @@
-//! Rollback owners for descriptor creation, shared by sockets and pipes.
+//! Rollback owners for descriptor creation, shared by sockets, pipes and PTYs.
 use super::*;
 
 pub(super) struct PendingPair(pub(super) [FdReservation; 2]);
