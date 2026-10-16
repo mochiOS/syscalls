@@ -327,23 +327,78 @@ unsafe fn accept_io(
     {
         return Err(EINVAL);
     }
-    let entry = with_fd_entry(fd)?;
+    io_resources::with_initialized(
+        || {
+            Ok((
+                with_fd_entry(fd)?,
+                None::<PendingFdReservation>,
+                None::<PendingAccepted>,
+                0usize,
+            ))
+        },
+        |(entry, pending, _, capacity)| {
+            if !entry.handle.kind.is_socket() {
+                return Err(mochios_posix_client::newlib_errno::from_status(-88));
+            }
+            if !address.is_null() && length.is_null() {
+                return Err(EFAULT);
+            }
+            *capacity = if address.is_null() {
+                0
+            } else {
+                (unsafe { length.read() }) as usize
+            };
+            let limit = process_fd_limit()?;
+            *pending = Some(PendingFdReservation(
+                state().fds.reserve_from(0, limit).map_err(|_| EMFILE)?,
+            ));
+            Ok(())
+        },
+        |(entry, pending, accepted, capacity)| unsafe {
+            accept_entry(
+                **entry,
+                address,
+                length,
+                flags,
+                *capacity,
+                pending.as_ref().unwrap(),
+                accepted,
+            )
+        },
+    )
+}
+
+struct PendingAccepted {
+    value: mochios_posix_client::socket::Accepted<u32>,
+    installed: bool,
+}
+impl Drop for PendingAccepted {
+    fn drop(&mut self) {
+        if !self.installed {
+            close_object_handle(self.value.socket.handle);
+        }
+    }
+}
+
+unsafe fn accept_entry(
+    entry: FdEntry,
+    address: *mut c_void,
+    length: *mut u32,
+    flags: c_int,
+    capacity: usize,
+    pending: &PendingFdReservation,
+    accepted: &mut Option<PendingAccepted>,
+) -> Result<c_int, c_int> {
     if !entry.handle.kind.is_socket() {
         return Err(mochios_posix_client::newlib_errno::from_status(-88));
     }
     if !address.is_null() && length.is_null() {
         return Err(EFAULT);
     }
-    let capacity = if address.is_null() {
-        0
-    } else {
-        (unsafe { length.read() }) as usize
-    };
-    let limit = process_fd_limit()?;
-    let pending = PendingFdReservation(state().fds.reserve_from(0, limit).map_err(|_| EMFILE)?);
     let client = posix_client().map_err(map_posix_client_error)?;
-    let accepted = stream_io(*entry, syscall::HANDLE_SIGNAL_READABLE, || {
-        client
+    stream_io(entry, syscall::HANDLE_SIGNAL_READABLE, || {
+        let _native = defer_native_delivery();
+        let value = client
             .accept_socket(
                 mochios_posix_client::ObjectHandleAttachment {
                     handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
@@ -358,43 +413,46 @@ unsafe fn accept_io(
                 },
                 close_object_handle,
             )
-            .map_err(map_posix_client_error)
+            .map_err(map_posix_client_error)?;
+        *accepted = Some(PendingAccepted {
+            value,
+            installed: false,
+        });
+        Ok(())
     })?;
-    let prepared = (|| {
-        if !address.is_null() {
-            let peer = accepted.peer_address().map_err(|_| EIO)?;
-            let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
-            let required = mochios_posix_client::socket::encode_sockaddr(peer, &mut native)
-                .map_err(|_| EIO)?;
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    native.as_ptr(),
-                    address.cast::<u8>(),
-                    capacity.min(required),
-                );
-                length.write(required as u32);
-            }
+    let accepted = accepted.as_mut().unwrap();
+    let _native = defer_native_delivery();
+    if !address.is_null() {
+        let peer = accepted.value.peer_address().map_err(|_| EIO)?;
+        let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
+        let required =
+            mochios_posix_client::socket::encode_sockaddr(peer, &mut native).map_err(|_| EIO)?;
+        unsafe {
+            ptr::copy_nonoverlapping(
+                native.as_ptr(),
+                address.cast::<u8>(),
+                capacity.min(required),
+            );
+            length.write(required as u32);
         }
-        let local_flags = 2 | if flags & mochios_posix_client::socket::SOCK_CLOEXEC != 0 {
-            O_CLOEXEC
-        } else {
-            0
-        };
-        let entry = object_entry(
-            u64::from(accepted.socket.handle),
-            accepted.socket.rights,
-            FdKind::ObjectSocket,
-            local_flags,
-        );
-        state()
-            .fds
-            .commit_reservation(&pending.0, entry)
-            .map_err(|_| EIO)
-    })();
-    if prepared.is_err() {
-        close_object_handle(accepted.socket.handle);
     }
-    prepared
+    let local_flags = 2 | if flags & mochios_posix_client::socket::SOCK_CLOEXEC != 0 {
+        O_CLOEXEC
+    } else {
+        0
+    };
+    let entry = object_entry(
+        u64::from(accepted.value.socket.handle),
+        accepted.value.socket.rights,
+        FdKind::ObjectSocket,
+        local_flags,
+    );
+    let result = state()
+        .fds
+        .commit_reservation(&pending.0, entry)
+        .map_err(|_| EIO)?;
+    accepted.installed = true;
+    Ok(result)
 }
 
 #[unsafe(no_mangle)]
