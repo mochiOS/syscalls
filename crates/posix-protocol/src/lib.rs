@@ -373,6 +373,10 @@ pub const STATUS_EINTR: i32 = -4;
 pub const STATUS_EIO: i32 = -5;
 pub const STATUS_ECHILD: i32 = -10;
 pub const STATUS_EAGAIN: i32 = -11;
+/// Path traversal encountered a non-directory component (userspace policy).
+pub const STATUS_ENOTDIR: i32 = -20;
+/// A userspace operation requiring a regular file received a directory.
+pub const STATUS_EISDIR: i32 = -21;
 pub const STATUS_ENOTTY: i32 = -25;
 pub const STATUS_ENOSYS: i32 = -38;
 /// Truncate was rejected specifically by RLIMIT_FSIZE, not a filesystem's
