@@ -3,6 +3,8 @@
 use super::*;
 use mochios_posix_client::{fd::FdReservations, socket_control as control, socket_transfer};
 use mochios_posix_protocol::socket_transfer as wire;
+#[path = "socket_message_memory.rs"]
+mod memory;
 
 const MSG_CTRUNC: c_int = 0x8;
 const MSG_TRUNC: c_int = 0x20;
@@ -77,7 +79,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
     if input.is_null() {
         return Err(EFAULT);
     }
-    let message = unsafe { input.read_unaligned() };
+    let message = memory::read_message(input)?;
     if message.vector_count > mochios_posix_client::io_vector::IOV_MAX {
         return Err(EINVAL);
     }
@@ -93,11 +95,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
         length: 0,
     }; 1024];
     for (index, vector) in vectors[..message.vector_count].iter_mut().enumerate() {
-        let item = unsafe { message.vectors.add(index).read_unaligned() };
-        *vector = Vector {
-            base: item.iov_base.cast(),
-            length: item.iov_len,
-        };
+        *vector = memory::read_vector(message.vectors, index)?;
         if (vector.base as usize).checked_add(vector.length).is_none() {
             return Err(EFAULT);
         }
@@ -159,13 +157,7 @@ unsafe fn send_vectors(
     }
     let ancillary = control_storage.as_mut().unwrap().bytes();
     if !ancillary.is_empty() {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                message.control.cast::<u8>(),
-                ancillary.as_mut_ptr(),
-                ancillary.len(),
-            )
-        };
+        user_copy::read(message.control.cast(), ancillary)?;
     }
     let mut descriptors = [0; control::MAX_RIGHTS];
     let count =
@@ -184,9 +176,7 @@ unsafe fn send_vectors(
         for vector in vectors {
             let size = vector.length.min(bytes.len() - offset);
             if size != 0 {
-                unsafe {
-                    ptr::copy_nonoverlapping(vector.base, bytes.as_mut_ptr().add(offset), size)
-                };
+                user_copy::read(vector.base, &mut bytes[offset..offset + size])?;
                 offset += size;
             }
             if offset == bytes.len() {
@@ -197,9 +187,9 @@ unsafe fn send_vectors(
             if message.name_length as usize > mochios_posix_client::socket::MAX_SOCKADDR_LEN {
                 return Err(EINVAL);
             }
-            let address = unsafe {
-                core::slice::from_raw_parts(message.name.cast(), message.name_length as usize)
-            };
+            let mut address = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
+            let address = &mut address[..message.name_length as usize];
+            user_copy::read(message.name.cast(), address)?;
             let address = mochios_posix_client::socket::decode_sockaddr(address)
                 .map_err(|status| mochios_posix_client::newlib_errno::from_status(status as i64))?;
             return socket_record::send_to(
@@ -265,7 +255,7 @@ unsafe fn send_vectors(
             if length > address.len() {
                 return Err(EINVAL);
             }
-            unsafe { ptr::copy_nonoverlapping(message.name.cast(), address.as_mut_ptr(), length) };
+            user_copy::read(message.name.cast(), &mut address[..length])?;
             let address = mochios_posix_client::socket::decode_sockaddr(&address[..length])
                 .map_err(|status| mochios_posix_client::newlib_errno::from_status(status as i64))?;
             let route = mochios_posix_client::socket_record::prepare_route(
@@ -472,7 +462,7 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
     }
     // As for readv, C metadata must be readable. Snapshot it once so concurrent
     // caller edits cannot change lengths after validation or record consumption.
-    let message = unsafe { output.read_unaligned() };
+    let message = memory::read_message(output)?;
     if message.vector_count > mochios_posix_client::io_vector::IOV_MAX {
         return Err(EINVAL);
     }
@@ -486,11 +476,7 @@ unsafe fn receive(fd: c_int, output: *mut Message, flags: c_int) -> Result<isize
         length: 0,
     }; 1024];
     for (index, vector) in vectors[..message.vector_count].iter_mut().enumerate() {
-        let input = unsafe { message.vectors.add(index).read_unaligned() };
-        *vector = Vector {
-            base: input.iov_base.cast(),
-            length: input.iov_len,
-        };
+        *vector = memory::read_vector(message.vectors, index)?;
         if (vector.base as usize).checked_add(vector.length).is_none() {
             return Err(EFAULT);
         }
@@ -593,9 +579,9 @@ unsafe fn receive_vectors(
         }
     }
     let _native = defer_native_delivery();
-    // All fallible caller-memory writes precede FD publication. A synchronous
-    // fault may abandon this frame, but the scope still owns every reference.
-    unsafe { output.write_unaligned(message) };
+    // Keep all received references rollback-owned until the final C header
+    // copy succeeds, including when called inside an active native upcall.
+    memory::write_message(output, message)?;
     if let Some(incoming) = receiving.incoming.as_mut() {
         let entries = core::array::from_fn::<_, { control::MAX_RIGHTS }, _>(|index| {
             incoming.entries[index].unwrap_or(entry)
@@ -785,13 +771,10 @@ unsafe fn receive_once(
     if !datagram {
         message.name_length = 0;
     } else if !message.name.is_null() {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                native.as_ptr(),
-                message.name.cast(),
-                (message.name_length as usize).min(required),
-            )
-        };
+        user_copy::write(
+            message.name.cast(),
+            &native[..(message.name_length as usize).min(required)],
+        )?;
         message.name_length = required as u32;
     }
     let mut descriptors = [0; control::MAX_RIGHTS];
@@ -803,9 +786,7 @@ unsafe fn receive_once(
     let encoded = control::encode_rights(&descriptors[..incoming.count], &mut ancillary[..bound]);
     let encoded = encoded.map_err(|_| EIO)?;
     if encoded.length != 0 {
-        unsafe {
-            ptr::copy_nonoverlapping(ancillary.as_ptr(), message.control.cast(), encoded.length)
-        };
+        user_copy::write(message.control.cast(), &ancillary[..encoded.length])?;
     }
     message.control_length = encoded.length;
     message.flags = if received.message.length > received.message.copied {
