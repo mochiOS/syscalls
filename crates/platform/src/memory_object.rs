@@ -2,7 +2,7 @@
 //! or service-specific discovery are involved in this data path.
 
 use crate::{handle, syscall};
-use syscall::{SysError, SysResult, SyscallNumber};
+use syscall::{NativeError, SysError, SysResult, SyscallNumber};
 
 const PAGE_BYTES: u64 = 4096;
 pub const READONLY_BUFFER_RIGHTS: u64 = syscall::HANDLE_RIGHT_READ | syscall::HANDLE_RIGHT_MAP;
@@ -37,7 +37,7 @@ impl ReadOnlyOffer {
             || bytes[6..8] != (Self::WIRE_LENGTH as u16).to_le_bytes()
             || bytes[8..16].iter().any(|byte| *byte != 0)
         {
-            return Err(SysError::from_raw(syscall::EINVAL as i64));
+            return Err(SysError::from(NativeError::InvalidArgument.into_raw()));
         }
         let offer = Self {
             offset: u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
@@ -55,7 +55,7 @@ impl ReadOnlyOffer {
                 .checked_add(self.length)
                 .is_some_and(|end| end <= extent)
         {
-            return Err(SysError::from_raw(syscall::EINVAL as i64));
+            return Err(SysError::from(NativeError::InvalidArgument.into_raw()));
         }
         Ok(())
     }
@@ -70,8 +70,11 @@ pub fn receive_readonly_offer(
     maximum_length: u64,
 ) -> SysResult<MemoryMapping> {
     let offer = ReadOnlyOffer::decode(bytes)?;
-    if offer.length > maximum_length || object.rights()? != READONLY_BUFFER_RIGHTS {
-        return Err(SysError::from_raw(syscall::EACCES as i64));
+    if offer.length > maximum_length {
+        return Err(SysError::from(NativeError::LimitExceeded.into_raw()));
+    }
+    if object.rights()? != READONLY_BUFFER_RIGHTS {
+        return Err(SysError::from(NativeError::AccessDenied.into_raw()));
     }
     // This query checks resource type instead of trusting a descriptor's
     // claimed type or bounds. No sender FD/PID is looked up.
@@ -87,7 +90,7 @@ impl MemoryObject {
     /// Create fixed, page-aligned RAM backing using the current native ABI.
     pub fn create(length: u64) -> SysResult<Self> {
         if length == 0 || length % PAGE_BYTES != 0 {
-            return Err(SysError::from_raw(syscall::EINVAL as i64));
+            return Err(SysError::from(NativeError::InvalidArgument.into_raw()));
         }
         Self::create_with_options(length, 0)
     }
@@ -133,7 +136,12 @@ impl MemoryObject {
     /// Handle. Shrink invalidates affected pages of existing mappings;
     /// subsequent access beyond the live extent faults. Regrowth is zeroed.
     pub fn resize(&self, length: u64) -> SysResult<()> {
-        syscall::call2(SyscallNumber::MemoryObjectResize, self.handle as u64, length).map(|_| ())
+        syscall::call2(
+            SyscallNumber::MemoryObjectResize,
+            self.handle as u64,
+            length,
+        )
+        .map(|_| ())
     }
 
     pub fn rights(&self) -> SysResult<u64> {
@@ -169,13 +177,13 @@ impl MemoryObject {
     /// handle ownership, so a mapped view may outlive this object handle.
     pub fn map(&self, offset: u64, length: u64, access: u64) -> SysResult<MemoryMapping> {
         if offset % PAGE_BYTES != 0 || length == 0 || access & !syscall::MEMORY_ACCESS_ALL != 0 {
-            return Err(SysError::from_raw(syscall::EINVAL as i64));
+            return Err(SysError::from(NativeError::InvalidArgument.into_raw()));
         }
         let capacity = length
             .checked_add(PAGE_BYTES - 1)
             .map(|length| length & !(PAGE_BYTES - 1))
             .filter(|capacity| offset.checked_add(*capacity).is_some())
-            .ok_or(SysError::from_raw(syscall::EINVAL as i64))?;
+            .ok_or(SysError::from(NativeError::LimitExceeded.into_raw()))?;
         let address = syscall::call6(
             SyscallNumber::MemoryMap,
             0,
