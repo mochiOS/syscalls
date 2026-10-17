@@ -381,6 +381,8 @@ pub const STATUS_EINTR: i32 = -4;
 pub const STATUS_EIO: i32 = -5;
 pub const STATUS_ECHILD: i32 = -10;
 pub const STATUS_EAGAIN: i32 = -11;
+/// A userspace filesystem or registration operation found an existing entry.
+pub const STATUS_EEXIST: i32 = -17;
 /// Path traversal encountered a non-directory component (userspace policy).
 pub const STATUS_ENOTDIR: i32 = -20;
 /// A userspace operation requiring a regular file received a directory.
