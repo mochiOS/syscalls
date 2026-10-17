@@ -25,6 +25,10 @@ pub const MAX_NOTIFICATION_SETTINGS_LEN: usize = 16 * 1024;
 pub const DOCUMENT_DELIVERY_MAGIC: [u8; 8] = *b"MAPPDOC1";
 pub const DOCUMENT_DELIVERY_PREFIX_LEN: usize = 16;
 
+/// A workspace transaction or pending-request capacity was exceeded.
+/// This is a signed userspace reply status, not a native kernel failure.
+pub const STATUS_CAPACITY_EXCEEDED: i32 = -28;
+
 pub const OP_CLIPBOARD_SET_BEGIN: u16 = 0x0100;
 pub const OP_CLIPBOARD_SET_CHUNK: u16 = 0x0101;
 pub const OP_CLIPBOARD_SET_COMMIT: u16 = 0x0102;

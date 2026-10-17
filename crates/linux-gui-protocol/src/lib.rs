@@ -15,6 +15,10 @@ pub const BUNDLE_LAUNCH_PREFIX_LEN: usize = 24;
 pub const PREPARE_BUNDLE_PREFIX_LEN: usize = 40;
 pub const PREPARE_BUNDLE_RESPONSE_LEN: usize = 24;
 
+/// linux.service cannot accept another GUI instance. Preserves the signed
+/// launch-response status independently of the native syscall ABI.
+pub const STATUS_INSTANCE_LIMIT: i32 = -28;
+
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Opcode {
