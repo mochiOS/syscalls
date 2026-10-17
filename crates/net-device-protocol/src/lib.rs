@@ -33,6 +33,9 @@ pub const STATUS_CONNECTION_LIMIT: i32 = -24;
 /// Network-service configuration, DNS-server or route unavailability.
 /// Keep its existing wire value separate from the kernel's native failures.
 pub const STATUS_NETWORK_UNAVAILABLE: i32 = -6;
+/// Network-service peer closure/reset. This signed wire status does not
+/// instruct the kernel to deliver POSIX SIGPIPE.
+pub const STATUS_PEER_CLOSED: i32 = -32;
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
