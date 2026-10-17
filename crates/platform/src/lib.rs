@@ -1061,7 +1061,7 @@ pub mod handle {
             buffer.as_mut_ptr() as u64,
             buffer.len() as u64,
         )?;
-        usize::try_from(length).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+        crate::handle_result::transfer_length(length, buffer.len())
     }
 
     pub fn write(handle: Handle, buffer: &[u8]) -> SysResult<usize> {
@@ -1071,7 +1071,7 @@ pub mod handle {
             buffer.as_ptr() as u64,
             buffer.len() as u64,
         )?;
-        usize::try_from(length).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+        crate::handle_result::transfer_length(length, buffer.len())
     }
 
     /// Reads bytes at an explicit offset without changing the object's cursor.
@@ -1083,7 +1083,7 @@ pub mod handle {
             buffer.len() as u64,
             offset,
         )?;
-        usize::try_from(length).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+        crate::handle_result::transfer_length(length, buffer.len())
     }
 
     /// Writes bytes at an explicit offset without changing the object's cursor.
@@ -1095,7 +1095,7 @@ pub mod handle {
             buffer.len() as u64,
             offset,
         )?;
-        usize::try_from(length).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+        crate::handle_result::transfer_length(length, buffer.len())
     }
 
     /// Sends an opaque bounded control request to an object provider.
@@ -1114,7 +1114,7 @@ pub mod handle {
             output.as_mut_ptr() as u64,
             output.len() as u64,
         )?;
-        usize::try_from(length).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+        crate::handle_result::transfer_length(length, output.len())
     }
 
     /// Moves the shared cursor of an I/O object using a native seek basis.
