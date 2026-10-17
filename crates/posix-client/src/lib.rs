@@ -844,6 +844,25 @@ impl<T: ObjectTransport> Client<T> {
             .ok_or(ClientError::MismatchedResponse)
     }
 
+    pub fn terminal_session_id(
+        &self,
+        terminal: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<u64, ClientError<T::Error>> {
+        let mut response = [0u8; protocol::PROCESS_ID_REQUEST_LEN];
+        let length = self.terminal_request(
+            protocol::OP_TERMINAL_GET_SESSION,
+            &[],
+            terminal,
+            &mut response,
+        )?;
+        let session = protocol::decode_process_id_request(&response[..length])
+            .map_err(ClientError::Protocol)?;
+        u64::try_from(session)
+            .ok()
+            .filter(|session| *session != 0)
+            .ok_or(ClientError::MismatchedResponse)
+    }
+
     pub fn set_terminal_foreground_process_group(
         &self,
         terminal: ObjectHandleAttachment<T::Handle>,

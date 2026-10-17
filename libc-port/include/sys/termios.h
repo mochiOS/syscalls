@@ -120,6 +120,7 @@ int tcdrain(int);
 int tcflow(int, int);
 int tcflush(int, int);
 pid_t tcgetpgrp(int);
+pid_t tcgetsid(int);
 int tcsetpgrp(int, pid_t);
 speed_t cfgetispeed(const struct termios *);
 speed_t cfgetospeed(const struct termios *);

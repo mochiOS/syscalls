@@ -6191,6 +6191,21 @@ pub extern "C" fn tcgetpgrp(fd: c_int) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn tcgetsid(fd: c_int) -> c_int {
+    let result = io_resources::with(
+        || terminal_attachment(fd),
+        |(_, terminal)| {
+            let session = posix_client()
+                .map_err(map_posix_client_error)?
+                .terminal_session_id(*terminal)
+                .map_err(map_posix_client_error)?;
+            c_int::try_from(session).map_err(|_| EOVERFLOW)
+        },
+    );
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn tcsetpgrp(fd: c_int, process_group: c_int) -> c_int {
     if process_group <= 0 {
         set_errno(EINVAL);

@@ -305,6 +305,9 @@ pub const OP_RESOURCE_POLICY: u16 = 94;
 pub const OP_CANONICAL_PATH_AT: u16 = 95;
 /// Guarded WaitRequest; returns WaitInfo including pre-reap POSIX real UID.
 pub const OP_WAIT_CHILD_INFO: u16 = 96;
+/// Empty payload and one TRANSFER-only terminal Handle. Returns the controlling
+/// session ID only if this is the authenticated caller's controlling terminal.
+pub const OP_TERMINAL_GET_SESSION: u16 = 97;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
