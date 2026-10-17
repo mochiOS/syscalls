@@ -1,5 +1,5 @@
 //! Native image replacement with a caller-supplied virtual-byte ceiling.
-use super::{SysError, SysResult, SyscallNumber};
+use super::{NativeError, SysError, SysResult, SyscallNumber};
 use core::convert::Infallible;
 
 /// Success enters the new image and never returns. No path lookup, startup
@@ -21,5 +21,7 @@ pub fn replace_bounded(
     )?;
     // A native success value must not turn a failed replacement into a
     // returning "successful exec" at the language boundary.
-    Err(SysError::from_raw(mnu_abi::EIO as i64))
+    Err(SysError::from_raw(
+        NativeError::BackingFailure.into_raw() as i64
+    ))
 }
