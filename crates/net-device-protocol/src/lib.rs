@@ -27,6 +27,9 @@ pub const STACK_STATISTICS_LEN: usize = 288;
 pub const SECURITY_STATISTICS_LEN: usize = 152;
 pub const MAX_HOSTNAME_LEN: usize = 253;
 pub const MAX_TCP_IO_LEN: usize = 4096;
+/// Network-service HTTP response / TLS connection quota. Preserve the signed
+/// wire status independently of kernel mechanism errors and libc errno.
+pub const STATUS_CONNECTION_LIMIT: i32 = -24;
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
