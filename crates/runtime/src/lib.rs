@@ -229,7 +229,9 @@ pub fn process_exit(code: u64) -> ! {
 
 pub fn write_all(fd: u64, bytes: &[u8]) -> syscall::SysResult<()> {
     if fd != 1 && fd != 2 {
-        return Err(syscall::SysError::from_raw(syscall::EBADF as i64));
+        return Err(syscall::SysError::from(
+            syscall::NativeError::InvalidArgument.into_raw(),
+        ));
     }
     if !bytes.is_empty() {
         let wrote = syscall::call2(
@@ -238,7 +240,9 @@ pub fn write_all(fd: u64, bytes: &[u8]) -> syscall::SysResult<()> {
             bytes.len() as u64,
         )?;
         if wrote != bytes.len() as u64 {
-            return Err(syscall::SysError::from_raw(syscall::EIO as i64));
+            return Err(syscall::SysError::from(
+                syscall::NativeError::BackingFailure.into_raw(),
+            ));
         }
     }
     Ok(())
