@@ -1,12 +1,13 @@
 use crate::handle::{self, Handle};
 use crate::package::MpkgReader;
-use crate::syscall::{EIO, ERANGE, SysError};
+use crate::syscall::{NativeError, SysError};
 
 /// Package input backed by an already-authorized native file Handle.
 ///
 /// This reader borrows the Handle: the caller must keep it open, close it
-/// afterwards, and prevent other users from moving its shared cursor while
-/// parsing. No path lookup or additional authority is acquired here.
+/// afterwards. `len` moves the shared cursor to EOF, so callers must exclude
+/// concurrent cursor users during that call. Positioned reads do not use or
+/// change the shared cursor. No path lookup or additional authority is acquired.
 pub struct NativeMpkgReader {
     handle: Handle,
 }
@@ -23,13 +24,16 @@ impl MpkgReader for NativeMpkgReader {
     }
 
     fn read_exact_at(&mut self, offset: u64, output: &mut [u8]) -> Result<(), SysError> {
-        let offset = i64::try_from(offset).map_err(|_| SysError::from_raw(ERANGE as i64))?;
-        handle::seek(self.handle, offset, handle::HANDLE_SEEK_START)?;
+        offset
+            .checked_add(output.len() as u64)
+            .ok_or_else(|| SysError::from_raw(NativeError::LimitExceeded.into_raw() as i64))?;
         let mut done = 0;
         while done < output.len() {
-            let count = handle::read(self.handle, &mut output[done..])?;
+            let count = handle::read_at(self.handle, &mut output[done..], offset + done as u64)?;
             if count == 0 || count > output.len() - done {
-                return Err(SysError::from_raw(EIO as i64));
+                return Err(SysError::from_raw(
+                    NativeError::BackingFailure.into_raw() as i64
+                ));
             }
             done += count;
         }
