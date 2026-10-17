@@ -381,6 +381,8 @@ pub const STATUS_ENOTDIR: i32 = -20;
 /// A userspace operation requiring a regular file received a directory.
 pub const STATUS_EISDIR: i32 = -21;
 pub const STATUS_ENOTTY: i32 = -25;
+/// A userspace file/image size limit, independent of the native kernel ABI.
+pub const STATUS_EFBIG: i32 = -27;
 pub const STATUS_ENOSYS: i32 = -38;
 /// Truncate was rejected specifically by RLIMIT_FSIZE, not a filesystem's
 /// maximum object size. libc must generate SIGXFSZ and then report EFBIG.
