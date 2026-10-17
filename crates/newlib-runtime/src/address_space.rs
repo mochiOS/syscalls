@@ -1,8 +1,5 @@
 //! POSIX AS policy is read in user space; admission is a native VM operation.
-use super::{
-    c_int, has_posix_environment, map_kernel_errno, posix_protocol, resource_policy, syscall,
-    syscall_errno,
-};
+use super::{c_int, has_posix_environment, posix_protocol, resource_policy, syscall};
 
 #[derive(Clone, Copy)]
 pub(super) struct Limit(u64);
@@ -31,8 +28,8 @@ impl Limit {
         backing_handle: u64,
         backing_offset: u64,
     ) -> Result<u64, c_int> {
-        if self.0 == posix_protocol::RLIM_INFINITY {
-            return syscall_errno(syscall::raw_syscall6(
+        let result = if self.0 == posix_protocol::RLIM_INFINITY {
+            syscall::raw_syscall6(
                 syscall::SyscallNumber::MemoryMap,
                 address,
                 length,
@@ -40,21 +37,23 @@ impl Limit {
                 options,
                 backing_handle,
                 backing_offset,
-            ));
-        }
-        // Kernel counts all live mappings and checks/inserts under its VM
-        // lock. No userspace byte counter or query-then-map race is involved.
-        syscall::memory::map_bounded(syscall::memory::Request {
-            address,
-            length,
-            access,
-            options,
-            backing_handle,
-            backing_offset,
-            byte_ceiling: self.0,
-            reserved: 0,
-        })
-        .map_err(|error| map_kernel_errno(error.raw()))
+            )
+            .into_result()
+        } else {
+            // Kernel counts all live mappings and checks/inserts under its VM
+            // lock. No userspace byte counter or query-then-map race is involved.
+            syscall::memory::map_bounded(syscall::memory::Request {
+                address,
+                length,
+                access,
+                options,
+                backing_handle,
+                backing_offset,
+                byte_ceiling: self.0,
+                reserved: 0,
+            })
+        };
+        result.map_err(|error| mochios_posix_client::memory::map_errno(error.raw()))
     }
 }
 
