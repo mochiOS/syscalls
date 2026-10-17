@@ -6442,16 +6442,7 @@ pub extern "C" fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c_int {
             syscall::SyscallNumber::MemorySync,
             addr as u64,
             len as u64,
-            if policy.asynchronous {
-                mnu_abi::MEMORY_SYNC_DEFERRED
-                    | if policy.invalidate {
-                        mnu_abi::MEMORY_SYNC_REFRESH
-                    } else {
-                        0
-                    }
-            } else {
-                0
-            },
+            policy.native_options(),
         )
         .into_result()
         .map_err(|error| mochios_posix_client::memory::sync_errno(error.raw()))?;

@@ -60,6 +60,24 @@ pub struct SyncPolicy {
     pub invalidate: bool,
 }
 
+impl SyncPolicy {
+    /// Refresh is always receipt-based, even when the POSIX caller waits.
+    /// Compatibility flags themselves never cross the native syscall boundary.
+    pub const fn native_options(self) -> u64 {
+        let deferred = if self.asynchronous || self.invalidate {
+            mnu_abi::MEMORY_SYNC_DEFERRED
+        } else {
+            0
+        };
+        deferred
+            | if self.invalidate {
+                mnu_abi::MEMORY_SYNC_REFRESH
+            } else {
+                0
+            }
+    }
+}
+
 pub const fn sync_policy(flags: i32) -> Option<SyncPolicy> {
     if flags & !(MS_ASYNC | MS_INVALIDATE | MS_SYNC) != 0 {
         return None;
