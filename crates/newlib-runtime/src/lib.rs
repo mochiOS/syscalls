@@ -63,6 +63,7 @@ mod socket_record;
 mod socket_message;
 mod stdio_cancellation;
 mod thread_cleanup;
+mod thread_lookup;
 mod fault_signal;
 mod signal_delivery;
 mod signal_stack;
@@ -1322,14 +1323,34 @@ fn reap_detached_threads() {
 fn current_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
     loop {
         let epoch = FORK_EPOCH.load(Ordering::Acquire);
-        let current = native_thread_id().ok().and_then(|native_id| {
-            THREADS.iter().enumerate().find_map(|(index, control)| {
+        // Registered nonzero TLS bases are runtime-private thread identities,
+        // not authentication. Native threads without a private TLS base keep
+        // the kernel-identity path; nothing here changes IPC sender identity.
+        let from_tls = thread_lookup::local_base().and_then(|base| {
+            let mut matches = THREADS.iter().enumerate().filter(|(_, control)| {
                 let state = control.state.load(Ordering::Acquire);
-                (state != THREAD_FREE
+                state != THREAD_FREE
                     && state != THREAD_REAPING
-                    && control.native_id.load(Ordering::Acquire) == native_id)
-                    .then(|| thread_token_for(index, control).map(|token| (token, control)))
-                    .flatten()
+                    && control.thread_local_base.load(Ordering::Acquire) == base
+            });
+            let (index, control) = matches.next()?;
+            // An ambiguous registration cannot establish a local identity.
+            if matches.next().is_none() {
+                thread_token_for(index, control).map(|token| (token, control))
+            } else {
+                None
+            }
+        });
+        let current = from_tls.or_else(|| {
+            native_thread_id().ok().and_then(|native_id| {
+                THREADS.iter().enumerate().find_map(|(index, control)| {
+                    let state = control.state.load(Ordering::Acquire);
+                    (state != THREAD_FREE
+                        && state != THREAD_REAPING
+                        && control.native_id.load(Ordering::Acquire) == native_id)
+                        .then(|| thread_token_for(index, control).map(|token| (token, control)))
+                        .flatten()
+                })
             })
         });
         if FORK_EPOCH.load(Ordering::Acquire) == epoch {
