@@ -6426,19 +6426,36 @@ pub extern "C" fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c_int {
             return Err(EINVAL);
         }
         let policy = mochios_posix_client::memory::sync_policy(flags).ok_or(EINVAL)?;
-        // The native operation is currently blocking writeback. Do not report
-        // asynchronous completion or invalidation until those operations exist.
-        if policy.asynchronous || policy.invalidate {
+        // Cache invalidation requires mapping/TLB coordination not yet exposed
+        // by the native operation. Deferred writeback has its own admission.
+        if policy.invalidate {
             return Err(ENOSYS);
         }
-        let _ = syscall::raw_syscall3(
+        // A callback must not abandon an accepted completion Handle between
+        // the two native calls. No application callback is delayed during I/O:
+        // deferred admission returns before the worker's provider operations.
+        let _delivery = if policy.asynchronous {
+            defer_native_delivery()
+        } else {
+            None
+        };
+        let result = syscall::raw_syscall3(
             syscall::SyscallNumber::MemorySync,
             addr as u64,
             len as u64,
-            0,
+            if policy.asynchronous {
+                mnu_abi::MEMORY_SYNC_DEFERRED
+            } else {
+                0
+            },
         )
         .into_result()
         .map_err(|error| mochios_posix_client::memory::sync_errno(error.raw()))?;
+        if policy.asynchronous {
+            // POSIX exposes no completion token. Closing this reference does
+            // not cancel the worker's retained backing or clear dirty data.
+            close_object_handle(result as u32);
+        }
         Ok(0)
     })();
     result_with_errno(result, -1)
