@@ -14,7 +14,7 @@ pub use mnu_abi::{
     AddressWaitGuard, HandleInfo, HandleWaitGuard,
     ExecutionIdentity,
     ProcessExecutionUsage,
-    ADDRESS_WAIT_INFINITE, AddressWaitResult, ClockId, ClockInstant, EACCES, EAGAIN, EBADF,
+    ADDRESS_WAIT_INFINITE, AddressWaitResult, ClockId, ClockInstant, EACCES, EAGAIN,
     EEXIST, EINVAL, EIO, ENOENT, ENOMEM, ENOSPC, ENOSYS,
     ENOTSUP, EOVERFLOW, EPERM, ERANGE,
     HANDLE_OPTION_NONBLOCKING, HANDLE_OPTIONS_ALL, HANDLE_RIGHT_ALL,

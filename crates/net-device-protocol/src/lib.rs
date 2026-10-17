@@ -36,6 +36,9 @@ pub const STATUS_NETWORK_UNAVAILABLE: i32 = -6;
 /// Network-service peer closure/reset. This signed wire status does not
 /// instruct the kernel to deliver POSIX SIGPIPE.
 pub const STATUS_PEER_CLOSED: i32 = -32;
+/// No HTTP/TLS stream is registered under the requested service-local ID.
+/// Foreign-owner IDs remain access-denied, independently of this wire status.
+pub const STATUS_INVALID_STREAM: i32 = -9;
 
 #[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
