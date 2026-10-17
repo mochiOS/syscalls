@@ -667,6 +667,12 @@ where
             .set_value(metadata_key, metadata)
             .map_err(LaunchFdError::Context)?;
     }
+    context
+        .set_value(
+            mochios_posix_protocol::FD_TABLE_KEY,
+            mochios_posix_protocol::FD_TABLE_VERSION,
+        )
+        .map_err(LaunchFdError::Context)?;
     Ok(())
 }
 
@@ -680,7 +686,7 @@ pub fn plan_launch_context<H: Copy>(
     mut label: impl FnMut(H) -> Option<u64>,
 ) -> Result<usize, LaunchFdError<core::convert::Infallible>> {
     use mnu_abi::process_image::ContextUpdate as U;
-    if descriptor_limit > DEFAULT_FD_LIMIT || output.len() < descriptor_limit * 2 {
+    if descriptor_limit > DEFAULT_FD_LIMIT || output.len() < descriptor_limit * 2 + 1 {
         return Err(LaunchFdError::InvalidDescriptor);
     }
     for index in 0..descriptor_limit {
@@ -728,7 +734,12 @@ pub fn plan_launch_context<H: Copy>(
             value: metadata.unwrap_or(0),
         };
     }
-    Ok(descriptor_limit * 2)
+    output[descriptor_limit * 2] = U {
+        kind: U::SET_VALUE,
+        key: mochios_posix_protocol::FD_TABLE_KEY,
+        value: mochios_posix_protocol::FD_TABLE_VERSION,
+    };
+    Ok(descriptor_limit * 2 + 1)
 }
 
 pub fn restore_launch_context<H, C, R, O>(
@@ -747,8 +758,15 @@ where
     if descriptor_limit > DEFAULT_FD_LIMIT || descriptor_limit > i32::MAX as usize {
         return Err(LaunchFdError::InvalidDescriptor);
     }
+    let mut restored = match context
+        .get_value(mochios_posix_protocol::FD_TABLE_KEY)
+        .map_err(LaunchFdError::Context)?
+    {
+        None => false,
+        Some(mochios_posix_protocol::FD_TABLE_VERSION) => true,
+        Some(_) => return Err(LaunchFdError::InvalidMetadata),
+    };
     *table = FdTable::new();
-    let mut restored = false;
     for index in 0..descriptor_limit {
         let fd = index as i32;
         let metadata_key =

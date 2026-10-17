@@ -2391,7 +2391,7 @@ fn attach_fd_launch_context(
         kind: U::REMOVE_VALUE,
         key: 0,
         value: 0,
-    }; MAX_FDS * 2];
+    }; MAX_FDS * 2 + 1];
     let count = plan_launch_context(
         fds,
         MAX_FDS,

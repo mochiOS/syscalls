@@ -30,6 +30,11 @@ pub const CONTROL_HANDLE_KEY: u64 = u64::from_le_bytes(*b"POSXCTRL");
 /// Explicit ProcessHandle selected by the userspace launcher for bootstrap.
 /// mnu only transfers the opaque key and attenuated object reference.
 pub const BOOTSTRAP_PROCESS_HANDLE_KEY: u64 = u64::from_le_bytes(*b"POSXINIT");
+/// Explicit FD-table initialization, including an intentionally empty table.
+/// Absent only when a native launcher leaves stdio bootstrap to the runtime.
+/// This key and version are userspace policy, opaque to mnu.
+pub const FD_TABLE_KEY: u64 = u64::from_le_bytes(*b"POSXFDTB");
+pub const FD_TABLE_VERSION: u64 = 1;
 
 const FD_HANDLE_KEY_PREFIX: u64 = 0x504f_5348_0000_0000;
 const FD_METADATA_KEY_PREFIX: u64 = 0x504f_5346_0000_0000;
