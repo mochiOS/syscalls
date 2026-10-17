@@ -7,6 +7,7 @@ pub mod mboot_wifi;
 pub mod session_control;
 pub mod diagnostic;
 pub mod memory_object;
+mod handle_result;
 pub mod workspace;
 #[cfg(any(feature = "std", test))]
 extern crate std;
@@ -326,9 +327,8 @@ pub mod thread {
     }
 
     pub fn create_interrupt_handle() -> SysResult<u32> {
-        syscall::call0(syscall::SyscallNumber::ThreadHandleCreate).and_then(|handle| {
-            u32::try_from(handle).map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))
-        })
+        syscall::call0(syscall::SyscallNumber::ThreadHandleCreate)
+            .and_then(crate::handle_result::decode)
     }
 
     pub fn interrupt(handle: u32, payload: u64) -> SysResult<()> {
@@ -419,7 +419,7 @@ pub mod process {
             metadata.as_ptr() as u64,
             metadata.len() as u64,
         )?;
-        u32::try_from(raw).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+        crate::handle_result::decode(raw)
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -461,11 +461,8 @@ pub mod process {
     }
 
     pub fn open_handle_for_endpoint(endpoint: u64, rights: u64) -> SysResult<u32> {
-        syscall::call2(syscall::SyscallNumber::ProcessHandleOpen, endpoint, rights).and_then(
-            |handle| {
-                u32::try_from(handle).map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))
-            },
-        )
+        syscall::call2(syscall::SyscallNumber::ProcessHandleOpen, endpoint, rights)
+            .and_then(crate::handle_result::decode)
     }
 
     pub fn open_handle_for_process_id(process_id: u64, rights: u64) -> SysResult<u32> {
@@ -474,18 +471,15 @@ pub mod process {
             process_id,
             rights,
         )
-        .and_then(|handle| {
-            u32::try_from(handle).map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))
-        })
+        .and_then(crate::handle_result::decode)
     }
 
 
     /// Captures a detached VM image. Closing its final Handle releases it;
     /// this does not create a process or copy native execution authority.
     pub fn clone_address_space() -> SysResult<u32> {
-        syscall::call0(syscall::SyscallNumber::AddressSpaceClone).and_then(|handle| {
-            u32::try_from(handle).map_err(|_| syscall::SysError::from_raw(syscall::EIO as i64))
-        })
+        syscall::call0(syscall::SyscallNumber::AddressSpaceClone)
+            .and_then(crate::handle_result::decode)
     }
 
     pub fn resume_handle(handle: u32) -> SysResult<()> {
@@ -626,7 +620,7 @@ pub mod ipc {
     /// Creates an IPC endpoint represented by a process-local object handle.
     pub fn create_handle() -> SysResult<u32> {
         let raw = syscall::call2(syscall::SyscallNumber::IpcCreateHandle, 0, 0)?;
-        u32::try_from(raw).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+        crate::handle_result::decode(raw)
     }
 
     pub fn send(endpoint: u64, bytes: &[u8]) -> SysResult<u64> {
@@ -779,7 +773,7 @@ pub mod handle {
     };
 
     fn decode(raw: u64) -> SysResult<Handle> {
-        u32::try_from(raw).map_err(|_| syscall::SysError::from_raw(syscall::EOVERFLOW as i64))
+        crate::handle_result::decode(raw)
     }
 
     pub fn close(handle: Handle) -> SysResult<()> {

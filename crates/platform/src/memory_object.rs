@@ -100,10 +100,7 @@ impl MemoryObject {
 
     fn create_with_options(length: u64, options: u64) -> SysResult<Self> {
         let raw = syscall::call2(SyscallNumber::MemoryObjectCreate, length, options)?;
-        let handle = u32::try_from(raw)
-            .ok()
-            .filter(|handle| *handle != 0)
-            .ok_or(SysError::from_raw(syscall::EIO as i64))?;
+        let handle = crate::handle_result::decode(raw)?;
         Ok(Self { handle })
     }
 
