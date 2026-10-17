@@ -25,6 +25,7 @@ mod wait_id;
 mod io_resources;
 mod mapping_io;
 mod mapping_backing;
+mod memory_refresh;
 mod object_reply;
 mod shared_memory_namespace;
 mod current_directory;
@@ -6426,10 +6427,8 @@ pub extern "C" fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c_int {
             return Err(EINVAL);
         }
         let policy = mochios_posix_client::memory::sync_policy(flags).ok_or(EINVAL)?;
-        // Cache invalidation requires mapping/TLB coordination not yet exposed
-        // by the native operation. Deferred writeback has its own admission.
-        if policy.invalidate {
-            return Err(ENOSYS);
+        if policy.invalidate && !policy.asynchronous {
+            return memory_refresh::synchronize(addr as u64, len as u64).map(|()| 0);
         }
         // A callback must not abandon an accepted completion Handle between
         // the two native calls. No application callback is delayed during I/O:
@@ -6445,6 +6444,11 @@ pub extern "C" fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c_int {
             len as u64,
             if policy.asynchronous {
                 mnu_abi::MEMORY_SYNC_DEFERRED
+                    | if policy.invalidate {
+                        mnu_abi::MEMORY_SYNC_REFRESH
+                    } else {
+                        0
+                    }
             } else {
                 0
             },
