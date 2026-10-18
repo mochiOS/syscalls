@@ -394,6 +394,8 @@ pub const STATUS_ENOTTY: i32 = -25;
 /// A userspace file/image size limit, independent of the native kernel ABI.
 pub const STATUS_EFBIG: i32 = -27;
 pub const STATUS_ENOSYS: i32 = -38;
+/// Unsupported operation selected by userspace POSIX policy, not mnu.
+pub const STATUS_ENOTSUP: i32 = -95;
 /// Truncate was rejected specifically by RLIMIT_FSIZE, not a filesystem's
 /// maximum object size. libc must generate SIGXFSZ and then report EFBIG.
 pub const STATUS_FILE_SIZE_LIMIT: i32 = -0x10001;

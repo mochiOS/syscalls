@@ -30,6 +30,8 @@ pub const MAX_TCP_IO_LEN: usize = 4096;
 /// Network-service HTTP response / TLS connection quota. Preserve the signed
 /// wire status independently of kernel mechanism errors and libc errno.
 pub const STATUS_CONNECTION_LIMIT: i32 = -24;
+/// The userspace resolver does not implement the requested DNS record type.
+pub const STATUS_UNSUPPORTED_RECORD: i32 = -95;
 /// Network-service configuration, DNS-server or route unavailability.
 /// Keep its existing wire value separate from the kernel's native failures.
 pub const STATUS_NETWORK_UNAVAILABLE: i32 = -6;
