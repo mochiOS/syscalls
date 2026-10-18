@@ -32,6 +32,55 @@ pub const ENOTSUP: i32 = 134;
 pub const EOPNOTSUPP: i32 = 95;
 pub const EOVERFLOW: i32 = 139;
 
+/// Convert a positive newlib C errno to a signed POSIX wire failure.
+/// This is not native-status normalization: the numeric namespaces overlap.
+/// Invalid/unknown errno values become EIO; success is handled by the caller.
+pub const fn to_status(errno: i32) -> i32 {
+    let wire = match errno {
+        1..=14 | 16..=34 | 60..=63 | 67 | 71 | 96 | 104 | 105 | 111 => errno,
+        EDEADLK => 35,
+        ENAMETOOLONG => 36,
+        46 => 37, // ENOLCK
+        ENOSYS => 38,
+        90 => 39, // ENOTEMPTY
+        92 => 40, // ELOOP
+        35 => 42, // ENOMSG
+        36 => 43, // EIDRM
+        74 => 72, // EMULTIHOP
+        77 => 74, // EBADMSG
+        EOVERFLOW => 75,
+        138 => 84, // EILSEQ
+        108 => 88, // ENOTSOCK
+        121 => 89, // EDESTADDRREQ
+        122 => 90, // EMSGSIZE
+        107 => 91, // EPROTOTYPE
+        109 => 92, // ENOPROTOOPT
+        123 => 93, // EPROTONOSUPPORT
+        EOPNOTSUPP | ENOTSUP => 95,
+        106 => 97,  // EAFNOSUPPORT
+        112 => 98,  // EADDRINUSE
+        125 => 99,  // EADDRNOTAVAIL
+        115 => 100, // ENETDOWN
+        114 => 101, // ENETUNREACH
+        126 => 102, // ENETRESET
+        113 => 103, // ECONNABORTED
+        127 => 106, // EISCONN
+        128 => 107, // ENOTCONN
+        116 => 110, // ETIMEDOUT
+        117 => 112, // EHOSTDOWN
+        118 => 113, // EHOSTUNREACH
+        120 => 114, // EALREADY
+        119 => 115, // EINPROGRESS
+        133 => 116, // ESTALE
+        132 => 122, // EDQUOT
+        140 => 125, // ECANCELED
+        142 => 130, // EOWNERDEAD
+        141 => 131, // ENOTRECOVERABLE
+        _ => EIO,
+    };
+    -wire
+}
+
 /// Translate either a signed native/wire failure or its positive magnitude.
 /// Unknown statuses become EIO rather than accidentally naming an unrelated
 /// newlib error. This function must not be applied to an existing C errno.
