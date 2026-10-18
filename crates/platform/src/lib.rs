@@ -1530,7 +1530,9 @@ pub mod memory {
 
     pub fn framebuffer_transfer_limit() -> SysResult<usize> {
         let limit = syscall::call0(syscall::SyscallNumber::FramebufferTransferLimit)?;
-        usize::try_from(limit).map_err(|_| syscall::SysError::from_raw(syscall::ERANGE as i64))
+        usize::try_from(limit).map_err(|_| {
+            syscall::SysError::from_raw(syscall::NativeError::LimitExceeded.into_raw() as i64)
+        })
     }
 
     pub fn commit_framebuffer(x: u32, y: u32, width: u32, height: u32) -> SysResult<u64> {

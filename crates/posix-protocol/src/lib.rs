@@ -393,6 +393,8 @@ pub const STATUS_EISDIR: i32 = -21;
 pub const STATUS_ENOTTY: i32 = -25;
 /// A userspace file/image size limit, independent of the native kernel ABI.
 pub const STATUS_EFBIG: i32 = -27;
+/// A userspace buffer, snapshot or encoded response exceeds its allowed range.
+pub const STATUS_ERANGE: i32 = -34;
 pub const STATUS_ENOSYS: i32 = -38;
 /// Unsupported operation selected by userspace POSIX policy, not mnu.
 pub const STATUS_ENOTSUP: i32 = -95;
