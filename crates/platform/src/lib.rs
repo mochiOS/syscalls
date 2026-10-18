@@ -1688,10 +1688,10 @@ pub mod capability {
 }
 
 pub mod env {
-    use super::syscall::{ENOSYS, SysError, SysResult};
+    use super::syscall::{NativeError, SysError, SysResult};
 
     pub fn args() -> SysResult<&'static [&'static [u8]]> {
-        Err(SysError::from_raw(ENOSYS as i64))
+        Err(SysError::from_raw(NativeError::Unsupported.into_raw() as i64))
     }
 }
 
