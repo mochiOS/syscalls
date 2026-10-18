@@ -75,9 +75,6 @@ pub fn index_mpkg_reader(reader: &mut impl MpkgReader) -> Result<MpkgIndex, SysE
     let mut offset = MPKG_HEADER_LEN;
     let mut terminated = false;
     while offset + TAR_BLOCK_LEN <= file_len {
-        if entries.len() >= MAX_MPKG_ENTRIES {
-            return Err(package_error(LimitExceeded));
-        }
         let mut block = [0u8; TAR_BLOCK_LEN as usize];
         reader.read_exact_at(offset, &mut block)?;
         if block.iter().all(|byte| *byte == 0) {
@@ -86,6 +83,9 @@ pub fn index_mpkg_reader(reader: &mut impl MpkgReader) -> Result<MpkgIndex, SysE
             }
             terminated = true;
             break;
+        }
+        if entries.len() >= MAX_MPKG_ENTRIES {
+            return Err(package_error(LimitExceeded));
         }
         if &block[257..263] != b"ustar\0" || &block[263..265] != b"00" {
             return Err(package_error(InvalidArgument));
