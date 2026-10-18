@@ -2381,6 +2381,7 @@ fn map_launch_fd_error(error: LaunchFdError<c_int>) -> c_int {
 fn restore_fd_state_from_launch_context(fds: &mut FdTable<FdObject>) -> Result<bool, c_int> {
     let mut context = RuntimeLaunchContext;
     let mut operations = RuntimeFdOps;
+    let mut references = fd_lease::RestoreReferences::new();
     restore_launch_context(
         fds,
         MAX_FDS,
@@ -2391,12 +2392,14 @@ fn restore_fd_state_from_launch_context(fds: &mut FdTable<FdObject>) -> Result<b
             let (lower_handle, close_owned) = attachment
                 .map(|(object, _)| (object.lower_handle, true))
                 .unwrap_or((0, false));
-            Some(FdObject {
+            let object = FdObject {
                 lower_handle,
                 kind,
                 open_flags: metadata.open_flags as c_int,
                 close_owned,
-            })
+            };
+            references.register(object).ok()?;
+            Some(object)
         },
     )
     .map_err(map_launch_fd_error)

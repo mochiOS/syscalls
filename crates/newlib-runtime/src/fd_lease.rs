@@ -9,6 +9,41 @@ use mochios_posix_client::handle_borrow::{Book, Pin};
 pub(super) static BORROWS: RuntimeMutex<Book<{ mnu_abi::PROCESS_MAX_OBJECT_HANDLES }>> =
     RuntimeMutex::new(Book::new());
 
+/// Launch keys are associations, not separately owned native references.
+/// Different FD keys may therefore resolve to the very same native label.
+pub(super) struct RestoreReferences {
+    labels: [u64; MAX_FDS],
+    count: usize,
+}
+
+impl RestoreReferences {
+    pub(super) fn new() -> Self {
+        Self {
+            labels: [0; MAX_FDS],
+            count: 0,
+        }
+    }
+
+    pub(super) fn register(&mut self, object: FdObject) -> Result<(), c_int> {
+        if !object.close_owned {
+            return Ok(());
+        }
+        if object.lower_handle == 0
+            || object.lower_handle > mnu_abi::PROCESS_MAX_OBJECT_HANDLES as u64
+        {
+            return Err(EBADF);
+        }
+        if self.labels[..self.count].contains(&object.lower_handle) {
+            BORROWS.lock().retain(object.lower_handle).ok_or(EBADF)?;
+        } else {
+            let slot = self.labels.get_mut(self.count).ok_or(EBADF)?;
+            *slot = object.lower_handle;
+            self.count += 1;
+        }
+        Ok(())
+    }
+}
+
 pub(super) struct Lease {
     entry: FdEntry,
     pin: Option<Pin>,

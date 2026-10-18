@@ -5,6 +5,7 @@
 #[derive(Clone, Copy)]
 struct Slot {
     readers: usize,
+    additional_owners: usize,
     retired: bool,
 }
 
@@ -23,9 +24,23 @@ impl<const N: usize> Book<N> {
         Self {
             slots: [Slot {
                 readers: 0,
+                additional_owners: 0,
                 retired: false,
             }; N],
         }
+    }
+
+    /// Share one already-owned native label between process-local FD owners.
+    /// This creates no native reference and requires no DUPLICATE authority.
+    /// Register each additional owner before publishing its descriptor.
+    pub fn retain(&mut self, label: u64) -> Option<()> {
+        let index = usize::try_from(label.checked_sub(1)?).ok()?;
+        let slot = self.slots.get_mut(index)?;
+        if slot.retired {
+            return None;
+        }
+        slot.additional_owners = slot.additional_owners.checked_add(1)?;
+        Some(())
     }
 
     /// Labels are one-based. Failure leaves every reference count unchanged.
@@ -39,13 +54,17 @@ impl<const N: usize> Book<N> {
         Some(Pin { index })
     }
 
-    /// Remove the table's ownership. True means close the native reference
-    /// now; false defers that close to the last outstanding operation.
+    /// Remove one FD owner's reference. True means close the native reference
+    /// now; false leaves it with another FD owner or outstanding operation.
     pub fn retire(&mut self, label: u64) -> Option<bool> {
         let index = usize::try_from(label.checked_sub(1)?).ok()?;
         let slot = self.slots.get_mut(index)?;
         if slot.retired {
             return None;
+        }
+        if slot.additional_owners != 0 {
+            slot.additional_owners -= 1;
+            return Some(false);
         }
         if slot.readers == 0 {
             return Some(true);
