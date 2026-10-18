@@ -1,4 +1,5 @@
-use crate::syscall::{EINVAL, ENOMEM, ERANGE, SysError};
+use crate::syscall::{NativeError, SysError};
+use NativeError::{InvalidArgument, LimitExceeded, ResourceUnavailable};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -40,14 +41,17 @@ pub trait MpkgReader {
     fn read_exact_at(&mut self, offset: u64, output: &mut [u8]) -> Result<(), SysError>;
 }
 
-fn package_error(errno: u64) -> SysError {
-    SysError::from_raw(errno as i64)
+fn package_error(error: NativeError) -> SysError {
+    SysError::from_raw(error.into_raw() as i64)
 }
 
 pub fn index_mpkg_reader(reader: &mut impl MpkgReader) -> Result<MpkgIndex, SysError> {
     let file_len = reader.len()?;
-    if !(MPKG_HEADER_LEN..=MAX_MPKG_LEN).contains(&file_len) {
-        return Err(package_error(ERANGE));
+    if file_len < MPKG_HEADER_LEN {
+        return Err(package_error(InvalidArgument));
+    }
+    if file_len > MAX_MPKG_LEN {
+        return Err(package_error(LimitExceeded));
     }
     let mut header = [0u8; MPKG_HEADER_LEN as usize];
     reader.read_exact_at(0, &mut header)?;
@@ -59,11 +63,11 @@ pub fn index_mpkg_reader(reader: &mut impl MpkgReader) -> Result<MpkgIndex, SysE
         || header[11] != 0
         || header[20..].iter().any(|byte| *byte != 0)
     {
-        return Err(package_error(EINVAL));
+        return Err(package_error(InvalidArgument));
     }
     let expanded = u64::from_le_bytes(header[12..20].try_into().unwrap());
     if expanded != file_len - MPKG_HEADER_LEN {
-        return Err(package_error(EINVAL));
+        return Err(package_error(InvalidArgument));
     }
 
     let mut entries = Vec::new();
@@ -72,21 +76,22 @@ pub fn index_mpkg_reader(reader: &mut impl MpkgReader) -> Result<MpkgIndex, SysE
     let mut terminated = false;
     while offset + TAR_BLOCK_LEN <= file_len {
         if entries.len() >= MAX_MPKG_ENTRIES {
-            return Err(package_error(ERANGE));
+            return Err(package_error(LimitExceeded));
         }
         let mut block = [0u8; TAR_BLOCK_LEN as usize];
         reader.read_exact_at(offset, &mut block)?;
         if block.iter().all(|byte| *byte == 0) {
             if !range_is_zero(reader, offset, file_len - offset)? {
-                return Err(package_error(EINVAL));
+                return Err(package_error(InvalidArgument));
             }
             terminated = true;
             break;
         }
         if &block[257..263] != b"ustar\0" || &block[263..265] != b"00" {
-            return Err(package_error(EINVAL));
+            return Err(package_error(InvalidArgument));
         }
-        let expected_checksum = parse_tar_octal(&block[148..156]).ok_or(package_error(EINVAL))?;
+        let expected_checksum =
+            parse_tar_octal(&block[148..156]).ok_or(package_error(InvalidArgument))?;
         let checksum: u64 = block
             .iter()
             .enumerate()
@@ -99,37 +104,39 @@ pub fn index_mpkg_reader(reader: &mut impl MpkgReader) -> Result<MpkgIndex, SysE
             })
             .sum();
         if expected_checksum != checksum {
-            return Err(package_error(EINVAL));
+            return Err(package_error(InvalidArgument));
         }
-        let name = tar_text(&block[..100]).ok_or(package_error(EINVAL))?;
-        let prefix = tar_text(&block[345..500]).ok_or(package_error(EINVAL))?;
+        let name = tar_text(&block[..100]).ok_or(package_error(InvalidArgument))?;
+        let prefix = tar_text(&block[345..500]).ok_or(package_error(InvalidArgument))?;
         let path = if prefix.is_empty() {
             name
         } else {
             alloc::format!("{prefix}/{name}")
         };
         if !valid_mpkg_path(&path) || entries.iter().any(|entry: &MpkgEntry| entry.path == path) {
-            return Err(package_error(EINVAL));
+            return Err(package_error(InvalidArgument));
         }
         let kind = block[156];
         if kind != 0 && kind != b'0' && kind != b'5' {
-            return Err(package_error(EINVAL));
+            return Err(package_error(InvalidArgument));
         }
-        let size = parse_tar_octal(&block[124..136]).ok_or(package_error(EINVAL))?;
+        let size = parse_tar_octal(&block[124..136]).ok_or(package_error(InvalidArgument))?;
         let data_offset = offset
             .checked_add(TAR_BLOCK_LEN)
-            .ok_or(package_error(ERANGE))?;
-        let data_end = data_offset.checked_add(size).ok_or(package_error(ERANGE))?;
+            .ok_or(package_error(LimitExceeded))?;
+        let data_end = data_offset
+            .checked_add(size)
+            .ok_or(package_error(LimitExceeded))?;
         if data_end > file_len {
-            return Err(package_error(EINVAL));
+            return Err(package_error(InvalidArgument));
         }
         if path == "manifest.toml" {
             if size > MAX_MANIFEST_LEN || kind == b'5' {
-                return Err(package_error(EINVAL));
+                return Err(package_error(InvalidArgument));
             }
             let mut data = Vec::new();
             data.try_reserve_exact(size as usize)
-                .map_err(|_| package_error(ENOMEM))?;
+                .map_err(|_| package_error(ResourceUnavailable))?;
             data.resize(size as usize, 0);
             reader.read_exact_at(data_offset, &mut data)?;
             manifest = Some(data);
@@ -140,15 +147,19 @@ pub fn index_mpkg_reader(reader: &mut impl MpkgReader) -> Result<MpkgIndex, SysE
             size,
             offset: data_offset,
         });
-        let padded = size.checked_add(511).ok_or(package_error(ERANGE))? / 512 * 512;
+        let padded = size
+            .checked_add(511)
+            .ok_or(package_error(LimitExceeded))?
+            / 512
+            * 512;
         offset = data_offset
             .checked_add(padded)
-            .ok_or(package_error(ERANGE))?;
+            .ok_or(package_error(LimitExceeded))?;
     }
     if !terminated {
-        return Err(package_error(EINVAL));
+        return Err(package_error(InvalidArgument));
     }
-    let manifest = manifest.ok_or(package_error(EINVAL))?;
+    let manifest = manifest.ok_or(package_error(InvalidArgument))?;
     Ok(MpkgIndex {
         file_len,
         manifest,
@@ -161,15 +172,15 @@ pub fn read_mpkg_range_reader(
     offset: u64,
     size: u64,
 ) -> Result<Vec<u8>, SysError> {
-    let end = offset.checked_add(size).ok_or(package_error(ERANGE))?;
+    let end = offset.checked_add(size).ok_or(package_error(LimitExceeded))?;
     if end > reader.len()? {
-        return Err(package_error(EINVAL));
+        return Err(package_error(InvalidArgument));
     }
-    let size = usize::try_from(size).map_err(|_| package_error(ERANGE))?;
+    let size = usize::try_from(size).map_err(|_| package_error(LimitExceeded))?;
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(size)
-        .map_err(|_| package_error(ENOMEM))?;
+        .map_err(|_| package_error(ResourceUnavailable))?;
     bytes.resize(size, 0);
     reader.read_exact_at(offset, &mut bytes)?;
     Ok(bytes)
@@ -192,7 +203,7 @@ fn range_is_zero(
         remaining -= requested as u64;
         cursor = cursor
             .checked_add(requested as u64)
-            .ok_or(package_error(ERANGE))?;
+            .ok_or(package_error(LimitExceeded))?;
     }
     Ok(true)
 }
