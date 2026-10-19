@@ -400,11 +400,12 @@ pub struct NodeStatus {
     pub gid: u32,
     pub link_count: u32,
     pub special_device: u64,
-    pub access_time_seconds: u64,
+    /// Signed seconds since the Unix epoch, including pre-1970 timestamps.
+    pub access_time_seconds: i64,
     pub access_time_nanoseconds: u32,
-    pub modification_time_seconds: u64,
+    pub modification_time_seconds: i64,
     pub modification_time_nanoseconds: u32,
-    pub change_time_seconds: u64,
+    pub change_time_seconds: i64,
     pub change_time_nanoseconds: u32,
 }
 
@@ -430,11 +431,11 @@ pub fn encode_node_status(
     put_u32(output, 48, status.gid);
     put_u32(output, 52, status.link_count);
     put_u64(output, 56, status.special_device);
-    put_u64(output, 64, status.access_time_seconds);
+    put_u64(output, 64, status.access_time_seconds as u64);
     put_u32(output, 72, status.access_time_nanoseconds);
-    put_u64(output, 80, status.modification_time_seconds);
+    put_u64(output, 80, status.modification_time_seconds as u64);
     put_u32(output, 88, status.modification_time_nanoseconds);
-    put_u64(output, 96, status.change_time_seconds);
+    put_u64(output, 96, status.change_time_seconds as u64);
     put_u32(output, 104, status.change_time_nanoseconds);
     Ok(NODE_STATUS_LEN)
 }
@@ -459,11 +460,11 @@ pub fn decode_node_status(input: &[u8]) -> Result<NodeStatus, ProtocolError> {
         gid: get_u32(input, 48),
         link_count: get_u32(input, 52),
         special_device: get_u64(input, 56),
-        access_time_seconds: get_u64(input, 64),
+        access_time_seconds: get_u64(input, 64) as i64,
         access_time_nanoseconds: get_u32(input, 72),
-        modification_time_seconds: get_u64(input, 80),
+        modification_time_seconds: get_u64(input, 80) as i64,
         modification_time_nanoseconds: get_u32(input, 88),
-        change_time_seconds: get_u64(input, 96),
+        change_time_seconds: get_u64(input, 96) as i64,
         change_time_nanoseconds: get_u32(input, 104),
     };
     if !node_status_times_are_valid(&status) {
