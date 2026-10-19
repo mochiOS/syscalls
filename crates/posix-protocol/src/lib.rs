@@ -21,6 +21,7 @@ pub mod signal_wait;
 pub mod fork;
 pub mod resource_policy;
 pub mod status;
+pub mod file_time;
 
 /// Opaque LaunchContext key under which the POSIX control endpoint is passed.
 ///
@@ -308,6 +309,10 @@ pub const OP_WAIT_CHILD_INFO: u16 = 96;
 /// Empty payload and one TRANSFER-only terminal Handle. Returns the controlling
 /// session ID only if this is the authenticated caller's controlling terminal.
 pub const OP_TERMINAL_GET_SESSION: u16 = 97;
+/// file_time::AtRequest, with directory authority attached as for statat.
+pub const OP_UTIMENS_AT: u16 = 98;
+/// file_time::Update and exactly one CONTROL|TRANSFER FileHandle.
+pub const OP_FUTIMENS: u16 = 99;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -430,7 +435,7 @@ pub const FILE_FLAGS_UPDATE_PAYLOAD_LEN: usize = 8;
 pub const fn file_mutation_rights(opcode: u16) -> Option<u64> {
     let right = match opcode {
         OP_FTRUNCATE => mnu_abi::HANDLE_RIGHT_WRITE,
-        OP_FCHMOD | OP_FCHOWN | OP_FSETFL | OP_FUPDATEFL => mnu_abi::HANDLE_RIGHT_CONTROL,
+        OP_FCHMOD | OP_FCHOWN | OP_FSETFL | OP_FUPDATEFL | OP_FUTIMENS => mnu_abi::HANDLE_RIGHT_CONTROL,
         _ => return None,
     };
     Some(right | mnu_abi::HANDLE_RIGHT_TRANSFER)

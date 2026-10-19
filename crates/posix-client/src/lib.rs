@@ -1784,6 +1784,50 @@ impl<T: ObjectTransport> Client<T> {
         Ok(())
     }
 
+    /// Update times using authenticated POSIX credentials and retained path authority.
+    pub fn utimens_at(
+        &self,
+        base: StatAtBase<T::Handle>,
+        path: impl AsRef<[u8]>,
+        times: protocol::file_time::Update,
+        flags: u32,
+    ) -> Result<(), ClientError<T::Error>> {
+        let (base, directory) = match base {
+            StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
+            StatAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
+            StatAtBase::Directory(handle) => (protocol::OpenBase::AttachedDirectory, Some(handle)),
+        };
+        let mut payload = [0; protocol::file_time::AT_HEADER_LEN + protocol::MAX_PATH_LEN];
+        let length = protocol::file_time::encode_at(
+            protocol::file_time::AtRequest {
+                target: protocol::StatAtRequest { base, path: path.as_ref(), flags },
+                times,
+            },
+            &mut payload,
+        )
+        .map_err(ClientError::Protocol)?;
+        let mut handles = ObjectHandles::new();
+        if let Some(directory) = directory {
+            handles
+                .push(directory)
+                .map_err(|_| ClientError::RequestTooLarge)?;
+        }
+        self.request_without_reply_handles(
+            protocol::OP_UTIMENS_AT, &payload[..length], &mut [], &mut handles,
+        )?;
+        Ok(())
+    }
+
+    pub fn futimens(
+        &self,
+        file: ObjectHandleAttachment<T::Handle>,
+        times: protocol::file_time::Update,
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut payload = [0; protocol::file_time::UPDATE_LEN];
+        protocol::file_time::encode(times, &mut payload).map_err(ClientError::Protocol)?;
+        self.file_operation(protocol::OP_FUTIMENS, &payload, file)
+    }
+
     pub fn fchmod(
         &self,
         file: ObjectHandleAttachment<T::Handle>,
