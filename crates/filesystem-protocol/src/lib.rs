@@ -1,5 +1,10 @@
 #![no_std]
 
+mod timestamps;
+pub use timestamps::{
+    FileTimeUpdate, TIME_UPDATE_LEN, TimestampUpdate, decode_time_update, encode_time_update,
+};
+
 pub const MAGIC: [u8; 4] = *b"MFS1";
 pub const VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 64;
@@ -104,6 +109,13 @@ pub const OP_UPDATE_FLAGS_HANDLE: u16 = 40;
 /// Resolve an existing path, following symlinks, and return its canonical
 /// root-relative name. Uses STAT_AT root/base flags and authenticated credentials.
 pub const OP_CANONICAL_PATH_AT: u16 = 41;
+/// Resolve and update inode times in one operation. Payload: authenticated
+/// credentials, FileTimeUpdate, then path. Ordered root/base directory Handles
+/// must match SET_TIMES_AT flags. Current time is chosen by the provider.
+pub const OP_SET_TIMES_AT: u16 = 42;
+/// Update exactly one attached open object. Requires CONTROL|TRANSFER authority;
+/// payload: authenticated credentials and FileTimeUpdate, with no trailing data.
+pub const OP_SET_TIMES_HANDLE: u16 = 43;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const OPEN_STATUS_APPEND: u32 = 1 << 0;
@@ -185,6 +197,12 @@ pub const CHOWN_AT_BASE_ATTACHED: u32 = 1 << 1;
 pub const CHOWN_AT_ROOT_ATTACHED: u32 = 1 << 2;
 pub const CHOWN_AT_FLAGS_ALL: u32 =
     CHOWN_AT_NOFOLLOW | CHOWN_AT_BASE_ATTACHED | CHOWN_AT_ROOT_ATTACHED;
+
+pub const SET_TIMES_AT_NOFOLLOW: u32 = 1 << 0;
+pub const SET_TIMES_AT_BASE_ATTACHED: u32 = 1 << 1;
+pub const SET_TIMES_AT_ROOT_ATTACHED: u32 = 1 << 2;
+pub const SET_TIMES_AT_FLAGS_ALL: u32 =
+    SET_TIMES_AT_NOFOLLOW | SET_TIMES_AT_BASE_ATTACHED | SET_TIMES_AT_ROOT_ATTACHED;
 
 pub const SETATTR_MODE: u32 = 1 << 0;
 pub const SETATTR_UID: u32 = 1 << 1;
