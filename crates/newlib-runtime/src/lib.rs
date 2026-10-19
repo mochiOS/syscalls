@@ -2816,7 +2816,8 @@ fn authorize_exec_path(path_bytes: &[u8]) -> Result<(), c_int> {
     if status == 0 {
         Ok(())
     } else {
-        Err(c_int::try_from(status).unwrap_or(EIO))
+        let status = i64::try_from(status).map_err(|_| EIO)?;
+        Err(map_kernel_errno(status))
     }
 }
 
@@ -2858,7 +2859,8 @@ fn authorize_clone_path(identity: &str) -> Result<(), c_int> {
     if reply.status == 0 {
         Ok(())
     } else {
-        Err(c_int::try_from(reply.status).unwrap_or(EIO))
+        let status = i64::try_from(reply.status).map_err(|_| EIO)?;
+        Err(map_kernel_errno(status))
     }
 }
 
