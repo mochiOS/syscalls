@@ -5,22 +5,30 @@ use crate::syscall::{NativeError, SysError};
 /// Package input backed by an already-authorized native file Handle.
 ///
 /// This reader borrows the Handle: the caller must keep it open, close it
-/// afterwards. `len` moves the shared cursor to EOF, so callers must exclude
-/// concurrent cursor users during that call. Positioned reads do not use or
-/// change the shared cursor. No path lookup or additional authority is acquired.
+/// afterwards. The caller supplies a cursor-independent metadata query for
+/// that same Handle (for example POSIX fstat through its existing endpoint).
+/// Neither length queries nor positioned reads change the shared cursor. No
+/// path lookup, Handle duplication or additional authority is acquired here.
 pub struct NativeMpkgReader {
     handle: Handle,
+    length_query: fn(Handle) -> Result<u64, SysError>,
 }
 
 impl NativeMpkgReader {
-    pub fn from_borrowed_handle(handle: Handle) -> Self {
-        Self { handle }
+    pub fn from_borrowed_handle(
+        handle: Handle,
+        length_query: fn(Handle) -> Result<u64, SysError>,
+    ) -> Self {
+        Self {
+            handle,
+            length_query,
+        }
     }
 }
 
 impl MpkgReader for NativeMpkgReader {
     fn len(&mut self) -> Result<u64, SysError> {
-        handle::seek(self.handle, 0, handle::HANDLE_SEEK_END)
+        (self.length_query)(self.handle)
     }
 
     fn read_exact_at(&mut self, offset: u64, output: &mut [u8]) -> Result<(), SysError> {
