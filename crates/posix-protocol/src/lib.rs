@@ -395,6 +395,8 @@ pub const STATUS_ENOTTY: i32 = -25;
 pub const STATUS_EFBIG: i32 = -27;
 /// A userspace buffer, snapshot or encoded response exceeds its allowed range.
 pub const STATUS_ERANGE: i32 = -34;
+/// POSIX result/representation overflow, independent of native mechanism tags.
+pub const STATUS_EOVERFLOW: i32 = -75;
 pub const STATUS_ENOSYS: i32 = -38;
 /// Unsupported operation selected by userspace POSIX policy, not mnu.
 pub const STATUS_ENOTSUP: i32 = -95;

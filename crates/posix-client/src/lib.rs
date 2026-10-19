@@ -2000,7 +2000,7 @@ impl Transport for EndpointTransport {
         let length = (received & 0xffff_ffff) as usize;
         if length > response.len() {
             return Err(mochi_user_platform::syscall::SysError::from_raw(
-                mochi_user_platform::syscall::EOVERFLOW as i64,
+                mochi_user_platform::syscall::NativeError::LimitExceeded.into_raw() as i64,
             ));
         }
         Ok(length)
@@ -2036,7 +2036,7 @@ impl ObjectTransport for EndpointTransport {
         )?;
         let count = usize::try_from(native.count).map_err(|_| {
             mochi_user_platform::syscall::SysError::from_raw(
-                mochi_user_platform::syscall::EOVERFLOW as i64,
+                mochi_user_platform::syscall::NativeError::LimitExceeded.into_raw() as i64,
             )
         })?;
         if count > MAX_OBJECT_HANDLES || native.delivery_flags != 0 {
@@ -2070,14 +2070,14 @@ impl ObjectTransport for EndpointTransport {
                 })
                 .map_err(|_| {
                     mochi_user_platform::syscall::SysError::from_raw(
-                        mochi_user_platform::syscall::EOVERFLOW as i64,
+                        mochi_user_platform::syscall::NativeError::LimitExceeded.into_raw() as i64,
                     )
                 })?;
         }
         let length = (received & 0xffff_ffff) as usize;
         if length > response.len() {
             return Err(mochi_user_platform::syscall::SysError::from_raw(
-                mochi_user_platform::syscall::EOVERFLOW as i64,
+                mochi_user_platform::syscall::NativeError::LimitExceeded.into_raw() as i64,
             ));
         }
         Ok(length)
@@ -2104,7 +2104,9 @@ impl SyscallEndpointTransport {
             protocol::CONTROL_HANDLE_KEY,
         )?;
         let endpoint = u32::try_from(raw).map_err(|_| {
-            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EOVERFLOW as i64)
+            mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::NativeError::LimitExceeded.into_raw() as i64,
+            )
         })?;
         Ok(Self::new(endpoint))
     }
@@ -2144,7 +2146,7 @@ impl Transport for SyscallEndpointTransport {
         let length = (received & 0xffff_ffff) as usize;
         if length > response.len() {
             return Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::EOVERFLOW as i64,
+                mochi_user_syscall::NativeError::LimitExceeded.into_raw() as i64,
             ));
         }
         Ok(length)
@@ -2185,7 +2187,9 @@ impl ObjectTransport for SyscallEndpointTransport {
             (&mut native as *mut mochi_user_syscall::IpcObjectHandles) as u64,
         )?;
         let count = usize::try_from(native.count).map_err(|_| {
-            mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EOVERFLOW as i64)
+            mochi_user_syscall::SysError::from_raw(
+                mochi_user_syscall::NativeError::LimitExceeded.into_raw() as i64,
+            )
         })?;
         if count > MAX_OBJECT_HANDLES || native.delivery_flags != 0 {
             close_syscall_attachments(&native, count);
@@ -2212,13 +2216,15 @@ impl ObjectTransport for SyscallEndpointTransport {
                     rights: attachment.rights,
                 })
                 .map_err(|_| {
-                    mochi_user_syscall::SysError::from_raw(mochi_user_syscall::EOVERFLOW as i64)
+                    mochi_user_syscall::SysError::from_raw(
+                        mochi_user_syscall::NativeError::LimitExceeded.into_raw() as i64,
+                    )
                 })?;
         }
         let length = (received & 0xffff_ffff) as usize;
         if length > response.len() {
             return Err(mochi_user_syscall::SysError::from_raw(
-                mochi_user_syscall::EOVERFLOW as i64,
+                mochi_user_syscall::NativeError::LimitExceeded.into_raw() as i64,
             ));
         }
         Ok(length)
