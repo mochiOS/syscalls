@@ -7,6 +7,7 @@ mod fd_creation;
 mod callback_resources;
 mod file_mutation;
 mod file_metadata;
+mod file_time;
 mod stat_output;
 mod terminal_memory;
 mod terminal_attributes;
@@ -5689,6 +5690,21 @@ pub extern "C" fn fchown(fd: c_int, uid: u32, gid: u32) -> c_int {
         },
     );
     result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn utimensat(
+    dirfd: c_int,
+    path: *const c_char,
+    times: *const Timespec,
+    flags: c_int,
+) -> c_int {
+    result_with_errno(file_time::at(dirfd, path, times, flags).map(|_| 0), -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn futimens(fd: c_int, times: *const Timespec) -> c_int {
+    result_with_errno(file_time::fd(fd, times).map(|_| 0), -1)
 }
 
 #[unsafe(no_mangle)]
