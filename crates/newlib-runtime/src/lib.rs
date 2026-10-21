@@ -18,6 +18,7 @@ mod interval_timer;
 mod multiplex_memory;
 mod resource_limit_memory;
 mod signal_memory;
+mod signal_action;
 mod directory_io;
 mod path_io;
 mod user_copy;
@@ -136,6 +137,7 @@ const SA_NOCLDSTOP: c_int = 1;
 const SA_NOCLDWAIT: c_int = 2;
 const SA_RESTART: c_int = mochios_posix_client::signal::SA_RESTART;
 const SA_NODEFER: c_int = mochios_posix_client::signal::SA_NODEFER;
+const SA_RESETHAND: c_int = mochios_posix_client::signal::SA_RESETHAND;
 const SA_SIGINFO: c_int = mochios_posix_client::signal::SA_SIGINFO;
 const SA_ONSTACK: c_int = mochios_posix_client::signal_stack::SA_ONSTACK;
 const SPAWN_FAIL_EXIT_STATUS: c_int = 127;
@@ -6731,7 +6733,7 @@ pub unsafe extern "C" fn sigaction(
         }
     };
     if replacement.sa_flags
-        & !(SA_NOCLDSTOP | SA_NOCLDWAIT | SA_RESTART | SA_SIGINFO | SA_ONSTACK | SA_NODEFER)
+        & !(SA_NOCLDSTOP | SA_NOCLDWAIT | SA_RESTART | SA_SIGINFO | SA_ONSTACK | SA_NODEFER | SA_RESETHAND)
         != 0
         || (replacement.sa_flags & (SA_NOCLDSTOP | SA_NOCLDWAIT) != 0
             && signal != posix_protocol::SIGNAL_CHLD as c_int)
@@ -7072,7 +7074,7 @@ fn dispatch_signal(
     if signal <= 0 || signal > posix_protocol::SIGNAL_MAX as c_int {
         return Err(EINVAL);
     }
-    let action = SIGNAL_ACTIONS.lock()[signal as usize - 1];
+    let action = signal_action::select(signal as u32)?;
     match action.handler {
         0 => Ok(1),
         usize::MAX => Ok(2),

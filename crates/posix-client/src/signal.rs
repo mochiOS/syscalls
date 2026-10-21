@@ -5,6 +5,7 @@ pub const SIGNAL_BLOCK: i32 = 1;
 pub const SIGNAL_UNBLOCK: i32 = 2;
 pub const SA_RESTART: i32 = 0x1000_0000;
 pub const SA_NODEFER: i32 = 0x4000_0000;
+pub const SA_RESETHAND: i32 = i32::MIN;
 pub const SA_SIGINFO: i32 = 4;
 // NSIG in the current newlib target ABI includes signal zero.
 pub const NEWLIB_SIGNAL_COUNT: i32 = 32;
@@ -33,13 +34,19 @@ pub const fn sanitize_mask(mask: u64) -> u64 {
     mask & !unblockable_mask()
 }
 
-/// Additional mask while running a caught handler. NODEFER suppresses only
-/// automatic self-blocking; it never removes an explicit sa_mask entry.
+/// Additional mask while running a caught handler. NODEFER (also implied by
+/// our RESETHAND policy) suppresses only automatic self-blocking, not sa_mask.
 pub const fn handler_mask(signal: u32, mask: u64, flags: i32) -> Option<u64> {
     let Some(current) = signal_bit(signal) else {
         return None;
     };
-    Some(sanitize_mask(mask | if flags & SA_NODEFER == 0 { current } else { 0 }))
+    Some(sanitize_mask(
+        mask | if flags & (SA_NODEFER | SA_RESETHAND) == 0 {
+            current
+        } else {
+            0
+        },
+    ))
 }
 
 pub const fn can_change_disposition(signal: u32) -> bool {
