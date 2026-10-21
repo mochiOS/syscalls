@@ -5447,29 +5447,21 @@ pub extern "C" fn getegid() -> credentials::Id {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn setgid(gid: c_int) -> c_int {
-    if gid < 0 {
-        set_errno(EINVAL);
-        return -1;
-    }
+pub extern "C" fn setgid(gid: credentials::Id) -> c_int {
     let result = posix_client()
         .map_err(map_posix_client_error)
-        .and_then(|client| client.set_gid(gid as u32).map_err(map_posix_client_error))
+        .and_then(|client| client.set_gid(u32::from(gid)).map_err(map_posix_client_error))
         .map(|_| 0);
     result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn setegid(gid: c_int) -> c_int {
-    if gid < 0 {
-        set_errno(EINVAL);
-        return -1;
-    }
+pub extern "C" fn setegid(gid: credentials::Id) -> c_int {
     let result = posix_client()
         .map_err(map_posix_client_error)
         .and_then(|client| {
             client
-                .set_effective_gid(gid as u32)
+                .set_effective_gid(u32::from(gid))
                 .map_err(map_posix_client_error)
         })
         .map(|_| 0);
@@ -5477,29 +5469,21 @@ pub extern "C" fn setegid(gid: c_int) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn setuid(uid: c_int) -> c_int {
-    if uid < 0 {
-        set_errno(EINVAL);
-        return -1;
-    }
+pub extern "C" fn setuid(uid: credentials::Id) -> c_int {
     let result = posix_client()
         .map_err(map_posix_client_error)
-        .and_then(|client| client.set_uid(uid as u32).map_err(map_posix_client_error))
+        .and_then(|client| client.set_uid(u32::from(uid)).map_err(map_posix_client_error))
         .map(|_| 0);
     result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn seteuid(uid: c_int) -> c_int {
-    if uid < 0 {
-        set_errno(EINVAL);
-        return -1;
-    }
+pub extern "C" fn seteuid(uid: credentials::Id) -> c_int {
     let result = posix_client()
         .map_err(map_posix_client_error)
         .and_then(|client| {
             client
-                .set_effective_uid(uid as u32)
+                .set_effective_uid(u32::from(uid))
                 .map_err(map_posix_client_error)
         })
         .map(|_| 0);
