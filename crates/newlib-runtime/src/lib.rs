@@ -50,6 +50,7 @@ mod thread_stack;
 mod pthread_attr;
 mod credentials;
 mod groups;
+mod groups_memory;
 mod pthread_mutex;
 mod pthread_cond;
 mod pthread_once;
@@ -5378,8 +5379,7 @@ pub extern "C" fn getgroups(gidsetsize: c_int, grouplist: *mut groups::Gid) -> c
         if capacity < count {
             return Err(EINVAL);
         }
-        let destination = unsafe { core::slice::from_raw_parts_mut(grouplist, count) };
-        groups::store(&groups[..count], destination).map_err(|_| EOVERFLOW)?;
+        groups_memory::write(grouplist, &groups[..count])?;
         c_int::try_from(count).map_err(|_| EOVERFLOW)
     })();
     result_with_errno(result, -1)
@@ -5395,13 +5395,8 @@ pub extern "C" fn setgroups(ngroups: c_int, grouplist: *const groups::Gid) -> c_
         if count != 0 && grouplist.is_null() {
             return Err(EFAULT);
         }
-        let source = if count == 0 {
-            &[]
-        } else {
-            unsafe { core::slice::from_raw_parts(grouplist, count) }
-        };
         let mut groups = [0u32; posix_protocol::MAX_SUPPLEMENTARY_GROUPS];
-        groups::widen(source, &mut groups);
+        groups_memory::read(grouplist, &mut groups[..count])?;
         posix_client()
             .and_then(|client| client.set_groups(&groups[..count]))
             .map_err(map_posix_client_error)?;
