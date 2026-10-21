@@ -8,14 +8,15 @@ pub mod execution;
 pub mod memory;
 pub mod image;
 pub use mnu_abi::status::Error as NativeError;
+pub mod compatibility_status;
+pub use compatibility_status::{EACCES, EAGAIN, EINVAL, EIO, ENOENT, ENOMEM};
 
 pub use mnu_abi::{
     ProcessorInfo,
     AddressWaitGuard, HandleInfo, HandleWaitGuard,
     ExecutionIdentity,
     ProcessExecutionUsage,
-    ADDRESS_WAIT_INFINITE, AddressWaitResult, ClockId, ClockInstant, EACCES, EAGAIN,
-    EINVAL, EIO, ENOENT, ENOMEM,
+    ADDRESS_WAIT_INFINITE, AddressWaitResult, ClockId, ClockInstant,
     HANDLE_OPTION_NONBLOCKING, HANDLE_OPTIONS_ALL, HANDLE_RIGHT_ALL,
     HANDLE_RIGHT_CONTROL, HANDLE_RIGHT_DUPLICATE, HANDLE_RIGHT_MAP, HANDLE_RIGHT_READ,
     HANDLE_RIGHT_RECEIVE, HANDLE_RIGHT_SEEK, HANDLE_RIGHT_SEND, HANDLE_RIGHT_SIGNAL,
