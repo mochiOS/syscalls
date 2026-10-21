@@ -2933,7 +2933,9 @@ fn replace_process_image(
             path_text,
         )
         .map_err(map_posix_client_error)?;
-    let required_rights = syscall::HANDLE_RIGHT_READ | syscall::HANDLE_RIGHT_SEEK;
+    // Native image snapshots use bounded positional reads, never the shared
+    // open-file cursor. Do not require unrelated SEEK authority here.
+    let required_rights = syscall::HANDLE_RIGHT_READ;
     if opened.rights & required_rights != required_rights {
         close_object_handle(opened.handle);
         return Err(EACCES);
