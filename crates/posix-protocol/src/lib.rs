@@ -315,6 +315,11 @@ pub const OP_UTIMENS_AT: u16 = 98;
 pub const OP_FUTIMENS: u16 = 99;
 /// Replace this authenticated process's elapsed-time alarm; u32 seconds in/out.
 pub const OP_ALARM: u16 = 100;
+/// Empty request; returns interval_timer::Value for the caller's real timer.
+pub const OP_REAL_TIMER_GET: u16 = 101;
+/// interval_timer::Value input and previous value output, no attached objects.
+pub const OP_REAL_TIMER_SET: u16 = 102;
+pub mod interval_timer;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

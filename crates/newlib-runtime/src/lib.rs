@@ -14,6 +14,7 @@ mod terminal_attributes;
 mod socket_memory;
 mod socket_receive_address;
 mod time_memory;
+mod interval_timer;
 mod multiplex_memory;
 mod resource_limit_memory;
 mod signal_memory;

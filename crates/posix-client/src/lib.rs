@@ -720,6 +720,26 @@ impl<T: Transport> Client<T> {
         Ok(u32::from_le_bytes(response))
     }
 
+    /// Query the caller's elapsed-time timer; no process-local C ABI crosses IPC.
+    pub fn real_timer(&self) -> Result<protocol::interval_timer::Value, ClientError<T::Error>> {
+        let mut output = [0; protocol::interval_timer::LEN];
+        let length = self.request(protocol::OP_REAL_TIMER_GET, 0, &[], &mut output)?;
+        protocol::interval_timer::decode(&output[..length]).map_err(ClientError::Protocol)
+    }
+
+    /// Atomically replace the elapsed-time timer shared with `alarm()`.
+    /// A zero remainder disarms it without discarding its configured interval.
+    pub fn set_real_timer(
+        &self,
+        value: protocol::interval_timer::Value,
+    ) -> Result<protocol::interval_timer::Value, ClientError<T::Error>> {
+        let mut input = [0; protocol::interval_timer::LEN];
+        protocol::interval_timer::encode(value, &mut input).map_err(ClientError::Protocol)?;
+        let mut output = [0; protocol::interval_timer::LEN];
+        let length = self.request(protocol::OP_REAL_TIMER_SET, 0, &input, &mut output)?;
+        protocol::interval_timer::decode(&output[..length]).map_err(ClientError::Protocol)
+    }
+
     pub fn request(
         &self,
         opcode: u16,
