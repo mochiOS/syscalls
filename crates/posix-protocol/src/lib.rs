@@ -313,6 +313,8 @@ pub const OP_TERMINAL_GET_SESSION: u16 = 97;
 pub const OP_UTIMENS_AT: u16 = 98;
 /// file_time::Update and exactly one CONTROL|TRANSFER FileHandle.
 pub const OP_FUTIMENS: u16 = 99;
+/// Replace this authenticated process's elapsed-time alarm; u32 seconds in/out.
+pub const OP_ALARM: u16 = 100;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -568,6 +570,7 @@ pub const SIGNAL_KILL: u32 = 9;
 pub const SIGNAL_BUS: u32 = 10;
 pub const SIGNAL_SEGV: u32 = 11;
 pub const SIGNAL_PIPE: u32 = 13;
+pub const SIGNAL_ALRM: u32 = 14;
 pub const SIGNAL_URG: u32 = 16;
 pub const SIGNAL_STOP: u32 = 17;
 pub const SIGNAL_TSTP: u32 = 18;

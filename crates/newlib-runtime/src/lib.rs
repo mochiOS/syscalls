@@ -7557,6 +7557,21 @@ pub extern "C" fn sched_yield() -> c_int {
     )
 }
 
+/// Process-wide elapsed-time alarm; never a cancellation point.
+#[unsafe(no_mangle)]
+pub extern "C" fn alarm(seconds: u32) -> u32 {
+    let result = posix_client()
+        .map_err(map_posix_client_error)
+        .and_then(|client| client.alarm(seconds).map_err(map_posix_client_error));
+    match result {
+        Ok(previous) => previous,
+        Err(error) => {
+            set_errno(error);
+            0
+        }
+    }
+}
+
 /// Unlike nanosleep, POSIX clock_nanosleep returns an error number directly.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn clock_nanosleep(

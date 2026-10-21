@@ -704,6 +704,22 @@ impl<T: Transport> Client<T> {
         self.request(protocol::OP_GETCWD, 0, &[], output)
     }
 
+    /// Set or cancel the process-wide elapsed-time alarm. The returned
+    /// remaining duration is rounded upward to whole seconds.
+    pub fn alarm(&self, seconds: u32) -> Result<u32, ClientError<T::Error>> {
+        let mut response = [0; 4];
+        let length = self.request(
+            protocol::OP_ALARM,
+            0,
+            &seconds.to_le_bytes(),
+            &mut response,
+        )?;
+        if length != response.len() {
+            return Err(ClientError::Protocol(protocol::ProtocolError::InvalidLength));
+        }
+        Ok(u32::from_le_bytes(response))
+    }
+
     pub fn request(
         &self,
         opcode: u16,
