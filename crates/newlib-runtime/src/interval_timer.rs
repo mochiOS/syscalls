@@ -1,6 +1,6 @@
-//! Process elapsed-time timers. CPU-time timers require separate accounting.
+//! Process elapsed and CPU-time interval timers over userspace POSIX policy.
 use super::*;
-use posix_protocol::interval_timer::Value;
+use posix_protocol::interval_timer::{CpuClock, Value};
 
 #[repr(C)]
 pub(super) struct Itimerval {
@@ -8,10 +8,11 @@ pub(super) struct Itimerval {
     value: Timeval,
 }
 
-fn check_kind(which: c_int) -> Result<(), c_int> {
+fn check_kind(which: c_int) -> Result<Option<CpuClock>, c_int> {
     match which {
-        0 => Ok(()),
-        1 | 2 => Err(ENOSYS),
+        0 => Ok(None),
+        1 => Ok(Some(CpuClock::Virtual)),
+        2 => Ok(Some(CpuClock::Profile)),
         _ => Err(EINVAL),
     }
 }
@@ -75,14 +76,16 @@ fn write(destination: *mut Itimerval, value: Value) -> Result<(), c_int> {
 #[unsafe(no_mangle)]
 pub extern "C" fn getitimer(which: c_int, current: *mut Itimerval) -> c_int {
     let result = (|| {
-        check_kind(which)?;
+        let clock = check_kind(which)?;
         if current.is_null() {
             return Err(EFAULT);
         }
-        let value = posix_client()
-            .map_err(map_posix_client_error)?
-            .real_timer()
-            .map_err(map_posix_client_error)?;
+        let client = posix_client().map_err(map_posix_client_error)?;
+        let value = match clock {
+            None => client.real_timer(),
+            Some(clock) => client.cpu_timer(clock),
+        }
+        .map_err(map_posix_client_error)?;
         write(current, value)?;
         Ok(0)
     })();
@@ -96,17 +99,19 @@ pub extern "C" fn setitimer(
     previous: *mut Itimerval,
 ) -> c_int {
     let result = (|| {
-        check_kind(which)?;
+        let clock = check_kind(which)?;
         // Import both timeval records before IPC or any potentially aliased
         // output. C pointers and struct padding never enter the wire message.
         let value = read(replacement)?;
-        let old = posix_client()
-            .map_err(map_posix_client_error)?
-            .set_real_timer(value)
-            .map_err(|error| match map_posix_client_error(error) {
-                EOVERFLOW => EINVAL,
-                error => error,
-            })?;
+        let client = posix_client().map_err(map_posix_client_error)?;
+        let old = match clock {
+            None => client.set_real_timer(value),
+            Some(clock) => client.set_cpu_timer(clock, value),
+        }
+        .map_err(|error| match map_posix_client_error(error) {
+            EOVERFLOW => EINVAL,
+            error => error,
+        })?;
         if !previous.is_null() {
             write(previous, old)?;
         }

@@ -3,6 +3,23 @@ use crate::ProtocolError;
 
 pub const LEN: usize = 16;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum CpuClock {
+    Virtual = 1,
+    Profile = 2,
+}
+
+impl CpuClock {
+    pub fn decode(input: &[u8]) -> Result<Self, ProtocolError> {
+        match input {
+            [1, 0, 0, 0] => Ok(Self::Virtual),
+            [2, 0, 0, 0] => Ok(Self::Profile),
+            _ => Err(ProtocolError::InvalidLength),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Value {
     pub interval_ns: u64,

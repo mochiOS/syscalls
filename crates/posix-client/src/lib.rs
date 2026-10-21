@@ -740,6 +740,34 @@ impl<T: Transport> Client<T> {
         protocol::interval_timer::decode(&output[..length]).map_err(ClientError::Protocol)
     }
 
+    /// Query the caller's user-only or user-plus-kernel CPU interval timer.
+    pub fn cpu_timer(
+        &self,
+        clock: protocol::interval_timer::CpuClock,
+    ) -> Result<protocol::interval_timer::Value, ClientError<T::Error>> {
+        let mut output = [0; protocol::interval_timer::LEN];
+        let length = self.request(
+            protocol::OP_CPU_TIMER_GET,
+            0,
+            &(clock as u32).to_le_bytes(),
+            &mut output,
+        )?;
+        protocol::interval_timer::decode(&output[..length]).map_err(ClientError::Protocol)
+    }
+
+    pub fn set_cpu_timer(
+        &self,
+        clock: protocol::interval_timer::CpuClock,
+        value: protocol::interval_timer::Value,
+    ) -> Result<protocol::interval_timer::Value, ClientError<T::Error>> {
+        let mut input = [0; 4 + protocol::interval_timer::LEN];
+        input[..4].copy_from_slice(&(clock as u32).to_le_bytes());
+        protocol::interval_timer::encode(value, &mut input[4..]).map_err(ClientError::Protocol)?;
+        let mut output = [0; protocol::interval_timer::LEN];
+        let length = self.request(protocol::OP_CPU_TIMER_SET, 0, &input, &mut output)?;
+        protocol::interval_timer::decode(&output[..length]).map_err(ClientError::Protocol)
+    }
+
     pub fn request(
         &self,
         opcode: u16,

@@ -319,6 +319,10 @@ pub const OP_ALARM: u16 = 100;
 pub const OP_REAL_TIMER_GET: u16 = 101;
 /// interval_timer::Value input and previous value output, no attached objects.
 pub const OP_REAL_TIMER_SET: u16 = 102;
+/// Four-byte interval_timer::CpuClock selector; no attached objects.
+pub const OP_CPU_TIMER_GET: u16 = 103;
+/// CpuClock selector followed by interval_timer::Value; previous Value reply.
+pub const OP_CPU_TIMER_SET: u16 = 104;
 pub mod interval_timer;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
@@ -576,6 +580,8 @@ pub const SIGNAL_BUS: u32 = 10;
 pub const SIGNAL_SEGV: u32 = 11;
 pub const SIGNAL_PIPE: u32 = 13;
 pub const SIGNAL_ALRM: u32 = 14;
+pub const SIGNAL_VTALRM: u32 = 26;
+pub const SIGNAL_PROF: u32 = 27;
 pub const SIGNAL_URG: u32 = 16;
 pub const SIGNAL_STOP: u32 = 17;
 pub const SIGNAL_TSTP: u32 = 18;
