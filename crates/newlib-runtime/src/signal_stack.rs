@@ -15,20 +15,26 @@ fn error(error: stack::StackError) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigaltstack(requested: *const Stack, previous: *mut Stack) -> c_int {
     let result = (|| {
+        // Snapshot faultable input before changing the thread mask or stack
+        // state. requested and previous may refer to the same application bytes.
+        let requested = if requested.is_null() {
+            None
+        } else {
+            Some(signal_memory::read_stack(requested)?)
+        };
         let (_, control) = register_current_thread().ok_or(EAGAIN)?;
         let mask = service_signal_mask(control, posix_protocol::SIGNAL_MASK_BLOCK, u64::MAX)?;
         let changed = (|| {
             let pointer = stack::current_pointer();
-            let old = if requested.is_null() {
-                control.alternate_stack.snapshot(pointer)
-            } else {
-                control
+            let old = match requested {
+                None => control.alternate_stack.snapshot(pointer),
+                Some(requested) => control
                     .alternate_stack
-                    .replace(unsafe { requested.read() }, pointer)
-                    .map_err(error)?
+                    .replace(requested, pointer)
+                    .map_err(error)?,
             };
             if !previous.is_null() {
-                unsafe { previous.write(old) };
+                signal_memory::write_stack(previous, old)?;
             }
             Ok(0)
         })();

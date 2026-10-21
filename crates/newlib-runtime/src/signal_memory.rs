@@ -1,6 +1,6 @@
 //! C signal metadata is copied at the boundary, never borrowed across IPC.
 use super::*;
-use mochios_posix_client::signal_context::SigInfo;
+use mochios_posix_client::signal_context::{SigInfo, Stack};
 
 macro_rules! read_field {
     ($bytes:ident, $structure:ty, $field:ident, $integer:ty) => {{
@@ -38,6 +38,24 @@ pub(super) fn write_action(
     write_field!(bytes, SignalAction, sa_flags, value.sa_flags);
     write_field!(bytes, SignalAction, sa_mask, value.sa_mask);
     write_field!(bytes, SignalAction, handler, value.handler);
+    user_copy::write(destination.cast(), &bytes)
+}
+
+pub(super) fn read_stack(source: *const Stack) -> Result<Stack, c_int> {
+    let mut bytes = [0; core::mem::size_of::<Stack>()];
+    user_copy::read(source.cast(), &mut bytes)?;
+    Ok(Stack {
+        ss_sp: read_field!(bytes, Stack, ss_sp, usize),
+        ss_flags: read_field!(bytes, Stack, ss_flags, c_int),
+        ss_size: read_field!(bytes, Stack, ss_size, usize),
+    })
+}
+
+pub(super) fn write_stack(destination: *mut Stack, value: Stack) -> Result<(), c_int> {
+    let mut bytes = [0; core::mem::size_of::<Stack>()];
+    write_field!(bytes, Stack, ss_sp, value.ss_sp);
+    write_field!(bytes, Stack, ss_flags, value.ss_flags);
+    write_field!(bytes, Stack, ss_size, value.ss_size);
     user_copy::write(destination.cast(), &bytes)
 }
 
