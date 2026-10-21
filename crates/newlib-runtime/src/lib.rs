@@ -134,6 +134,7 @@ const WCONTINUED: c_int = 8;
 const SA_NOCLDSTOP: c_int = 1;
 const SA_NOCLDWAIT: c_int = 2;
 const SA_RESTART: c_int = mochios_posix_client::signal::SA_RESTART;
+const SA_NODEFER: c_int = mochios_posix_client::signal::SA_NODEFER;
 const SA_SIGINFO: c_int = mochios_posix_client::signal::SA_SIGINFO;
 const SA_ONSTACK: c_int = mochios_posix_client::signal_stack::SA_ONSTACK;
 const SPAWN_FAIL_EXIT_STATUS: c_int = 127;
@@ -6744,7 +6745,9 @@ pub unsafe extern "C" fn sigaction(
             return -1;
         }
     };
-    if replacement.sa_flags & !(SA_NOCLDSTOP | SA_NOCLDWAIT | SA_RESTART | SA_SIGINFO | SA_ONSTACK) != 0
+    if replacement.sa_flags
+        & !(SA_NOCLDSTOP | SA_NOCLDWAIT | SA_RESTART | SA_SIGINFO | SA_ONSTACK | SA_NODEFER)
+        != 0
         || (replacement.sa_flags & (SA_NOCLDSTOP | SA_NOCLDWAIT) != 0
             && signal != posix_protocol::SIGNAL_CHLD as c_int)
     {
@@ -7108,12 +7111,16 @@ fn dispatch_signal(
                 None
             };
             let control = preparation.control;
-            let current_signal =
-                mochios_posix_client::signal::signal_bit(signal as u32).unwrap_or(0);
+            let handler_mask = mochios_posix_client::signal::handler_mask(
+                signal as u32,
+                action.sa_mask,
+                action.sa_flags,
+            )
+            .ok_or(EINVAL)?;
             let previous = service_signal_mask(
                 control,
                 posix_protocol::SIGNAL_MASK_BLOCK,
-                action.sa_mask | current_signal,
+                handler_mask,
             )?;
             context.uc_sigmask = previous;
             let original = context.uc_mcontext;

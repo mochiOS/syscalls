@@ -3,6 +3,7 @@
 
 #define SA_SIGINFO 0x4
 #define SA_ONSTACK 0x8
+#define SA_NODEFER 0x40000000
 /* Keep the non-RTEMS newlib layout: handler union, mask, flags. */
 struct sigaction {
     union {
