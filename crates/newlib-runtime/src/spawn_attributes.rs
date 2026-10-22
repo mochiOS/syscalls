@@ -1,4 +1,4 @@
-//! Snapshot the caller's opaque spawn attribute handle before creating a child.
+//! Checked field access and snapshots of opaque caller-owned spawn attributes.
 use super::*;
 
 macro_rules! scalar {
@@ -12,17 +12,79 @@ macro_rules! scalar {
     }};
 }
 
+fn handle_address(attr: *const c_void) -> Result<usize, c_int> {
+    if attr.is_null() {
+        return Err(EINVAL);
+    }
+    let mut pointer = [0; core::mem::size_of::<usize>()];
+    user_copy::read(attr.cast(), &mut pointer)?;
+    let pointer = usize::from_ne_bytes(pointer);
+    if pointer == 0 {
+        Err(EINVAL)
+    } else {
+        Ok(pointer)
+    }
+}
+
+fn field_address(
+    attr: *const *mut PosixSpawnAttr,
+    offset: usize,
+    size: usize,
+) -> Result<usize, c_int> {
+    if offset.checked_add(size).ok_or(EINVAL)? > core::mem::size_of::<PosixSpawnAttr>() {
+        return Err(EINVAL);
+    }
+    handle_address(attr.cast())?
+        .checked_add(offset)
+        .ok_or(EFAULT)
+}
+
+// Copy only the selected scalar field. Reading a whole C struct would also
+// read padding and unrelated, possibly uninitialized or inaccessible fields.
+pub(super) fn get<const N: usize>(
+    attr: *const *mut PosixSpawnAttr,
+    output: *mut u8,
+    offset: usize,
+) -> c_int {
+    if output.is_null() {
+        return EINVAL;
+    }
+    let _delivery = defer_native_delivery();
+    let result = (|| {
+        let source = field_address(attr, offset, N)?;
+        let mut bytes = [0; N];
+        user_copy::read(source as *const u8, &mut bytes)?;
+        user_copy::write(output, &bytes)
+    })();
+    result.err().unwrap_or(0)
+}
+
+pub(super) fn set<const N: usize>(
+    attr: *const *mut PosixSpawnAttr,
+    input: *const u8,
+    offset: usize,
+) -> c_int {
+    if input.is_null() {
+        return EINVAL;
+    }
+    let _delivery = defer_native_delivery();
+    let result = (|| {
+        let destination = field_address(attr, offset, N)?;
+        let mut bytes = [0; N];
+        // Capture before modifying the object, including when input aliases
+        // its storage. A failed input copy cannot apply a partial new value.
+        user_copy::read(input, &mut bytes)?;
+        user_copy::write(destination as *mut u8, &bytes)
+    })();
+    result.err().unwrap_or(0)
+}
+
 pub(super) fn read_optional(attr: *const c_void) -> Result<Option<PosixSpawnAttr>, c_int> {
     if attr.is_null() {
         return Ok(None);
     }
     let _delivery = defer_native_delivery();
-    let mut pointer = [0; core::mem::size_of::<usize>()];
-    user_copy::read(attr.cast(), &mut pointer)?;
-    let pointer = usize::from_ne_bytes(pointer);
-    if pointer == 0 {
-        return Err(EINVAL);
-    }
+    let pointer = handle_address(attr)?;
     // Decode initialized bytes, not a borrowed C struct or an assumed-aligned
     // pointer. Padding is copied but never interpreted as a Rust value.
     let mut bytes = [0; core::mem::size_of::<PosixSpawnAttr>()];

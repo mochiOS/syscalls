@@ -8838,15 +8838,11 @@ pub extern "C" fn posix_spawnattr_getflags(
     attr: *const *mut PosixSpawnAttr,
     flags: *mut i16,
 ) -> c_int {
-    if flags.is_null() {
-        return EINVAL;
-    }
-    let value = match unsafe { spawn_attributes_handle(attr) } {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    unsafe { flags.write((*value).sa_flags) };
-    0
+    spawn_attributes::get::<{ core::mem::size_of::<i16>() }>(
+        attr,
+        flags.cast(),
+        core::mem::offset_of!(PosixSpawnAttr, sa_flags),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -8857,12 +8853,11 @@ pub extern "C" fn posix_spawnattr_setflags(attr: *mut *mut PosixSpawnAttr, flags
     ) {
         return EINVAL;
     }
-    let value = match unsafe { spawn_attributes_handle(attr.cast_const()) } {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    unsafe { (*value).sa_flags = flags };
-    0
+    spawn_attributes::set::<{ core::mem::size_of::<i16>() }>(
+        attr.cast_const(),
+        ptr::addr_of!(flags).cast(),
+        core::mem::offset_of!(PosixSpawnAttr, sa_flags),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -8870,15 +8865,11 @@ pub extern "C" fn posix_spawnattr_getpgroup(
     attr: *const *mut PosixSpawnAttr,
     pgroup: *mut c_int,
 ) -> c_int {
-    if pgroup.is_null() {
-        return EINVAL;
-    }
-    let value = match unsafe { spawn_attributes_handle(attr) } {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    unsafe { pgroup.write((*value).sa_pgroup) };
-    0
+    spawn_attributes::get::<{ core::mem::size_of::<c_int>() }>(
+        attr,
+        pgroup.cast(),
+        core::mem::offset_of!(PosixSpawnAttr, sa_pgroup),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -8886,12 +8877,11 @@ pub extern "C" fn posix_spawnattr_setpgroup(
     attr: *mut *mut PosixSpawnAttr,
     pgroup: c_int,
 ) -> c_int {
-    let value = match unsafe { spawn_attributes_handle(attr.cast_const()) } {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    unsafe { (*value).sa_pgroup = pgroup };
-    0
+    spawn_attributes::set::<{ core::mem::size_of::<c_int>() }>(
+        attr.cast_const(),
+        ptr::addr_of!(pgroup).cast(),
+        core::mem::offset_of!(PosixSpawnAttr, sa_pgroup),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -8899,15 +8889,12 @@ pub extern "C" fn posix_spawnattr_getschedparam(
     attr: *const *mut PosixSpawnAttr,
     schedparam: *mut SchedParam,
 ) -> c_int {
-    if schedparam.is_null() {
-        return EINVAL;
-    }
-    let value = match unsafe { spawn_attributes_handle(attr) } {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    unsafe { schedparam.write((*value).sa_schedparam) };
-    0
+    spawn_attributes::get::<{ core::mem::size_of::<c_int>() }>(
+        attr,
+        schedparam.cast(),
+        core::mem::offset_of!(PosixSpawnAttr, sa_schedparam)
+            + core::mem::offset_of!(SchedParam, sched_priority),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -8915,15 +8902,12 @@ pub extern "C" fn posix_spawnattr_setschedparam(
     attr: *mut *mut PosixSpawnAttr,
     schedparam: *const SchedParam,
 ) -> c_int {
-    if schedparam.is_null() {
-        return EINVAL;
-    }
-    let value = match unsafe { spawn_attributes_handle(attr.cast_const()) } {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    unsafe { (*value).sa_schedparam = schedparam.read() };
-    0
+    spawn_attributes::set::<{ core::mem::size_of::<c_int>() }>(
+        attr.cast_const(),
+        schedparam.cast(),
+        core::mem::offset_of!(PosixSpawnAttr, sa_schedparam)
+            + core::mem::offset_of!(SchedParam, sched_priority),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -8931,15 +8915,11 @@ pub extern "C" fn posix_spawnattr_getschedpolicy(
     attr: *const *mut PosixSpawnAttr,
     policy: *mut c_int,
 ) -> c_int {
-    if policy.is_null() {
-        return EINVAL;
-    }
-    let value = match unsafe { spawn_attributes_handle(attr) } {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    unsafe { policy.write((*value).sa_schedpolicy) };
-    0
+    spawn_attributes::get::<{ core::mem::size_of::<c_int>() }>(
+        attr,
+        policy.cast(),
+        core::mem::offset_of!(PosixSpawnAttr, sa_schedpolicy),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -8947,12 +8927,11 @@ pub extern "C" fn posix_spawnattr_setschedpolicy(
     attr: *mut *mut PosixSpawnAttr,
     policy: c_int,
 ) -> c_int {
-    let value = match unsafe { spawn_attributes_handle(attr.cast_const()) } {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    unsafe { (*value).sa_schedpolicy = policy };
-    0
+    spawn_attributes::set::<{ core::mem::size_of::<c_int>() }>(
+        attr.cast_const(),
+        ptr::addr_of!(policy).cast(),
+        core::mem::offset_of!(PosixSpawnAttr, sa_schedpolicy),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -8960,15 +8939,11 @@ pub extern "C" fn posix_spawnattr_getsigdefault(
     attr: *const *mut PosixSpawnAttr,
     sigdefault: *mut u64,
 ) -> c_int {
-    if sigdefault.is_null() {
-        return EINVAL;
-    }
-    let value = match unsafe { spawn_attributes_handle(attr) } {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    unsafe { sigdefault.write((*value).sa_sigdefault) };
-    0
+    spawn_attributes::get::<{ core::mem::size_of::<u64>() }>(
+        attr,
+        sigdefault.cast(),
+        core::mem::offset_of!(PosixSpawnAttr, sa_sigdefault),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -8976,15 +8951,11 @@ pub extern "C" fn posix_spawnattr_setsigdefault(
     attr: *mut *mut PosixSpawnAttr,
     sigdefault: *const u64,
 ) -> c_int {
-    if sigdefault.is_null() {
-        return EINVAL;
-    }
-    let value = match unsafe { spawn_attributes_handle(attr.cast_const()) } {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    unsafe { (*value).sa_sigdefault = sigdefault.read() };
-    0
+    spawn_attributes::set::<{ core::mem::size_of::<u64>() }>(
+        attr.cast_const(),
+        sigdefault.cast(),
+        core::mem::offset_of!(PosixSpawnAttr, sa_sigdefault),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -8992,15 +8963,11 @@ pub extern "C" fn posix_spawnattr_getsigmask(
     attr: *const *mut PosixSpawnAttr,
     sigmask: *mut u64,
 ) -> c_int {
-    if sigmask.is_null() {
-        return EINVAL;
-    }
-    let value = match unsafe { spawn_attributes_handle(attr) } {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    unsafe { sigmask.write((*value).sa_sigmask) };
-    0
+    spawn_attributes::get::<{ core::mem::size_of::<u64>() }>(
+        attr,
+        sigmask.cast(),
+        core::mem::offset_of!(PosixSpawnAttr, sa_sigmask),
+    )
 }
 
 #[unsafe(no_mangle)]
@@ -9008,15 +8975,11 @@ pub extern "C" fn posix_spawnattr_setsigmask(
     attr: *mut *mut PosixSpawnAttr,
     sigmask: *const u64,
 ) -> c_int {
-    if sigmask.is_null() {
-        return EINVAL;
-    }
-    let value = match unsafe { spawn_attributes_handle(attr.cast_const()) } {
-        Ok(value) => value,
-        Err(error) => return error,
-    };
-    unsafe { (*value).sa_sigmask = sigmask.read() };
-    0
+    spawn_attributes::set::<{ core::mem::size_of::<u64>() }>(
+        attr.cast_const(),
+        sigmask.cast(),
+        core::mem::offset_of!(PosixSpawnAttr, sa_sigmask),
+    )
 }
 
 #[unsafe(no_mangle)]
