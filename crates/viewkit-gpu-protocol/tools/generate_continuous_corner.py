@@ -6,6 +6,7 @@ Run from any directory; the generated Rust table is checked into source control.
 """
 from pathlib import Path
 import math
+import subprocess
 
 C = 1.6525000895846302
 N = 1024
@@ -37,3 +38,5 @@ with output.open('w') as out:
     for row in nodes:
         out.write('    [' + ', '.join(f'{v:.17e}' for v in row) + '],\n')
     out.write('];\n')
+
+subprocess.run(["rustfmt", "--edition", "2024", str(output)], check=True)

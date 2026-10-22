@@ -62,7 +62,7 @@ pub fn cubic(first: usize, last: usize) -> Cubic {
 }
 
 /// Number of polygon segments per corner. kappa_max * L^2 / (8*n^2)
-/// bounds the chord error by < 0.025 physical pixels. Keeping a dyadic grid
+/// bounds the chord error by < 0.08 physical pixels. Keeping a dyadic grid
 /// makes all rendering backends use exactly the same precomputed samples.
 pub fn polygon_segments(physical_radius: f32) -> usize {
     let r = if physical_radius.is_finite() {
@@ -71,7 +71,7 @@ pub fn polygon_segments(physical_radius: f32) -> usize {
         0.0
     };
     let mut n = 8;
-    while n < 1024 && 0.98 * r / (n * n) as f32 > 0.025 {
+    while n < 1024 && 0.98 * r / (n * n) as f32 > 0.08 {
         n *= 2;
     }
     n
@@ -179,6 +179,31 @@ impl RoundedRect {
             }
         }
     }
+    /// Parallel contour at a signed outward distance, using reference normals.
+    /// Endpoints shared by capsule corners have identical normals, avoiding
+    /// zero-length-edge artifacts when constructing antialiased stroke rings.
+    pub fn for_each_offset_point(self, segments: usize, offset: f32, mut emit: impl FnMut(Point)) {
+        if self.is_empty() {
+            return;
+        }
+        let n = segments.clamp(8, 1024).next_power_of_two();
+        for corner in 0..4 {
+            for i in 0..=n {
+                let index = i * 1024 / n;
+                let node = data::NODES[index];
+                let (c, s) = (node[2] as f32, node[3] as f32);
+                let normal = match corner {
+                    0 => (s, -c),
+                    1 => (c, s),
+                    2 => (-s, c),
+                    _ => (-c, -s),
+                };
+                let p = self.corner_point(corner, sample(index));
+                emit((p.0 + normal.0 * offset, p.1 + normal.1 * offset));
+            }
+        }
+    }
+
     pub fn contains(self, p: Point) -> bool {
         let [x, y, w, h] = self.bounds;
         if self.is_empty()
@@ -370,7 +395,7 @@ mod tests {
                 let dy = (b.1 - a.1) as f64;
                 let distance =
                     ((p.0 - a.0 as f64) * dy - (p.1 - a.1 as f64) * dx).abs() / dx.hypot(dy);
-                assert!(distance * (physical_radius as f64) < 0.026);
+                assert!(distance * (physical_radius as f64) < 0.081);
             }
         }
         let r = RoundedRect::uniform([0.0, 0.0, 100.0, 60.0], 20.0);
