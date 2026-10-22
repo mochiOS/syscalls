@@ -48,6 +48,7 @@ mod current_directory;
 mod canonical_path;
 mod pipe;
 mod pty_creation;
+mod terminal_lock;
 mod vector_metadata;
 use vector_metadata::VectorMetadata;
 mod image_startup;
@@ -6225,6 +6226,11 @@ pub extern "C" fn tcflow(fd: c_int, action: c_int) -> c_int {
         },
     );
     result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn unlockpt(fd: c_int) -> c_int {
+    result_with_errno(terminal_lock::unlock(fd), -1)
 }
 
 #[unsafe(no_mangle)]

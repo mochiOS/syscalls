@@ -621,6 +621,11 @@ pub const PTY_CONTROL_FLOW: u64 = 0x5054_5900_0000_0009;
 /// Read-only master control returning a bounded pty_name payload. Native
 /// HandleControl enforces CONTROL authority; mnu does not interpret the code.
 pub const PTY_CONTROL_GET_SLAVE_NAME: u64 = 0x5054_5900_0000_000a;
+/// Master-only control: one little-endian u32 (0 or 1), empty reply. The
+/// lock gates new slave opens, not IO through an already admitted slave.
+pub const PTY_CONTROL_SET_SLAVE_LOCK: u64 = 0x5054_5900_0000_000b;
+/// Master-only control: empty input, exactly one little-endian u32 reply.
+pub const PTY_CONTROL_GET_SLAVE_LOCK: u64 = 0x5054_5900_0000_000c;
 pub mod pty_name;
 /// Read-only query namespace; never accepted as a mutation control.
 pub const PTY_QUERY_READ_SETTINGS: u64 = 0x5054_5951_0000_0001;
