@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod device_open;
+pub mod device_metadata;
 
 mod timestamps;
 pub mod device_namespace;
