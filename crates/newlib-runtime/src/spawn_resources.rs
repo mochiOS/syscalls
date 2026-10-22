@@ -6,9 +6,21 @@ pub(super) struct Resources {
     write: Option<u32>,
     child: Option<(u64, bool)>,
     startup: Option<CloneStartup>,
+    preparation: Option<fork_policy::Preparation>,
 }
 
 impl Resources {
+    fn for_fork() -> Result<Self, c_int> {
+        // fork needs startup acknowledgement, but not an exec-status stream.
+        Ok(Self {
+            read: None,
+            write: None,
+            child: None,
+            startup: Some(CloneStartup::new()?),
+            preparation: None,
+        })
+    }
+
     fn new() -> Result<Self, c_int> {
         let pair = create_spawn_status_stream()?;
         let mut resources = Self {
@@ -16,6 +28,7 @@ impl Resources {
             write: (pair.write != 0 && pair.write != pair.read).then_some(pair.write),
             child: None,
             startup: None,
+            preparation: None,
         };
         if pair.read == 0 || pair.write == 0 || pair.read == pair.write {
             resources.close_streams();
@@ -34,9 +47,11 @@ impl Resources {
         &mut self,
     ) -> Result<(u64, FdTable<FdObject>, Option<u32>), c_int> {
         let child = &mut self.child;
-        clone_registered_process_owned(self.startup.as_mut().ok_or(EIO)?, |value| {
-            *child = value;
-        })
+        clone_registered_process_owned(
+            self.startup.as_mut().ok_or(EIO)?,
+            &mut self.preparation,
+            |value| *child = value,
+        )
     }
 
     pub(super) fn child_writer(&mut self) -> Result<(), c_int> {
@@ -85,6 +100,27 @@ impl Resources {
         spawn_output::publish(process_id, handle, output)
     }
 
+    fn finish_fork(
+        &mut self,
+        process_id: u64,
+        process_handle: Option<u32>,
+    ) -> Result<c_int, c_int> {
+        let _delivery = defer_native_delivery();
+        let pid = c_int::try_from(process_id).map_err(|_| EOVERFLOW)?;
+        match (pid, process_handle, self.child) {
+            (0, None, None) => Ok(0),
+            (pid, Some(handle), Some((owned, true))) if pid > 0 && owned == u64::from(handle) => {
+                // fork publishes its positive PID by return value, not through
+                // caller memory. Keep the child owned until this infallible
+                // handoff; only this parent's native reference is discarded.
+                close_object_handle(handle);
+                self.track_child(None);
+                Ok(pid)
+            }
+            _ => Err(EIO),
+        }
+    }
+
     fn close_streams(&mut self) {
         for handle in [self.read.take(), self.write.take()].into_iter().flatten() {
             close_object_handle(handle);
@@ -97,6 +133,7 @@ impl Drop for Resources {
         let _delivery = defer_native_delivery();
         self.close_streams();
         drop(self.startup.take());
+        drop(self.preparation.take());
         if let Some((handle, registered)) = self.child.take() {
             cleanup_failed_child(handle, registered);
         }
@@ -108,4 +145,11 @@ pub(super) fn with(operation: impl FnOnce(&mut Resources) -> c_int) -> c_int {
         Ok(status) => status,
         Err(error) => error,
     }
+}
+
+pub(super) fn fork() -> Result<c_int, c_int> {
+    io_resources::with(Resources::for_fork, |resources| {
+        let (pid, _, process_handle) = resources.clone_registered()?;
+        resources.finish_fork(pid, process_handle)
+    })
 }

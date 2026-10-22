@@ -2965,14 +2965,14 @@ fn execve_with_launch_context(
 }
 
 #[inline(never)]
-fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c_int> {
-    let mut startup = CloneStartup::new()?;
-    clone_registered_process_owned(&mut startup, |_| {})
+fn clone_registered_process() -> Result<c_int, c_int> {
+    spawn_resources::fork()
 }
 
 #[inline(never)]
 fn clone_registered_process_owned(
     startup: &mut CloneStartup,
+    policy: &mut Option<fork_policy::Preparation>,
     mut track_child: impl FnMut(Option<(u64, bool)>),
 ) -> Result<(u64, FdTable<FdObject>, Option<u32>), c_int> {
     // Finish endpoint initialization before cloning. Copying the once-cell in
@@ -3017,7 +3017,10 @@ fn clone_registered_process_owned(
     let actions_guard = SIGNAL_ACTIONS.lock();
     // Match copied handler state to service dispositions before capturing VM.
     // Prepare before STATE so error cleanup never performs IPC under that lock.
-    let mut preparation = fork_policy::Preparation::new(client)?;
+    // Publish the token into the outer callback owner while allocator_guard
+    // still defers native delivery. Local stack Drop is not run when a C
+    // handler abandons the registration/acknowledgement operation.
+    let preparation = policy.insert(fork_policy::Preparation::new(client)?);
     // Keep the FD table stable across the address-space clone. Both parent and
     // child drop their private copy of this guard immediately after the native
     // clone returns, so the child never inherits a permanently locked STATE.
@@ -3085,6 +3088,10 @@ fn clone_registered_process_owned(
             thread_control.thread_local_base.load(Ordering::Relaxed),
         )
     };
+    // Keep the captured image and Handle capture protected while releasing
+    // the copied locks. The parent publishes its child owner before reopening
+    // delivery; neither temporary reference is left on an abandonable stack.
+    let creation_delivery = defer_native_delivery();
     if image == 0 {
         capture.disarm_child();
         preparation.disarm_child();
@@ -3114,6 +3121,7 @@ fn clone_registered_process_owned(
     drop(allocator_guard);
     drop(lifecycle_guard);
     if image == 0 {
+        drop(creation_delivery);
         // Fork's numeric slot labels are temporary transfer metadata, not exec
         // inheritance policy. Keep only the selected control endpoint key;
         // later exec stages exactly its intended descriptors into context.
@@ -3160,9 +3168,7 @@ fn clone_registered_process_owned(
     }
     let image = u32::try_from(syscall_errno(syscall::RawSyscallResult::new(image))?)
         .map_err(|_| EOVERFLOW)?;
-    // Publish ownership before a native return can dispatch an application
-    // handler. This guard ends before registration RPC or startup waiting.
-    let creation_delivery = defer_native_delivery();
+    // This guard ends before registration RPC or startup waiting.
     let created = (|| {
         let length = mnu_abi::process_create::encode_context(
             identity,
@@ -4659,17 +4665,7 @@ pub extern "C" fn pipe(fds: *mut c_int) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fork() -> c_int {
-    result_with_errno(
-        atfork::run(|| {
-            clone_registered_process().and_then(|(pid, _, process_handle)| {
-                if let Some(process_handle) = process_handle {
-                    close_object_handle(process_handle);
-                }
-                c_int::try_from(pid).map_err(|_| EOVERFLOW)
-            })
-        }),
-        -1,
-    )
+    result_with_errno(atfork::run(clone_registered_process), -1)
 }
 
 #[unsafe(no_mangle)]
