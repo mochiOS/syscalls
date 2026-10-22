@@ -29,6 +29,7 @@ mod exec_search;
 mod spawn_output;
 mod spawn_attributes;
 mod spawn_file_actions;
+mod spawn_resources;
 mod wait_output;
 mod wait_id;
 mod io_resources;
@@ -2965,6 +2966,15 @@ fn execve_with_launch_context(
 
 #[inline(never)]
 fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c_int> {
+    let mut startup = CloneStartup::new()?;
+    clone_registered_process_owned(&mut startup, |_| {})
+}
+
+#[inline(never)]
+fn clone_registered_process_owned(
+    startup: &mut CloneStartup,
+    mut track_child: impl FnMut(Option<(u64, bool)>),
+) -> Result<(u64, FdTable<FdObject>, Option<u32>), c_int> {
     // Finish endpoint initialization before cloning. Copying the once-cell in
     // its `initializing` state would leave the child waiting for a thread that
     // does not exist in the cloned process.
@@ -2973,7 +2983,6 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     service_signal_mask(thread_control, posix_protocol::SIGNAL_MASK_QUERY, 0)?;
     // Captured as ordinary stream Handles, not FDs or kernel POSIX state.
     // Keep ownership until both sides have confirmed child runtime startup.
-    let mut startup = CloneStartup::new()?;
     // Do not snapshot a thread slot during publication/reclamation. Acquire
     // this before the allocator, which those operations may themselves use.
     let lifecycle_guard = thread_lifecycle::capture()?;
@@ -3151,6 +3160,9 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     }
     let image = u32::try_from(syscall_errno(syscall::RawSyscallResult::new(image))?)
         .map_err(|_| EOVERFLOW)?;
+    // Publish ownership before a native return can dispatch an application
+    // handler. This guard ends before registration RPC or startup waiting.
+    let creation_delivery = defer_native_delivery();
     let created = (|| {
         let length = mnu_abi::process_create::encode_context(
             identity,
@@ -3174,13 +3186,16 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     close_object_handle(image);
     drop(capture);
     let handle = created?;
+    track_child(Some((handle, false)));
     let handle = match u32::try_from(handle) {
         Ok(handle) => handle,
         Err(_) => {
             cleanup_failed_child(handle, false);
+            track_child(None);
             return Err(EOVERFLOW);
         }
     };
+    drop(creation_delivery);
     let mut registration_attempted = false;
     let result = (|| {
         let mut status = syscall::ProcessStatus::default();
@@ -3191,7 +3206,11 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
         ))?;
         let process_id = status.process_id;
         c_int::try_from(process_id).map_err(|_| EOVERFLOW)?;
-        registration_attempted = true;
+        {
+            let _delivery = defer_native_delivery();
+            registration_attempted = true;
+            track_child(Some((u64::from(handle), true)));
+        }
         preparation.commit(ObjectHandleAttachment {
             handle,
             rights: syscall::HANDLE_RIGHT_WAIT | syscall::HANDLE_RIGHT_SIGNAL,
@@ -3208,7 +3227,9 @@ fn clone_registered_process() -> Result<(u64, FdTable<FdObject>, Option<u32>), c
     match result {
         Ok(process_id) => Ok((process_id, inherited_fds, Some(handle))),
         Err(error) => {
+            let _delivery = defer_native_delivery();
             cleanup_failed_child(u64::from(handle), registration_attempted);
+            track_child(None);
             Err(error)
         }
     }
@@ -3229,10 +3250,13 @@ impl CloneStartup {
     }
 
     fn send(&mut self, status: c_int) -> Result<(), c_int> {
-        if let Some(handle) = self.read.take() {
-            close_object_handle(handle);
+        {
+            let _delivery = defer_native_delivery();
+            if let Some(handle) = self.read.take() {
+                close_object_handle(handle);
+            }
         }
-        let handle = self.write.take().ok_or(EBADF)?;
+        let handle = self.write.ok_or(EBADF)?;
         let result = child_startup::send(status, |packet| {
             syscall_errno(syscall::raw_syscall3(
                 syscall::SyscallNumber::HandleWrite,
@@ -3242,7 +3266,10 @@ impl CloneStartup {
             ))
             .and_then(|count| usize::try_from(count).map_err(|_| EIO))
         });
-        close_object_handle(handle);
+        let _delivery = defer_native_delivery();
+        if let Some(handle) = self.write.take() {
+            close_object_handle(handle);
+        }
         result
     }
 
@@ -3258,10 +3285,13 @@ impl CloneStartup {
     }
 
     fn wait(&mut self) -> Result<(), c_int> {
-        if let Some(handle) = self.write.take() {
-            close_object_handle(handle);
+        {
+            let _delivery = defer_native_delivery();
+            if let Some(handle) = self.write.take() {
+                close_object_handle(handle);
+            }
         }
-        let handle = self.read.take().ok_or(EBADF)?;
+        let handle = self.read.ok_or(EBADF)?;
         let result = child_startup::receive(|packet| {
             syscall_errno(syscall::raw_syscall3(
                 syscall::SyscallNumber::HandleRead,
@@ -3271,13 +3301,17 @@ impl CloneStartup {
             ))
             .and_then(|count| usize::try_from(count).map_err(|_| EIO))
         });
-        close_object_handle(handle);
+        let _delivery = defer_native_delivery();
+        if let Some(handle) = self.read.take() {
+            close_object_handle(handle);
+        }
         result
     }
 }
 
 impl Drop for CloneStartup {
     fn drop(&mut self) {
+        let _delivery = defer_native_delivery();
         for handle in [self.read.take(), self.write.take()].into_iter().flatten() {
             close_object_handle(handle);
         }
@@ -9238,62 +9272,58 @@ fn spawn_with_actions(
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> c_int {
+    spawn_resources::with(|resources| {
+        spawn_with_resources(pid, path, actions, attributes, argv, envp, resources)
+    })
+}
+
+fn spawn_with_resources(
+    pid: *mut c_int,
+    path: *const c_char,
+    actions: &spawn_file_actions::Actions,
+    attributes: Option<PosixSpawnAttr>,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+    resources: &mut spawn_resources::Resources,
+) -> c_int {
     let snapshot = SpawnSnapshot {
         path,
         argv,
         envp,
     };
 
-    let status_stream = match create_spawn_status_stream() {
-        Ok(pair) => pair,
+    let (child_pid, desired_fds, _process_handle) = match resources.clone_registered() {
+        Ok(value) => value,
         Err(errno_value) => return errno_value,
     };
 
-    let (child_pid, desired_fds, process_handle) = match clone_registered_process() {
-        Ok(value) => value,
-        Err(errno_value) => {
-            close_object_handle(status_stream.read);
-            close_object_handle(status_stream.write);
-            return errno_value;
-        }
-    };
-
     if child_pid == 0 {
-        close_object_handle(status_stream.read);
+        resources
+            .child_writer()
+            .unwrap_or_else(|error| process_exit(error));
         // This child's normal FD table is authoritative for file actions and
         // any signal-handler reentry. The snapshot holds the same inherited
         // references; it is metadata, not a second native Handle owner.
         state().fds = desired_fds;
         if let Err(errno_value) = apply_spawn_attributes(attributes) {
-            report_spawn_error(status_stream.write, errno_value);
+            resources.fail(errno_value);
         }
         if let Err(errno_value) = apply_spawn_file_actions(actions) {
-            report_spawn_error(status_stream.write, errno_value);
+            resources.fail(errno_value);
         }
         if let Err(errno_value) =
             execve_with_launch_context(snapshot.path, snapshot.argv, snapshot.envp)
         {
-            report_spawn_error(status_stream.write, errno_value);
+            resources.fail(errno_value);
         }
-        report_spawn_error(status_stream.write, EIO);
+        resources.fail(EIO);
     }
 
-    close_object_handle(status_stream.write);
-    let process_handle = process_handle.expect("parent clone result must include process handle");
-    let status = read_spawn_status(status_stream.read);
-    close_object_handle(status_stream.read);
-    match status {
+    match resources.wait() {
         Ok(mochios_posix_client::spawn::ExecStatus::Succeeded) => {
-            spawn_output::publish(child_pid, process_handle, pid)
+            resources.publish(child_pid, pid)
         }
-        Ok(mochios_posix_client::spawn::ExecStatus::Failed(errno_value)) => {
-            cleanup_failed_child(u64::from(process_handle), true);
-            errno_value
-        }
-        Err(errno_value) => {
-            cleanup_failed_child(u64::from(process_handle), true);
-            errno_value
-        }
+        Ok(mochios_posix_client::spawn::ExecStatus::Failed(errno_value)) | Err(errno_value) => errno_value,
     }
 }
 
