@@ -3666,7 +3666,7 @@ fn set_terminal_window_size(entry: FdEntry, window: NewlibWinSize) -> Result<(),
 
 fn terminal_attachment(fd: c_int) -> Result<(fd_lease::Lease, ObjectHandleAttachment<u32>), c_int> {
     let entry = with_fd_entry(fd)?;
-    if entry.handle.kind != FdKind::ObjectPty {
+    if !matches!(entry.handle.kind, FdKind::ObjectPty | FdKind::ObjectSpecial) {
         return Err(ENOTTY);
     }
     if entry.rights & syscall::HANDLE_RIGHT_TRANSFER == 0 {
