@@ -1,5 +1,7 @@
 #![no_std]
 
+pub mod continuous_corner;
+
 #[cfg(test)]
 extern crate std;
 
