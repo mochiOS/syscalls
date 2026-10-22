@@ -26,6 +26,7 @@ mod path_io;
 mod user_copy;
 mod exec_inputs;
 mod exec_search;
+mod exec_interpreter;
 mod string_configuration;
 mod spawn_output;
 mod spawn_attributes;
@@ -105,8 +106,8 @@ use mochios_posix_client::fd::{
 };
 use mochios_posix_client::newlib_errno::{
     E2BIG, EACCES, EAGAIN, EBADF, EBUSY, ECHILD, EDEADLK, EEXIST, EFAULT, EFBIG, EINTR, EINVAL,
-    EIO, EISDIR, EMFILE, ENAMETOOLONG, ENOENT, ENOMEM, ENOSYS, ENOTDIR, ENOTSUP, ENOTTY, EOVERFLOW,
-    EPERM, EPIPE, ERANGE, ESPIPE, ESRCH,
+    EIO, EISDIR, EMFILE, ENAMETOOLONG, ENOENT, ENOEXEC, ENOMEM, ENOSYS, ENOTDIR, ENOTSUP,
+    ENOTTY, EOVERFLOW, EPERM, EPIPE, ERANGE, ESPIPE, ESRCH,
 };
 use mochios_posix_client::signal_context::{SigInfo, UContext};
 use mochios_posix_client::{

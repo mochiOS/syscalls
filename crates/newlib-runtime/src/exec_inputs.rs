@@ -84,6 +84,7 @@ impl Inputs {
                 start: self.used,
                 length,
             };
+            self.text[next - 1] = 0;
             self.used = next;
         }
         Err(E2BIG)
@@ -91,6 +92,25 @@ impl Inputs {
 
     pub(super) fn path(&self) -> &[u8] {
         &self.path[..self.path_length]
+    }
+
+    /// Borrow C vectors from owned, explicitly terminated text. Callers must
+    /// retain this snapshot throughout the synchronous exec preparation.
+    pub(super) fn c_vectors(
+        &self,
+        argv: &mut [*const c_char; MAX_EXEC_VECTOR_ENTRIES],
+        envp: &mut [*const c_char; MAX_EXEC_VECTOR_ENTRIES],
+    ) -> (usize, usize) {
+        for (kind, output) in [argv, envp].into_iter().enumerate() {
+            output.fill(core::ptr::null());
+            for (destination, span) in output
+                .iter_mut()
+                .zip(&self.spans[kind][..self.counts[kind]])
+            {
+                *destination = self.text[span.start..].as_ptr().cast();
+            }
+        }
+        (self.counts[0], self.counts[1])
     }
 
     pub(super) fn vectors<'a>(

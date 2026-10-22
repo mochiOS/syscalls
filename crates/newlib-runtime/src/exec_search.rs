@@ -144,8 +144,17 @@ pub extern "C" fn execvp(file: *const c_char, argv: *const *mut c_char) -> c_int
     let envp = unsafe { environ as *const *const c_char };
     result_with_errno(
         search(file, |candidate| {
-            execve_with_launch_context(candidate, argv.cast(), envp).map(|()| 0)
-        }),
+            match execve_with_launch_context(candidate, argv.cast(), envp) {
+                // Complete this PATH candidate even if the interpreter fails
+                // with ENOENT/EACCES. Those are not errors from searching for
+                // the original executable, so never try a later candidate.
+                Err(ENOEXEC) => {
+                    Ok(exec_interpreter::replace(candidate, argv.cast(), envp).map(|()| 0))
+                }
+                result => result.map(|()| Ok(0)),
+            }
+        })
+        .and_then(|result| result),
         -1,
     )
 }
