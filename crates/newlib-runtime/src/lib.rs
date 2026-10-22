@@ -3550,7 +3550,7 @@ fn terminal_control(
     input: &[u8],
     output: &mut [u8],
 ) -> Result<usize, c_int> {
-    if entry.handle.kind != FdKind::ObjectPty {
+    if !matches!(entry.handle.kind, FdKind::ObjectPty | FdKind::ObjectSpecial) {
         return Err(ENOTTY);
     }
     let length = retry_terminal_operation(posix_protocol::SIGNAL_TTOU, || {
@@ -3563,8 +3563,26 @@ fn terminal_control(
             output.as_mut_ptr() as u64,
             output.len() as u64,
         ))
+    })
+    .map_err(|error| match error {
+        ENOTSUP | ENOSYS if entry.handle.kind == FdKind::ObjectSpecial => ENOTTY,
+        error => error,
     })?;
     usize::try_from(length).map_err(|_| EOVERFLOW)
+}
+
+fn terminal_attributes(entry: FdEntry) -> Result<posix_protocol::TerminalAttributes, c_int> {
+    let mut encoded = [0; posix_protocol::TERMINAL_ATTRIBUTES_LEN];
+    let length = terminal_control(
+        entry,
+        posix_protocol::PTY_CONTROL_GET_ATTRIBUTES,
+        &[],
+        &mut encoded,
+    )?;
+    if length != encoded.len() {
+        return Err(EIO);
+    }
+    posix_protocol::decode_terminal_attributes(&encoded).map_err(|_| EIO)
 }
 
 #[unsafe(no_mangle)]
@@ -6012,18 +6030,16 @@ pub extern "C" fn lstat(path: *const c_char, stat_buf: *mut c_void) -> c_int {
 #[unsafe(no_mangle)]
 pub extern "C" fn _isatty(fd: c_int) -> c_int {
     let result = io_resources::with(|| with_fd_entry(fd), |entry| {
-        Ok(
-            if matches!(
-                entry.handle.kind,
-                FdKind::Stdin | FdKind::Stdout | FdKind::Stderr | FdKind::ObjectPty
-            ) {
-                1
-            } else {
-                0
-            },
-        )
+        if matches!(
+            entry.handle.kind,
+            FdKind::Stdin | FdKind::Stdout | FdKind::Stderr
+        ) {
+            return Ok(1);
+        }
+        terminal_attributes(**entry)?;
+        Ok(1)
     });
-    result_with_errno(result, -1)
+    result_with_errno(result, 0)
 }
 
 #[unsafe(no_mangle)]
@@ -6040,18 +6056,7 @@ pub extern "C" fn tcgetattr(fd: c_int, termios: *mut NewlibTermios) -> c_int {
     let result = io_resources::with(
         || with_fd_entry(fd),
         |entry| {
-            let mut encoded = [0; posix_protocol::TERMINAL_ATTRIBUTES_LEN];
-            let length = terminal_control(
-                **entry,
-                posix_protocol::PTY_CONTROL_GET_ATTRIBUTES,
-                &[],
-                &mut encoded,
-            )?;
-            if length != encoded.len() {
-                return Err(EIO);
-            }
-            let attributes =
-                posix_protocol::decode_terminal_attributes(&encoded).map_err(|_| EIO)?;
+            let attributes = terminal_attributes(**entry)?;
             terminal_memory::write_attributes(termios, terminal_attributes_to_newlib(attributes))?;
             Ok(0)
         },
