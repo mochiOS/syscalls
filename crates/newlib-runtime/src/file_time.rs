@@ -34,7 +34,10 @@ pub(super) fn fd(fd: c_int, times: *const Timespec) -> Result<(), c_int> {
         |entry| {
             if !matches!(
                 entry.handle.kind,
-                FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory
+                FdKind::ObjectFile
+                    | FdKind::ObjectSpecial
+                    | FdKind::ObjectTerminalFile
+                    | FdKind::ObjectDirectory
             ) {
                 // A valid stream/socket/VM descriptor is not an invalid FD, but
                 // those providers do not yet expose mutable timestamp metadata.

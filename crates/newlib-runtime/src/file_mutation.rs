@@ -122,6 +122,9 @@ pub(super) fn ftruncate(fd: c_int, length: u64) -> Result<c_int, c_int> {
             shared_memory::truncate(entry, length)?;
             return Ok(0);
         }
+        if entry.handle.kind == FdKind::ObjectTerminalFile {
+            return Err(EINVAL);
+        }
         if !matches!(
             entry.handle.kind,
             FdKind::ObjectFile | FdKind::ObjectSpecial
@@ -304,11 +307,7 @@ fn open_in_slot(
         // before fstat; no C handler can escape with an untracked reply Handle.
         scope.as_mut().resource_mut().unwrap().source.opened = Some(opened);
         let status = client.fstat(opened).map_err(map_posix_client_error)?;
-        let kind = match status.mode & 0o170000 {
-            0o040000 => FdKind::ObjectDirectory,
-            0o100000 => FdKind::ObjectFile,
-            _ => FdKind::ObjectSpecial,
-        };
+        let kind = file_kind::opened(opened, status.mode)?;
         let entry = object_entry(u64::from(opened.handle), opened.rights, kind, flags);
         // Dispatch while the result is still owned by the tracked scope,
         // BEFORE publishing an FD that C has not yet received. A nonlocal

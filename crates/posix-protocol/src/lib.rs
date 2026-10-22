@@ -57,6 +57,8 @@ pub const INHERITED_FD_KIND_DATAGRAM: u8 = 12;
 /// Non-regular provider file (for example a character device). Keep this
 /// distinction across exec and SCM_RIGHTS; resource file limits exclude it.
 pub const INHERITED_FD_KIND_SPECIAL: u8 = 13;
+/// A filesystem-backed terminal: native terminal data path, inode metadata.
+pub const INHERITED_FD_KIND_TERMINAL_FILE: u8 = 14;
 pub const INHERITED_FD_DESCRIPTOR_CLOEXEC: u8 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +97,7 @@ const fn valid_inherited_fd_kind(kind: u8) -> bool {
             | INHERITED_FD_KIND_SOCKET
             | INHERITED_FD_KIND_DATAGRAM
             | INHERITED_FD_KIND_SPECIAL
+            | INHERITED_FD_KIND_TERMINAL_FILE
     )
 }
 
@@ -113,6 +116,7 @@ pub const fn inherited_fd_kind_requires_handle(kind: u8) -> Option<bool> {
             | INHERITED_FD_KIND_SOCKET
             | INHERITED_FD_KIND_DATAGRAM
             | INHERITED_FD_KIND_SPECIAL
+            | INHERITED_FD_KIND_TERMINAL_FILE
     ))
 }
 

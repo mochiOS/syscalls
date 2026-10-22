@@ -49,7 +49,10 @@ fn get_status_flags(entry: FdEntry) -> Result<c_int, c_int> {
                 .map_err(map_posix_client_error)?;
             Ok((entry.handle.open_flags & 3) | newlib_mutable_status_flags(flags))
         }
-        FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite | FdKind::ObjectPty => {
+        FdKind::ObjectStreamRead
+        | FdKind::ObjectStreamWrite
+        | FdKind::ObjectPty
+        | FdKind::ObjectTerminalFile => {
             let options = syscall_errno(syscall::raw_syscall1(
                 syscall::SyscallNumber::HandleOptionsGet,
                 entry.handle.lower_handle,
@@ -79,7 +82,10 @@ fn set_status_flags(entry: FdEntry, flags: c_int) -> Result<(), c_int> {
                 posix_mutable_status_flags(flags),
             )
             .map_err(map_posix_client_error),
-        FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite | FdKind::ObjectPty => {
+        FdKind::ObjectStreamRead
+        | FdKind::ObjectStreamWrite
+        | FdKind::ObjectPty
+        | FdKind::ObjectTerminalFile => {
             if flags & !(O_NONBLOCK | 3) != 0 {
                 return Err(EINVAL);
             }
@@ -126,7 +132,10 @@ fn set_nonblocking(fd: c_int, enabled: bool) -> Result<c_int, c_int> {
                         )
                         .map_err(map_posix_client_error)?;
                 }
-                FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite | FdKind::ObjectPty => {
+                FdKind::ObjectStreamRead
+                | FdKind::ObjectStreamWrite
+                | FdKind::ObjectPty
+                | FdKind::ObjectTerminalFile => {
                     // Native streams currently have exactly one generic mutable option.
                     // There is no client-side read/modify/write race between aliases.
                     const _: () =
