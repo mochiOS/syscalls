@@ -3,7 +3,7 @@ use super::*;
 
 pub(super) struct Path(*mut c_char);
 impl Path {
-    fn capture(source: usize) -> Result<Self, c_int> {
+    pub(super) fn capture(source: usize) -> Result<Self, c_int> {
         let mut bytes = [0; posix_protocol::MAX_PATH_LEN + 1];
         let length = user_copy::capture_text(
             source as *const c_char,
@@ -20,6 +20,10 @@ impl Path {
     }
     pub(super) fn as_ptr(&self) -> *const c_char {
         self.0
+    }
+    // Transfer the allocation only when the C action builder takes ownership.
+    pub(super) fn into_raw(self) -> *mut c_char {
+        core::mem::ManuallyDrop::new(self).0
     }
 }
 impl Drop for Path {

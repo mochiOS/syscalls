@@ -1865,24 +1865,6 @@ unsafe fn c_bytes<'a>(ptr_value: *const c_char) -> &'a [u8] {
     unsafe { core::slice::from_raw_parts(ptr_value.cast::<u8>(), len) }
 }
 
-unsafe fn duplicate_c_string(value: *const c_char) -> Result<*mut c_char, c_int> {
-    if value.is_null() {
-        return Err(EFAULT);
-    }
-    let bytes = unsafe { c_bytes(value) };
-    let allocation_size = bytes.len().checked_add(1).ok_or(ENOMEM)?;
-    let copy = unsafe { malloc(allocation_size) }.cast::<c_char>();
-    if copy.is_null() {
-        return Err(ENOMEM);
-    }
-    // Safety: copy owns allocation_size bytes and value contains bytes.len()
-    // readable bytes followed by a terminator.
-    unsafe {
-        ptr::copy_nonoverlapping(value, copy, allocation_size);
-    }
-    Ok(copy)
-}
-
 fn push_decimal(mut value: usize, out: &mut [u8], length: &mut usize) -> Result<(), c_int> {
     let mut digits = [0u8; 20];
     let mut index = digits.len();
@@ -2528,6 +2510,24 @@ unsafe fn allocate_file_actions_object() -> Result<*mut PosixSpawnFileActions, c
 
 unsafe fn release_file_actions_object(target: *mut PosixSpawnFileActions) {
     unsafe { free(target.cast()) };
+}
+
+// The opaque handle slot belongs to the caller and need not be Rust-aligned.
+// Its non-null value must still be an initialized, allocator-owned action list.
+fn file_actions_object(
+    actions: *const *mut PosixSpawnFileActions,
+) -> Result<*mut PosixSpawnFileActions, c_int> {
+    if actions.is_null() {
+        return Err(EINVAL);
+    }
+    let mut bytes = [0; core::mem::size_of::<usize>()];
+    user_copy::read(actions.cast(), &mut bytes)?;
+    let object = usize::from_ne_bytes(bytes) as *mut PosixSpawnFileActions;
+    if object.is_null() {
+        Err(EINVAL)
+    } else {
+        Ok(object)
+    }
 }
 
 unsafe fn allocate_file_action_entry() -> Result<*mut PosixSpawnFileActionsEntry, c_int> {
@@ -8978,10 +8978,13 @@ pub extern "C" fn posix_spawn_file_actions_init(actions: *mut *mut PosixSpawnFil
     if actions.is_null() {
         return EINVAL;
     }
+    let _delivery = defer_native_delivery();
     match unsafe { allocate_file_actions_object() } {
         Ok(value) => {
-            // Safety: actions points to writable caller storage.
-            unsafe { *actions = value };
+            if let Err(error) = user_copy::write(actions.cast(), &(value as usize).to_ne_bytes()) {
+                unsafe { release_file_actions_object(value) };
+                return error;
+            }
             0
         }
         Err(errno_value) => errno_value,
@@ -8992,13 +8995,17 @@ pub extern "C" fn posix_spawn_file_actions_init(actions: *mut *mut PosixSpawnFil
 pub extern "C" fn posix_spawn_file_actions_destroy(
     actions: *mut *mut PosixSpawnFileActions,
 ) -> c_int {
+    let _delivery = defer_native_delivery();
     if actions.is_null() {
         return EINVAL;
     }
-    // Safety: actions points to the caller's handle storage.
-    let actions_ptr = unsafe { *actions };
-    if actions_ptr.is_null() {
-        return EINVAL;
+    let actions_ptr = match file_actions_object(actions) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
+    // Do not free a list while the caller-visible handle still refers to it.
+    if let Err(error) = user_copy::write(actions.cast(), &0usize.to_ne_bytes()) {
+        return error;
     }
     // Safety: actions_ptr is the queue object previously allocated by init().
     let mut current = unsafe { (*actions_ptr).fa_list.stqh_first };
@@ -9019,7 +9026,6 @@ pub extern "C" fn posix_spawn_file_actions_destroy(
     }
     unsafe {
         release_file_actions_object(actions_ptr);
-        *actions = ptr::null_mut();
     }
     0
 }
@@ -9038,13 +9044,13 @@ pub extern "C" fn posix_spawn_file_actions_addopen(
     if fildes < 0 {
         return EBADF;
     }
-    // Safety: actions points to the caller's handle storage.
-    let actions_ptr = unsafe { *actions };
-    if actions_ptr.is_null() {
-        return EINVAL;
-    }
-    let path = match unsafe { duplicate_c_string(path) } {
+    let _delivery = defer_native_delivery();
+    let actions_ptr = match file_actions_object(actions) {
         Ok(value) => value,
+        Err(error) => return error,
+    };
+    let path = match spawn_file_actions::Path::capture(path as usize) {
+        Ok(value) => value.into_raw(),
         Err(errno_value) => return errno_value,
     };
     let entry = match unsafe { allocate_file_action_entry() } {
@@ -9068,17 +9074,17 @@ pub extern "C" fn posix_spawn_file_actions_addclose(
     actions: *mut *mut PosixSpawnFileActions,
     fildes: c_int,
 ) -> c_int {
+    let _delivery = defer_native_delivery();
     if actions.is_null() {
         return EINVAL;
     }
     if fildes < 0 {
         return EBADF;
     }
-    // Safety: actions points to the caller's handle storage.
-    let actions_ptr = unsafe { *actions };
-    if actions_ptr.is_null() {
-        return EINVAL;
-    }
+    let actions_ptr = match file_actions_object(actions) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
     let entry = match unsafe { allocate_file_action_entry() } {
         Ok(value) => value,
         Err(errno_value) => return errno_value,
@@ -9097,17 +9103,17 @@ pub extern "C" fn posix_spawn_file_actions_adddup2(
     fildes: c_int,
     newfildes: c_int,
 ) -> c_int {
+    let _delivery = defer_native_delivery();
     if actions.is_null() {
         return EINVAL;
     }
     if fildes < 0 || newfildes < 0 {
         return EBADF;
     }
-    // Safety: actions points to the caller's handle storage.
-    let actions_ptr = unsafe { *actions };
-    if actions_ptr.is_null() {
-        return EINVAL;
-    }
+    let actions_ptr = match file_actions_object(actions) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
     let entry = match unsafe { allocate_file_action_entry() } {
         Ok(value) => value,
         Err(errno_value) => return errno_value,
@@ -9129,13 +9135,13 @@ pub extern "C" fn posix_spawn_file_actions_addchdir_np(
     if actions.is_null() || path.is_null() {
         return EINVAL;
     }
-    // Safety: actions points to the caller's handle storage.
-    let actions_ptr = unsafe { *actions };
-    if actions_ptr.is_null() {
-        return EINVAL;
-    }
-    let path = match unsafe { duplicate_c_string(path) } {
+    let _delivery = defer_native_delivery();
+    let actions_ptr = match file_actions_object(actions) {
         Ok(value) => value,
+        Err(error) => return error,
+    };
+    let path = match spawn_file_actions::Path::capture(path as usize) {
+        Ok(value) => value.into_raw(),
         Err(errno_value) => return errno_value,
     };
     let entry = match unsafe { allocate_file_action_entry() } {
@@ -9166,17 +9172,17 @@ pub extern "C" fn posix_spawn_file_actions_addfchdir_np(
     actions: *mut *mut PosixSpawnFileActions,
     fildes: c_int,
 ) -> c_int {
+    let _delivery = defer_native_delivery();
     if actions.is_null() {
         return EINVAL;
     }
     if fildes < 0 {
         return EBADF;
     }
-    // Safety: actions points to the caller's handle storage.
-    let actions_ptr = unsafe { *actions };
-    if actions_ptr.is_null() {
-        return EINVAL;
-    }
+    let actions_ptr = match file_actions_object(actions) {
+        Ok(value) => value,
+        Err(error) => return error,
+    };
     let entry = match unsafe { allocate_file_action_entry() } {
         Ok(value) => value,
         Err(errno_value) => return errno_value,
