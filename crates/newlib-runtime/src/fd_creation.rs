@@ -1,6 +1,14 @@
 //! Rollback owners for descriptor creation, shared by sockets, pipes and PTYs.
 use super::*;
 
+pub(super) struct PendingFdReservation(pub(super) FdReservation);
+
+impl Drop for PendingFdReservation {
+    fn drop(&mut self) {
+        state().fds.cancel_reservation(&self.0);
+    }
+}
+
 pub(super) struct PendingPair(pub(super) [FdReservation; 2]);
 impl PendingPair {
     pub(super) fn copy_descriptors(&self, output: *mut c_int) -> Result<(), c_int> {

@@ -4,6 +4,8 @@ mod child_cleanup;
 mod child_startup;
 mod fd_lease;
 mod fd_creation;
+use fd_creation::PendingFdReservation;
+mod file_handle_import;
 mod callback_resources;
 mod file_mutation;
 mod file_metadata;
@@ -2246,14 +2248,6 @@ fn newlib_mutable_status_flags(flags: u32) -> c_int {
         result |= O_NONBLOCK;
     }
     result
-}
-
-struct PendingFdReservation(FdReservation);
-
-impl Drop for PendingFdReservation {
-    fn drop(&mut self) {
-        state().fds.cancel_reservation(&self.0);
-    }
 }
 
 fn retry_open_with_prompt(path: *const c_char, flags: c_int, mode: c_int) -> Result<c_int, c_int> {
