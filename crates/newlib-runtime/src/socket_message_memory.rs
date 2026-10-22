@@ -27,16 +27,8 @@ pub(super) fn read_message(source: *const Message) -> Result<Message, c_int> {
 }
 
 pub(super) fn read_vector(source: *const IoVecMut, index: usize) -> Result<Vector, c_int> {
-    let offset = index
-        .checked_mul(core::mem::size_of::<IoVecMut>())
-        .ok_or(EFAULT)?;
-    let address = (source as usize).checked_add(offset).ok_or(EFAULT)?;
-    let mut bytes = [0; core::mem::size_of::<IoVecMut>()];
-    user_copy::read(address as *const u8, &mut bytes)?;
-    Ok(Vector {
-        base: read_field!(bytes, IoVecMut, iov_base, usize) as *mut u8,
-        length: read_field!(bytes, IoVecMut, iov_len, usize),
-    })
+    let (base, length) = vector_memory::read(source, index)?;
+    Ok(Vector { base, length })
 }
 
 pub(super) fn write_message(destination: *mut Message, message: Message) -> Result<(), c_int> {

@@ -14,6 +14,7 @@ mod stat_output;
 mod terminal_memory;
 mod terminal_attributes;
 mod terminal_read;
+mod vector_memory;
 mod socket_memory;
 mod socket_receive_address;
 mod time_memory;
@@ -886,6 +887,14 @@ struct IoVecMut {
     iov_base: *mut c_void,
     iov_len: usize,
 }
+
+// The checked byte decoder is shared by readv and writev. C pointer constness
+// must be their only layout difference; never reinterpret either as a reference.
+const _: () = {
+    assert!(core::mem::size_of::<IoVec>() == core::mem::size_of::<IoVecMut>());
+    assert!(core::mem::offset_of!(IoVec, iov_base) == core::mem::offset_of!(IoVecMut, iov_base));
+    assert!(core::mem::offset_of!(IoVec, iov_len) == core::mem::offset_of!(IoVecMut, iov_len));
+};
 
 #[repr(C)]
 struct Timespec {
@@ -4247,6 +4256,26 @@ fn vector_errno(error: mochios_posix_client::io_vector::VectorError) -> c_int {
     }
 }
 
+fn capture_vector_metadata(
+    source: *const IoVecMut,
+    count: c_int,
+    metadata: &mut VectorMetadata,
+) -> Result<usize, c_int> {
+    if count < 0 || count as usize > mochios_posix_client::io_vector::IOV_MAX {
+        return Err(EINVAL);
+    }
+    // Own each record before a returning callback can change/unmap its array.
+    for index in 0..count as usize {
+        let (base, length) = vector_memory::read(source, index)?;
+        metadata.set(index, base.cast(), length);
+    }
+    mochios_posix_client::io_vector::validate(count, |index| {
+        let (base, length) = metadata.get(index);
+        (base.is_null(), length)
+    })
+    .map_err(vector_errno)
+}
+
 struct VectorBuffer {
     pointer: *mut u8,
     length: usize,
@@ -4304,14 +4333,7 @@ pub unsafe extern "C" fn writev(fd: c_int, iov: *const IoVec, iovcnt: c_int) -> 
             ))
         },
         |(_, metadata, buffer)| {
-            let total = mochios_posix_client::io_vector::validate(iovcnt, |index| {
-                // Copy each record once; a returning handler may change
-                // or even unmap the caller's array while I/O is waiting.
-                let part = unsafe { iov.add(index).read_unaligned() };
-                metadata.set(index, part.iov_base.cast_mut(), part.iov_len);
-                (part.iov_base.is_null(), part.iov_len)
-            })
-            .map_err(vector_errno)?;
+            let total = capture_vector_metadata(iov.cast(), iovcnt, metadata)?;
             *buffer = Some(VectorBuffer::new(total)?);
             Ok(())
         },
@@ -4322,11 +4344,7 @@ pub unsafe extern "C" fn writev(fd: c_int, iov: *const IoVec, iovcnt: c_int) -> 
                 |index| metadata.get(index).1,
                 |index, bytes| {
                     let (base, _) = metadata.get(index);
-                    // Safety: validated nonempty caller buffers and the temporary
-                    // buffer do not overlap; copy only the transferred prefix.
-                    unsafe {
-                        ptr::copy_nonoverlapping(base.cast::<u8>(), bytes.as_mut_ptr(), bytes.len())
-                    };
+                    user_copy::read(base.cast(), bytes)
                 },
                 |bytes| {
                     syscall_write(**entry, bytes.as_ptr().cast(), bytes.len())
@@ -4473,12 +4491,7 @@ pub unsafe extern "C" fn readv(fd: c_int, iov: *const IoVecMut, iovcnt: c_int) -
             ))
         },
         |(_, metadata, buffer)| {
-            let total = mochios_posix_client::io_vector::validate(iovcnt, |index| {
-                let part = unsafe { iov.add(index).read_unaligned() };
-                metadata.set(index, part.iov_base, part.iov_len);
-                (part.iov_base.is_null(), part.iov_len)
-            })
-            .map_err(vector_errno)?;
+            let total = capture_vector_metadata(iov, iovcnt, metadata)?;
             *buffer = Some(VectorBuffer::new(total)?);
             Ok(())
         },
@@ -4489,11 +4502,7 @@ pub unsafe extern "C" fn readv(fd: c_int, iov: *const IoVecMut, iovcnt: c_int) -
                 |index| metadata.get(index).1,
                 |index, bytes| {
                     let (base, _) = metadata.get(index);
-                    // Safety: validated nonempty caller buffers and the temporary
-                    // buffer do not overlap; copy only the transferred prefix.
-                    unsafe {
-                        ptr::copy_nonoverlapping(bytes.as_ptr(), base.cast::<u8>(), bytes.len())
-                    };
+                    user_copy::write(base.cast(), bytes)
                 },
                 |bytes| {
                     syscall_read(**entry, bytes.as_mut_ptr().cast(), bytes.len())

@@ -17,14 +17,14 @@ pub fn write<E>(
     count: usize,
     bytes: &mut [u8],
     mut length: impl FnMut(usize) -> usize,
-    mut copy: impl FnMut(usize, &mut [u8]),
+    mut copy: impl FnMut(usize, &mut [u8]) -> Result<(), E>,
     io: impl FnOnce(&[u8]) -> Result<usize, E>,
 ) -> Result<usize, TransferError<E>> {
     let mut offset = 0;
     for index in 0..count {
         let size = length(index).min(bytes.len() - offset);
         if size != 0 {
-            copy(index, &mut bytes[offset..offset + size]);
+            copy(index, &mut bytes[offset..offset + size]).map_err(TransferError::Io)?;
             offset += size;
         }
         if offset == bytes.len() {
@@ -44,7 +44,7 @@ pub fn read<E>(
     count: usize,
     bytes: &mut [u8],
     mut length: impl FnMut(usize) -> usize,
-    mut copy: impl FnMut(usize, &[u8]),
+    mut copy: impl FnMut(usize, &[u8]) -> Result<(), E>,
     io: impl FnOnce(&mut [u8]) -> Result<usize, E>,
 ) -> Result<usize, TransferError<E>> {
     let transferred = io(bytes).map_err(TransferError::Io)?;
@@ -55,7 +55,16 @@ pub fn read<E>(
     for index in 0..count {
         let size = length(index).min(transferred - offset);
         if size != 0 {
-            copy(index, &bytes[offset..offset + size]);
+            if let Err(error) = copy(index, &bytes[offset..offset + size]) {
+                // I/O has consumed input, but only completed caller-vector
+                // copies are known progress. A failing copy may itself have
+                // changed an unknown prefix; do not invent its byte count.
+                return if offset == 0 {
+                    Err(TransferError::Io(error))
+                } else {
+                    Ok(offset)
+                };
+            }
             offset += size;
         }
         if offset == transferred {
