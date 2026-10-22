@@ -666,6 +666,7 @@ pub const TERMINAL_IFLAG_INLCR: u32 = 1 << 6;
 pub const TERMINAL_IFLAG_IGNCR: u32 = 1 << 7;
 pub const TERMINAL_IFLAG_ICRNL: u32 = 1 << 8;
 pub const TERMINAL_IFLAG_IXON: u32 = 1 << 10;
+pub const TERMINAL_IFLAG_IXANY: u32 = 1 << 11;
 pub const TERMINAL_IFLAG_IXOFF: u32 = 1 << 12;
 pub const TERMINAL_IFLAG_IUTF8: u32 = 1 << 14;
 

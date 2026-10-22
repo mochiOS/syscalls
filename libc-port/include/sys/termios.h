@@ -37,6 +37,7 @@ struct winsize {
 #define IGNCR   (1U << 7)
 #define ICRNL   (1U << 8)
 #define IXON    (1U << 10)
+#define IXANY   (1U << 11)
 #define IXOFF   (1U << 12)
 #define IUTF8   (1U << 14)
 
