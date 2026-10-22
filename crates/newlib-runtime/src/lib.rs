@@ -8629,6 +8629,30 @@ pub unsafe extern "C" fn _pthread_cleanup_pop_restore(context: *mut thread_clean
     }
 }
 
+fn update_cancel_control(
+    control: &ThreadControl,
+    field: &AtomicU32,
+    value: u32,
+    previous: *mut c_int,
+) -> c_int {
+    // A native upcall must not reenter between snapshot, faultable copy and
+    // commit. Application pointers never become Rust references, including
+    // when this API itself is called from an already active upcall.
+    let Some(_delivery) =
+        mochios_posix_client::upcall_guard::Guard::enter(&control.native_delivery_defer)
+    else {
+        return EOVERFLOW;
+    };
+    let old = field.load(Ordering::Acquire);
+    if !previous.is_null() {
+        if let Err(error) = user_copy::write(previous.cast(), &(old as c_int).to_ne_bytes()) {
+            return error;
+        }
+    }
+    field.store(value, Ordering::Release);
+    0
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_setcancelstate(state: c_int, old_state: *mut c_int) -> c_int {
     if !matches!(state as u32, PTHREAD_CANCEL_ENABLE | PTHREAD_CANCEL_DISABLE) {
@@ -8638,13 +8662,9 @@ pub unsafe extern "C" fn pthread_setcancelstate(state: c_int, old_state: *mut c_
         Some(current) => current,
         None => return EAGAIN,
     };
-    let previous = control.cancel_state.swap(state as u32, Ordering::AcqRel);
-    if !old_state.is_null() {
-        unsafe { old_state.write(previous as c_int) };
-    }
     // Only deferred cancellation is currently supported. Re-enabling it is
     // not a cancellation point: retain the request until an explicit point.
-    0
+    update_cancel_control(control, &control.cancel_state, state as u32, old_state)
 }
 
 #[unsafe(no_mangle)]
@@ -8659,13 +8679,7 @@ pub unsafe extern "C" fn pthread_setcanceltype(cancel_type: c_int, old_type: *mu
         Some(current) => current,
         None => return EAGAIN,
     };
-    let previous = control
-        .cancel_type
-        .swap(PTHREAD_CANCEL_DEFERRED, Ordering::AcqRel);
-    if !old_type.is_null() {
-        unsafe { old_type.write(previous as c_int) };
-    }
-    0
+    update_cancel_control(control, &control.cancel_type, PTHREAD_CANCEL_DEFERRED, old_type)
 }
 
 #[unsafe(no_mangle)]
