@@ -7,6 +7,7 @@ Run from any directory; the generated Rust table is checked into source control.
 from pathlib import Path
 import math
 import subprocess
+import argparse
 
 C = 1.6525000895846302
 N = 1024
@@ -40,3 +41,14 @@ with output.open('w') as out:
     out.write('];\n')
 
 subprocess.run(["rustfmt", "--edition", "2024", str(output)], check=True)
+
+# Firmware keeps BootUI dependency-free. Export the identical geometry and test
+# vectors instead of making a UEFI renderer depend on a desktop transport crate.
+parser = argparse.ArgumentParser()
+parser.add_argument('--bootui', type=Path, help='Export identical source/data into BootUI src/')
+args = parser.parse_args()
+if args.bootui:
+    source = output.with_name('continuous_corner.rs')
+    args.bootui.mkdir(parents=True, exist_ok=True)
+    for file in (source, output):
+        (args.bootui / file.name).write_bytes(file.read_bytes())
