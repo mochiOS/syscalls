@@ -2506,19 +2506,6 @@ unsafe fn initialize_runtime(stack: StackView) {
     let _ = unsafe { atexit(run_fini_array) };
 }
 
-unsafe fn spawn_attributes_handle(
-    attributes: *const *mut PosixSpawnAttr,
-) -> Result<*mut PosixSpawnAttr, c_int> {
-    if attributes.is_null() {
-        return Err(EINVAL);
-    }
-    let value = unsafe { attributes.read() };
-    if value.is_null() {
-        return Err(EINVAL);
-    }
-    Ok(value)
-}
-
 unsafe fn init_file_actions_list(value: *mut PosixSpawnFileActions) {
     // Safety: caller passes a pointer to a live pool slot owned by this runtime.
     unsafe {
@@ -8805,27 +8792,33 @@ pub extern "C" fn posix_spawnattr_init(attr: *mut *mut PosixSpawnAttr) -> c_int 
     if attr.is_null() {
         return EINVAL;
     }
+    let _delivery = defer_native_delivery();
     let value = unsafe { malloc(core::mem::size_of::<PosixSpawnAttr>()) }.cast::<PosixSpawnAttr>();
     if value.is_null() {
         return ENOMEM;
     }
     unsafe {
         value.write(PosixSpawnAttr::new());
-        attr.write(value);
+    }
+    if let Err(error) = user_copy::write(attr.cast(), &(value as usize).to_ne_bytes()) {
+        unsafe { free(value.cast()) };
+        return error;
     }
     0
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn posix_spawnattr_destroy(attr: *mut *mut PosixSpawnAttr) -> c_int {
-    let value = match unsafe { spawn_attributes_handle(attr.cast_const()) } {
+    let _delivery = defer_native_delivery();
+    let value = match spawn_attributes::handle_address(attr.cast()) {
         Ok(value) => value,
         Err(error) => return error,
     };
-    unsafe {
-        free(value.cast());
-        attr.write(ptr::null_mut());
+    // A failed copy must not leave a caller-visible reference to freed storage.
+    if let Err(error) = user_copy::write(attr.cast(), &0usize.to_ne_bytes()) {
+        return error;
     }
+    unsafe { free(value as *mut c_void) };
     0
 }
 

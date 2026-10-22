@@ -12,7 +12,7 @@ macro_rules! scalar {
     }};
 }
 
-fn handle_address(attr: *const c_void) -> Result<usize, c_int> {
+pub(super) fn handle_address(attr: *const c_void) -> Result<usize, c_int> {
     if attr.is_null() {
         return Err(EINVAL);
     }
