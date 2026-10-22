@@ -1472,8 +1472,3 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
-
-[[patch.unused]]
-name = "mnu-abi"
-version = "0.1.0"
-source = "git+https://github.com/mochiOS/mnu#91a1f075f743385845c57725323cfa20ff585343"
