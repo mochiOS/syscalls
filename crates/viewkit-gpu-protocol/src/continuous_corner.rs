@@ -203,7 +203,26 @@ impl RoundedRect {
                     _ => (-c, -s),
                 };
                 let p = self.corner_point(corner, sample(index));
-                emit((p.0 + normal.0 * offset, p.1 + normal.1 * offset));
+                let normal = if self.radii[(corner + 1) % 4] == 0.0 {
+                    match corner {
+                        0 => (1.0, -1.0),
+                        1 => (1.0, 1.0),
+                        2 => (-1.0, 1.0),
+                        _ => (-1.0, -1.0),
+                    }
+                } else {
+                    normal
+                };
+                let mut q = (p.0 + normal.0 * offset, p.1 + normal.1 * offset);
+                if offset < 0.0 {
+                    // Once a small corner vanishes under erosion, its normal
+                    // samples cannot cross the inset straight sides.
+                    let [x, y, w, h] = self.bounds;
+                    let dx = (-offset).min(w * 0.5);
+                    let dy = (-offset).min(h * 0.5);
+                    q = (q.0.clamp(x + dx, x + w - dx), q.1.clamp(y + dy, y + h - dy));
+                }
+                emit(q);
             }
         }
     }
@@ -412,6 +431,21 @@ mod tests {
             assert!(!r.contains((p.0 - normal.0, p.1 - normal.1)));
         }
     }
+    #[test]
+    fn zero_and_vanishing_corner_offsets_stay_on_inset_sides() {
+        let square = RoundedRect::uniform([0.0, 0.0, 100.0, 30.0], 0.0);
+        square.for_each_offset_point(12, -1.0, |p| {
+            assert!([(99.0, 1.0), (99.0, 29.0), (1.0, 29.0), (1.0, 1.0)].contains(&p));
+        });
+        square.for_each_offset_point(12, 1.0, |p| {
+            assert!([(101.0, -1.0), (101.0, 31.0), (-1.0, 31.0), (-1.0, -1.0)].contains(&p));
+        });
+        let small = RoundedRect::uniform([0.0, 0.0, 100.0, 30.0], 0.1);
+        small.for_each_offset_point(12, -1.0, |p| {
+            assert!((1.0..=99.0).contains(&p.0) && (1.0..=29.0).contains(&p.1));
+        });
+    }
+
     #[test]
     fn radii_zero_capsules_asymmetry_and_invalid_values() {
         let r = RoundedRect::new([0.0, 0.0, 100.0, 30.0], [40.0, 30.0, 20.0, 10.0]);
