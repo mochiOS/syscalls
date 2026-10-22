@@ -27,6 +27,7 @@ mod user_copy;
 mod exec_inputs;
 mod exec_search;
 mod spawn_output;
+mod spawn_attributes;
 mod wait_output;
 mod wait_id;
 mod io_resources;
@@ -3417,30 +3418,6 @@ fn cleanup_failed_child(handle: u64, registration_attempted: bool) {
         if syscall_errno(syscall::raw_syscall1(syscall::SyscallNumber::Sleep, 10)).is_err() {
             let _ = syscall::raw_syscall0(syscall::SyscallNumber::ThreadYield);
         }
-    }
-}
-
-fn read_spawn_attributes(attr: *const c_void) -> Result<Option<PosixSpawnAttr>, c_int> {
-    if attr.is_null() {
-        return Ok(None);
-    }
-    // Safety: attr points to the caller's opaque posix_spawnattr_t handle.
-    let handle = unsafe { attr.cast::<*mut PosixSpawnAttr>().read() };
-    if handle.is_null() {
-        return Err(EINVAL);
-    }
-    // Safety: the handle was returned by posix_spawnattr_init and remains
-    // owned by the caller for the duration of this call.
-    let attributes = unsafe { handle.read() };
-    if attributes.sa_flags & mochios_posix_client::spawn::SET_PROCESS_GROUP != 0
-        && attributes.sa_pgroup < 0
-    {
-        return Err(EINVAL);
-    }
-    match mochios_posix_client::spawn::classify_attribute_flags(attributes.sa_flags) {
-        mochios_posix_client::spawn::AttributeFlags::Supported => Ok(Some(attributes)),
-        mochios_posix_client::spawn::AttributeFlags::RequiresScheduler => Err(ENOSYS),
-        mochios_posix_client::spawn::AttributeFlags::Invalid => Err(EINVAL),
     }
 }
 
@@ -9270,7 +9247,7 @@ pub extern "C" fn _posix_spawn(
     if pid.is_null() || path.is_null() {
         return EINVAL;
     }
-    let attributes = match read_spawn_attributes(attrp) {
+    let attributes = match spawn_attributes::read_optional(attrp) {
         Ok(attributes) => attributes,
         Err(errno_value) => return errno_value,
     };
