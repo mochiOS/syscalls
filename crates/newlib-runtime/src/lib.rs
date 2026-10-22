@@ -4648,12 +4648,8 @@ pub extern "C" fn openpty(
         set_errno(EFAULT);
         return -1;
     }
-    if !name.is_null() {
-        set_errno(ENOTSUP);
-        return -1;
-    }
     result_with_errno(
-        pty_creation::create(master, slave, termios, window_size.cast()),
+        pty_creation::create(master, slave, name, termios, window_size.cast()),
         -1,
     )
 }

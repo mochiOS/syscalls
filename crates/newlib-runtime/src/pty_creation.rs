@@ -5,6 +5,7 @@ use super::*;
 pub(super) fn create(
     master: *mut c_int,
     slave: *mut c_int,
+    name: *mut c_char,
     attributes: *const NewlibTermios,
     window: *const NewlibWinSize,
 ) -> Result<c_int, c_int> {
@@ -69,6 +70,12 @@ pub(super) fn create(
             }
             if let Some(window) = window {
                 set_terminal_window_size(entries[1], *window)?;
+            }
+            if !name.is_null() {
+                // Legacy openpty has no buffer-size argument. Copy only the
+                // validated, NUL-terminated name, not the maximum capacity.
+                // Resources remain registered if copying faults/abandons C.
+                terminal_name::copy(entries[0], name, posix_protocol::pty_name::MAX_LEN)?;
             }
             let _native = defer_native_delivery();
             // An earlier output may have been copied when a later one fails,
