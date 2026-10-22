@@ -12,6 +12,7 @@ mod file_metadata;
 mod file_time;
 mod stat_output;
 mod terminal_memory;
+mod terminal_name;
 mod terminal_attributes;
 mod terminal_read;
 mod file_kind;
@@ -4622,6 +4623,17 @@ pub extern "C" fn close(fd: c_int) -> c_int {
     // Do not hide a completed close: the descriptor number may already have
     // been reused by another thread. Retain concurrent cancellation instead.
     result
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ptsname_r(fd: c_int, output: *mut c_char, capacity: usize) -> c_int {
+    match terminal_name::get(fd, output, capacity) {
+        Ok(result) => result,
+        Err(error) => {
+            set_errno(error);
+            error
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
