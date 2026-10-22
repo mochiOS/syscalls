@@ -25,6 +25,7 @@ mod directory_io;
 mod path_io;
 mod user_copy;
 mod exec_inputs;
+mod exec_search;
 mod wait_output;
 mod wait_id;
 mod io_resources;
@@ -8129,57 +8130,6 @@ pub extern "C" fn execv(path: *const c_char, argv: *const *const c_char) -> c_in
     _execve(path, argv, unsafe { environ as *const *const c_char })
 }
 
-fn search_executable_path<T>(
-    file: &[u8],
-    mut execute: impl FnMut(*const c_char) -> Result<T, c_int>,
-) -> Result<T, c_int> {
-    const DEFAULT_PATH: &[u8] = b"/bin:/usr/bin";
-    const PATH_NAME: &[u8] = b"PATH\0";
-
-    if file.is_empty() {
-        return Err(ENOENT);
-    }
-    let path_pointer = unsafe { getenv(PATH_NAME.as_ptr().cast::<c_char>()) };
-    let path = if path_pointer.is_null() {
-        DEFAULT_PATH
-    } else {
-        unsafe { c_bytes(path_pointer.cast_const()) }
-    };
-    let mut candidate = [0u8; posix_protocol::MAX_PATH_LEN + 1];
-    mochios_posix_client::spawn::search_path(path, file, &mut candidate, |candidate| {
-        execute(candidate.as_ptr().cast::<c_char>())
-    })
-    .map_err(|error| match error {
-        mochios_posix_client::spawn::PathSearchFailure::Candidate(error) => match error {
-            mochios_posix_client::spawn::PathCandidateError::EmptyFile => ENOENT,
-            mochios_posix_client::spawn::PathCandidateError::ContainsNul => EINVAL,
-            mochios_posix_client::spawn::PathCandidateError::TooLong => ENAMETOOLONG,
-        },
-        mochios_posix_client::spawn::PathSearchFailure::Errno(errno) => errno,
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn execvp(file: *const c_char, argv: *const *mut c_char) -> c_int {
-    if file.is_null() {
-        set_errno(EFAULT);
-        return -1;
-    }
-
-    let argv = argv as *const *const c_char;
-    let envp = unsafe { environ as *const *const c_char };
-    let name = unsafe { c_bytes(file) };
-    if name.iter().any(|byte| *byte == b'/') {
-        return result_with_errno(execve_with_launch_context(file, argv, envp).map(|()| 0), -1);
-    }
-    result_with_errno(
-        search_executable_path(name, |candidate| {
-            execve_with_launch_context(candidate, argv, envp).map(|()| 0)
-        }),
-        -1,
-    )
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn _waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int {
     let result = (|| {
@@ -9400,33 +9350,6 @@ pub extern "C" fn posix_spawn(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _posix_spawnp(
-    pid: *mut c_int,
-    file: *const c_char,
-    file_actions: *const c_void,
-    attrp: *const c_void,
-    argv: *const *const c_char,
-    envp: *const *const c_char,
-) -> c_int {
-    if file.is_null() {
-        return EFAULT;
-    }
-    let file_bytes = unsafe { c_bytes(file) };
-    if file_bytes.contains(&b'/') {
-        return _posix_spawn(pid, file, file_actions, attrp, argv, envp);
-    }
-    match search_executable_path(file_bytes, |candidate| {
-        match _posix_spawn(pid, candidate, file_actions, attrp, argv, envp) {
-            0 => Ok(()),
-            errno_value => Err(errno_value),
-        }
-    }) {
-        Ok(()) => 0,
-        Err(errno_value) => errno_value,
-    }
-}
-
-#[unsafe(no_mangle)]
 pub extern "C" fn posix_spawnp(
     pid: *mut c_int,
     file: *const c_char,
@@ -9435,7 +9358,7 @@ pub extern "C" fn posix_spawnp(
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> c_int {
-    _posix_spawnp(pid, file, file_actions, attrp, argv, envp)
+    exec_search::_posix_spawnp(pid, file, file_actions, attrp, argv, envp)
 }
 
 #[unsafe(no_mangle)]
