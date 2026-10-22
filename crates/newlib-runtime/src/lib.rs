@@ -309,6 +309,7 @@ struct ThreadControl {
     owns_stack: AtomicU32,
     reent: AtomicUsize,
     reent_mapping_size: AtomicUsize,
+    ptsname_buffer: terminal_name::Buffer,
     joinability: AtomicU32,
     join_waiter: AtomicU32,
     cancel_state: AtomicU32,
@@ -355,6 +356,7 @@ impl ThreadControl {
             owns_stack: AtomicU32::new(0),
             reent: AtomicUsize::new(0),
             reent_mapping_size: AtomicUsize::new(0),
+            ptsname_buffer: terminal_name::Buffer::new(),
             joinability: AtomicU32::new(THREAD_JOINABLE),
             join_waiter: AtomicU32::new(0),
             cancel_state: AtomicU32::new(PTHREAD_CANCEL_ENABLE),
@@ -1141,6 +1143,9 @@ fn reserve_thread_control()
         let generation = mochios_posix_client::thread::next_generation(
             control.generation.load(Ordering::Relaxed),
         );
+        // SAFETY: The FREE -> STARTING transition exclusively claimed this
+        // retired slot; its new owner has not been published or started yet.
+        unsafe { control.ptsname_buffer.reset() };
         control.generation.store(generation, Ordering::Release);
         control.native_id.store(0, Ordering::Relaxed);
         control.newlib_lock_identity.store(0, Ordering::Relaxed);
@@ -4632,6 +4637,25 @@ pub extern "C" fn ptsname_r(fd: c_int, output: *mut c_char, capacity: usize) -> 
         Err(error) => {
             set_errno(error);
             error
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ptsname(fd: c_int) -> *mut c_char {
+    let result = register_current_thread()
+        .ok_or(EAGAIN)
+        .and_then(|(_, control)| {
+            // SAFETY: Only this thread accesses its registered control's buffer.
+            // THREADS has static storage, and its slot cannot be reused while the
+            // native thread remains live. No Rust reference to bytes is returned.
+            unsafe { terminal_name::owned(fd, &control.ptsname_buffer) }
+        });
+    match result {
+        Ok(output) => output,
+        Err(error) => {
+            set_errno(error);
+            ptr::null_mut()
         }
     }
 }
