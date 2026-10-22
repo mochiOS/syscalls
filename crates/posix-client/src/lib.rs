@@ -22,6 +22,7 @@ pub mod handle_borrow;
 pub mod memory;
 pub mod multiplex;
 pub mod newlib_errno;
+pub mod image_error;
 pub mod process_image;
 pub mod process_creation;
 mod fork;

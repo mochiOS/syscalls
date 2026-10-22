@@ -22,6 +22,7 @@ pub const fn normalize_failure(status: i64) -> i32 {
             mnu_abi::status::Error::NotFound => -2,
             mnu_abi::status::Error::PeerClosed => -32,
             mnu_abi::status::Error::Unsupported => -95,
+            mnu_abi::status::Error::InvalidFormat => crate::STATUS_EIO,
         },
         None if mnu_abi::status::is_error(negative as u64) => crate::STATUS_EIO,
         None => negative as i32,

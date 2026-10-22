@@ -2916,7 +2916,7 @@ fn replace_process_image(
         byte_ceiling,
     ) {
         Ok(never) => match never {},
-        Err(error) => Err(map_kernel_errno(error.raw())),
+        Err(error) => Err(mochios_posix_client::image_error::errno(error.raw())),
     };
     close_object_handle(opened.handle);
     result
