@@ -61,20 +61,24 @@ pub fn cubic(first: usize, last: usize) -> Cubic {
     }
 }
 
-/// Number of polygon segments per corner. kappa_max * L^2 / (8*n^2)
-/// bounds the chord error by < 0.08 physical pixels. Keeping a dyadic grid
-/// makes all rendering backends use exactly the same precomputed samples.
+/// Number of polygon segments per corner. kappa_max * L^2 * dt^2 / 8
+/// bounds the chord error by < 0.08 physical pixels. All backends select the
+/// same indices in the precomputed 1024-step grid, including non-dyadic counts.
 pub fn polygon_segments(physical_radius: f32) -> usize {
     let r = if physical_radius.is_finite() {
         physical_radius.max(0.0)
     } else {
         0.0
     };
-    let mut n = 8;
-    while n < 1024 && 0.98 * r / (n * n) as f32 > 0.08 {
-        n *= 2;
+    for n in [
+        8, 12, 16, 20, 24, 32, 40, 48, 64, 80, 96, 128, 192, 256, 384, 512, 768,
+    ] {
+        let step = ((1024 + n - 1) / n) as f32 / 1024.0;
+        if 0.98 * r * step * step <= 0.08 {
+            return n;
+        }
     }
-    n
+    1024
 }
 
 /// Conservatively measured Hermite error bounds on the normalized curve.
@@ -172,7 +176,7 @@ impl RoundedRect {
         if self.is_empty() {
             return;
         }
-        let n = segments.clamp(8, 1024).next_power_of_two();
+        let n = segments.clamp(8, 1024);
         for corner in 0..4 {
             for i in 0..=n {
                 emit(self.corner_point(corner, sample(i * 1024 / n)));
@@ -186,7 +190,7 @@ impl RoundedRect {
         if self.is_empty() {
             return;
         }
-        let n = segments.clamp(8, 1024).next_power_of_two();
+        let n = segments.clamp(8, 1024);
         for corner in 0..4 {
             for i in 0..=n {
                 let index = i * 1024 / n;
