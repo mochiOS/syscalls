@@ -26,6 +26,7 @@ mod path_io;
 mod user_copy;
 mod exec_inputs;
 mod exec_search;
+mod spawn_output;
 mod wait_output;
 mod wait_id;
 mod io_resources;
@@ -9321,10 +9322,7 @@ pub extern "C" fn _posix_spawn(
     close_object_handle(status_stream.read);
     match status {
         Ok(mochios_posix_client::spawn::ExecStatus::Succeeded) => {
-            close_object_handle(process_handle);
-            // Safety: pid points to writable storage supplied by the caller.
-            unsafe { *pid = child_pid as c_int };
-            0
+            spawn_output::publish(child_pid, process_handle, pid)
         }
         Ok(mochios_posix_client::spawn::ExecStatus::Failed(errno_value)) => {
             cleanup_failed_child(u64::from(process_handle), true);
