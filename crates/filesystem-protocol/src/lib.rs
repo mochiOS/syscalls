@@ -2,6 +2,7 @@
 
 pub mod device_open;
 pub mod device_metadata;
+pub mod device_registration;
 
 mod timestamps;
 pub mod device_namespace;
@@ -126,6 +127,9 @@ pub const OP_SET_TIMES_HANDLE: u16 = 43;
 pub const OP_DEVICE_NODE_CREATE: u16 = 44;
 pub const OP_DEVICE_NODE_SET_ATTRIBUTES: u16 = 45;
 pub const OP_DEVICE_NODE_REMOVE: u16 = 46;
+/// Owner registration: parent CONTROL|TRANSFER, factory endpoint SEND, then
+/// resource-scoped factory TRANSFER attachments. No inline Handle/object IDs.
+pub const OP_DEVICE_NODE_REGISTER_EXTERNAL: u16 = 47;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const OPEN_STATUS_APPEND: u32 = 1 << 0;
