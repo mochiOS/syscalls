@@ -1,6 +1,7 @@
 #![no_std]
 
 mod timestamps;
+pub mod device_namespace;
 pub use timestamps::{
     FileTimeUpdate, TIME_UPDATE_LEN, TimestampUpdate, decode_time_update, encode_time_update,
 };
@@ -116,6 +117,12 @@ pub const OP_SET_TIMES_AT: u16 = 42;
 /// Update exactly one attached open object. Requires CONTROL|TRANSFER authority;
 /// payload: authenticated credentials and FileTimeUpdate, with no trailing data.
 pub const OP_SET_TIMES_HANDLE: u16 = 43;
+/// Owner configuration through the delegated control endpoint and exactly one
+/// CONTROL|TRANSFER parent-directory attachment. Inline IDs confer no authority.
+/// Payloads use device_namespace; replies contain NodeStatus, not new authority.
+pub const OP_DEVICE_NODE_CREATE: u16 = 44;
+pub const OP_DEVICE_NODE_SET_ATTRIBUTES: u16 = 45;
+pub const OP_DEVICE_NODE_REMOVE: u16 = 46;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const OPEN_STATUS_APPEND: u32 = 1 << 0;
