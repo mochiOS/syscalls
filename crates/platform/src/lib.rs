@@ -1121,6 +1121,21 @@ pub mod handle {
         crate::handle_result::transfer_length(length, output.len())
     }
 
+    /// Queries provider-owned observations through existing READ authority.
+    /// This namespace does not authorize control or state-changing operations.
+    pub fn query(handle: Handle, code: u64, input: &[u8], output: &mut [u8]) -> SysResult<usize> {
+        let length = syscall::call6(
+            syscall::SyscallNumber::HandleQuery,
+            handle as u64,
+            code,
+            input.as_ptr() as u64,
+            input.len() as u64,
+            output.as_mut_ptr() as u64,
+            output.len() as u64,
+        )?;
+        crate::handle_result::transfer_length(length, output.len())
+    }
+
     /// Moves the shared cursor of an I/O object using a native seek basis.
     /// Compatibility layers must translate POSIX `SEEK_*` values before
     /// calling this function.

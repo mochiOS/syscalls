@@ -37,6 +37,7 @@ pub mod signal_stack;
 pub mod upcall_guard;
 pub mod spawn;
 pub mod stream;
+pub mod terminal_read;
 #[cfg(feature = "syscall-endpoint")]
 pub mod synchronization;
 pub mod pthread_mutex;

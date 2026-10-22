@@ -13,6 +13,7 @@ mod file_time;
 mod stat_output;
 mod terminal_memory;
 mod terminal_attributes;
+mod terminal_read;
 mod socket_memory;
 mod socket_receive_address;
 mod time_memory;
@@ -4073,25 +4074,7 @@ fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<is
                 mnu_abi::STREAM_IO_TRY,
             )),
         )?,
-        FdKind::ObjectPty => loop {
-            match retry_terminal_operation(posix_protocol::SIGNAL_TTIN, || {
-                syscall_errno(syscall::raw_syscall3(
-                    syscall::SyscallNumber::HandleRead,
-                    entry.handle.lower_handle,
-                    buffer as u64,
-                    length as u64,
-                ))
-            }) {
-                Ok(read) => break read,
-                Err(EAGAIN) if !handle_is_nonblocking(entry)? => {
-                    let _ = wait_for_handle(
-                        entry,
-                        syscall::HANDLE_SIGNAL_READABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
-                    )?;
-                }
-                Err(errno) => return Err(errno),
-            }
-        },
+        FdKind::ObjectPty => return terminal_read::read(entry, buffer, length),
         FdKind::ObjectStreamWrite => return Err(EBADF),
         FdKind::ObjectDirectory => return Err(EISDIR),
         _ => return Err(EBADF),

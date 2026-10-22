@@ -613,6 +613,48 @@ pub const PTY_CONTROL_FLUSH: u64 = 0x5054_5900_0000_0006;
 pub const PTY_CONTROL_GET_WINDOW_SIZE: u64 = 0x5054_5900_0000_0007;
 pub const PTY_CONTROL_SET_WINDOW_SIZE: u64 = 0x5054_5900_0000_0008;
 pub const PTY_CONTROL_FLOW: u64 = 0x5054_5900_0000_0009;
+/// Read-only query namespace; never accepted as a mutation control.
+pub const PTY_QUERY_READ_SETTINGS: u64 = 0x5054_5951_0000_0001;
+pub const TERMINAL_READ_SETTINGS_LEN: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerminalReadSettings {
+    pub noncanonical: bool,
+    pub minimum: u8,
+    pub deciseconds: u8,
+}
+
+pub fn encode_terminal_read_settings(
+    value: TerminalReadSettings,
+    output: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if output.len() < TERMINAL_READ_SETTINGS_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    if !value.noncanonical && (value.minimum != 0 || value.deciseconds != 0) {
+        return Err(ProtocolError::InvalidLength);
+    }
+    output[..4].copy_from_slice(&[
+        1, u8::from(value.noncanonical), value.minimum, value.deciseconds,
+    ]);
+    Ok(())
+}
+
+pub fn decode_terminal_read_settings(input: &[u8]) -> Result<TerminalReadSettings, ProtocolError> {
+    if input.len() != TERMINAL_READ_SETTINGS_LEN
+        || input[0] != 1
+        || input[1] > 1
+        || (input[1] == 0 && (input[2] != 0 || input[3] != 0))
+    {
+        return Err(ProtocolError::InvalidLength);
+    }
+    Ok(TerminalReadSettings {
+        noncanonical: input[1] == 1,
+        minimum: input[2],
+        deciseconds: input[3],
+    })
+}
+
 pub const TERMINAL_FLOW_LEN: usize = 4;
 pub const TERMINAL_FLOW_OUTPUT_STOP: u32 = 0;
 pub const TERMINAL_FLOW_OUTPUT_START: u32 = 1;
