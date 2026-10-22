@@ -1,5 +1,7 @@
 #![no_std]
 
+pub mod device_open;
+
 mod timestamps;
 pub mod device_namespace;
 pub use timestamps::{

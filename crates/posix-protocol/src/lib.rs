@@ -23,7 +23,6 @@ pub mod resource_policy;
 pub mod status;
 pub mod file_time;
 pub mod pty_factory;
-pub mod pty_open;
 
 /// Opaque LaunchContext key under which the POSIX control endpoint is passed.
 ///
