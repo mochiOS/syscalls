@@ -28,6 +28,7 @@ mod exec_inputs;
 mod exec_search;
 mod spawn_output;
 mod spawn_attributes;
+mod spawn_file_actions;
 mod wait_output;
 mod wait_id;
 mod io_resources;
@@ -916,7 +917,6 @@ const POLLNVAL: i16 = 0x0020;
 #[derive(Clone, Copy)]
 struct SpawnSnapshot {
     path: *const c_char,
-    file_actions: *const c_void,
     argv: *const *const c_char,
     envp: *const *const c_char,
 }
@@ -2683,63 +2683,37 @@ fn duplicate_fd_from(
     })
 }
 
-fn apply_spawn_file_actions(actions: *const c_void) -> Result<(), c_int> {
-    if actions.is_null() {
-        return Ok(());
-    }
-    let actions_handle = actions.cast::<*mut PosixSpawnFileActions>();
-    // Safety: posix_spawn receives a pointer to the opaque file-actions handle.
-    let actions = unsafe { actions_handle.read() };
-    if actions.is_null() {
-        return Ok(());
-    }
-    // Safety: actions points to a live queue object allocated by this runtime.
-    let mut current = unsafe { (*actions).fa_list.stqh_first };
-    while !current.is_null() {
-        // Safety: current walks the STAILQ built by newlib's posix_spawn_file_actions APIs.
-        let entry = unsafe { &*current };
-        match entry.fae_action {
-            FAE_CLOSE => {
+fn apply_spawn_file_actions(actions: &spawn_file_actions::Actions) -> Result<(), c_int> {
+    use spawn_file_actions::Action;
+    actions.apply(|action| {
+        match action {
+            Action::Close(fd) => {
                 let mut operations = RuntimeFdOps;
-                state().fds.close_for_spawn(entry.fae_fildes, &mut operations);
+                state().fds.close_for_spawn(*fd, &mut operations);
             }
-            FAE_DUP2 => {
-                // Safety: the active union field is determined by fae_action.
-                let new_fd = unsafe { entry.fae_data.dup2.newfildes };
-                duplicate_spawn_fd_entry(entry.fae_fildes, new_fd)?;
+            Action::Dup2 { source, target } => {
+                duplicate_spawn_fd_entry(*source, *target)?;
             }
-            FAE_OPEN => {
-                // Safety: the active union field is determined by fae_action.
-                let open = unsafe { entry.fae_data.open };
-                if entry.fae_fildes < 0 || entry.fae_fildes >= process_fd_limit()? {
+            Action::Open {
+                fd,
+                flags,
+                mode,
+                path,
+            } => {
+                if *fd < 0 || *fd >= process_fd_limit()? {
                     return Err(EBADF);
                 }
-                if open.path.is_null() {
-                    return Err(EFAULT);
-                }
-                file_mutation::open_for_spawn(
-                    open.path, open.oflag, open.mode as c_int, entry.fae_fildes,
-                )?;
+                file_mutation::open_for_spawn(path.as_ptr(), *flags, *mode as c_int, *fd)?;
             }
-            FAE_CHDIR => {
-                // Safety: the active union field is determined by fae_action.
-                let path = unsafe { entry.fae_data.dir };
-                if path.is_null() {
-                    return Err(EFAULT);
-                }
-                change_directory_path(path)?;
+            Action::Chdir(path) => {
+                change_directory_path(path.as_ptr())?;
             }
-            FAE_FCHDIR => {
-                // Safety: the active union field is determined by fae_action.
-                let fd = unsafe { entry.fae_data.dirfd };
-                path_io::fchdir(fd)?;
+            Action::Fchdir(fd) => {
+                path_io::fchdir(*fd)?;
             }
-            _ => return Err(EINVAL),
         }
-        // Safety: advance within the same STAILQ.
-        current = entry.fae_list.stqe_next;
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 fn close_object_handle(handle: u32) {
@@ -9251,10 +9225,21 @@ pub extern "C" fn _posix_spawn(
         Ok(attributes) => attributes,
         Err(errno_value) => return errno_value,
     };
+    spawn_file_actions::with(file_actions, |actions| {
+        spawn_with_actions(pid, path, actions, attributes, argv, envp)
+    })
+}
 
+fn spawn_with_actions(
+    pid: *mut c_int,
+    path: *const c_char,
+    actions: &spawn_file_actions::Actions,
+    attributes: Option<PosixSpawnAttr>,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> c_int {
     let snapshot = SpawnSnapshot {
         path,
-        file_actions,
         argv,
         envp,
     };
@@ -9282,7 +9267,7 @@ pub extern "C" fn _posix_spawn(
         if let Err(errno_value) = apply_spawn_attributes(attributes) {
             report_spawn_error(status_stream.write, errno_value);
         }
-        if let Err(errno_value) = apply_spawn_file_actions(snapshot.file_actions) {
+        if let Err(errno_value) = apply_spawn_file_actions(actions) {
             report_spawn_error(status_stream.write, errno_value);
         }
         if let Err(errno_value) =
