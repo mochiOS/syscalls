@@ -26,6 +26,26 @@ pub(super) fn publish(process_id: u64, handle: u32, output: *mut c_int) -> c_int
             }
             // No callback or fallible provider operation follows publication.
             let _delivery = defer_native_delivery();
+            let mut status = syscall::ProcessStatus::default();
+            let result = syscall_errno(syscall::raw_syscall2(
+                syscall::SyscallNumber::ProcessHandleStatus,
+                u64::from(handle),
+                (&mut status as *mut syscall::ProcessStatus) as u64,
+            ))?;
+            // EOF can also mean that the old image died before exec or could
+            // not send its error packet. Only native committed-image metadata
+            // proves replacement. A fast exit after a real exec is successful.
+            if result != 0
+                || status.process_id != process_id as u64
+                || status.reserved != 0
+                || !matches!(
+                    status.state,
+                    syscall::PROCESS_STATE_RUNNING | syscall::PROCESS_STATE_EXITED
+                )
+                || status.image_revision == 0
+            {
+                return Err(EIO);
+            }
             user_copy::write(output.cast(), &process_id.to_ne_bytes())?;
             let handle = child.0.take().expect("unpublished child owner");
             close_object_handle(handle);
