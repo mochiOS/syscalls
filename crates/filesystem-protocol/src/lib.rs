@@ -228,6 +228,9 @@ pub const OPEN_AT_SEARCH: u32 = 1 << 11;
 /// Request cursor-bearing records on a directory's provider stream. The
 /// format is part of its open description and is shared by Handle aliases.
 pub const OPEN_AT_CURSOR_RECORDS: u32 = 1 << 12;
+/// Check execute permission while opening an existing regular image object.
+/// This adds no Handle rights and cannot be combined with file mutations.
+pub const OPEN_AT_EXECUTE: u32 = 1 << 13;
 pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
     | OPEN_AT_WRITE
     | OPEN_AT_CREATE
@@ -240,7 +243,8 @@ pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
     | OPEN_AT_ROOT_ATTACHED
     | OPEN_AT_NONBLOCK
     | OPEN_AT_SEARCH
-    | OPEN_AT_CURSOR_RECORDS;
+    | OPEN_AT_CURSOR_RECORDS
+    | OPEN_AT_EXECUTE;
 
 pub const STAT_AT_NOFOLLOW: u32 = 1 << 0;
 pub const STAT_AT_BASE_ATTACHED: u32 = 1 << 1;

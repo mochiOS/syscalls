@@ -2893,7 +2893,7 @@ fn replace_process_image(
             } else {
                 OpenAtBase::ProcessCwd
             },
-            posix_protocol::OPEN_READ,
+            posix_protocol::OPEN_READ | posix_protocol::OPEN_EXECUTE,
             0,
             path_text,
         )

@@ -511,6 +511,9 @@ pub const OPEN_DIRECTORY: u32 = 1 << 7;
 pub const OPEN_NOFOLLOW: u32 = 1 << 8;
 /// The client understands provider-defined directory continuation positions.
 pub const OPEN_CURSOR_RECORDS: u32 = 1 << 9;
+/// Internal image admission: open an existing regular file for reading only
+/// after checking effective execute permission on that same resolved inode.
+pub const OPEN_EXECUTE: u32 = 1 << 10;
 pub const OPEN_OPTIONS_ALL: u32 = OPEN_READ
     | OPEN_WRITE
     | OPEN_CREATE
@@ -520,7 +523,8 @@ pub const OPEN_OPTIONS_ALL: u32 = OPEN_READ
     | OPEN_NONBLOCK
     | OPEN_DIRECTORY
     | OPEN_NOFOLLOW
-    | OPEN_CURSOR_RECORDS;
+    | OPEN_CURSOR_RECORDS
+    | OPEN_EXECUTE;
 
 pub const MUTABLE_STATUS_FLAGS: u32 = OPEN_APPEND | OPEN_NONBLOCK;
 
