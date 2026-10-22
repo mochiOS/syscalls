@@ -4,6 +4,12 @@ const SC_THREAD_THREADS_MAX: i32 = 40;
 const SC_THREAD_DESTRUCTOR_ITERATIONS: i32 = 53;
 const SC_IOV_MAX: i32 = 66;
 
+/// Default executable search list, independent of the caller's PATH variable.
+pub const DEFAULT_EXECUTABLE_PATH: &[u8] = b"/bin:/usr/bin";
+
+/// SDK confstr selector; unrelated to native kernel selectors.
+pub const CS_PATH: i32 = 0;
+
 /// Translate libc selectors using a validated native processor snapshot.
 /// Unknown or inconsistent data is an error, never a fabricated single CPU.
 pub fn processor_count(selector: i32, info: mnu_abi::ProcessorInfo) -> Result<u32, i32> {

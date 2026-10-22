@@ -26,6 +26,7 @@ mod path_io;
 mod user_copy;
 mod exec_inputs;
 mod exec_search;
+mod string_configuration;
 mod spawn_output;
 mod spawn_attributes;
 mod spawn_file_actions;

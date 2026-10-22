@@ -109,7 +109,7 @@ fn search<T: Copy>(
             }
             let pointer = unsafe { getenv(c"PATH".as_ptr()) };
             if pointer.is_null() {
-                path.append(b"/bin:/usr/bin")
+                path.append(mochios_posix_client::configuration::DEFAULT_EXECUTABLE_PATH)
             } else {
                 // PATH is a list, not a single pathname. Grow fallibly rather
                 // than imposing PATH_MAX on the entire search list.
