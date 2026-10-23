@@ -14,8 +14,8 @@ impl<T: ObjectTransport> Client<T> {
         self.request_without_reply_handles(opcode, payload, output, &mut ObjectHandles::new())
     }
 
-    /// Notifying modes currently return ENOSYS until the service's reactor
-    /// delivery adapter is connected; they are never silently dropped.
+    /// Signal/default notifications use the service's signal dispatcher.
+    /// Thread callbacks remain ENOSYS until callback lifecycle is supported.
     pub fn timer_create(
         &self,
         clock: Clock,

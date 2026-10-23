@@ -1,7 +1,7 @@
 //! POSIX timer C boundary. Only local notification cookies enter IPC; C
 //! records are imported/exported using checked copies, never raw references.
-//! The service still rejects notifying creation with ENOSYS until its joint
-//! signal dispatcher is connected. SIGEV_NONE controls are usable now.
+//! Signal/default notifications use the joint service signal dispatcher.
+//! SIGEV_THREAD is explicitly unsupported until callback lifecycle is provided.
 //! Rollback retries are bounded and fair; persistent failures retain IDs until
 //! a later API boundary or the service's process-exit cleanup. No RPC in Drop.
 use super::*;
