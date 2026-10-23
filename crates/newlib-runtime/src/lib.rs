@@ -7218,6 +7218,7 @@ pub unsafe extern "C" fn sigpending(set: *mut u64) -> c_int {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sigwait(set: *const u64, selected: *mut c_int) -> c_int {
+    pthread_testcancel();
     let result = (|| {
         if set.is_null() || selected.is_null() {
             return Err(EFAULT);
@@ -7226,7 +7227,9 @@ pub unsafe extern "C" fn sigwait(set: *const u64, selected: *mut c_int) -> c_int
         let mask = signal_memory::read_set(set)?;
         let client = posix_client().map_err(map_posix_client_error)?;
         loop {
+            pthread_testcancel();
             let epoch = client.thread_signal_epoch().map_err(map_posix_client_error)?;
+            pthread_testcancel();
             match client.wait_thread_signal_info_since(mask, epoch) {
                 Ok(accepted) => {
                     if signal_info::prepare(accepted.signal, accepted.origin)?.is_none() {
@@ -7247,6 +7250,9 @@ pub unsafe extern "C" fn sigwait(set: *const u64, selected: *mut c_int) -> c_int
         }
     })();
     // POSIX thread APIs return the error number directly, not through errno.
+    if result.is_err() {
+        pthread_testcancel();
+    }
     result.err().unwrap_or(0)
 }
 
@@ -7264,6 +7270,7 @@ pub unsafe extern "C" fn sigtimedwait(
     info: *mut mochios_posix_client::signal_context::SigInfo,
     timeout: *const NewlibTimespec,
 ) -> c_int {
+    pthread_testcancel();
     let result = (|| {
         let deadline = if timeout.is_null() {
             None
@@ -7276,6 +7283,9 @@ pub unsafe extern "C" fn sigtimedwait(
         };
         wait_signal_info(set, info, deadline)
     })();
+    if result.is_err() {
+        pthread_testcancel();
+    }
     result_with_errno(result, -1)
 }
 
@@ -7284,7 +7294,8 @@ fn wait_signal_info(
     info: *mut mochios_posix_client::signal_context::SigInfo,
     deadline: Option<u64>,
 ) -> Result<c_int, c_int> {
-    (|| {
+    pthread_testcancel();
+    let result = (|| {
         if set.is_null() {
             return Err(EFAULT);
         }
@@ -7292,7 +7303,9 @@ fn wait_signal_info(
         let mask = signal_memory::read_set(set)?;
         let client = posix_client().map_err(map_posix_client_error)?;
         loop {
+            pthread_testcancel();
             let epoch = client.thread_signal_epoch().map_err(map_posix_client_error)?;
+            pthread_testcancel();
             let received = match deadline {
                 Some(deadline) => client.wait_thread_signal_info_until(mask, epoch, deadline),
                 None => client.wait_thread_signal_info_since(mask, epoch),
@@ -7313,7 +7326,11 @@ fn wait_signal_info(
             signal_memory::write_resolved_info(info, prepared.into_info()?)?;
             return Ok(accepted.signal as c_int);
         }
-    })()
+    })();
+    if result.is_err() {
+        pthread_testcancel();
+    }
+    result
 }
 
 #[unsafe(no_mangle)]
@@ -8459,6 +8476,7 @@ pub extern "C" fn execv(path: *const c_char, argv: *const *const c_char) -> c_in
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int {
+    pthread_testcancel();
     let result = (|| {
         if options & !(WNOHANG | WUNTRACED | WCONTINUED) != 0 {
             return Err(EINVAL);
@@ -8472,12 +8490,14 @@ pub extern "C" fn _waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_
                 .map_err(map_posix_client_error)?
         } else {
             loop {
+                pthread_testcancel();
                 if control.nonrestart_signal_generation.load(Ordering::Acquire) != caught {
                     return Err(EINTR);
                 }
                 let epoch = client
                     .thread_signal_epoch()
                     .map_err(map_posix_client_error)?;
+                pthread_testcancel();
                 if control.nonrestart_signal_generation.load(Ordering::Acquire) != caught {
                     return Err(EINTR);
                 }
@@ -8494,6 +8514,9 @@ pub extern "C" fn _waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_
         };
         wait_output::publish(waited.process_id, waited.status, status)
     })();
+    if result.is_err() {
+        pthread_testcancel();
+    }
     result_with_errno(result, -1)
 }
 

@@ -4,6 +4,7 @@ use mochios_posix_client::{signal_context::SigInfo, wait};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn waitid(id_type: c_int, id: u32, output: *mut SigInfo, options: c_int) -> c_int {
+    pthread_testcancel();
     let result = (|| {
         let request = wait::request(id_type, id, options)?;
         if output.is_null() {
@@ -13,12 +14,14 @@ pub extern "C" fn waitid(id_type: c_int, id: u32, output: *mut SigInfo, options:
         let caught = control.nonrestart_signal_generation.load(Ordering::Acquire);
         let client = posix_client().map_err(map_posix_client_error)?;
         let info = loop {
+            pthread_testcancel();
             if control.nonrestart_signal_generation.load(Ordering::Acquire) != caught {
                 return Err(EINTR);
             }
             let epoch = client
                 .thread_signal_epoch()
                 .map_err(map_posix_client_error)?;
+            pthread_testcancel();
             if control.nonrestart_signal_generation.load(Ordering::Acquire) != caught {
                 return Err(EINTR);
             }
@@ -37,5 +40,8 @@ pub extern "C" fn waitid(id_type: c_int, id: u32, output: *mut SigInfo, options:
         }
         Ok(0)
     })();
+    if result.is_err() {
+        pthread_testcancel();
+    }
     result_with_errno(result, -1)
 }
