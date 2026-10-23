@@ -5,9 +5,34 @@ use mochios_filesystem_protocol::object_limits as wire;
 
 // Newlib sys/unistd.h selectors, interpreted only in userspace.
 const PC_LINK_MAX: c_int = 0;
+const PC_MAX_CANON: c_int = 1;
+const PC_MAX_INPUT: c_int = 2;
 const PC_NAME_MAX: c_int = 3;
 const PC_PATH_MAX: c_int = 4;
 const PC_PIPE_BUF: c_int = 5;
+const PC_VDISABLE: c_int = 8;
+
+fn terminal_value(entry: FdEntry, name: c_int) -> Result<CLong, c_int> {
+    use posix_protocol::terminal_limits::{Limits, RESPONSE_LEN};
+    let mut bytes = [0; RESPONSE_LEN];
+    let count = terminal_observe(
+        entry,
+        posix_protocol::PTY_QUERY_LIMITS,
+        posix_protocol::PTY_CONTROL_GET_LIMITS,
+        &mut bytes,
+    )
+    .map_err(|error| if error == ENOTTY { EINVAL } else { error })?;
+    if count != bytes.len() {
+        return Err(EIO);
+    }
+    let value = Limits::decode(&bytes).map_err(|_| EIO)?;
+    Ok(match name {
+        PC_MAX_CANON => value.canonical_bytes.into(),
+        PC_MAX_INPUT => value.input_bytes.into(),
+        PC_VDISABLE => value.disabled_character.into(),
+        _ => unreachable!(),
+    })
+}
 
 fn limits(entry: FdEntry) -> Result<wire::Limits, c_int> {
     let mut bytes = [0; wire::RESPONSE_LEN];
@@ -37,6 +62,9 @@ fn query(entry: FdEntry, name: c_int) -> Result<CLong, c_int> {
     }
     if let Some(value) = mochios_posix_client::configuration::file_option(name) {
         return Ok(value);
+    }
+    if matches!(name, PC_MAX_CANON | PC_MAX_INPUT | PC_VDISABLE) {
+        return terminal_value(entry, name);
     }
     if name == PC_PIPE_BUF {
         return if matches!(

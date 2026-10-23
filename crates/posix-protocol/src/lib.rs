@@ -669,13 +669,18 @@ pub const PTY_CONTROL_GET_SLAVE_NAME: u64 = 0x5054_5900_0000_000a;
 pub const PTY_CONTROL_SET_SLAVE_LOCK: u64 = 0x5054_5900_0000_000b;
 /// Master-only control: empty input, exactly one little-endian u32 reply.
 pub const PTY_CONTROL_GET_SLAVE_LOCK: u64 = 0x5054_5900_0000_000c;
+/// Read-only equivalent of PTY_QUERY_LIMITS for CONTROL-only handles.
+pub const PTY_CONTROL_GET_LIMITS: u64 = 0x5054_5900_0000_000d;
 pub mod pty_name;
+pub mod terminal_limits;
 /// Read-only query namespace; never accepted as a mutation control.
 pub const PTY_QUERY_READ_SETTINGS: u64 = 0x5054_5951_0000_0001;
 /// Empty input, TERMINAL_ATTRIBUTES_LEN reply, native READ authority.
 pub const PTY_QUERY_ATTRIBUTES: u64 = 0x5054_5951_0000_0002;
 /// Empty input, TERMINAL_WINDOW_SIZE_LEN reply, native READ authority.
 pub const PTY_QUERY_WINDOW_SIZE: u64 = 0x5054_5951_0000_0003;
+/// Empty input, terminal_limits::RESPONSE_LEN reply, native READ authority.
+pub const PTY_QUERY_LIMITS: u64 = 0x5054_5951_0000_0004;
 pub const TERMINAL_READ_SETTINGS_LEN: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
