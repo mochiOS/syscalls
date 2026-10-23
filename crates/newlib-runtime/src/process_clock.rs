@@ -22,6 +22,11 @@ fn sample(pid: u64) -> Result<Sample, c_int> {
         .map_err(map_posix_client_error)
 }
 
+pub(super) fn nanoseconds(pid: u64) -> Result<u128, c_int> {
+    let (seconds, nanoseconds) = timespec(sample(pid)?)?;
+    Ok(seconds as u128 * 1_000_000_000 + nanoseconds as u128)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn clock_getcpuclockid(pid: c_int, output: *mut u64) -> c_int {
     let saved_errno = unsafe { *__errno() };

@@ -75,6 +75,27 @@ impl<const N: usize> Book<N> {
         self.pin_owned(label, 0).ok()
     }
 
+    /// Adopt a freshly received private reference with no descriptor owner.
+    /// Its single pin owns disposal from admission onward. The caller must
+    /// supply a fresh native label and close it itself if admission fails.
+    /// Fork discard can then release a vanished thread's private reference.
+    pub fn pin_private(&mut self, label: u64, owner: u64) -> Result<Pin, PinError> {
+        if owner == 0 {
+            return Err(PinError::InvalidOwner);
+        }
+        let index = label
+            .checked_sub(1)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or(PinError::InvalidLabel)?;
+        let slot = self.slots.get(index).ok_or(PinError::InvalidLabel)?;
+        if slot.retired || slot.readers != 0 || slot.additional_owners != 0 {
+            return Err(PinError::Retired);
+        }
+        let pin = self.pin_owned(label, owner)?;
+        self.slots[index].retired = true;
+        Ok(pin)
+    }
+
     /// Attribute a lifetime pin to a stable caller-owned thread identity.
     /// Zero denotes an unattributed pin (the plain pin API). These tags confer
     /// no native authority. At most N distinct live pairs are tracked; any
@@ -110,6 +131,28 @@ impl<const N: usize> Book<N> {
         self.groups
             .iter()
             .any(|group| group.label != 0 && (group.owner == 0 || group.owner != owner))
+    }
+
+    /// A retired reference with no surviving operation has no owner in the
+    /// child. While the caller freezes this book and the FD table, omit it
+    /// from explicit native inheritance instead of requesting TRANSFER for a
+    /// resource which the child would immediately discard anyway.
+    pub fn discarded_by_fork(&self, label: u64, owner: u64) -> bool {
+        if owner == 0 {
+            return false;
+        }
+        let Some(slot) = label
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| self.slots.get(index))
+        else {
+            return false;
+        };
+        slot.retired
+            && !self
+                .groups
+                .iter()
+                .any(|group| group.label == label && group.owner == owner)
     }
 
     /// Child-only transition after VM capture, with the FD table and this book

@@ -44,6 +44,7 @@ mod spawn_resources;
 mod wait_output;
 mod wait_id;
 mod io_resources;
+mod cpu_sleep;
 mod mapping_io;
 mod mapping_backing;
 mod memory_refresh;
@@ -3132,13 +3133,28 @@ fn clone_registered_process_owned(
     let mut capture = handle_capture::Capture::new()?;
     let mut records = [mnu_abi::HandleInfo::default(); mnu_abi::process_create::MAX_HANDLES];
     let count = capture.records(&mut records)?;
+    // References owned only by disappearing operation scopes have no child
+    // owner. Explicitly omit those labels; do not request delegation rights
+    // for private completion channels or revive retired descriptor owners.
+    let mut excluded = [0u32; mnu_abi::process_create::MAX_HANDLES];
+    let mut excluded_count = 0;
+    for record in &records[..count] {
+        if fd_borrows.discarded_by_fork(u64::from(record.handle), newlib_lock_identity()) {
+            excluded[excluded_count] = record.handle;
+            excluded_count += 1;
+        }
+    }
     let mut grants = [mnu_abi::process_create::HandleGrant {
         key: 0,
         source: 0,
         target: 0,
         rights: 0,
     }; mnu_abi::process_create::MAX_HANDLES];
-    let count = mochios_posix_client::inheritance::prepare(&records[..count], &[], &mut grants)
+    let count = mochios_posix_client::inheritance::prepare(
+        &records[..count],
+        &excluded[..excluded_count],
+        &mut grants,
+    )
         .map_err(|error| match error {
             mochios_posix_client::inheritance::Error::NonTransferable(_) => EACCES,
             mochios_posix_client::inheritance::Error::TooManyHandles
@@ -3212,6 +3228,11 @@ fn clone_registered_process_owned(
         // This is the child's private book; the parent's pins remain live.
         if fd_borrows
             .discard_for_fork(newlib_lock_identity(), |label| {
+                // These references were intentionally never installed in the
+                // child. Their old numeric slots may be reused by bootstrap.
+                if excluded[..excluded_count].contains(&(label as u32)) {
+                    return;
+                }
                 if let Err(error) = syscall_errno(syscall::raw_syscall1(
                     syscall::SyscallNumber::HandleClose,
                     label,
@@ -7824,6 +7845,9 @@ pub unsafe extern "C" fn clock_nanosleep(
             return Err(EFAULT);
         }
         let request = time_memory::read_timespec(request)?;
+        if let Some(process) = cpu_sleep::target(clock_id) {
+            return cpu_sleep::sleep(process, flags, request, remaining);
+        }
         let clock_id = c_int::try_from(clock_id).map_err(|_| EINVAL)?;
         let spec = ClockSleep::parse(clock_id, flags, request.tv_sec, request.tv_nsec)?;
         if !spec.absolute && spec.nanoseconds == 0 {

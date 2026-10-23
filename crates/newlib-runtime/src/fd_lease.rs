@@ -53,6 +53,29 @@ pub(super) struct Lease {
 }
 
 impl Lease {
+    /// Own a fresh native reference without installing a POSIX descriptor.
+    /// Preparation must defer native delivery until the lease is published
+    /// in a callback resource scope, as for ordinary FD creation.
+    pub(super) fn adopt_private(entry: FdEntry) -> Result<Self, c_int> {
+        let pin = BORROWS
+            .lock()
+            .pin_private(entry.handle.lower_handle, newlib_lock_identity());
+        match pin {
+            Ok(pin) => Ok(Self {
+                entry,
+                pin: Some(pin),
+                _thread: core::marker::PhantomData,
+            }),
+            Err(error) => {
+                close_object_handle(entry.handle.lower_handle as u32);
+                Err(match error {
+                    mochios_posix_client::handle_borrow::PinError::Capacity => ENOMEM,
+                    _ => EBADF,
+                })
+            }
+        }
+    }
+
     pub(super) fn new(entry: FdEntry) -> Result<Self, c_int> {
         let pin = if entry.handle.close_owned {
             Some(
