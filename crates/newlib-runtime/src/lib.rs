@@ -8527,6 +8527,7 @@ pub unsafe extern "C" fn pthread_key_create(
     if key.is_null() {
         return EINVAL;
     }
+    let _native = defer_native_delivery();
     for (slot, control) in THREAD_KEYS.iter().enumerate() {
         if control
             .allocated
@@ -8554,10 +8555,16 @@ pub unsafe extern "C" fn pthread_key_create(
             control.allocated.store(THREAD_KEY_FREE, Ordering::Release);
             return EAGAIN;
         };
+        // Keep the reserved slot private until the caller receives its token.
+        // A faultable output must not leak a key or invoke a destructor.
+        if let Err(error) = user_copy::write(key.cast(), &token.raw().to_ne_bytes()) {
+            control.destructor.store(0, Ordering::Relaxed);
+            control.allocated.store(THREAD_KEY_FREE, Ordering::Release);
+            return error;
+        }
         control
             .allocated
             .store(THREAD_KEY_ALLOCATED, Ordering::Release);
-        unsafe { key.write(token.raw()) };
         return 0;
     }
     EAGAIN
