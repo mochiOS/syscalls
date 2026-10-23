@@ -15,7 +15,8 @@ impl<T: ObjectTransport> Client<T> {
     }
 
     /// Signal/default notifications use the service's signal dispatcher.
-    /// Thread callbacks remain ENOSYS until callback lifecycle is supported.
+    /// Thread notifications contain only a process-local cookie; a runtime
+    /// dispatcher receives them through `timer_wait_callback`.
     pub fn timer_create(
         &self,
         clock: Clock,
@@ -79,6 +80,20 @@ impl<T: ObjectTransport> Client<T> {
             return Err(ClientError::MismatchedResponse);
         }
         Ok(())
+    }
+
+    /// Blocking wait for one callback event belonging to this authenticated
+    /// process. No signal is reserved and no executable address enters IPC.
+    pub fn timer_wait_callback(
+        &self,
+    ) -> Result<protocol::timer_callback::Event, ClientError<T::Error>> {
+        let mut output = [0; protocol::timer_callback::REPLY_LEN];
+        let length = self.timer_request(
+            protocol::OP_TIMER_THREAD_WAIT,
+            &protocol::timer_callback::REQUEST,
+            &mut output,
+        )?;
+        protocol::timer_callback::decode(&output[..length]).map_err(ClientError::Protocol)
     }
 
     pub fn timer_value(&self, id: u64) -> Result<Value, ClientError<T::Error>> {
