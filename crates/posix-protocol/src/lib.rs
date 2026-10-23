@@ -355,6 +355,9 @@ pub const OP_THREAD_CPU_SLEEP: u16 = 115;
 pub const OP_TIMER_THREAD_WAIT: u16 = 116;
 /// record_lock request with exactly one explicitly delegated FileHandle.
 pub const OP_RECORD_LOCK: u16 = 117;
+/// Batched, explicitly attached close-on-exec file observations, or cancel.
+pub const OP_RECORD_LOCK_EXEC: u16 = 118;
+pub mod record_lock_exec;
 pub mod timer_callback;
 pub mod record_lock;
 pub mod cpu_sleep;

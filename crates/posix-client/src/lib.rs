@@ -59,6 +59,7 @@ pub mod time;
 pub mod thread_clock;
 pub mod process_clock;
 pub mod process_timer;
+mod record_lock_exec;
 pub mod cpu_sleep;
 pub mod timer_value;
 pub mod wait;
