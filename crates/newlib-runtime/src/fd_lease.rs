@@ -47,6 +47,9 @@ impl RestoreReferences {
 pub(super) struct Lease {
     entry: FdEntry,
     pin: Option<Pin>,
+    // Fork discard attributes the pin to the acquiring runtime thread. Do not
+    // let an operation's destructor migrate to a different surviving thread.
+    _thread: core::marker::PhantomData<*mut ()>,
 }
 
 impl Lease {
@@ -64,7 +67,11 @@ impl Lease {
         } else {
             None
         };
-        Ok(Self { entry, pin })
+        Ok(Self {
+            entry,
+            pin,
+            _thread: core::marker::PhantomData,
+        })
     }
 }
 

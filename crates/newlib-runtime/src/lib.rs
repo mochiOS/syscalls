@@ -3053,13 +3053,7 @@ fn clone_registered_process_owned(
     let guard = state();
     // Handle captures include retired-but-pinned references too. Freeze their
     // bookkeeping with the FD table, and unlock the copied book in both images.
-    let fd_borrows = fd_lease::BORROWS.lock();
-    // Native/user threads can hold references independently of the pthread
-    // slot-state test above. Until vanished-thread reclamation is implemented,
-    // refuse a snapshot with foreign or unattributed in-flight FD pins.
-    if fd_borrows.has_foreign_pins(newlib_lock_identity()) {
-        return Err(EAGAIN);
-    }
+    let mut fd_borrows = fd_lease::BORROWS.lock();
     let inherited_fds = guard.fds.clone();
     if guard.executable.is_null() {
         return Err(ENOENT);
@@ -3144,6 +3138,22 @@ fn clone_registered_process_owned(
             native_thread_id().unwrap_or_else(|error| startup.fail(map_kernel_errno(error.raw()))),
             Ordering::Relaxed,
         );
+        // Only this thread resumes. Preserve its operation scopes, but do not
+        // inherit foreign FD pins as permanent references with no destructor.
+        // This is the child's private book; the parent's pins remain live.
+        if fd_borrows
+            .discard_for_fork(newlib_lock_identity(), |label| {
+                if let Err(error) = syscall_errno(syscall::raw_syscall1(
+                    syscall::SyscallNumber::HandleClose,
+                    label,
+                )) {
+                    startup.fail(error);
+                }
+            })
+            .is_err()
+        {
+            startup.fail(EIO);
+        }
     }
     drop(fd_borrows);
     drop(guard);

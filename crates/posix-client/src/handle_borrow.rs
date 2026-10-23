@@ -33,6 +33,7 @@ impl Group {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PinError {
     InvalidLabel,
+    InvalidOwner,
     Retired,
     Capacity,
 }
@@ -102,12 +103,52 @@ impl<const N: usize> Book<N> {
         Ok(Pin { index, owner })
     }
 
-    /// Snapshot admission cannot treat another thread's in-flight references
-    /// as belonging to its survivor. Unattributed pins count as foreign too.
+    /// Inspect pins belonging to disappearing threads, not the survivor.
+    /// Unattributed pins count as foreign too. Reconciliation, if permitted,
+    /// must use discard_for_fork on the child's private copy only.
     pub fn has_foreign_pins(&self, owner: u64) -> bool {
         self.groups
             .iter()
             .any(|group| group.label != 0 && (group.owner == 0 || group.owner != owner))
+    }
+
+    /// Child-only transition after VM capture, with the FD table and this book
+    /// frozen. Only `owner` resumes in the child. Discard all other operation
+    /// pins, including unattributed ones, but preserve every descriptor owner
+    /// and the survivor's pins. Never run this on the parent's book or release
+    /// a discarded Pin later: its owning stack must not resume in this image.
+    ///
+    /// `close` receives each retired native label whose last pin disappeared,
+    /// once. It must perform only native reference disposal, not application
+    /// callbacks or mutations of this book. No native authority is acquired.
+    pub fn discard_for_fork(
+        &mut self,
+        owner: u64,
+        mut close: impl FnMut(u64),
+    ) -> Result<(), PinError> {
+        if owner == 0 {
+            return Err(PinError::InvalidOwner);
+        }
+        // Remove by key search rather than advancing an index: back-shift
+        // deletion can move a wrapped bucket behind the previous cursor.
+        while let Some(index) = self
+            .groups
+            .iter()
+            .position(|group| group.label != 0 && group.owner != owner)
+        {
+            let group = self.groups[index];
+            self.slots[group.label as usize - 1].readers -= group.readers;
+            self.remove_group(index);
+        }
+        for (index, slot) in self.slots.iter_mut().enumerate() {
+            if slot.retired && slot.readers == 0 {
+                // Commit before disposal. Re-entry after a non-returning
+                // disposal failure must not close a reused label twice.
+                slot.retired = false;
+                close(index as u64 + 1);
+            }
+        }
+        Ok(())
     }
 
     fn home(label: u64, owner: u64) -> usize {
