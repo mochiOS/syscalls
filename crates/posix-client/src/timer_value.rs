@@ -21,6 +21,7 @@ pub enum Error {
     AlreadyBound,
     InvalidTimer,
     DuplicateTimer,
+    InvalidOwner,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +37,7 @@ struct Entry<V: Copy> {
     token: Token,
     timer: u64,
     value: V,
+    owner: Option<u64>,
 }
 
 /// Allocation-free storage with strictly non-reused, full-width wire tokens.
@@ -56,6 +58,19 @@ impl<V: Copy, const N: usize> Registry<V, N> {
     /// Reserve before creation RPC. Bind only after receiving its validated
     /// server ID; failed creation can cancel this reservation without IPC.
     pub fn reserve(&mut self, value: V) -> Result<Token, Error> {
+        self.reserve_for(value, None)
+    }
+
+    /// Process-local lifetime label; grants no authority and is never sent
+    /// over IPC. Use for notifications which disappear with this local owner.
+    pub fn reserve_owned(&mut self, value: V, owner: u64) -> Result<Token, Error> {
+        if owner == 0 {
+            return Err(Error::InvalidOwner);
+        }
+        self.reserve_for(value, Some(owner))
+    }
+
+    fn reserve_for(&mut self, value: V, owner: Option<u64>) -> Result<Token, Error> {
         let index = self
             .entries
             .iter()
@@ -67,6 +82,7 @@ impl<V: Copy, const N: usize> Registry<V, N> {
             token,
             timer: 0,
             value,
+            owner,
         });
         self.last_token = raw;
         Ok(token)
@@ -131,6 +147,19 @@ impl<V: Copy, const N: usize> Registry<V, N> {
             .iter()
             .position(|entry| entry.as_ref().is_some_and(|entry| entry.timer == timer))?;
         self.entries[index].take().map(|entry| entry.value)
+    }
+
+    /// Retire the disappearing owner's notification values, preserving other
+    /// owners, process-lifetime values and the non-reused token high-water mark.
+    pub fn retire_owner(&mut self, owner: u64) {
+        for entry in &mut self.entries {
+            if entry
+                .as_ref()
+                .is_some_and(|entry| entry.owner == Some(owner))
+            {
+                *entry = None;
+            }
+        }
     }
 
     /// Match both identities, never fall back to a slot number or timer ID.

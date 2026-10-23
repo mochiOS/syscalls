@@ -127,7 +127,7 @@ fn clock(id: u64) -> Result<Clock, c_int> {
         1 => Ok(Clock::Realtime),
         2 => Ok(Clock::ProcessCpu),
         4 => Ok(Clock::Monotonic),
-        3 => Err(ENOTSUP), // Thread-owned timers need thread lifecycle policy.
+        3 => Ok(Clock::ThreadCpu),
         _ => Err(EINVAL),
     }
 }
@@ -237,7 +237,15 @@ pub extern "C" fn timer_create(clock_id: u64, event: *const c_void, output: *mut
         let (mut notification, value, default) = notification(event)?;
         let mut creation = Creation::new()?;
         if let Some(value) = value {
-            let token = state().timer_values.reserve(value).map_err(value_error)?;
+            let token = if clock == Clock::ThreadCpu {
+                let (_, control) = current_thread_control().ok_or(EAGAIN)?;
+                state()
+                    .timer_values
+                    .reserve_owned(value, control.native_id.load(Ordering::Acquire))
+            } else {
+                state().timer_values.reserve(value)
+            }
+            .map_err(value_error)?;
             creation.token = Some(token);
             if let Notification::Signal { value, .. } = &mut notification {
                 *value = token.raw()
@@ -263,6 +271,12 @@ pub extern "C" fn timer_create(clock_id: u64, event: *const c_void, output: *mut
         creation.committed = true;
         Ok(0)
     })
+}
+
+/// No RPC or application callback during final native-thread retirement.
+/// The service retires the corresponding timer after observing native exit.
+pub(super) fn thread_exit(owner: u64) {
+    state().timer_values.retire_owner(owner);
 }
 
 #[unsafe(no_mangle)]

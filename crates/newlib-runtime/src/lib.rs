@@ -1645,6 +1645,10 @@ fn finish_thread(control: &ThreadControl, result: *mut c_void) -> ! {
     }
     unsafe { thread_cleanup::drain(&control.cleanup_head) };
     run_thread_specific_destructors(control);
+    {
+        let _delivery = defer_native_delivery();
+        process_timer::thread_exit(control.native_id.load(Ordering::Acquire));
+    }
     control.result.store(result as usize, Ordering::Relaxed);
     control.state.store(THREAD_EXITED, Ordering::Release);
     notify_join_waiter(control);

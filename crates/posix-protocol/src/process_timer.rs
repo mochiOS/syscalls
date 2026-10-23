@@ -13,6 +13,8 @@ pub enum Clock {
     Realtime = 1,
     Monotonic = 2,
     ProcessCpu = 3,
+    /// Creating IPC thread's CPU clock; no identity is encoded in the frame.
+    ThreadCpu = 4,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +77,7 @@ pub fn decode_create(input: &[u8]) -> Result<(Clock, Notification), ProtocolErro
         1 => Clock::Realtime,
         2 => Clock::Monotonic,
         3 => Clock::ProcessCpu,
+        4 => Clock::ThreadCpu,
         _ => return Err(invalid()),
     };
     let kind = u32::from_le_bytes(input[8..12].try_into().unwrap());
