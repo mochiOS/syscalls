@@ -25,6 +25,7 @@ mod process_timer;
 mod multiplex_memory;
 mod resource_limit_memory;
 mod signal_memory;
+mod signal_info;
 mod signal_action;
 mod directory_io;
 mod path_io;
@@ -7004,11 +7005,14 @@ pub unsafe extern "C" fn sigwait(set: *const u64, selected: *mut c_int) -> c_int
         let client = posix_client().map_err(map_posix_client_error)?;
         loop {
             let epoch = client.thread_signal_epoch().map_err(map_posix_client_error)?;
-            match client.wait_thread_signal_since(mask, epoch) {
-                Ok(signal) => {
+            match client.wait_thread_signal_info_since(mask, epoch) {
+                Ok(accepted) => {
+                    if signal_info::prepare(accepted.signal, accepted.origin)?.is_none() {
+                        continue;
+                    }
                     // This signal was consumed synchronously. Do not dispatch
                     // its handler or discard it due to a later async delivery.
-                    signal_memory::write_selected(selected, signal as c_int)?;
+                    signal_memory::write_selected(selected, accepted.signal as c_int)?;
                     return Ok(());
                 }
                 Err(PosixClientError::Remote(posix_protocol::STATUS_EINTR)) => {
@@ -7065,21 +7069,28 @@ fn wait_signal_info(
         register_current_thread().ok_or(EAGAIN)?;
         let mask = signal_memory::read_set(set)?;
         let client = posix_client().map_err(map_posix_client_error)?;
-        let epoch = client.thread_signal_epoch().map_err(map_posix_client_error)?;
-        let received = match deadline {
-            Some(deadline) => client.wait_thread_signal_info_until(mask, epoch, deadline),
-            None => client.wait_thread_signal_info_since(mask, epoch),
-        };
-        let accepted = match received {
-            Ok(accepted) => accepted,
-            Err(PosixClientError::Remote(posix_protocol::STATUS_EINTR)) => {
-                drain_pending_signals()?;
-                return Err(EINTR);
-            }
-            Err(error) => return Err(map_posix_client_error(error)),
-        };
-        signal_memory::write_info(info, accepted.signal, accepted.origin)?;
-        Ok(accepted.signal as c_int)
+        loop {
+            let epoch = client.thread_signal_epoch().map_err(map_posix_client_error)?;
+            let received = match deadline {
+                Some(deadline) => client.wait_thread_signal_info_until(mask, epoch, deadline),
+                None => client.wait_thread_signal_info_since(mask, epoch),
+            };
+            let accepted = match received {
+                Ok(accepted) => accepted,
+                Err(PosixClientError::Remote(posix_protocol::STATUS_EINTR)) => {
+                    drain_pending_signals()?;
+                    return Err(EINTR);
+                }
+                Err(error) => return Err(map_posix_client_error(error)),
+            };
+            let Some(prepared) = signal_info::prepare(accepted.signal, accepted.origin)? else {
+                // Reuse the original absolute deadline: late deleted timers
+                // cannot extend sigtimedwait indefinitely by resetting it.
+                continue;
+            };
+            signal_memory::write_resolved_info(info, prepared.into_info()?)?;
+            return Ok(accepted.signal as c_int);
+        }
     })()
 }
 
@@ -7125,6 +7136,26 @@ fn dispatch_signal(
     if signal <= 0 || signal > posix_protocol::SIGNAL_MAX as c_int {
         return Err(EINVAL);
     }
+    let metadata = match fault_info {
+        Some(info) => signal_info::Prepared::Ready(info),
+        None => {
+            let origin = match posix_client()
+                .map_err(map_posix_client_error)?
+                .signal_delivery_origin(delivery)
+            {
+                Ok(origin) => origin,
+                // SIGCONT can cancel a dequeued stop before its handler or
+                // default action commits. Only authoritative remote absence
+                // permits skipping completion; a transport EAGAIN does not.
+                Err(PosixClientError::Remote(posix_protocol::STATUS_EAGAIN)) => return Ok(4),
+                Err(error) => return Err(map_posix_client_error(error)),
+            };
+            let Some(prepared) = signal_info::prepare(delivery.signal, origin)? else {
+                return Ok(3);
+            };
+            prepared
+        }
+    };
     let action = signal_action::select(signal as u32)?;
     match action.handler {
         0 => Ok(1),
@@ -7132,19 +7163,7 @@ fn dispatch_signal(
         1 => Ok(3),
         _ => {
             let mut info = if action.sa_flags & SA_SIGINFO != 0 {
-                Some(match fault_info {
-                    Some(info) => info,
-                    None => {
-                        let origin = posix_client()
-                            .map_err(map_posix_client_error)?
-                            .signal_delivery_origin(delivery)
-                            .map_err(map_posix_client_error)?;
-                        SigInfo::from_origin(delivery.signal, origin).map_err(|error| match error {
-                            mochios_posix_client::signal_context::InfoError::Overflow => EOVERFLOW,
-                            _ => EIO,
-                        })?
-                    }
-                })
+                Some(metadata.into_info()?)
             } else {
                 None
             };
@@ -7289,6 +7308,7 @@ fn drain_pending_signals_with_context(context: &mut UContext, native: bool) -> R
         let finished = match dispatched {
             Ok(0 | 3) => scope.as_mut().complete(),
             Ok(1) => apply_default_signal_action(delivery),
+            Ok(4) => Ok(()), // Origin lookup confirmed cancellation; no token remains.
             result => {
                 let _ = scope.as_mut().complete();
                 Err(result.err().unwrap_or(EINVAL))

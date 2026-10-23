@@ -82,13 +82,17 @@ pub(super) fn write_info(
         mochios_posix_client::signal_context::InfoError::Overflow => EOVERFLOW,
         _ => EIO,
     })?;
+    write_resolved_info(destination, value)
+}
+
+pub(super) fn write_resolved_info(destination: *mut SigInfo, value: SigInfo) -> Result<(), c_int> {
     if destination.is_null() {
         return Ok(());
     }
     let mut bytes = [0; core::mem::size_of::<SigInfo>()];
     write_field!(bytes, SigInfo, si_signo, value.si_signo);
     write_field!(bytes, SigInfo, si_code, value.si_code);
-    // SAFETY: SigInfo::from_origin above initializes
+    // SAFETY: SigInfo constructors initialize
     // the complete union as a pointer-sized integer, including its upper bytes.
     write_field!(bytes, SigInfo, si_value, unsafe {
         value.si_value.sival_ptr
