@@ -65,6 +65,7 @@ use heap::HeapState;
 mod atfork;
 mod thread_lifecycle;
 mod thread_reference;
+mod thread_clock;
 mod thread_stack;
 mod pthread_attr;
 mod credentials;
@@ -712,6 +713,9 @@ struct RuntimeState {
     named_semaphores: mochios_posix_client::named_semaphore::Mappings<u32, 128>,
     timer_values: mochios_posix_client::timer_value::Registry<usize, 128>,
     timer_cleanup: process_timer::CleanupBook,
+    thread_clocks: mochios_posix_client::thread_clock::Registry<
+        { mochios_posix_client::thread::MAX_THREADS },
+    >,
     heap: HeapState,
 }
 
@@ -730,6 +734,7 @@ impl RuntimeState {
             named_semaphores: mochios_posix_client::named_semaphore::Mappings::new(),
             timer_values: mochios_posix_client::timer_value::Registry::new(),
             timer_cleanup: process_timer::CleanupBook::new(),
+            thread_clocks: mochios_posix_client::thread_clock::Registry::new(),
             heap: HeapState::new(),
         }
     }
@@ -1642,6 +1647,9 @@ fn finish_thread(control: &ThreadControl, result: *mut c_void) -> ! {
     {
         let _delivery = defer_native_delivery();
         process_timer::thread_exit(control.native_id.load(Ordering::Acquire));
+        state()
+            .thread_clocks
+            .retire_native(control.native_id.load(Ordering::Acquire));
     }
     control.result.store(result as usize, Ordering::Relaxed);
     control.state.store(THREAD_EXITED, Ordering::Release);
@@ -3161,6 +3169,7 @@ fn clone_registered_process_owned(
         state().fds.clear_reservations();
         state().timer_values.clear_for_fork();
         state().timer_cleanup = process_timer::CleanupBook::new();
+        state().thread_clocks.clear_for_fork();
         // The new native thread has no copied upcall target.
         for other in &THREADS {
             if !ptr::eq(other, thread_control) && other.state.load(Ordering::Acquire) != THREAD_FREE
@@ -7528,6 +7537,9 @@ pub extern "C" fn getentropy(buffer: *mut c_void, length: usize) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn clock_getres(clock_id: u64, resolution: *mut Timespec) -> c_int {
+    if thread_clock::is_id(clock_id) {
+        return result_with_errno(thread_clock::resolution(clock_id, resolution), -1);
+    }
     let native_clock = match c_int::try_from(clock_id)
         .ok()
         .and_then(mochios_posix_client::time::classify_clock_id)
@@ -7568,6 +7580,10 @@ pub extern "C" fn clock_gettime(clock_id: u64, tp: *mut Timespec) -> c_int {
     if tp.is_null() {
         set_errno(EFAULT);
         return -1;
+    }
+
+    if thread_clock::is_id(clock_id) {
+        return result_with_errno(thread_clock::read(clock_id, tp), -1);
     }
 
     let native_clock = match c_int::try_from(clock_id)

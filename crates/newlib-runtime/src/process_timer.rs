@@ -121,6 +121,9 @@ fn value_error(error: ValueError) -> c_int {
 }
 
 fn clock(id: u64) -> Result<Clock, c_int> {
+    if thread_clock::is_id(id) {
+        return thread_clock::timer_source(id);
+    }
     // newlib clockid_t is unsigned long. Do not truncate before validation,
     // or accidentally interpret Linux's clock numbers as the newlib ABI.
     match id {
