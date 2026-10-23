@@ -57,16 +57,21 @@ pub(super) fn import(event: *const c_void, value: usize) -> Result<Callback, c_i
         let word = |offset| usize::from_ne_bytes(bytes[offset..offset + 8].try_into().unwrap());
         let initialized = c_int::from_ne_bytes(bytes[..4].try_into().unwrap());
         let detach = c_int::from_ne_bytes(bytes[4..8].try_into().unwrap());
+        // pthread_attr_setinheritsched stores INHERIT / EXPLICIT as 0 / 1
+        // in the first trailing word. The second word remains reserved.
+        let inherit = u32::from_ne_bytes(bytes[32..36].try_into().unwrap());
         if initialized == 0
             || !matches!(detach, PTHREAD_CREATE_JOINABLE | PTHREAD_CREATE_DETACHED)
             || word(16) < PTHREAD_STACK_MIN
-            || bytes[32..] != [0; 8]
+            || inherit > 1
+            || bytes[36..] != [0; 4]
         {
             return Err(EINVAL);
         }
         attr.stackaddr = word(8) as *mut c_void;
         attr.stacksize = word(16);
         attr.guardsize = word(24);
+        attr.reserved[0] = inherit;
         // A notification has no join owner. POSIX leaves joinable attributes
         // unspecified; all callbacks use the detached lifetime here.
     }
