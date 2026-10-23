@@ -49,6 +49,7 @@ mod canonical_path;
 mod pipe;
 mod pty_creation;
 mod terminal_lock;
+mod terminal_grant;
 mod pty_master;
 mod vector_metadata;
 use vector_metadata::VectorMetadata;
@@ -6227,6 +6228,11 @@ pub extern "C" fn tcflow(fd: c_int, action: c_int) -> c_int {
         },
     );
     result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn grantpt(fd: c_int) -> c_int {
+    result_with_errno(terminal_grant::grant(fd), -1)
 }
 
 #[unsafe(no_mangle)]

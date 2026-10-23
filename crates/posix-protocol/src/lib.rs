@@ -332,6 +332,9 @@ pub mod interval_timer;
 /// Empty request, no attachments. Creates a locked PTY and returns exactly
 /// one master Handle. No slave open is published or retained.
 pub const OP_PTY_OPEN_MASTER: u16 = 105;
+/// Empty request and one WRITE|CONTROL|TRANSFER master Handle. Apply the
+/// authenticated caller's real IDs to its slave; never accepts path/UID data.
+pub const OP_PTY_GRANT_MASTER: u16 = 106;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

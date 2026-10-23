@@ -901,6 +901,14 @@ impl<T: ObjectTransport> Client<T> {
         Err(ClientError::MismatchedResponse)
     }
 
+    pub fn grant_pty_master(
+        &self,
+        master: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.terminal_request(protocol::OP_PTY_GRANT_MASTER, &[], master, &mut [])
+            .map(|_| ())
+    }
+
     pub fn acquire_controlling_terminal(
         &self,
         terminal: ObjectHandleAttachment<T::Handle>,
