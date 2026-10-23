@@ -312,7 +312,7 @@ impl<T: Transport> Client<T> {
                 protocol::SIGNAL_WAIT_REQUEST_LEN,
             )
         };
-        let mut response = [0; protocol::signal_wait::LEN];
+        let mut response = [0; protocol::signal_wait::MAX_LEN];
         let length = self.request(
             opcode,
             0,
@@ -513,7 +513,7 @@ impl<T: Transport> Client<T> {
     ) -> Result<protocol::signal_origin::Origin, ClientError<T::Error>> {
         let mut request = [0; protocol::SIGNAL_DELIVERY_LEN];
         protocol::encode_signal_delivery(delivery, &mut request).map_err(ClientError::Protocol)?;
-        let mut response = [0; protocol::signal_origin::LEN];
+        let mut response = [0; protocol::signal_origin::MAX_LEN];
         let length = self.request(protocol::OP_SIGNAL_DELIVERY_ORIGIN, 0, &request, &mut response)?;
         protocol::signal_origin::decode(&response[..length]).map_err(ClientError::Protocol)
     }

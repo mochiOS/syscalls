@@ -3,6 +3,7 @@ use crate::protocol;
 use mnu_abi::{MemoryFaultCause, ThreadInitialRegisters, ThreadUpcallSnapshot};
 
 pub const SI_USER: i32 = 1;
+pub const SI_TIMER: i32 = 3;
 pub const SI_KERNEL: i32 = 128;
 // newlib's existing generic SI_* sources occupy 1..=5. Keep synchronous
 // fault codes disjoint so kill(SIGSEGV) cannot look like an address fault.
@@ -95,7 +96,7 @@ impl SigInfo {
         if origin.source == protocol::signal_origin::CHILD && origin.child.event == 0 {
             return Err(InfoError::MissingDetail);
         }
-        protocol::signal_origin::encode(origin, &mut [0; protocol::signal_origin::LEN])
+        protocol::signal_origin::encode(origin, &mut [0; protocol::signal_origin::MAX_LEN])
             .map_err(|_| InfoError::InvalidOrigin)?;
         match origin.source {
             protocol::signal_origin::USER if origin.process_id != 0 => {
@@ -127,8 +128,35 @@ impl SigInfo {
             protocol::signal_origin::FAULT => {
                 return Err(InfoError::MissingDetail);
             }
+            protocol::signal_origin::TIMER => {
+                // A service value token is not a C sigval. Only the runtime's
+                // process-local registry may resolve the application value.
+                return Err(InfoError::MissingDetail);
+            }
             _ => return Err(InfoError::InvalidOrigin),
         }
+        Ok(result)
+    }
+
+    /// The caller supplies locally resolved sigval bits, not the wire token.
+    /// Keeping resolution separate prevents a cookie from becoming a pointer.
+    pub fn from_timer_origin(
+        signal: u32,
+        origin: protocol::signal_origin::Origin,
+        resolved_value: usize,
+    ) -> Result<Self, InfoError> {
+        if signal == 0 || signal > protocol::SIGNAL_MAX {
+            return Err(InfoError::InvalidSignal);
+        }
+        protocol::signal_origin::encode(origin, &mut [0; protocol::signal_origin::MAX_LEN])
+            .map_err(|_| InfoError::InvalidOrigin)?;
+        if origin.source != protocol::signal_origin::TIMER || origin.timer.is_none() {
+            return Err(InfoError::MissingDetail);
+        }
+        let mut result = Self::empty(signal, SI_TIMER);
+        result.si_value = SigValue {
+            sival_ptr: resolved_value,
+        };
         Ok(result)
     }
 

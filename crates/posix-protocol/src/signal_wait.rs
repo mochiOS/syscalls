@@ -1,7 +1,9 @@
 //! Atomic synchronous acceptance: provenance travels with the consumed signal.
 use super::*;
 
+/// Common record size. Receive buffers must reserve MAX_LEN for timer detail.
 pub const LEN: usize = 8 + signal_origin::LEN;
+pub const MAX_LEN: usize = 8 + signal_origin::MAX_LEN;
 pub const TIMED_REQUEST_LEN: usize = SIGNAL_WAIT_REQUEST_LEN + 8;
 
 pub fn encode_timed_request(
@@ -39,8 +41,12 @@ pub struct Accepted {
     pub origin: signal_origin::Origin,
 }
 
+pub const fn encoded_len(value: Accepted) -> usize {
+    8 + signal_origin::encoded_len(value.origin)
+}
+
 pub fn encode(value: Accepted, output: &mut [u8]) -> Result<(), ProtocolError> {
-    if output.len() < LEN {
+    if output.len() < encoded_len(value) {
         return Err(ProtocolError::BufferTooSmall);
     }
     if value.signal == 0
@@ -51,20 +57,20 @@ pub fn encode(value: Accepted, output: &mut [u8]) -> Result<(), ProtocolError> {
     {
         return Err(ProtocolError::InvalidLength);
     }
-    signal_origin::encode(value.origin, &mut output[8..LEN])?;
+    signal_origin::encode(value.origin, &mut output[8..encoded_len(value)])?;
     put_u32(output, 0, value.signal);
     put_u32(output, 4, 0);
     Ok(())
 }
 
 pub fn decode(input: &[u8]) -> Result<Accepted, ProtocolError> {
-    if input.len() != LEN || get_u32(input, 4) != 0 {
+    if input.len() < 8 || get_u32(input, 4) != 0 {
         return Err(ProtocolError::InvalidLength);
     }
     let value = Accepted {
         signal: get_u32(input, 0),
         origin: signal_origin::decode(&input[8..])?,
     };
-    encode(value, &mut [0; LEN])?;
+    encode(value, &mut [0; MAX_LEN])?;
     Ok(value)
 }

@@ -66,6 +66,7 @@ pub fn origin(info: protocol::WaitInfo) -> Result<protocol::signal_origin::Origi
         process_id: info.result.process_id,
         real_uid: info.real_uid,
         child,
+        timer: None,
     };
     protocol::signal_origin::encode(origin, &mut [0; protocol::signal_origin::LEN])
         .map_err(|_| EIO)?;
