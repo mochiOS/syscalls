@@ -2,6 +2,7 @@
 
 pub mod device_open;
 pub mod description_flags;
+pub mod object_limits;
 pub mod device_metadata;
 pub mod device_registration;
 pub mod device_removal;
