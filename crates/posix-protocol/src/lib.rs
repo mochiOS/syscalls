@@ -341,6 +341,10 @@ pub const OP_TIMER_DELETE: u16 = 108;
 pub const OP_TIMER_GET: u16 = 109;
 pub const OP_TIMER_SET: u16 = 110;
 pub const OP_TIMER_OVERRUN: u16 = 111;
+/// process_clock target PID; authenticated observation of a registered process.
+/// No native object authority is returned or acquired from caller PID bytes.
+pub const OP_PROCESS_CPU_CLOCK: u16 = 112;
+pub mod process_clock;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -70,6 +70,7 @@ mod libc_lock;
 mod thread_lifecycle;
 mod thread_reference;
 mod thread_clock;
+mod process_clock;
 mod thread_stack;
 mod pthread_attr;
 mod credentials;
@@ -7692,6 +7693,9 @@ pub extern "C" fn getentropy(buffer: *mut c_void, length: usize) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn clock_getres(clock_id: u64, resolution: *mut Timespec) -> c_int {
+    if mochios_posix_client::process_clock::target(clock_id).is_some() {
+        return result_with_errno(process_clock::resolution(clock_id, resolution), -1);
+    }
     if thread_clock::is_id(clock_id) {
         return result_with_errno(thread_clock::resolution(clock_id, resolution), -1);
     }
@@ -7737,6 +7741,9 @@ pub extern "C" fn clock_gettime(clock_id: u64, tp: *mut Timespec) -> c_int {
         return -1;
     }
 
+    if mochios_posix_client::process_clock::target(clock_id).is_some() {
+        return result_with_errno(process_clock::read(clock_id, tp), -1);
+    }
     if thread_clock::is_id(clock_id) {
         return result_with_errno(thread_clock::read(clock_id, tp), -1);
     }
