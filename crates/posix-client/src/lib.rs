@@ -1359,6 +1359,34 @@ impl<T: ObjectTransport> Client<T> {
         }
     }
 
+    /// One blocking lock call. The server defers its reply while conflicts
+    /// remain; epoch changes return EINTR without acquiring the lock.
+    pub fn wait_record_lock_since(
+        &self,
+        file: ObjectHandleAttachment<T::Handle>,
+        lock: protocol::record_lock::Request,
+        epoch: u64,
+    ) -> Result<(), ClientError<T::Error>> {
+        use protocol::{record_lock as locks, record_lock_wait as wire};
+        let mut payload = [0; wire::LEN];
+        wire::encode(wire::Request { lock, epoch }, &mut payload).map_err(ClientError::Protocol)?;
+        let rights = locks::required_rights(lock);
+        if file.rights & rights != rights {
+            return Err(ClientError::Remote(-13));
+        }
+        let file = ObjectHandleAttachment {
+            handle: file.handle,
+            rights,
+        };
+        let mut response = [0; locks::REPLY_LEN];
+        let length =
+            self.file_request(protocol::OP_RECORD_LOCK_WAIT, &payload, file, &mut response)?;
+        match locks::decode_reply(&response[..length]).map_err(ClientError::Protocol)? {
+            locks::Reply::Done => Ok(()),
+            _ => Err(ClientError::MismatchedResponse),
+        }
+    }
+
     pub fn access_at(
         &self,
         base: AccessAtBase<T::Handle>,

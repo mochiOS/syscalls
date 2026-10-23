@@ -357,6 +357,9 @@ pub const OP_TIMER_THREAD_WAIT: u16 = 116;
 pub const OP_RECORD_LOCK: u16 = 117;
 /// Batched, explicitly attached close-on-exec file observations, or cancel.
 pub const OP_RECORD_LOCK_EXEC: u16 = 118;
+/// Blocking record lock with an explicit file and signal delivery epoch.
+pub const OP_RECORD_LOCK_WAIT: u16 = 119;
+pub mod record_lock_wait;
 pub mod record_lock_exec;
 pub mod timer_callback;
 pub mod record_lock;
