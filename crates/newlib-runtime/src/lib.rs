@@ -2284,6 +2284,9 @@ fn posix_open_options(flags: c_int) -> Result<u32, c_int> {
     const O_TRUNC: c_int = 0x0400;
     const O_EXCL: c_int = 0x0800;
     const O_NONBLOCK: c_int = 0x4000;
+    // Terminal acquisition is explicit in userspace; ordinary open never
+    // assigns a controlling terminal. Accept this option without forwarding it.
+    const O_NOCTTY: c_int = 0x8000;
     const O_NOFOLLOW: c_int = 0x100000;
     const O_DIRECTORY: c_int = 0x200000;
     const SUPPORTED: c_int = 0x3
@@ -2292,6 +2295,7 @@ fn posix_open_options(flags: c_int) -> Result<u32, c_int> {
         | O_TRUNC
         | O_EXCL
         | O_NONBLOCK
+        | O_NOCTTY
         | O_CLOEXEC
         | O_NOFOLLOW
         | O_DIRECTORY;
