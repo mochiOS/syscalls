@@ -106,6 +106,17 @@ impl FdReservation {
     }
 }
 
+/// A destination pinned for replacement while policy work runs outside the
+/// caller's FD-table lock. The original entry remains visible until commit.
+/// This is distinct from a pending-open reservation: replacing it must return
+/// the old entry to its owner, never silently overwrite an owned reference.
+#[derive(Debug)]
+#[must_use = "commit or cancel the replacement on its issuing table"]
+pub struct FdReplacement {
+    index: usize,
+    generation: u64,
+}
+
 /// Slots reserved for one ancillary receive. Not inherited by a fork snapshot.
 /// Use only with the issuing table, and explicitly commit or cancel every group.
 #[derive(Debug)]
@@ -162,6 +173,52 @@ impl<H: Copy> FdTable<H> {
 
     fn is_free(&self, index: usize) -> bool {
         self.entries[index].is_none() && self.reservations[index] == 0
+    }
+
+    /// The caller must serialize access to this table. It may release its lock
+    /// after reserving: open/dup/close cannot consume this destination until
+    /// commit or cancellation. Neither this method nor commit disposes Handles.
+    pub fn reserve_replacement(
+        &mut self,
+        fd: i32,
+    ) -> Result<(FdReplacement, Option<Entry<H>>), FdError<core::convert::Infallible>> {
+        let index = usize::try_from(fd).map_err(|_| FdError::InvalidDescriptor)?;
+        if index >= DEFAULT_FD_LIMIT {
+            return Err(FdError::InvalidDescriptor);
+        }
+        if self.reservations[index] != 0 {
+            return Err(FdError::BusyDescriptor);
+        }
+        let generation = self
+            .next_reservation
+            .checked_add(1)
+            .ok_or(FdError::InvalidDescriptor)?;
+        self.next_reservation = generation;
+        self.reservations[index] = generation;
+        Ok((FdReplacement { index, generation }, self.entries[index]))
+    }
+
+    /// Caller retains responsibility for both the incoming reference on error
+    /// and the returned, displaced reference on success. No allocation or
+    /// Handle operation can fail after the matching reservation is checked.
+    pub fn commit_replacement(
+        &mut self,
+        replacement: &FdReplacement,
+        entry: Entry<H>,
+    ) -> Result<Option<Entry<H>>, FdError<core::convert::Infallible>> {
+        if self.reservations[replacement.index] != replacement.generation {
+            return Err(FdError::InvalidDescriptor);
+        }
+        self.reservations[replacement.index] = 0;
+        Ok(self.entries[replacement.index].replace(entry))
+    }
+
+    pub fn cancel_replacement(&mut self, replacement: &FdReplacement) -> bool {
+        if self.reservations[replacement.index] != replacement.generation {
+            return false;
+        }
+        self.reservations[replacement.index] = 0;
+        true
     }
 
     /// Reserve before performing a potentially destructive filesystem open.
@@ -422,6 +479,14 @@ impl<H: Copy> FdTable<H> {
 
     pub fn take(&mut self, fd: i32) -> Result<Entry<H>, FdError<()>> {
         let index = usize::try_from(fd).map_err(|_| FdError::BadDescriptor)?;
+        if self.get(fd).is_some()
+            && self
+                .reservations
+                .get(index)
+                .is_some_and(|generation| *generation != 0)
+        {
+            return Err(FdError::BusyDescriptor);
+        }
         self.entries
             .get_mut(index)
             .and_then(Option::take)
@@ -434,6 +499,14 @@ impl<H: Copy> FdTable<H> {
         operations: &mut O,
     ) -> Result<(), FdError<O::Error>> {
         let index = usize::try_from(fd).map_err(|_| FdError::BadDescriptor)?;
+        if self.get(fd).is_some()
+            && self
+                .reservations
+                .get(index)
+                .is_some_and(|generation| *generation != 0)
+        {
+            return Err(FdError::BusyDescriptor);
+        }
         let entry = self
             .entries
             .get_mut(index)
@@ -531,18 +604,34 @@ impl<H: Copy> FdTable<H> {
             return Ok(target_fd);
         }
         let source = self.get(source_fd).ok_or(FdError::BadDescriptor)?;
-        if self.reservations[target_fd as usize] != 0 {
-            return Err(FdError::BusyDescriptor);
-        }
-        let handle = operations
-            .clone_handle(source.handle, source.rights)
-            .map_err(FdError::Handle)?;
-        let target_index = target_fd as usize;
-        if let Some(replaced) = self.entries[target_index].replace(Entry {
-            handle,
-            rights: source.rights,
-            descriptor_flags: source.descriptor_flags & !FD_CLOEXEC,
-        }) {
+        let (replacement, _) =
+            self.reserve_replacement(target_fd)
+                .map_err(|error| match error {
+                    FdError::BusyDescriptor => FdError::BusyDescriptor,
+                    _ => FdError::InvalidDescriptor,
+                })?;
+        let handle = match operations.clone_handle(source.handle, source.rights) {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.cancel_replacement(&replacement);
+                return Err(FdError::Handle(error));
+            }
+        };
+        let displaced = match self.commit_replacement(
+            &replacement,
+            Entry {
+                handle,
+                rights: source.rights,
+                descriptor_flags: source.descriptor_flags & !FD_CLOEXEC,
+            },
+        ) {
+            Ok(displaced) => displaced,
+            Err(_) => {
+                operations.close_handle(handle);
+                return Err(FdError::InvalidDescriptor);
+            }
+        };
+        if let Some(replaced) = displaced {
             operations.close_handle(replaced.handle);
         }
         Ok(target_fd)
@@ -575,10 +664,11 @@ impl<H: Copy> FdTable<H> {
     }
 
     pub fn close_on_exec<O: HandleOps<H>>(&mut self, operations: &mut O) {
-        for slot in &mut self.entries {
-            if slot
-                .as_ref()
-                .is_some_and(|entry| entry.descriptor_flags & FD_CLOEXEC != 0)
+        for (index, slot) in self.entries.iter_mut().enumerate() {
+            if self.reservations[index] == 0
+                && slot
+                    .as_ref()
+                    .is_some_and(|entry| entry.descriptor_flags & FD_CLOEXEC != 0)
                 && let Some(entry) = slot.take()
             {
                 operations.close_handle(entry.handle);
