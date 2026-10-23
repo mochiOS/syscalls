@@ -3133,9 +3133,9 @@ fn clone_registered_process_owned(
     let mut capture = handle_capture::Capture::new()?;
     let mut records = [mnu_abi::HandleInfo::default(); mnu_abi::process_create::MAX_HANDLES];
     let count = capture.records(&mut records)?;
-    // References owned only by disappearing operation scopes have no child
-    // owner. Explicitly omit those labels; do not request delegation rights
-    // for private completion channels or revive retired descriptor owners.
+    // Private references and references owned only by disappearing operation
+    // scopes have no child owner. Explicitly omit those labels; do not request
+    // delegation rights or revive retired descriptor owners.
     let mut excluded = [0u32; mnu_abi::process_create::MAX_HANDLES];
     let mut excluded_count = 0;
     for record in &records[..count] {
@@ -5027,12 +5027,22 @@ fn wait_for_multiplex(
     control: &ThreadControl,
     caught: u64,
 ) -> Result<(), c_int> {
+    wait_for_multiplex_while(items, deadline, control, caught, || true)
+}
+
+fn wait_for_multiplex_while(
+    items: &mut [syscall::HandleWaitItem],
+    deadline: u64,
+    control: &ThreadControl,
+    caught: u64,
+    valid: impl Fn() -> bool,
+) -> Result<(), c_int> {
     mochios_posix_client::multiplex::wait_cancellable(
         caught,
         || control.caught_signal_generation.load(Ordering::Acquire),
         || {
-            control.cancel_state.load(Ordering::Acquire) == PTHREAD_CANCEL_ENABLE
-                && control.cancel_pending.load(Ordering::Acquire) != 0
+            !valid() || (control.cancel_state.load(Ordering::Acquire) == PTHREAD_CANCEL_ENABLE
+                && control.cancel_pending.load(Ordering::Acquire) != 0)
         },
         || control.multiplex_generation.load(Ordering::Acquire),
         |notification| {
@@ -5040,13 +5050,23 @@ fn wait_for_multiplex(
                 address: (&control.multiplex_generation as *const AtomicU64) as u64,
                 expected: notification,
             };
-            match syscall_errno(syscall::raw_syscall4(
+            if !valid() {
+                return Ok(false);
+            }
+            let result = syscall_errno(syscall::raw_syscall4(
                 syscall::SyscallNumber::HandleWaitManyGuarded,
                 items.as_mut_ptr() as u64,
                 items.len() as u64,
                 deadline,
                 (&guard as *const syscall::HandleWaitGuard) as u64,
-            )) {
+            ));
+            // A returning handler may fork even while the native call is
+            // failing. That result and its observed bits belong to the old
+            // reference lifetime; let the cancellation predicate retire it.
+            if !valid() {
+                return Ok(false);
+            }
+            match result {
                 Ok(_) => Ok(true),
                 Err(EAGAIN) => Ok(false),
                 Err(error) => Err(error),

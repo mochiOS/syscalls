@@ -102,15 +102,31 @@ fn wait(
         {
             return Err(EINTR);
         }
-        let remaining = &mut pending.packet[pending.received..];
-        match syscall_errno(syscall::raw_syscall4(
-            syscall::SyscallNumber::StreamRead,
-            pending.completion.handle.lower_handle,
-            remaining.as_mut_ptr() as u64,
-            remaining.len() as u64,
-            mnu_abi::STREAM_IO_TRY,
-        )) {
-            Ok(count) if count != 0 && count <= remaining.len() as u64 => {
+        let available = pending.packet.len() - pending.received;
+        let result = {
+            // This read is nonblocking. Keep its label check and dispatch in
+            // one delivery-deferred section so a handler cannot fork and
+            // replace that label between them. Reopen callbacks before waiting.
+            let _native = defer_native_delivery();
+            if !pending.completion.is_current() {
+                return Err(EINTR);
+            }
+            let remaining = &mut pending.packet[pending.received..];
+            syscall_errno(syscall::raw_syscall4(
+                syscall::SyscallNumber::StreamRead,
+                pending.completion.handle.lower_handle,
+                remaining.as_mut_ptr() as u64,
+                remaining.len() as u64,
+                mnu_abi::STREAM_IO_TRY,
+            ))
+        };
+        // A signal handler can fork during the initial nonblocking read too.
+        // Its copied result does not describe a completion owned by the child.
+        if !pending.completion.is_current() {
+            return Err(EINTR);
+        }
+        match result {
+            Ok(count) if count != 0 && count <= available as u64 => {
                 pending.received += count as usize;
                 if pending.received == pending.packet.len() {
                     return wire::decode_completion(&pending.packet)
@@ -127,7 +143,13 @@ fn wait(
                     interests: syscall::HANDLE_SIGNAL_READABLE | syscall::HANDLE_SIGNAL_PEER_CLOSED,
                     ..Default::default()
                 }];
-                wait_for_multiplex(&mut item, syscall::HANDLE_WAIT_INFINITE, control, caught)?;
+                wait_for_multiplex_while(
+                    &mut item,
+                    syscall::HANDLE_WAIT_INFINITE,
+                    control,
+                    caught,
+                    || pending.completion.is_current(),
+                )?;
             }
             Err(error) => return Err(error),
         }

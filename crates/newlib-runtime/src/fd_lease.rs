@@ -47,12 +47,23 @@ impl RestoreReferences {
 pub(super) struct Lease {
     entry: FdEntry,
     pin: Option<Pin>,
+    // A private operation reference is never inherited. Its copied guard can
+    // resume after fork inside a returning handler, but must not release a pin
+    // or native label which child startup has discarded and possibly reused.
+    private_epoch: Option<u64>,
     // Fork discard attributes the pin to the acquiring runtime thread. Do not
     // let an operation's destructor migrate to a different surviving thread.
     _thread: core::marker::PhantomData<*mut ()>,
 }
 
 impl Lease {
+    /// A private reference copied across fork is invalid even if its old
+    /// numeric slot is occupied again. Check before dispatch and after upcalls.
+    pub(super) fn is_current(&self) -> bool {
+        self.private_epoch
+            .is_none_or(|epoch| epoch == FORK_EPOCH.load(Ordering::Acquire))
+    }
+
     /// Own a fresh native reference without installing a POSIX descriptor.
     /// Preparation must defer native delivery until the lease is published
     /// in a callback resource scope, as for ordinary FD creation.
@@ -64,6 +75,7 @@ impl Lease {
             Ok(pin) => Ok(Self {
                 entry,
                 pin: Some(pin),
+                private_epoch: Some(FORK_EPOCH.load(Ordering::Acquire)),
                 _thread: core::marker::PhantomData,
             }),
             Err(error) => {
@@ -93,6 +105,7 @@ impl Lease {
         Ok(Self {
             entry,
             pin,
+            private_epoch: None,
             _thread: core::marker::PhantomData,
         })
     }
@@ -109,6 +122,9 @@ impl core::ops::Deref for Lease {
 impl Drop for Lease {
     fn drop(&mut self) {
         if let Some(pin) = self.pin.take() {
+            if !self.is_current() {
+                return;
+            }
             let close = BORROWS.lock().release(pin);
             if close {
                 close_object_handle(self.entry.handle.lower_handle as u32);

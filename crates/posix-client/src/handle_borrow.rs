@@ -7,6 +7,7 @@ struct Slot {
     readers: usize,
     additional_owners: usize,
     retired: bool,
+    private: bool,
 }
 
 /// A single-use pin. Only the issuing book may release it.
@@ -52,6 +53,7 @@ impl<const N: usize> Book<N> {
                 readers: 0,
                 additional_owners: 0,
                 retired: false,
+                private: false,
             }; N],
             groups: [Group::EMPTY; N],
         }
@@ -78,7 +80,9 @@ impl<const N: usize> Book<N> {
     /// Adopt a freshly received private reference with no descriptor owner.
     /// Its single pin owns disposal from admission onward. The caller must
     /// supply a fresh native label and close it itself if admission fails.
-    /// Fork discard can then release a vanished thread's private reference.
+    /// Private pins never cross fork, including the surviving thread's pins.
+    /// The caller must invalidate their copied guards before child discard;
+    /// releasing one of those old pins afterwards would address a reused slot.
     pub fn pin_private(&mut self, label: u64, owner: u64) -> Result<Pin, PinError> {
         if owner == 0 {
             return Err(PinError::InvalidOwner);
@@ -93,6 +97,7 @@ impl<const N: usize> Book<N> {
         }
         let pin = self.pin_owned(label, owner)?;
         self.slots[index].retired = true;
+        self.slots[index].private = true;
         Ok(pin)
     }
 
@@ -133,8 +138,8 @@ impl<const N: usize> Book<N> {
             .any(|group| group.label != 0 && (group.owner == 0 || group.owner != owner))
     }
 
-    /// A retired reference with no surviving operation has no owner in the
-    /// child. While the caller freezes this book and the FD table, omit it
+    /// Private references, and retired references with no surviving operation,
+    /// have no owner in the child. Freeze this book and the FD table and omit them
     /// from explicit native inheritance instead of requesting TRANSFER for a
     /// resource which the child would immediately discard anyway.
     pub fn discarded_by_fork(&self, label: u64, owner: u64) -> bool {
@@ -149,17 +154,19 @@ impl<const N: usize> Book<N> {
             return false;
         };
         slot.retired
-            && !self
-                .groups
-                .iter()
-                .any(|group| group.label == label && group.owner == owner)
+            && (slot.private
+                || !self
+                    .groups
+                    .iter()
+                    .any(|group| group.label == label && group.owner == owner))
     }
 
     /// Child-only transition after VM capture, with the FD table and this book
     /// frozen. Only `owner` resumes in the child. Discard all other operation
-    /// pins, including unattributed ones, but preserve every descriptor owner
-    /// and the survivor's pins. Never run this on the parent's book or release
-    /// a discarded Pin later: its owning stack must not resume in this image.
+    /// pins, including unattributed ones, and all private pins. Preserve every
+    /// descriptor owner and the survivor's ordinary pins. Never run this on
+    /// the parent's book or release a discarded Pin later: surviving private
+    /// guards must recognize their invalidation without touching this book.
     ///
     /// `close` receives each retired native label whose last pin disappeared,
     /// once. It must perform only native reference disposal, not application
@@ -174,11 +181,10 @@ impl<const N: usize> Book<N> {
         }
         // Remove by key search rather than advancing an index: back-shift
         // deletion can move a wrapped bucket behind the previous cursor.
-        while let Some(index) = self
-            .groups
-            .iter()
-            .position(|group| group.label != 0 && group.owner != owner)
-        {
+        while let Some(index) = self.groups.iter().position(|group| {
+            group.label != 0
+                && (group.owner != owner || self.slots[group.label as usize - 1].private)
+        }) {
             let group = self.groups[index];
             self.slots[group.label as usize - 1].readers -= group.readers;
             self.remove_group(index);
@@ -188,6 +194,7 @@ impl<const N: usize> Book<N> {
                 // Commit before disposal. Re-entry after a non-returning
                 // disposal failure must not close a reused label twice.
                 slot.retired = false;
+                slot.private = false;
                 close(index as u64 + 1);
             }
         }
@@ -273,6 +280,7 @@ impl<const N: usize> Book<N> {
         slot.readers -= 1;
         if slot.readers == 0 && slot.retired {
             slot.retired = false;
+            slot.private = false;
             true
         } else {
             false
