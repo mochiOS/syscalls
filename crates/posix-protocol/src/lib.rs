@@ -669,6 +669,10 @@ pub const PTY_CONTROL_GET_SLAVE_LOCK: u64 = 0x5054_5900_0000_000c;
 pub mod pty_name;
 /// Read-only query namespace; never accepted as a mutation control.
 pub const PTY_QUERY_READ_SETTINGS: u64 = 0x5054_5951_0000_0001;
+/// Empty input, TERMINAL_ATTRIBUTES_LEN reply, native READ authority.
+pub const PTY_QUERY_ATTRIBUTES: u64 = 0x5054_5951_0000_0002;
+/// Empty input, TERMINAL_WINDOW_SIZE_LEN reply, native READ authority.
+pub const PTY_QUERY_WINDOW_SIZE: u64 = 0x5054_5951_0000_0003;
 pub const TERMINAL_READ_SETTINGS_LEN: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
