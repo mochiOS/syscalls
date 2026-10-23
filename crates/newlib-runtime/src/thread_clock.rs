@@ -161,6 +161,15 @@ pub(super) fn resolution(id: u64, output: *mut Timespec) -> Result<c_int, c_int>
     Ok(0)
 }
 
+pub(super) fn nanoseconds(id: u64) -> Result<u128, c_int> {
+    let mut value = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    read(id, &mut value)?;
+    Ok(value.tv_sec as u128 * 1_000_000_000 + value.tv_nsec as u128)
+}
+
 /// The local clock ID grants no authority. Pin and explicitly transfer a
 /// rights-reduced reference to select its native thread during timer creation.
 pub(super) fn timer_target(id: u64) -> Result<(thread_reference::Reference, u64), c_int> {

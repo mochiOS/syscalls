@@ -7868,6 +7868,9 @@ pub unsafe extern "C" fn clock_nanosleep(
         if let Some(process) = cpu_sleep::target(clock_id) {
             return cpu_sleep::sleep(process, flags, request, remaining);
         }
+        if thread_clock::is_id(clock_id) {
+            return cpu_sleep::sleep_thread(clock_id, flags, request, remaining);
+        }
         let clock_id = c_int::try_from(clock_id).map_err(|_| EINVAL)?;
         let spec = ClockSleep::parse(clock_id, flags, request.tv_sec, request.tv_nsec)?;
         if !spec.absolute && spec.nanoseconds == 0 {

@@ -53,6 +53,15 @@ pub fn decode_request(input: &[u8]) -> Result<Request, ProtocolError> {
     Ok(request)
 }
 
+/// Thread selection travels only in an attachment. The process field is zero.
+pub fn decode_thread_request(input: &[u8]) -> Result<Request, ProtocolError> {
+    let request = decode_request(input)?;
+    if request.process != 0 {
+        return Err(invalid());
+    }
+    Ok(request)
+}
+
 pub fn encode_reply(deadline: u128, out: &mut [u8]) -> Result<(), ProtocolError> {
     let out = out
         .get_mut(..REPLY_LEN)
