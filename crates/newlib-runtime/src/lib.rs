@@ -2967,6 +2967,14 @@ fn execve_with_launch_context(
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> Result<(), c_int> {
+    io_resources::with(|| Ok(()), |_| execve_with_launch_context_owned(path, argv, envp))
+}
+
+fn execve_with_launch_context_owned(
+    path: *const c_char,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> Result<(), c_int> {
     let (_, control) = register_current_thread().ok_or(EAGAIN)?;
     let delivery = mochios_posix_client::upcall_guard::Guard::enter(&control.native_delivery_defer)
         .ok_or(EOVERFLOW)?;

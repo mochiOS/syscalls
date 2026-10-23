@@ -101,6 +101,12 @@ fn execute<'a, R, const SIZE: usize>(
 }
 
 pub(super) fn ftruncate(fd: c_int, length: u64) -> Result<c_int, c_int> {
+    // Publish an operation owner before acquiring a source lease. The inner
+    // scope still owns the lease and replay state once preparation succeeds.
+    io_resources::with(|| Ok(()), |_| ftruncate_prepared(fd, length))
+}
+
+fn ftruncate_prepared(fd: c_int, length: u64) -> Result<c_int, c_int> {
     let (_, control) = register_current_thread().ok_or(EAGAIN)?;
     let native = delivery(control);
     // The lease cannot exist across an application callback until its pinned
@@ -158,6 +164,10 @@ pub(super) fn ftruncate(fd: c_int, length: u64) -> Result<c_int, c_int> {
 }
 
 pub(super) fn truncate(path: *const c_char, length: u64) -> Result<c_int, c_int> {
+    io_resources::with(|| Ok(()), |_| truncate_prepared(path, length))
+}
+
+fn truncate_prepared(path: *const c_char, length: u64) -> Result<c_int, c_int> {
     let (_, control) = register_current_thread().ok_or(EAGAIN)?;
     let native = delivery(control);
     let client = posix_client().map_err(map_posix_client_error)?;
@@ -240,6 +250,19 @@ pub(super) fn open_for_spawn(
 }
 
 fn open_in_slot(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: c_int,
+    mode: c_int,
+    target: Option<c_int>,
+    handoff: Option<&mut dyn FnMut(c_int) -> Result<(), c_int>>,
+) -> Result<c_int, c_int> {
+    io_resources::with(|| Ok(()), |_| {
+        open_prepared(dirfd, path, flags, mode, target, handoff)
+    })
+}
+
+fn open_prepared(
     dirfd: c_int,
     path: *const c_char,
     flags: c_int,
