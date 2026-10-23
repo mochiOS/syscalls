@@ -354,6 +354,7 @@ pub const OP_THREAD_CPU_SLEEP: u16 = 115;
 /// Wait for one process-owned thread callback notification; no code on wire.
 pub const OP_TIMER_THREAD_WAIT: u16 = 116;
 pub mod timer_callback;
+pub mod record_lock;
 pub mod cpu_sleep;
 pub mod process_clock;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
