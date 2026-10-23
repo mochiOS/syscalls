@@ -707,6 +707,7 @@ struct RuntimeState {
     executable: *const c_char,
     fds: FdTable<FdObject>,
     named_semaphores: mochios_posix_client::named_semaphore::Mappings<u32, 128>,
+    timer_values: mochios_posix_client::timer_value::Registry<usize, 128>,
     heap: HeapState,
 }
 
@@ -723,6 +724,7 @@ impl RuntimeState {
             executable: ptr::null(),
             fds: FdTable::new(),
             named_semaphores: mochios_posix_client::named_semaphore::Mappings::new(),
+            timer_values: mochios_posix_client::timer_value::Registry::new(),
             heap: HeapState::new(),
         }
     }
@@ -3157,6 +3159,7 @@ fn clone_registered_process_owned(
             startup.fail(error);
         }
         state().fds.clear_reservations();
+        state().timer_values.clear_for_fork();
         // The new native thread has no copied upcall target.
         for other in &THREADS {
             if !ptr::eq(other, thread_control) && other.state.load(Ordering::Acquire) != THREAD_FREE

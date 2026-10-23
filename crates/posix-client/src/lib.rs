@@ -57,6 +57,7 @@ pub mod thread;
 pub mod thread_stack;
 pub mod time;
 pub mod process_timer;
+pub mod timer_value;
 pub mod wait;
 
 pub trait Transport {
