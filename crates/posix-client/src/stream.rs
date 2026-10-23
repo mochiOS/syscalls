@@ -1,6 +1,6 @@
 /// Atomic pipe write size advertised by the newlib headers. This is POSIX
 /// policy, not a constant interpreted by the kernel stream mechanism.
-pub const PIPE_BUF: usize = 512;
+pub const PIPE_BUF: usize = mochios_posix_protocol::PIPE_BUF;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum WriteError<E> {

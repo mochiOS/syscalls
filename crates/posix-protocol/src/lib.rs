@@ -9,6 +9,9 @@ pub const MAGIC: [u8; 4] = *b"POSX";
 pub const VERSION: u16 = 1;
 pub const HEADER_LEN: usize = 32;
 pub const MAX_MESSAGE_LEN: usize = 64 * 1024;
+/// POSIX pipe/FIFO atomic write limit, shared by client and resource owner.
+/// Native stream mechanisms do not interpret this userspace policy.
+pub const PIPE_BUF: usize = 512;
 pub mod named_semaphore;
 pub mod shared_memory;
 pub mod socket;
