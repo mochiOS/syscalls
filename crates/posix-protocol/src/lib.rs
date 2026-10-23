@@ -178,8 +178,6 @@ pub const OP_SET_UID: u16 = 12;
 pub const OP_SET_GID: u16 = 13;
 pub const OP_FTRUNCATE: u16 = 14;
 pub const OP_FSYNC: u16 = 15;
-pub const OP_FGETFL: u16 = 16;
-pub const OP_FSETFL: u16 = 17;
 pub const OP_MKDIR_AT: u16 = 18;
 pub const OP_UNLINK_AT: u16 = 19;
 pub const OP_RENAME_AT: u16 = 20;
@@ -293,9 +291,6 @@ pub const OP_SOCKET_RECEIVE_WAIT: u16 = 88;
 /// endpoint. It permits transport only: every record request must separately
 /// attach a socket with the required data rights and a RAM buffer.
 pub const OP_SOCKET_RECORD_ENDPOINT: u16 = 89;
-/// Atomically updates selected mutable flags of one explicitly attached OFD.
-/// Requires CONTROL|TRANSFER. FILE_FLAGS_UPDATE_PAYLOAD_LEN input; empty reply.
-pub const OP_FUPDATEFL: u16 = 90;
 /// Empty request and no objects; returns one owner-scoped fork preparation token.
 pub const OP_FORK_PREPARE: u16 = 91;
 /// One token and one WAIT|SIGNAL ProcessHandle. The creator keeps the child
@@ -366,6 +361,22 @@ pub const OP_THREAD_WAIT_INTERRUPT: u16 = 120;
 pub const OP_PATH_LIMITS_AT: u16 = 121;
 /// StatAtRequest with flags zero, no returned Handle; terminal_limits reply.
 pub const OP_TERMINAL_LIMITS_AT: u16 = 122;
+
+/// Recognize assigned requests before operation-specific attachment admission.
+/// Holes are unassigned, not aliases or compatibility operations. OP_STATUS is
+/// a response and must never enter a request handler.
+pub const fn is_request_opcode(opcode: u16) -> bool {
+    matches!(
+        opcode,
+        OP_PING..=OP_FSYNC
+            | OP_MKDIR_AT..=OP_FCHOWN
+            | OP_WAIT_CHILD..=OP_SIGNAL_PENDING
+            | OP_SIGNAL_THREAD_REGISTER..=OP_SIGNAL_THREAD_SEND
+            | OP_WAITED_CHILD_CPU_USAGE..=OP_SIGNAL_THREAD_FAULT
+            | OP_SIGNAL_DELIVERY_ORIGIN..=OP_SOCKET_RECORD_ENDPOINT
+            | OP_FORK_PREPARE..=OP_TERMINAL_LIMITS_AT
+    )
+}
 pub const THREAD_WAIT_INTERRUPT_RIGHTS: u64 =
     mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_TRANSFER;
 pub mod record_lock_wait;
@@ -497,7 +508,7 @@ pub const FILE_FLAGS_UPDATE_PAYLOAD_LEN: usize = 8;
 pub const fn file_mutation_rights(opcode: u16) -> Option<u64> {
     let right = match opcode {
         OP_FTRUNCATE => mnu_abi::HANDLE_RIGHT_WRITE,
-        OP_FCHMOD | OP_FCHOWN | OP_FSETFL | OP_FUPDATEFL | OP_FUTIMENS => mnu_abi::HANDLE_RIGHT_CONTROL,
+        OP_FCHMOD | OP_FCHOWN | OP_FUTIMENS => mnu_abi::HANDLE_RIGHT_CONTROL,
         _ => return None,
     };
     Some(right | mnu_abi::HANDLE_RIGHT_TRANSFER)
