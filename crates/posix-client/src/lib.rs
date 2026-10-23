@@ -855,6 +855,32 @@ impl<T: Transport> Client<T> {
 }
 
 impl<T: ObjectTransport> Client<T> {
+    /// Own one master of a new, locked PTY. The caller must grant/unlock its
+    /// named slave before opening it. Never return an unrequested slave.
+    pub fn open_pty_master(
+        &self,
+    ) -> Result<ObjectHandleAttachment<T::Handle>, ClientError<T::Error>> {
+        let mut handles = ObjectHandles::new();
+        let result = self.request_with_handles(
+            protocol::OP_PTY_OPEN_MASTER,
+            0,
+            &[],
+            &mut [],
+            &mut handles,
+        );
+        if result.is_ok()
+            && handles.len() == 1
+            && let Some(master) = handles.get(0)
+            && master.handle != T::Handle::default()
+        {
+            handles.clear();
+            return Ok(master);
+        }
+        self.discard_received_handles(&mut handles, &ObjectHandles::new());
+        result?;
+        Err(ClientError::MismatchedResponse)
+    }
+
     /// Returns ownership of two distinct valid endpoints. Failed or malformed
     /// replies release received references without replaying PTY creation.
     pub fn open_pty(&self) -> Result<PtyPair<T::Handle>, ClientError<T::Error>> {

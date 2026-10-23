@@ -49,6 +49,7 @@ mod canonical_path;
 mod pipe;
 mod pty_creation;
 mod terminal_lock;
+mod pty_master;
 mod vector_metadata;
 use vector_metadata::VectorMetadata;
 mod image_startup;
@@ -6226,6 +6227,11 @@ pub extern "C" fn tcflow(fd: c_int, action: c_int) -> c_int {
         },
     );
     result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_openpt(flags: c_int) -> c_int {
+    result_with_errno(pty_master::create(flags), -1)
 }
 
 #[unsafe(no_mangle)]

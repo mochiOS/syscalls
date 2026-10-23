@@ -329,6 +329,9 @@ pub const OP_CPU_TIMER_GET: u16 = 103;
 /// CpuClock selector followed by interval_timer::Value; previous Value reply.
 pub const OP_CPU_TIMER_SET: u16 = 104;
 pub mod interval_timer;
+/// Empty request, no attachments. Creates a locked PTY and returns exactly
+/// one master Handle. No slave open is published or retained.
+pub const OP_PTY_OPEN_MASTER: u16 = 105;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
