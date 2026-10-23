@@ -4437,40 +4437,47 @@ pub unsafe extern "C" fn writev(fd: c_int, iov: *const IoVec, iovcnt: c_int) -> 
         set_errno(EFAULT);
         return -1;
     }
-    let result = io_resources::with_initialized(
-        || {
-            Ok((
-                with_fd_entry(fd)?,
-                VectorMetadata::new(iovcnt as usize)?,
-                None::<VectorBuffer>,
-            ))
-        },
-        |(_, metadata, buffer)| {
-            let total = capture_vector_metadata(iov.cast(), iovcnt, metadata)?;
-            *buffer = Some(VectorBuffer::new(total)?);
-            Ok(())
-        },
-        |(entry, metadata, buffer)| {
-            mochios_posix_client::io_vector::write(
-                iovcnt as usize,
-                buffer.as_mut().unwrap().bytes(),
-                |index| metadata.get(index).1,
-                |index, bytes| {
-                    let (base, _) = metadata.get(index);
-                    user_copy::read(base.cast(), bytes)
-                },
-                |bytes| {
-                    syscall_write(**entry, bytes.as_ptr().cast(), bytes.len())
-                        .and_then(|count| usize::try_from(count).map_err(|_| EIO))
-                },
-            )
-            .map(|count| count as isize)
-            .map_err(|error| match error {
-                mochios_posix_client::io_vector::TransferError::InvalidResult => EIO,
-                mochios_posix_client::io_vector::TransferError::Io(errno) => errno,
-            })
-        },
-    );
+    // Only fully prepared FD pins and private buffers survive this snapshot.
+    let result = unsafe {
+        io_resources::with_initialized_fork_opaque(
+            || {
+                Ok((
+                    with_fd_entry(fd)?,
+                    VectorMetadata::new(iovcnt as usize)?,
+                    None::<VectorBuffer>,
+                ))
+            },
+            |(_, metadata, buffer)| {
+                let total = capture_vector_metadata(iov.cast(), iovcnt, metadata)?;
+                *buffer = Some(VectorBuffer::new(total)?);
+                Ok(())
+            },
+            |(entry, _, _)| matches!(
+                entry.handle.kind,
+                FdKind::ObjectStreamWrite | FdKind::ObjectSocket
+            ),
+            |(entry, metadata, buffer)| {
+                mochios_posix_client::io_vector::write(
+                    iovcnt as usize,
+                    buffer.as_mut().unwrap().bytes(),
+                    |index| metadata.get(index).1,
+                    |index, bytes| {
+                        let (base, _) = metadata.get(index);
+                        user_copy::read(base.cast(), bytes)
+                    },
+                    |bytes| {
+                        syscall_write(**entry, bytes.as_ptr().cast(), bytes.len())
+                            .and_then(|count| usize::try_from(count).map_err(|_| EIO))
+                    },
+                )
+                .map(|count| count as isize)
+                .map_err(|error| match error {
+                    mochios_posix_client::io_vector::TransferError::InvalidResult => EIO,
+                    mochios_posix_client::io_vector::TransferError::Io(errno) => errno,
+                })
+            },
+        )
+    };
     finish_io_cancellation(result_with_errno(result, -1))
 }
 
@@ -4602,40 +4609,47 @@ pub unsafe extern "C" fn readv(fd: c_int, iov: *const IoVecMut, iovcnt: c_int) -
         set_errno(EFAULT);
         return -1;
     }
-    let result = io_resources::with_initialized(
-        || {
-            Ok((
-                with_fd_entry(fd)?,
-                VectorMetadata::new(iovcnt as usize)?,
-                None::<VectorBuffer>,
-            ))
-        },
-        |(_, metadata, buffer)| {
-            let total = capture_vector_metadata(iov, iovcnt, metadata)?;
-            *buffer = Some(VectorBuffer::new(total)?);
-            Ok(())
-        },
-        |(entry, metadata, buffer)| {
-            mochios_posix_client::io_vector::read(
-                iovcnt as usize,
-                buffer.as_mut().unwrap().bytes(),
-                |index| metadata.get(index).1,
-                |index, bytes| {
-                    let (base, _) = metadata.get(index);
-                    user_copy::write(base.cast(), bytes)
-                },
-                |bytes| {
-                    syscall_read(**entry, bytes.as_mut_ptr().cast(), bytes.len())
-                        .and_then(|count| usize::try_from(count).map_err(|_| EIO))
-                },
-            )
-            .map(|count| count as isize)
-            .map_err(|error| match error {
-                mochios_posix_client::io_vector::TransferError::InvalidResult => EIO,
-                mochios_posix_client::io_vector::TransferError::Io(errno) => errno,
-            })
-        },
-    );
+    // Only fully prepared FD pins and private buffers survive this snapshot.
+    let result = unsafe {
+        io_resources::with_initialized_fork_opaque(
+            || {
+                Ok((
+                    with_fd_entry(fd)?,
+                    VectorMetadata::new(iovcnt as usize)?,
+                    None::<VectorBuffer>,
+                ))
+            },
+            |(_, metadata, buffer)| {
+                let total = capture_vector_metadata(iov, iovcnt, metadata)?;
+                *buffer = Some(VectorBuffer::new(total)?);
+                Ok(())
+            },
+            |(entry, _, _)| matches!(
+                entry.handle.kind,
+                FdKind::ObjectStreamRead | FdKind::ObjectSocket
+            ),
+            |(entry, metadata, buffer)| {
+                mochios_posix_client::io_vector::read(
+                    iovcnt as usize,
+                    buffer.as_mut().unwrap().bytes(),
+                    |index| metadata.get(index).1,
+                    |index, bytes| {
+                        let (base, _) = metadata.get(index);
+                        user_copy::write(base.cast(), bytes)
+                    },
+                    |bytes| {
+                        syscall_read(**entry, bytes.as_mut_ptr().cast(), bytes.len())
+                            .and_then(|count| usize::try_from(count).map_err(|_| EIO))
+                    },
+                )
+                .map(|count| count as isize)
+                .map_err(|error| match error {
+                    mochios_posix_client::io_vector::TransferError::InvalidResult => EIO,
+                    mochios_posix_client::io_vector::TransferError::Io(errno) => errno,
+                })
+            },
+        )
+    };
     finish_io_cancellation(result_with_errno(result, -1))
 }
 

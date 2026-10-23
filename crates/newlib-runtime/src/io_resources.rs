@@ -30,7 +30,22 @@ pub(super) unsafe fn with_fork_opaque<R, T: Copy>(
     allow: impl FnOnce(&R) -> bool,
     operation: impl FnOnce(&mut R) -> Result<T, c_int>,
 ) -> Result<T, c_int> {
-    with_policy(prepare, |_| Ok(()), operation, allow)
+    unsafe { with_initialized_fork_opaque(prepare, |_| Ok(()), allow, operation) }
+}
+
+/// Initialize and validate private buffers before publishing fork admission.
+///
+/// # Safety
+/// The same ownership contract as with_fork_opaque applies after initialize
+/// returns successfully. Preparation and initialization remain ordinary
+/// blockers; no partially initialized owner may be admitted.
+pub(super) unsafe fn with_initialized_fork_opaque<R, T: Copy>(
+    prepare: impl FnOnce() -> Result<R, c_int>,
+    initialize: impl FnOnce(&mut R) -> Result<(), c_int>,
+    allow: impl FnOnce(&R) -> bool,
+    operation: impl FnOnce(&mut R) -> Result<T, c_int>,
+) -> Result<T, c_int> {
+    with_policy(prepare, initialize, operation, allow)
 }
 
 fn with_policy<R, T: Copy>(
