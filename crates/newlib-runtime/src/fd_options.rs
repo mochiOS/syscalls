@@ -39,7 +39,8 @@ fn get_status_flags(entry: FdEntry) -> Result<c_int, c_int> {
     match entry.handle.kind {
         FdKind::ObjectSocket | FdKind::ObjectDatagram => socket::get_status_flags(entry),
         FdKind::ObjectSharedMemory => shared_memory::get_status_flags(entry),
-        FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory => {
+        FdKind::ObjectFile | FdKind::ObjectDirectory => file_description_flags::get(entry),
+        FdKind::ObjectSpecial => {
             let flags = posix_client()
                 .map_err(map_posix_client_error)?
                 .get_status_flags(ObjectHandleAttachment {
@@ -72,7 +73,8 @@ fn set_status_flags(entry: FdEntry, flags: c_int) -> Result<(), c_int> {
     match entry.handle.kind {
         FdKind::ObjectSocket | FdKind::ObjectDatagram => socket::set_status_flags(entry, flags),
         FdKind::ObjectSharedMemory => shared_memory::set_status_flags(entry, flags),
-        FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory => posix_client()
+        FdKind::ObjectFile | FdKind::ObjectDirectory => file_description_flags::set(entry, flags),
+        FdKind::ObjectSpecial => posix_client()
             .map_err(map_posix_client_error)?
             .set_status_flags(
                 ObjectHandleAttachment {
@@ -117,7 +119,11 @@ fn set_nonblocking(fd: c_int, enabled: bool) -> Result<c_int, c_int> {
                 FdKind::ObjectSharedMemory => {
                     shared_memory::update_status_flags(**entry, mask, flags)?
                 }
-                FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory => {
+                FdKind::ObjectFile | FdKind::ObjectDirectory => {
+                    let mask = mochios_filesystem_protocol::OPEN_STATUS_NONBLOCK;
+                    file_description_flags::update(**entry, mask, if enabled { mask } else { 0 })?;
+                }
+                FdKind::ObjectSpecial => {
                     posix_client()
                         .map_err(map_posix_client_error)?
                         .update_status_flags(

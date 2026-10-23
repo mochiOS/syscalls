@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod device_open;
+pub mod description_flags;
 pub mod device_metadata;
 pub mod device_registration;
 pub mod device_removal;
