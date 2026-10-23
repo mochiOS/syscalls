@@ -102,7 +102,7 @@ unsafe fn wait(pointer: *mut Semaphore, timeout: Option<(u64, *const Timespec)>)
     };
     let caught = control.nonrestart_signal_generation.load(Ordering::Acquire);
     // Incidental cancellation points inside a signal handler must not exit
-    // while token admission is in progress. Asynchronous cancel is unsupported.
+    // while token admission is in progress. Re-enable after releasing owners.
     let previous = control
         .cancel_state
         .swap(PTHREAD_CANCEL_DISABLE, Ordering::AcqRel);

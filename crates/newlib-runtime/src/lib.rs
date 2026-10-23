@@ -71,6 +71,7 @@ mod atfork;
 mod libc_lock;
 mod thread_lifecycle;
 mod thread_reference;
+mod cancellation;
 mod thread_clock;
 mod process_clock;
 mod thread_stack;
@@ -7566,6 +7567,7 @@ extern "C" fn posix_signal_upcall(
         // Keep the generic native notification responsive. The interrupted
         // operation must release its owned wait position before C can run.
     } else {
+        cancellation::test_async();
         if drain_pending_signals_with_context(&mut context, true).is_err() {
             process_exit(127);
         }
@@ -8910,8 +8912,9 @@ pub unsafe extern "C" fn _pthread_cleanup_push_defer(
     routine: Option<thread_cleanup::Routine>,
     argument: *mut c_void,
 ) {
-    // Asynchronous cancellation is not yet supported, so the saved type is
-    // currently deferred. Preserve it using the SDK context for future support.
+    // Save and link the context before changing type, without an async
+    // notification observing a half-published cleanup record.
+    let _delivery = defer_native_delivery();
     unsafe { _pthread_cleanup_push(context, routine, argument) };
     let (_, control) = register_current_thread().unwrap_or_else(|| process_exit(127));
     control.cancel_type.store(PTHREAD_CANCEL_DEFERRED, Ordering::Release);
@@ -8923,6 +8926,7 @@ pub unsafe extern "C" fn _pthread_cleanup_pop_restore(context: *mut thread_clean
     if let Some(previous) = unsafe { thread_cleanup::pop(&control.cleanup_head, context, execute != 0) } {
         control.cancel_type.store(previous as u32, Ordering::Release);
     }
+    cancellation::test_async();
 }
 
 fn update_cancel_control(
@@ -8958,33 +8962,50 @@ pub unsafe extern "C" fn pthread_setcancelstate(state: c_int, old_state: *mut c_
         Some(current) => current,
         None => return EAGAIN,
     };
-    // Only deferred cancellation is currently supported. Re-enabling it is
-    // not a cancellation point: retain the request until an explicit point.
-    update_cancel_control(control, &control.cancel_state, state as u32, old_state)
+    let result = update_cancel_control(control, &control.cancel_state, state as u32, old_state);
+    if result == 0 {
+        cancellation::test_async();
+    }
+    result
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_setcanceltype(cancel_type: c_int, old_type: *mut c_int) -> c_int {
-    if cancel_type as u32 == PTHREAD_CANCEL_ASYNCHRONOUS {
-        return ENOSYS;
-    }
-    if cancel_type as u32 != PTHREAD_CANCEL_DEFERRED {
+    if !matches!(
+        cancel_type as u32,
+        PTHREAD_CANCEL_DEFERRED | PTHREAD_CANCEL_ASYNCHRONOUS
+    ) {
         return EINVAL;
     }
     let (_, control) = match register_current_thread() {
         Some(current) => current,
         None => return EAGAIN,
     };
-    update_cancel_control(control, &control.cancel_type, PTHREAD_CANCEL_DEFERRED, old_type)
+    if cancel_type as u32 == PTHREAD_CANCEL_ASYNCHRONOUS
+        && control.signal_upcall_stack.load(Ordering::Acquire) == 0
+    {
+        return ENOTSUP;
+    }
+    let result = update_cancel_control(control, &control.cancel_type, cancel_type as u32, old_type);
+    if result == 0 {
+        cancellation::test_async();
+    }
+    result
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn pthread_cancel(thread: Pthread) -> c_int {
-    thread_reference::with_live_token(thread, |control| {
+    let result = thread_reference::with_live_token(thread, |control| {
         control.cancel_pending.store(1, Ordering::Release);
         notify_thread_waiter(control);
         native_mutex_wake_all(&control.state);
-    }).err().unwrap_or(0)
+        cancellation::notify_async(control)
+    })
+    .and_then(|result| result)
+    .err()
+    .unwrap_or(0);
+    cancellation::test_async();
+    result
 }
 
 fn notify_thread_waiter(control: &ThreadControl) {
