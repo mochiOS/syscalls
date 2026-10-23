@@ -1229,6 +1229,10 @@ fn reserve_thread_control()
 enum ThreadReclamation {
     ThreadExit,
     ForkChild,
+    // The sibling may have been interrupted in a private libc cache update.
+    // Preserve its copied memory as part of the inherited VM until exec/exit,
+    // without following private pointers or running its destructors.
+    ForkLive,
 }
 
 fn release_thread_control(control: &ThreadControl) {
@@ -1236,19 +1240,17 @@ fn release_thread_control(control: &ThreadControl) {
 }
 
 fn discard_fork_thread_control(control: &ThreadControl) {
-    // A live sibling may have private libc caches mid-update. Keep refusing
-    // multithreaded fork until that case has a separate safe reclamation path.
-    if !matches!(
-        control.state.load(Ordering::Acquire),
-        THREAD_EXITED | THREAD_REAPING
-    ) {
-        process_exit(127);
-    }
-    reclaim_thread_control(control, ThreadReclamation::ForkChild);
+    let reason = match control.state.load(Ordering::Acquire) {
+        THREAD_EXITED | THREAD_REAPING => ThreadReclamation::ForkChild,
+        THREAD_RUNNING => ThreadReclamation::ForkLive,
+        _ => process_exit(127),
+    };
+    reclaim_thread_control(control, reason);
 }
 
 fn reclaim_thread_control(control: &ThreadControl, reason: ThreadReclamation) {
     let _reclamation = thread_lifecycle::mutate();
+    let keep_private_memory = matches!(reason, ThreadReclamation::ForkLive);
     // Never follow a resource link after its owner's stack has been reclaimed.
     if !control.callback_resources.reset_empty() {
         process_exit(127);
@@ -1260,7 +1262,7 @@ fn reclaim_thread_control(control: &ThreadControl, reason: ThreadReclamation) {
     thread_reference::replace(control, 0);
     let signal_stack = control.signal_upcall_stack.swap(0, Ordering::Relaxed);
     let signal_stack_size = control.signal_upcall_stack_size.swap(0, Ordering::Relaxed);
-    if signal_stack != 0 && signal_stack_size != 0 {
+    if !keep_private_memory && signal_stack != 0 && signal_stack_size != 0 {
         let _ = syscall::raw_syscall2(
             syscall::SyscallNumber::MemoryUnmap,
             signal_stack as u64,
@@ -1269,7 +1271,7 @@ fn reclaim_thread_control(control: &ThreadControl, reason: ThreadReclamation) {
     }
     let reent = control.reent.swap(0, Ordering::Relaxed);
     let reent_mapping_size = control.reent_mapping_size.swap(0, Ordering::Relaxed);
-    if reent != 0 && reent_mapping_size != 0 {
+    if !keep_private_memory && reent != 0 && reent_mapping_size != 0 {
         // Normal reent destruction may flush streams. Internal reclamation
         // must not abandon its owned TCB/mappings at a cancellation point;
         // fork-child discard suppresses those callbacks entirely.
@@ -1281,6 +1283,7 @@ fn reclaim_thread_control(control: &ThreadControl, reason: ThreadReclamation) {
             match reason {
                 ThreadReclamation::ThreadExit => __mochios_reent_destroy(reent as *mut c_void),
                 ThreadReclamation::ForkChild => __mochios_reent_discard(reent as *mut c_void),
+                ThreadReclamation::ForkLive => unreachable!(),
             }
         }
         if let (Some((_, caller)), Some(previous)) = (caller, previous) {
@@ -1295,7 +1298,7 @@ fn reclaim_thread_control(control: &ThreadControl, reason: ThreadReclamation) {
     let stack_base = control.stack_base.swap(0, Ordering::Relaxed);
     let stack_size = control.stack_size.swap(0, Ordering::Relaxed);
     let owns_stack = control.owns_stack.swap(0, Ordering::Relaxed) != 0;
-    if owns_stack && stack_base != 0 && stack_size != 0 {
+    if !keep_private_memory && owns_stack && stack_base != 0 && stack_size != 0 {
         let _ = syscall::raw_syscall2(
             syscall::SyscallNumber::MemoryUnmap,
             stack_base as u64,
@@ -3036,15 +3039,12 @@ fn clone_registered_process_owned(
     // Discovery uses only fixed stack buffers/native mapping, never malloc.
     // Keep allocator -> POLICY -> STATE order, not POLICY -> allocator.
     let mut policy_guard = resource_policy::freeze_for_clone();
-    // VM capture, pinned Handle grants and prepared POSIX policy do not yet
-    // safely discard sibling libc state. Keep this temporary live-pthread
-    // restriction here, not in the kernel's generic VM primitive.
+    // Lifecycle/resource/libc gates stabilize shared runtime state. A running
+    // sibling's opaque private memory is retained in the child, never walked.
+    // An unpublished startup still cannot provide a complete native binding.
     if THREADS.iter().any(|other| {
         !ptr::eq(other, thread_control)
-            && matches!(
-                other.state.load(Ordering::Acquire),
-                THREAD_STARTING | THREAD_RUNNING
-            )
+            && other.state.load(Ordering::Acquire) == THREAD_STARTING
     }) {
         return Err(EAGAIN);
     }
