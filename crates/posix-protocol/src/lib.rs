@@ -364,6 +364,8 @@ pub const OP_THREAD_WAIT_INTERRUPT: u16 = 120;
 /// StatAtRequest with zero flags; returns filesystem object_limits::Limits.
 /// Path credentials come from the authenticated session, with retained anchors.
 pub const OP_PATH_LIMITS_AT: u16 = 121;
+/// StatAtRequest with flags zero, no returned Handle; terminal_limits reply.
+pub const OP_TERMINAL_LIMITS_AT: u16 = 122;
 pub const THREAD_WAIT_INTERRUPT_RIGHTS: u64 =
     mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_TRANSFER;
 pub mod record_lock_wait;

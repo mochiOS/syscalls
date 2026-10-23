@@ -7,6 +7,38 @@ impl<T: ObjectTransport> Client<T> {
         base: StatAtBase<T::Handle>,
         path: impl AsRef<[u8]>,
     ) -> Result<object_limits::Limits, ClientError<T::Error>> {
+        let mut response = [0; object_limits::RESPONSE_LEN];
+        let length =
+            self.configuration_at(base, path, protocol::OP_PATH_LIMITS_AT, &mut response)?;
+        response
+            .get(..length)
+            .and_then(object_limits::Limits::decode)
+            .ok_or(ClientError::MismatchedResponse)
+    }
+
+    pub fn terminal_limits_at(
+        &self,
+        base: StatAtBase<T::Handle>,
+        path: impl AsRef<[u8]>,
+    ) -> Result<protocol::terminal_limits::Limits, ClientError<T::Error>> {
+        let mut response = [0; protocol::terminal_limits::RESPONSE_LEN];
+        let length =
+            self.configuration_at(base, path, protocol::OP_TERMINAL_LIMITS_AT, &mut response)?;
+        protocol::terminal_limits::Limits::decode(
+            response
+                .get(..length)
+                .ok_or(ClientError::MismatchedResponse)?,
+        )
+        .map_err(ClientError::Protocol)
+    }
+
+    fn configuration_at(
+        &self,
+        base: StatAtBase<T::Handle>,
+        path: impl AsRef<[u8]>,
+        opcode: u16,
+        response: &mut [u8],
+    ) -> Result<usize, ClientError<T::Error>> {
         let (base, directory) = match base {
             StatAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
             StatAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
@@ -28,16 +60,6 @@ impl<T: ObjectTransport> Client<T> {
                 .push(directory)
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
-        let mut response = [0; object_limits::RESPONSE_LEN];
-        let length = self.request_without_reply_handles(
-            protocol::OP_PATH_LIMITS_AT,
-            &payload[..length],
-            &mut response,
-            &mut handles,
-        )?;
-        response
-            .get(..length)
-            .and_then(object_limits::Limits::decode)
-            .ok_or(ClientError::MismatchedResponse)
+        self.request_without_reply_handles(opcode, &payload[..length], response, &mut handles)
     }
 }

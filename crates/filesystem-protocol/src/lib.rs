@@ -148,6 +148,10 @@ pub const OP_DEVICE_NODE_SET_ATTRIBUTES_IF_SAME: u16 = 49;
 /// root/base flags only, authenticated credentials and ordered directory Handles.
 /// Does not open the target or require target data-read permission.
 pub const OP_OBJECT_LIMITS_AT: u16 = 50;
+/// Observe an existing device without opening its data. STAT_AT root/base flags
+/// and ordered directory attachments; authenticated credentials wrap a fixed
+/// device_observation::Request followed by raw pathname bytes. Reply: bytes only.
+pub const OP_DEVICE_OBSERVATION_AT: u16 = 51;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const OPEN_STATUS_APPEND: u32 = 1 << 0;

@@ -26,11 +26,22 @@ fn terminal_value(entry: FdEntry, name: c_int) -> Result<CLong, c_int> {
         return Err(EIO);
     }
     let value = Limits::decode(&bytes).map_err(|_| EIO)?;
+    terminal_configuration_value(value, name)
+}
+
+pub(super) fn terminal_selector(name: c_int) -> bool {
+    matches!(name, PC_MAX_CANON | PC_MAX_INPUT | PC_VDISABLE)
+}
+
+pub(super) fn terminal_configuration_value(
+    value: posix_protocol::terminal_limits::Limits,
+    name: c_int,
+) -> Result<CLong, c_int> {
     Ok(match name {
         PC_MAX_CANON => value.canonical_bytes.into(),
         PC_MAX_INPUT => value.input_bytes.into(),
         PC_VDISABLE => value.disabled_character.into(),
-        _ => unreachable!(),
+        _ => return Err(EINVAL),
     })
 }
 
