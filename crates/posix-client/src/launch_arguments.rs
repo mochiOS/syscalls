@@ -4,6 +4,19 @@ extern crate alloc;
 
 use alloc::{string::String, vec, vec::Vec};
 
+/// Launcher item containing `NAME=value`, consumed by this userspace encoder
+/// when constructing the POSIX startup image, never parsed by the kernel.
+pub const ENVIRONMENT_PREFIX: &str = "__MNU_EXEC_ENV=";
+
+/// Launcher item containing decimal `key:source_handle:rights`. This userspace
+/// convention becomes a binary native HandleGrant; the kernel then enforces
+/// source ownership, TRANSFER authority and rights attenuation on that grant.
+pub const INHERITED_HANDLE_PREFIX: &str = "__MNU_EXEC_INHERIT_HANDLE=";
+
+/// Launcher item containing decimal `key:value`. Only the binary opaque pair
+/// is supplied to the native creation mechanism.
+pub const INHERITED_VALUE_PREFIX: &str = "__MNU_EXEC_INHERIT_VALUE=";
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum EncodeError {
     TooLarge,
@@ -21,7 +34,6 @@ pub fn encode_native_launch(
     items: &[String],
     random: [u8; 16],
 ) -> Result<Vec<u8>, EncodeError> {
-    use mnu_abi::exec::{ENVIRONMENT_PREFIX, INHERITED_HANDLE_PREFIX, INHERITED_VALUE_PREFIX};
     use mnu_abi::process_create::{self, HandleGrant, Value};
 
     if argument_zero.is_empty() || argument_zero.as_bytes().contains(&0) {
