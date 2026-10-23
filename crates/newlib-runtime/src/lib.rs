@@ -23,6 +23,7 @@ mod socket_receive_address;
 mod time_memory;
 mod interval_timer;
 mod process_timer;
+mod timer_callbacks;
 mod multiplex_memory;
 #[cfg(feature = "trace-io")]
 mod io_trace;
@@ -726,6 +727,7 @@ struct RuntimeState {
     named_semaphores: mochios_posix_client::named_semaphore::Mappings<u32, 128>,
     timer_values: mochios_posix_client::timer_value::Registry<usize, 128>,
     timer_cleanup: process_timer::CleanupBook,
+    timer_callbacks: timer_callbacks::Book,
     thread_clocks: mochios_posix_client::thread_clock::Registry<
         { mochios_posix_client::thread::MAX_THREADS },
     >,
@@ -747,6 +749,7 @@ impl RuntimeState {
             named_semaphores: mochios_posix_client::named_semaphore::Mappings::new(),
             timer_values: mochios_posix_client::timer_value::Registry::new(),
             timer_cleanup: process_timer::CleanupBook::new(),
+            timer_callbacks: timer_callbacks::Book::new(),
             thread_clocks: mochios_posix_client::thread_clock::Registry::new(),
             heap: HeapState::new(),
         }
@@ -1714,6 +1717,7 @@ fn finish_thread(control: &ThreadControl, result: *mut c_void) -> ! {
     }
     notify_join_waiter(control);
     native_mutex_wake_all(&control.state);
+    timer_callbacks::finish_if_last_application();
     let _ = syscall::raw_syscall1(syscall::SyscallNumber::ThreadExit, 0);
     loop {
         core::hint::spin_loop();
@@ -3277,6 +3281,8 @@ fn clone_registered_process_owned(
         state().fds.clear_reservations();
         state().timer_values.clear_for_fork();
         state().timer_cleanup = process_timer::CleanupBook::new();
+        state().timer_callbacks.clear_for_fork();
+        timer_callbacks::reset_dispatcher_for_fork();
         state().thread_clocks.clear_for_fork();
         // The new native thread has no copied upcall target.
         for other in &THREADS {

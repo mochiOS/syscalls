@@ -1,7 +1,7 @@
 //! POSIX timer C boundary. Only local notification cookies enter IPC; C
 //! records are imported/exported using checked copies, never raw references.
 //! Signal/default notifications use the joint service signal dispatcher.
-//! SIGEV_THREAD is explicitly unsupported until callback lifecycle is provided.
+//! Thread callbacks and pthread attributes stay in the local callback registry.
 //! Rollback retries are bounded and fair; persistent failures retain IDs until
 //! a later API boundary or the service's process-exit cleanup. No RPC in Drop.
 use super::*;
@@ -79,6 +79,7 @@ fn retry_cleanup() {
 struct Creation {
     slot: usize,
     token: Option<Token>,
+    callback: Option<Token>,
     id: Option<u64>,
     bound: bool,
     committed: bool,
@@ -88,6 +89,7 @@ impl Creation {
         Ok(Self {
             slot: state().timer_cleanup.reserve()?,
             token: None,
+            callback: None,
             id: None,
             bound: false,
             committed: false,
@@ -100,8 +102,14 @@ impl Drop for Creation {
         if !self.committed {
             if self.bound {
                 state.timer_values.retire(self.id.unwrap());
+                state.timer_callbacks.values.retire(self.id.unwrap());
             } else if let Some(token) = self.token {
                 let _ = state.timer_values.cancel(token);
+            }
+            if !self.bound {
+                if let Some(token) = self.callback {
+                    let _ = state.timer_callbacks.values.cancel(token);
+                }
             }
         }
         state.timer_cleanup.slots[self.slot] = if self.committed {
@@ -138,7 +146,17 @@ fn clock(id: u64) -> Result<Clock, c_int> {
     }
 }
 
-fn notification(event: *const c_void) -> Result<(Notification, Option<usize>, bool), c_int> {
+fn notification(
+    event: *const c_void,
+) -> Result<
+    (
+        Notification,
+        Option<usize>,
+        bool,
+        Option<timer_callbacks::Callback>,
+    ),
+    c_int,
+> {
     if event.is_null() {
         // Default sigval is the final timer ID, installed before publication.
         return Ok((
@@ -148,6 +166,7 @@ fn notification(event: *const c_void) -> Result<(Notification, Option<usize>, bo
             },
             Some(0),
             true,
+            None,
         ));
     }
     // SIGEV_THREAD's optional tail is deliberately not read for other modes.
@@ -155,7 +174,7 @@ fn notification(event: *const c_void) -> Result<(Notification, Option<usize>, bo
     user_copy::read(event.cast(), &mut bytes)?;
     let kind = c_int::from_ne_bytes(bytes[..4].try_into().unwrap());
     match kind {
-        1 => Ok((Notification::None, None, false)),
+        1 => Ok((Notification::None, None, false, None)),
         2 => {
             let signal = c_int::from_ne_bytes(bytes[4..8].try_into().unwrap());
             if !(1..=64).contains(&signal) {
@@ -169,9 +188,18 @@ fn notification(event: *const c_void) -> Result<(Notification, Option<usize>, bo
                 },
                 Some(value),
                 false,
+                None,
             ))
         }
-        3 => Err(ENOSYS), // No fabricated success without callback dispatch.
+        3 => {
+            let value = usize::from_ne_bytes(bytes[8..16].try_into().unwrap());
+            Ok((
+                Notification::Thread { cookie: 1 },
+                None,
+                false,
+                Some(timer_callbacks::import(event, value)?),
+            ))
+        }
         _ => Err(EINVAL),
     }
 }
@@ -240,13 +268,30 @@ pub extern "C" fn timer_create(clock_id: u64, event: *const c_void, output: *mut
         if output.is_null() {
             return Err(EFAULT);
         }
-        let (mut notification, value, default) = notification(event)?;
+        let (mut notification, value, default, callback) = notification(event)?;
         let mut creation = Creation::new()?;
         let target = if thread_clock::is_id(clock_id) {
             Some(thread_clock::timer_target(clock_id)?)
         } else {
             None
         };
+        if let Some(callback) = callback {
+            timer_callbacks::ensure_dispatcher()?;
+            let owner = if clock == Clock::ThreadCpu {
+                let (_, control) = current_thread_control().ok_or(EAGAIN)?;
+                Some(target.as_ref().map_or_else(
+                    || control.native_id.load(Ordering::Acquire),
+                    |(_, native)| *native,
+                ))
+            } else {
+                None
+            };
+            let token = timer_callbacks::reserve(callback, owner, clock_id)?;
+            creation.callback = Some(token);
+            notification = Notification::Thread {
+                cookie: token.raw(),
+            };
+        }
         if let Some(value) = value {
             let token = if clock == Clock::ThreadCpu {
                 let (_, control) = current_thread_control().ok_or(EAGAIN)?;
@@ -302,6 +347,14 @@ pub extern "C" fn timer_create(clock_id: u64, event: *const c_void, output: *mut
             state.timer_values.bind(token, id).map_err(value_error)?;
             creation.bound = true;
         }
+        if let Some(token) = creation.callback {
+            state()
+                .timer_callbacks
+                .values
+                .bind(token, id)
+                .map_err(value_error)?;
+            creation.bound = true;
+        }
         user_copy::write(output.cast(), &(id as usize).to_ne_bytes())?;
         creation.committed = true;
         Ok(0)
@@ -313,6 +366,7 @@ pub extern "C" fn timer_create(clock_id: u64, event: *const c_void, output: *mut
 pub(super) fn thread_exit(owner: u64, publish_exit: impl FnOnce()) {
     let mut state = state();
     state.timer_values.retire_owner(owner);
+    state.timer_callbacks.values.retire_owner(owner);
     state.thread_clocks.retire_native(owner);
     // Exclude new clock/value registration until the exited state is visible.
     // Otherwise a foreign timer could reserve a token after final retirement.
@@ -328,6 +382,7 @@ pub extern "C" fn timer_delete(id: usize) -> c_int {
             .map_err(map_posix_client_error);
         if matches!(result, Ok(()) | Err(EINVAL)) {
             state().timer_values.retire(id as u64);
+            state().timer_callbacks.values.retire(id as u64);
         }
         result.map(|()| 0)
     })
