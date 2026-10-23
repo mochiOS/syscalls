@@ -1,0 +1,330 @@
+//! POSIX timer C boundary. Only local notification cookies enter IPC; C
+//! records are imported/exported using checked copies, never raw references.
+//! The service still rejects notifying creation with ENOSYS until its joint
+//! signal dispatcher is connected. SIGEV_NONE controls are usable now.
+//! Rollback retries are bounded and fair; persistent failures retain IDs until
+//! a later API boundary or the service's process-exit cleanup. No RPC in Drop.
+use super::*;
+use mochios_posix_client::timer_value::{Error as ValueError, Token};
+use posix_protocol::process_timer::{Clock, Notification, Value};
+
+#[repr(C)]
+pub(super) struct Itimerspec {
+    interval: Timespec,
+    value: Timespec,
+}
+
+#[derive(Clone, Copy)]
+enum Cleanup {
+    Free,
+    Reserved,
+    Pending(u64),
+    Retrying,
+}
+
+// Reserve rollback capacity before creating any remote object. Failed deletion
+// stays tracked, even when the application's output mapping was invalid.
+pub(super) struct CleanupBook {
+    slots: [Cleanup; 128],
+    cursor: usize,
+}
+impl CleanupBook {
+    pub(super) const fn new() -> Self {
+        Self {
+            slots: [Cleanup::Free; 128],
+            cursor: 0,
+        }
+    }
+    fn reserve(&mut self) -> Result<usize, c_int> {
+        let index = self
+            .slots
+            .iter()
+            .position(|slot| matches!(slot, Cleanup::Free))
+            .ok_or(EAGAIN)?;
+        self.slots[index] = Cleanup::Reserved;
+        Ok(index)
+    }
+}
+
+fn retry_cleanup() {
+    let next = {
+        let mut state = state();
+        let book = &mut state.timer_cleanup;
+        let next = (0..book.slots.len()).find_map(|offset| {
+            let index = (book.cursor + offset) % book.slots.len();
+            if let Cleanup::Pending(id) = book.slots[index] {
+                Some((index, id))
+            } else {
+                None
+            }
+        });
+        if let Some((index, _)) = next {
+            book.slots[index] = Cleanup::Retrying;
+            book.cursor = (index + 1) % book.slots.len();
+        }
+        next
+    };
+    let Some((index, id)) = next else { return };
+    // No runtime lock is held during IPC. EINVAL is authoritative absence;
+    // transport and other errors must retain the object for another attempt.
+    let result = posix_client()
+        .map_err(map_posix_client_error)
+        .and_then(|client| client.timer_delete(id).map_err(map_posix_client_error));
+    state().timer_cleanup.slots[index] = match result {
+        Ok(()) | Err(EINVAL) => Cleanup::Free,
+        Err(_) => Cleanup::Pending(id),
+    };
+}
+
+struct Creation {
+    slot: usize,
+    token: Option<Token>,
+    id: Option<u64>,
+    bound: bool,
+    committed: bool,
+}
+impl Creation {
+    fn new() -> Result<Self, c_int> {
+        Ok(Self {
+            slot: state().timer_cleanup.reserve()?,
+            token: None,
+            id: None,
+            bound: false,
+            committed: false,
+        })
+    }
+}
+impl Drop for Creation {
+    fn drop(&mut self) {
+        let mut state = state();
+        if !self.committed {
+            if self.bound {
+                state.timer_values.retire(self.id.unwrap());
+            } else if let Some(token) = self.token {
+                let _ = state.timer_values.cancel(token);
+            }
+        }
+        state.timer_cleanup.slots[self.slot] = if self.committed {
+            Cleanup::Free
+        } else {
+            self.id.map_or(Cleanup::Free, Cleanup::Pending)
+        };
+    }
+}
+
+fn value_error(error: ValueError) -> c_int {
+    match error {
+        ValueError::Full => EAGAIN,
+        ValueError::Exhausted => EOVERFLOW,
+        _ => EIO,
+    }
+}
+
+fn clock(id: u64) -> Result<Clock, c_int> {
+    // newlib clockid_t is unsigned long. Do not truncate before validation,
+    // or accidentally interpret Linux's clock numbers as the newlib ABI.
+    match id {
+        1 => Ok(Clock::Realtime),
+        2 => Ok(Clock::ProcessCpu),
+        4 => Ok(Clock::Monotonic),
+        3 => Err(ENOTSUP), // Thread-owned timers need thread lifecycle policy.
+        _ => Err(EINVAL),
+    }
+}
+
+fn notification(event: *const c_void) -> Result<(Notification, Option<usize>, bool), c_int> {
+    if event.is_null() {
+        // Default sigval is the final timer ID, installed before publication.
+        return Ok((
+            Notification::Signal {
+                signal: 14,
+                value: 0,
+            },
+            Some(0),
+            true,
+        ));
+    }
+    // SIGEV_THREAD's optional tail is deliberately not read for other modes.
+    let mut bytes = [0; 16];
+    user_copy::read(event.cast(), &mut bytes)?;
+    let kind = c_int::from_ne_bytes(bytes[..4].try_into().unwrap());
+    match kind {
+        1 => Ok((Notification::None, None, false)),
+        2 => {
+            let signal = c_int::from_ne_bytes(bytes[4..8].try_into().unwrap());
+            if !(1..=64).contains(&signal) {
+                return Err(EINVAL);
+            }
+            let value = usize::from_ne_bytes(bytes[8..16].try_into().unwrap());
+            Ok((
+                Notification::Signal {
+                    signal: signal as u32,
+                    value: 0,
+                },
+                Some(value),
+                false,
+            ))
+        }
+        3 => Err(ENOSYS), // No fabricated success without callback dispatch.
+        _ => Err(EINVAL),
+    }
+}
+
+fn import(source: *const Itimerspec) -> Result<Value, c_int> {
+    let mut bytes = [0; core::mem::size_of::<Itimerspec>()];
+    user_copy::read(source.cast(), &mut bytes)?;
+    let time = |base| {
+        let field = |offset| {
+            i64::from_ne_bytes(bytes[base + offset..base + offset + 8].try_into().unwrap())
+        };
+        let seconds = field(core::mem::offset_of!(Timespec, tv_sec));
+        let nanos = field(core::mem::offset_of!(Timespec, tv_nsec));
+        if seconds < 0 || !(0..1_000_000_000).contains(&nanos) {
+            return Err(EINVAL);
+        }
+        Ok(seconds as u128 * 1_000_000_000 + nanos as u128)
+    };
+    Ok(Value {
+        interval_ns: time(core::mem::offset_of!(Itimerspec, interval))?,
+        remaining_ns: time(core::mem::offset_of!(Itimerspec, value))?,
+    })
+}
+
+fn export(destination: *mut Itimerspec, value: Value) -> Result<(), c_int> {
+    let mut bytes = [0; core::mem::size_of::<Itimerspec>()];
+    for (base, nanos) in [
+        (
+            core::mem::offset_of!(Itimerspec, interval),
+            value.interval_ns,
+        ),
+        (core::mem::offset_of!(Itimerspec, value), value.remaining_ns),
+    ] {
+        let seconds = i64::try_from(nanos / 1_000_000_000).map_err(|_| EOVERFLOW)?;
+        for (offset, value) in [
+            (core::mem::offset_of!(Timespec, tv_sec), seconds),
+            (
+                core::mem::offset_of!(Timespec, tv_nsec),
+                (nanos % 1_000_000_000) as i64,
+            ),
+        ] {
+            bytes[base + offset..base + offset + 8].copy_from_slice(&value.to_ne_bytes());
+        }
+    }
+    user_copy::write(destination.cast(), &bytes)
+}
+
+fn guarded(operation: impl FnOnce() -> Result<c_int, c_int>) -> c_int {
+    let result = (|| {
+        let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+        let _delivery =
+            mochios_posix_client::upcall_guard::Guard::enter(&control.native_delivery_defer)
+                .ok_or(EOVERFLOW)?;
+        retry_cleanup();
+        let result = operation();
+        retry_cleanup();
+        result
+    })();
+    result_with_errno(result, -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn timer_create(clock_id: u64, event: *const c_void, output: *mut usize) -> c_int {
+    guarded(|| {
+        let clock = clock(clock_id)?;
+        if output.is_null() {
+            return Err(EFAULT);
+        }
+        let (mut notification, value, default) = notification(event)?;
+        let mut creation = Creation::new()?;
+        if let Some(value) = value {
+            let token = state().timer_values.reserve(value).map_err(value_error)?;
+            creation.token = Some(token);
+            if let Notification::Signal { value, .. } = &mut notification {
+                *value = token.raw()
+            }
+        }
+        let client = posix_client().map_err(map_posix_client_error)?;
+        let id = client
+            .timer_create(clock, notification)
+            .map_err(map_posix_client_error)?;
+        creation.id = Some(id);
+        if let Some(token) = creation.token {
+            let mut state = state();
+            if default {
+                state
+                    .timer_values
+                    .update_reserved(token, id as usize)
+                    .map_err(value_error)?
+            }
+            state.timer_values.bind(token, id).map_err(value_error)?;
+            creation.bound = true;
+        }
+        user_copy::write(output.cast(), &(id as usize).to_ne_bytes())?;
+        creation.committed = true;
+        Ok(0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn timer_delete(id: usize) -> c_int {
+    guarded(|| {
+        let result = posix_client()
+            .map_err(map_posix_client_error)?
+            .timer_delete(id as u64)
+            .map_err(map_posix_client_error);
+        if matches!(result, Ok(()) | Err(EINVAL)) {
+            state().timer_values.retire(id as u64);
+        }
+        result.map(|()| 0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn timer_gettime(id: usize, output: *mut Itimerspec) -> c_int {
+    guarded(|| {
+        if output.is_null() {
+            return Err(EFAULT);
+        }
+        let value = posix_client()
+            .map_err(map_posix_client_error)?
+            .timer_value(id as u64)
+            .map_err(map_posix_client_error)?;
+        export(output, value)?;
+        Ok(0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn timer_settime(
+    id: usize,
+    flags: c_int,
+    replacement: *const Itimerspec,
+    previous: *mut Itimerspec,
+) -> c_int {
+    guarded(|| {
+        if flags & !4 != 0 {
+            return Err(EINVAL);
+        }
+        // Import before an aliased output, and keep full i64 timespec range.
+        let value = import(replacement)?;
+        let old = posix_client()
+            .map_err(map_posix_client_error)?
+            .timer_set(id as u64, flags == 4, value)
+            .map_err(map_posix_client_error)?;
+        if !previous.is_null() {
+            export(previous, old)?
+        }
+        Ok(0)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn timer_getoverrun(id: usize) -> c_int {
+    guarded(|| {
+        let overrun = posix_client()
+            .map_err(map_posix_client_error)?
+            .timer_overrun(id as u64)
+            .map_err(map_posix_client_error)?;
+        c_int::try_from(overrun).map_err(|_| EOVERFLOW)
+    })
+}

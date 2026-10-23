@@ -21,6 +21,7 @@ mod socket_memory;
 mod socket_receive_address;
 mod time_memory;
 mod interval_timer;
+mod process_timer;
 mod multiplex_memory;
 mod resource_limit_memory;
 mod signal_memory;
@@ -708,6 +709,7 @@ struct RuntimeState {
     fds: FdTable<FdObject>,
     named_semaphores: mochios_posix_client::named_semaphore::Mappings<u32, 128>,
     timer_values: mochios_posix_client::timer_value::Registry<usize, 128>,
+    timer_cleanup: process_timer::CleanupBook,
     heap: HeapState,
 }
 
@@ -725,6 +727,7 @@ impl RuntimeState {
             fds: FdTable::new(),
             named_semaphores: mochios_posix_client::named_semaphore::Mappings::new(),
             timer_values: mochios_posix_client::timer_value::Registry::new(),
+            timer_cleanup: process_timer::CleanupBook::new(),
             heap: HeapState::new(),
         }
     }
@@ -3160,6 +3163,7 @@ fn clone_registered_process_owned(
         }
         state().fds.clear_reservations();
         state().timer_values.clear_for_fork();
+        state().timer_cleanup = process_timer::CleanupBook::new();
         // The new native thread has no copied upcall target.
         for other in &THREADS {
             if !ptr::eq(other, thread_control) && other.state.load(Ordering::Acquire) != THREAD_FREE
