@@ -354,6 +354,12 @@ pub mod thread {
         Ok(status)
     }
 
+    /// Read cumulative CPU execution time through an owned Thread Handle
+    /// granting WAIT, without granting access by numeric thread identity.
+    pub fn cpu_clock(handle: u32) -> SysResult<syscall::ClockInstant> {
+        syscall::execution::thread_clock(handle)
+    }
+
     pub fn return_from_upcall(token: u64) -> SysResult<()> {
         syscall::call1(syscall::SyscallNumber::ThreadUpcallReturn, token).map(|_| ())
     }

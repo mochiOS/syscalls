@@ -53,3 +53,22 @@ pub fn endpoint_identity(endpoint: u64) -> SysResult<ExecutionIdentity> {
     }
     Ok(identity)
 }
+
+/// Sample CPU time through an explicit WAIT-capable Thread Handle. Zero is
+/// never a caller/TID shorthand; native selectors grant all observation rights.
+pub fn thread_clock(handle: u32) -> SysResult<super::ClockInstant> {
+    if handle == 0 {
+        return Err(SysError::from_raw(Error::InvalidArgument.into_raw() as i64));
+    }
+    let mut instant = super::ClockInstant::default();
+    let status = super::call3(
+        SyscallNumber::ThreadClockRead,
+        u64::from(handle),
+        (&mut instant as *mut super::ClockInstant) as u64,
+        core::mem::size_of::<super::ClockInstant>() as u64,
+    )?;
+    if status != mnu_abi::SUCCESS || instant.reserved != 0 || instant.nanoseconds >= 1_000_000_000 {
+        return Err(SysError::from_raw(Error::BackingFailure.into_raw() as i64));
+    }
+    Ok(instant)
+}
