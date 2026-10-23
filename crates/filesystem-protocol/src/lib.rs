@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod device_open;
+pub mod device_observation;
 pub mod description_flags;
 pub mod object_limits;
 pub mod device_metadata;
