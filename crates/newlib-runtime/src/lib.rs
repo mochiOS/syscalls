@@ -1,4 +1,5 @@
 #![no_std]
+#![feature(linkage)]
 
 mod child_cleanup;
 mod child_startup;
@@ -992,6 +993,9 @@ unsafe extern "C" {
 }
 
 #[panic_handler]
+// A Rust std consumer supplies its own handler. C-only programs retain this
+// fallback; never make an application link two strong lang-item definitions.
+#[linkage = "weak"]
 fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     process_exit(127)
 }

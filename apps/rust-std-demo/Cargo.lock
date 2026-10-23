@@ -27,6 +27,10 @@ name = "libc"
 version = "0.2.190"
 
 [[patch.unused]]
+name = "mnu-abi"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "mochios-mdriver-protocol"
 version = "0.1.0"
 
@@ -47,6 +51,10 @@ name = "mochi-user-platform"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "mochi-user-runtime"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "mochi-user-syscall"
 version = "0.1.0"
 
@@ -55,11 +63,27 @@ name = "mochios-capability-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
+name = "mochios-filesystem-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
 name = "mochios-linux-gui-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
 name = "mochios-linux-portal-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-net-device-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-posix-client"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-posix-protocol"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -84,4 +108,8 @@ version = "0.1.0"
 
 [[patch.unused]]
 name = "mochios-virtio-gpu-protocol"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "mochios-workspace-protocol"
 version = "0.1.0"
