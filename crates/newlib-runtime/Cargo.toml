@@ -6,6 +6,9 @@ edition = "2024"
 [lib]
 crate-type = ["staticlib"]
 
+[features]
+trace-io = []
+
 [dependencies]
 mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }
 mochi-user-syscall = { path = "../syscall" }

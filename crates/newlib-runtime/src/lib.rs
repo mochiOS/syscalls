@@ -24,6 +24,8 @@ mod time_memory;
 mod interval_timer;
 mod process_timer;
 mod multiplex_memory;
+#[cfg(feature = "trace-io")]
+mod io_trace;
 mod resource_limit_memory;
 mod signal_memory;
 mod signal_info;
@@ -1056,6 +1058,8 @@ fn native_process_id() -> Result<u64, syscall::SysError> {
 }
 
 fn native_thread_id() -> Result<u64, syscall::SysError> {
+    #[cfg(feature = "trace-io")]
+    io_trace::identity(thread_lookup::local_base().is_some());
     syscall::execution::identity().map(|identity| identity.thread_id)
 }
 
@@ -4491,6 +4495,8 @@ pub extern "C" fn _read(fd: c_int, buffer: *mut c_void, length: usize) -> isize 
         set_errno(EFAULT);
         return -1;
     }
+    #[cfg(feature = "trace-io")]
+    let trace = io_trace::read(fd, length);
     // Stream sockets, like pipes, use no temporary native references.
     let result = unsafe {
         io_resources::with_fork_opaque(
@@ -4503,6 +4509,10 @@ pub extern "C" fn _read(fd: c_int, buffer: *mut c_void, length: usize) -> isize 
         )
     };
     record_stdio_io(&result);
+    #[cfg(feature = "trace-io")]
+    if let Some(trace) = trace {
+        trace.finish(result);
+    }
     result_with_errno(result, -1)
 }
 
@@ -4663,6 +4673,8 @@ pub extern "C" fn _open(path: *const c_char, flags: c_int, mode: c_int) -> c_int
         set_errno(EFAULT);
         return -1;
     }
+    #[cfg(feature = "trace-io")]
+    let trace = io_trace::open(flags);
     let result = match file_mutation::open(path, flags, mode) {
         Err(errno) if errno == EACCES || errno == EPERM => {
             retry_open_with_prompt(path, flags, mode)
@@ -4676,6 +4688,8 @@ pub extern "C" fn _open(path: *const c_char, flags: c_int, mode: c_int) -> c_int
             }
         }
     }
+    #[cfg(feature = "trace-io")]
+    trace.finish(result);
     // Internal newlib callers must finish FILE/list cleanup before exiting.
     result_with_errno(result, -1)
 }
@@ -6486,6 +6500,8 @@ pub extern "C" fn cfmakeraw(termios: *mut NewlibTermios) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
+    #[cfg(feature = "trace-io")]
+    let trace = io_trace::growth(increment);
     let result = (|| {
         // Read before STATE: discovery is allocation-free and may be called
         // while libc owns its recursive allocator lock. Bootstrap processes
@@ -6511,6 +6527,10 @@ pub extern "C" fn _sbrk(increment: isize) -> *mut c_void {
             .adjust(increment, image_data_bytes, data_limit, memory_limit)
             .map(|old_break| old_break as *mut c_void)
     })();
+    #[cfg(feature = "trace-io")]
+    if let Some(trace) = trace {
+        trace.finish(result.as_ref().map(|_| 0).map_err(|error| *error));
+    }
     result_with_errno(result, (-1isize) as *mut c_void)
 }
 
