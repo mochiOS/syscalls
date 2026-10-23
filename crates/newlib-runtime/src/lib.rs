@@ -3040,6 +3040,12 @@ fn clone_registered_process_owned(
     // Handle captures include retired-but-pinned references too. Freeze their
     // bookkeeping with the FD table, and unlock the copied book in both images.
     let fd_borrows = fd_lease::BORROWS.lock();
+    // Native/user threads can hold references independently of the pthread
+    // slot-state test above. Until vanished-thread reclamation is implemented,
+    // refuse a snapshot with foreign or unattributed in-flight FD pins.
+    if fd_borrows.has_foreign_pins(newlib_lock_identity()) {
+        return Err(EAGAIN);
+    }
     let inherited_fds = guard.fds.clone();
     if guard.executable.is_null() {
         return Err(ENOENT);

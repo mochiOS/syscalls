@@ -52,7 +52,15 @@ pub(super) struct Lease {
 impl Lease {
     pub(super) fn new(entry: FdEntry) -> Result<Self, c_int> {
         let pin = if entry.handle.close_owned {
-            Some(BORROWS.lock().pin(entry.handle.lower_handle).ok_or(EBADF)?)
+            Some(
+                BORROWS
+                    .lock()
+                    .pin_owned(entry.handle.lower_handle, newlib_lock_identity())
+                    .map_err(|error| match error {
+                        mochios_posix_client::handle_borrow::PinError::Capacity => ENOMEM,
+                        _ => EBADF,
+                    })?,
+            )
         } else {
             None
         };
