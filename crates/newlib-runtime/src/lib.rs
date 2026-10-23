@@ -8605,7 +8605,9 @@ pub unsafe extern "C" fn pthread_key_create(
     if key.is_null() {
         return EINVAL;
     }
-    let _native = defer_native_delivery();
+    // A sibling must not snapshot INITIALIZING or a half-published callback.
+    // The mutation also defers delivery through the checked MemoryCopy below.
+    let _mutation = thread_lifecycle::mutate();
     for (slot, control) in THREAD_KEYS.iter().enumerate() {
         if control
             .allocated
@@ -8650,7 +8652,7 @@ pub unsafe extern "C" fn pthread_key_create(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn pthread_key_delete(key: PthreadKey) -> c_int {
-    let _native = defer_native_delivery();
+    let _mutation = thread_lifecycle::mutate();
     let Some((_, control)) = thread_key_control(key) else {
         return EINVAL;
     };
