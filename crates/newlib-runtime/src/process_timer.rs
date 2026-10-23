@@ -121,6 +121,9 @@ fn value_error(error: ValueError) -> c_int {
 }
 
 fn clock(id: u64) -> Result<Clock, c_int> {
+    if mochios_posix_client::process_clock::target(id).is_some() {
+        return Ok(Clock::ProcessCpu);
+    }
     if thread_clock::is_id(id) {
         return thread_clock::timer_source(id);
     }
@@ -278,7 +281,10 @@ pub extern "C" fn timer_create(clock_id: u64, event: *const c_void, output: *mut
             Some((reference, _)) => {
                 client.timer_create_for_thread(reference.handle(), notification)
             }
-            None => client.timer_create(clock, notification),
+            None => match mochios_posix_client::process_clock::target(clock_id) {
+                Some(pid) => client.timer_create_for_process(pid, notification),
+                None => client.timer_create(clock, notification),
+            },
         }
         .map_err(map_posix_client_error)?;
         creation.id = Some(id);

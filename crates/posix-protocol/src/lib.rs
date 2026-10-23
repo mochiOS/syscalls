@@ -344,6 +344,9 @@ pub const OP_TIMER_OVERRUN: u16 = 111;
 /// process_clock target PID; authenticated observation of a registered process.
 /// No native object authority is returned or acquired from caller PID bytes.
 pub const OP_PROCESS_CPU_CLOCK: u16 = 112;
+/// process_timer create frame followed by an explicit managed process ID.
+/// The PID selects a clock subject, never the timer's authenticated owner.
+pub const OP_TIMER_CREATE_PROCESS_CPU: u16 = 113;
 pub mod process_clock;
 pub const WAITED_CHILD_CPU_USAGE_LEN: usize = 40;
 

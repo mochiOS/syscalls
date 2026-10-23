@@ -55,6 +55,22 @@ impl<T: ObjectTransport> Client<T> {
         wire::decode_id(&output[..length]).map_err(ClientError::Protocol)
     }
 
+    /// The service checks the registered clock subject independently of the
+    /// caller-owned timer. No native PID lookup or extra Handle grant occurs.
+    pub fn timer_create_for_process(
+        &self,
+        pid: u64,
+        notification: Notification,
+    ) -> Result<u64, ClientError<T::Error>> {
+        let mut input = [0; wire::PROCESS_CREATE_LEN];
+        wire::encode_process_create(pid, notification, &mut input)
+            .map_err(ClientError::Protocol)?;
+        let mut output = [0; 8];
+        let length =
+            self.timer_request(protocol::OP_TIMER_CREATE_PROCESS_CPU, &input, &mut output)?;
+        wire::decode_id(&output[..length]).map_err(ClientError::Protocol)
+    }
+
     pub fn timer_delete(&self, id: u64) -> Result<(), ClientError<T::Error>> {
         let input = id.to_le_bytes();
         wire::decode_id(&input).map_err(ClientError::Protocol)?;

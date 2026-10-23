@@ -3,6 +3,7 @@
 use crate::ProtocolError;
 
 pub const CREATE_LEN: usize = 24;
+pub const PROCESS_CREATE_LEN: usize = CREATE_LEN + 8;
 pub const VALUE_LEN: usize = 32;
 pub const SET_LEN: usize = 48;
 pub const MAX_DURATION_NS: u128 = i64::MAX as u128 * 1_000_000_000 + 999_999_999;
@@ -99,6 +100,34 @@ pub fn decode_create(input: &[u8]) -> Result<(Clock, Notification), ProtocolErro
 pub fn decode_id(input: &[u8]) -> Result<u64, ProtocolError> {
     let id = u64::from_le_bytes(input.try_into().map_err(|_| invalid())?);
     if id == 0 { Err(invalid()) } else { Ok(id) }
+}
+
+pub fn encode_process_create(
+    pid: u64,
+    notification: Notification,
+    out: &mut [u8],
+) -> Result<(), ProtocolError> {
+    if pid == 0 || pid > crate::process_clock::MAX_PID {
+        return Err(invalid());
+    }
+    let out = out
+        .get_mut(..PROCESS_CREATE_LEN)
+        .ok_or(ProtocolError::BufferTooSmall)?;
+    encode_create(Clock::ProcessCpu, notification, &mut out[..CREATE_LEN])?;
+    out[CREATE_LEN..].copy_from_slice(&pid.to_le_bytes());
+    Ok(())
+}
+
+pub fn decode_process_create(input: &[u8]) -> Result<(u64, Notification), ProtocolError> {
+    if input.len() != PROCESS_CREATE_LEN {
+        return Err(invalid());
+    }
+    let (clock, notification) = decode_create(&input[..CREATE_LEN])?;
+    let pid = crate::process_clock::target(&input[CREATE_LEN..])?;
+    if clock != Clock::ProcessCpu || pid == 0 {
+        return Err(invalid());
+    }
+    Ok((pid, notification))
 }
 
 pub fn encode_value(value: Value, out: &mut [u8]) -> Result<(), ProtocolError> {
