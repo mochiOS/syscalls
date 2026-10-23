@@ -1452,6 +1452,19 @@ fn current_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
 }
 
 fn register_current_thread() -> Option<(Pthread, &'static ThreadControl)> {
+    let current = register_thread_control()?;
+    // Bootstrap processes may receive their endpoint after libc initialized
+    // the native thread. Enter its POSIX signal environment before the first
+    // POSIX operation, rather than treating a missing mask as an empty one.
+    if current.1.signal_upcall_stack.load(Ordering::Acquire) == 0
+        && has_posix_environment().ok()?
+    {
+        setup_signal_delivery(current.1, None).ok()?;
+    }
+    Some(current)
+}
+
+fn register_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
     if let Some(current) = current_thread_control() {
         return Some(current);
     }
@@ -1762,7 +1775,10 @@ unsafe extern "C" fn pthread_start_trampoline(argument: *mut c_void) -> ! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __getreent() -> *mut c_void {
-    let (_, control) = register_current_thread().unwrap_or_else(|| process_exit(127));
+    // libc allocation is also used inside POSIX attachment and by native-only
+    // services. Looking up reent must neither attach recursively nor add an
+    // endpoint query to every allocator invocation.
+    let (_, control) = register_thread_control().unwrap_or_else(|| process_exit(127));
     let reent = control.reent.load(Ordering::Acquire);
     if reent == 0 {
         process_exit(127);
