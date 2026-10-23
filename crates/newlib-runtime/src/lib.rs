@@ -7907,6 +7907,8 @@ pub unsafe extern "C" fn clock_nanosleep(
             .map_err(|error| map_kernel_errno(error.raw()))?;
         }
     })();
+    // A failed native wait is still a return from a cancellation point.
+    pthread_testcancel();
     set_errno(saved_errno);
     result.err().unwrap_or(0)
 }
@@ -7952,19 +7954,16 @@ pub extern "C" fn usleep(microseconds: u64) -> c_int {
 pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Timespec) -> c_int {
     pthread_testcancel();
     if request.is_null() {
-        set_errno(EFAULT);
-        return -1;
+        return sleep_failure(EFAULT);
     }
     let request = match time_memory::read_timespec(request) {
         Ok(request) => request,
         Err(error) => {
-            set_errno(error);
-            return -1;
+            return sleep_failure(error);
         }
     };
     if request.tv_sec < 0 || !(0..1_000_000_000).contains(&request.tv_nsec) {
-        set_errno(EINVAL);
-        return -1;
+        return sleep_failure(EINVAL);
     }
     let duration = match (request.tv_sec as u64)
         .checked_mul(1_000_000_000)
@@ -7972,16 +7971,14 @@ pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Tim
     {
         Some(duration) => duration,
         None => {
-            set_errno(EINVAL);
-            return -1;
+            return sleep_failure(EINVAL);
         }
     };
     if duration != 0 {
         let (_, control) = match register_current_thread() {
             Some(current) => current,
             None => {
-                set_errno(EAGAIN);
-                return -1;
+                return sleep_failure(EAGAIN);
             }
         };
         let generation = control.caught_signal_generation.load(Ordering::Acquire);
@@ -7990,8 +7987,7 @@ pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Tim
         {
             Ok(deadline) => deadline,
             Err(error) => {
-                set_errno(error);
-                return -1;
+                return sleep_failure(error);
             }
         };
         loop {
@@ -8001,8 +7997,7 @@ pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Tim
             let now = match monotonic_nanoseconds() {
                 Ok(now) => now,
                 Err(error) => {
-                    set_errno(error);
-                    return -1;
+                    return sleep_failure(error);
                 }
             };
             match observe_sleep(
@@ -8023,12 +8018,10 @@ pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Tim
                                 tv_nsec: (remaining_nanoseconds % 1_000_000_000) as i64,
                             },
                         ) {
-                            set_errno(error);
-                            return -1;
+                            return sleep_failure(error);
                         }
                     }
-                    set_errno(EINTR);
-                    return -1;
+                    return sleep_failure(EINTR);
                 }
                 SleepObservation::Waiting => {}
             }
@@ -8037,8 +8030,7 @@ pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Tim
                 wake,
                 deadline,
             ) {
-                set_errno(map_kernel_errno(error.raw()));
-                return -1;
+                return sleep_failure(map_kernel_errno(error.raw()));
             }
         }
     }
@@ -8051,11 +8043,19 @@ pub unsafe extern "C" fn nanosleep(request: *const Timespec, remaining: *mut Tim
                 tv_nsec: 0,
             },
         ) {
-            set_errno(error);
-            return -1;
+            return sleep_failure(error);
         }
     }
+    pthread_testcancel();
     0
+}
+
+fn sleep_failure(error: c_int) -> c_int {
+    // Native failures and checked user-copy failures can also deliver an
+    // upcall. Finish the cancellation point before returning their errno.
+    pthread_testcancel();
+    set_errno(error);
+    -1
 }
 
 #[unsafe(no_mangle)]
