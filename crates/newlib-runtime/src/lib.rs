@@ -8980,13 +8980,11 @@ pub unsafe extern "C" fn pthread_setcanceltype(cancel_type: c_int, old_type: *mu
 
 #[unsafe(no_mangle)]
 pub extern "C" fn pthread_cancel(thread: Pthread) -> c_int {
-    let Some(control) = thread_control(thread) else {
-        return ESRCH;
-    };
-    control.cancel_pending.store(1, Ordering::Release);
-    notify_thread_waiter(control);
-    native_mutex_wake_all(&control.state);
-    0
+    thread_reference::with_live_token(thread, |control| {
+        control.cancel_pending.store(1, Ordering::Release);
+        notify_thread_waiter(control);
+        native_mutex_wake_all(&control.state);
+    }).err().unwrap_or(0)
 }
 
 fn notify_thread_waiter(control: &ThreadControl) {

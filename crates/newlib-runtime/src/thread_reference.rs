@@ -4,6 +4,31 @@ use super::*;
 
 static REFERENCES: RuntimeMutex<()> = RuntimeMutex::new(());
 
+/// Apply a short local action before the target can cross native-reference
+/// retirement and reuse its TCB. No RPC or application callback is allowed.
+/// Published pthreads may still be STARTING before their trampoline runs.
+pub(super) fn with_live_token<T>(
+    thread: Pthread,
+    apply: impl FnOnce(&ThreadControl) -> T,
+) -> Result<T, c_int> {
+    let token = mochios_posix_client::thread::ThreadToken::from_raw(thread).ok_or(ESRCH)?;
+    let _activity = thread_lifecycle::mutate();
+    let _references = REFERENCES.lock();
+    let control = thread_control(thread).ok_or(ESRCH)?;
+    if !matches!(
+        control.state.load(Ordering::Acquire),
+        THREAD_STARTING | THREAD_RUNNING
+    ) || control.native_id.load(Ordering::Acquire) == 0
+        || control.generation.load(Ordering::Acquire) != token.generation()
+    {
+        return Err(ESRCH);
+    }
+    // Reclamation must close the source under REFERENCES before publishing
+    // FREE. In the FREE -> STARTING old-generation window, native_id is zero;
+    // if startup has advanced, the final generation read rejects old tokens.
+    Ok(apply(control))
+}
+
 pub(super) struct Reference {
     handle: u32,
     // No non-transferable temporary reference or copied mutex may enter a VM
