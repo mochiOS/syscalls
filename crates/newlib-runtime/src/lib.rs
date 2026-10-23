@@ -64,6 +64,7 @@ mod heap;
 use heap::HeapState;
 mod atfork;
 mod thread_lifecycle;
+mod thread_reference;
 mod thread_stack;
 mod pthread_attr;
 mod credentials;
@@ -1243,10 +1244,7 @@ fn reclaim_thread_control(control: &ThreadControl, reason: ThreadReclamation) {
     control.active_native_signal_frame_id.store(0, Ordering::Relaxed);
     control.active_signal_scope.store(0, Ordering::Relaxed);
     control.active_signal_scope_id.store(0, Ordering::Relaxed);
-    let handle = control.native_handle.swap(0, Ordering::AcqRel);
-    if handle != 0 {
-        let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, u64::from(handle));
-    }
+    thread_reference::replace(control, 0);
     let signal_stack = control.signal_upcall_stack.swap(0, Ordering::Relaxed);
     let signal_stack_size = control.signal_upcall_stack_size.swap(0, Ordering::Relaxed);
     if signal_stack != 0 && signal_stack_size != 0 {
@@ -1477,7 +1475,7 @@ fn setup_signal_delivery(
                 syscall::SyscallNumber::ThreadHandleCreate,
             ))?;
             let handle = u32::try_from(handle).map_err(|_| EOVERFLOW)?;
-            control.native_handle.store(handle, Ordering::Release);
+            thread_reference::replace(control, handle);
         }
         return Ok(());
     }
@@ -1544,10 +1542,7 @@ fn setup_signal_delivery(
     };
     // Publish before registration can trigger a pending-signal upcall. A
     // handler on this starting thread may use its own pthread identity.
-    let previous = control.native_handle.swap(handle, Ordering::AcqRel);
-    if previous != 0 {
-        let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, u64::from(previous));
-    }
+    thread_reference::replace(control, handle);
     let registration = posix_client()
         .map_err(map_posix_client_error)
         .and_then(|client| {
@@ -1559,8 +1554,7 @@ fn setup_signal_delivery(
                 .map_err(map_posix_client_error)
         });
     if let Err(error) = registration {
-        control.native_handle.store(0, Ordering::Release);
-        let _ = syscall::raw_syscall1(syscall::SyscallNumber::HandleClose, u64::from(handle));
+        thread_reference::replace(control, 0);
         let _ = syscall::raw_syscall2(
             syscall::SyscallNumber::MemoryUnmap,
             stack as u64,
@@ -1663,24 +1657,22 @@ fn finish_thread(control: &ThreadControl, result: *mut c_void) -> ! {
 // and ThreadExit afterwards. Its stacks and reent must survive that interval,
 // including any upcall delivered on the way out.
 fn native_thread_retired(control: &ThreadControl) -> Result<bool, c_int> {
-    let handle = control.native_handle.load(Ordering::Acquire);
-    if handle == 0 {
-        return Err(ESRCH);
-    }
-    let mut status = syscall::ThreadStatus::default();
-    match syscall::raw_syscall2(
-        syscall::SyscallNumber::ThreadHandleStatus,
-        u64::from(handle),
-        (&mut status as *mut syscall::ThreadStatus) as u64,
-    )
-    .into_result()
-    {
-        Ok(_) => Ok(status.state == mnu_abi::THREAD_STATE_TERMINATED),
-        // Only absence of the retained thread target proves retirement.
-        // Invalid selectors/authority or failed copies must not free stacks.
-        Err(error) if error.native_error() == Some(mnu_abi::status::Error::NotFound) => Ok(true),
-        Err(error) => Err(map_kernel_errno(error.raw())),
-    }
+    thread_reference::with_control(control, |handle| {
+        let mut status = syscall::ThreadStatus::default();
+        match syscall::raw_syscall2(
+            syscall::SyscallNumber::ThreadHandleStatus,
+            u64::from(handle),
+            (&mut status as *mut syscall::ThreadStatus) as u64,
+        )
+        .into_result()
+        {
+            Ok(_) => Ok(status.state == mnu_abi::THREAD_STATE_TERMINATED),
+            // Only absence of the retained thread target proves retirement.
+            // Invalid selectors/authority or failed copies must not free stacks.
+            Err(error) if error.native_error() == Some(mnu_abi::status::Error::NotFound) => Ok(true),
+            Err(error) => Err(map_kernel_errno(error.raw())),
+        }
+    })
 }
 
 unsafe extern "C" fn pthread_start_trampoline(argument: *mut c_void) -> ! {
@@ -7399,20 +7391,24 @@ pub extern "C" fn pthread_kill(thread: Pthread, signal: c_int) -> c_int {
             }
             break;
         }
-        let handle = control.native_handle.load(Ordering::Acquire);
-        if handle == 0 {
-            return Err(ESRCH);
+        {
+            let reference = thread_reference::snapshot(
+                thread,
+                syscall::HANDLE_RIGHT_WAIT
+                    | syscall::HANDLE_RIGHT_SIGNAL
+                    | syscall::HANDLE_RIGHT_TRANSFER,
+            )?;
+            posix_client()
+                .map_err(map_posix_client_error)?
+                .send_thread_signal(
+                    signal as u32,
+                    ObjectHandleAttachment {
+                        handle: reference.handle(),
+                        rights: syscall::HANDLE_RIGHT_WAIT | syscall::HANDLE_RIGHT_SIGNAL,
+                    },
+                )
+                .map_err(map_posix_client_error)?;
         }
-        posix_client()
-            .map_err(map_posix_client_error)?
-            .send_thread_signal(
-                signal as u32,
-                ObjectHandleAttachment {
-                    handle,
-                    rights: syscall::HANDLE_RIGHT_WAIT | syscall::HANDLE_RIGHT_SIGNAL,
-                },
-            )
-            .map_err(map_posix_client_error)?;
         if current {
             drain_pending_signals()?;
         }
