@@ -1,7 +1,7 @@
 //! Process-owned record lock messages. The file must be selected by an explicit
 //! FileHandle attachment, and the owner by authenticated IPC sender identity.
 //! No pathname, FD, inode, process identifier or executable address is accepted
-//! in a request. This codec does not itself publish a service operation.
+//! in a request.
 use crate::ProtocolError;
 
 pub const REQUEST_LEN: usize = 32;
@@ -35,6 +35,23 @@ pub struct Request {
     pub origin: Origin,
     pub start: i64,
     pub length: i64,
+}
+
+/// FileHandle authority, independent of claimed access modes or POSIX UID.
+/// Query/unlock/release need no data access; setting requires the matching
+/// delegated data right. SEEK_CUR snapshots require seek authority as well.
+pub fn required_rights(request: Request) -> u64 {
+    mnu_abi::HANDLE_RIGHT_TRANSFER
+        | match request.operation {
+            Operation::Set(Kind::Read) => mnu_abi::HANDLE_RIGHT_READ,
+            Operation::Set(Kind::Write) => mnu_abi::HANDLE_RIGHT_WRITE,
+            _ => 0,
+        }
+        | if request.origin == Origin::Current {
+            mnu_abi::HANDLE_RIGHT_SEEK
+        } else {
+            0
+        }
 }
 
 /// Query replies use a canonical absolute range. Zero length includes future

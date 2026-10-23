@@ -353,6 +353,8 @@ pub const OP_PROCESS_CPU_SLEEP: u16 = 114;
 pub const OP_THREAD_CPU_SLEEP: u16 = 115;
 /// Wait for one process-owned thread callback notification; no code on wire.
 pub const OP_TIMER_THREAD_WAIT: u16 = 116;
+/// record_lock request with exactly one explicitly delegated FileHandle.
+pub const OP_RECORD_LOCK: u16 = 117;
 pub mod timer_callback;
 pub mod record_lock;
 pub mod cpu_sleep;

@@ -1328,6 +1328,36 @@ impl<T: ObjectTransport> Client<T> {
         protocol::decode_file_status(&response[..response_len]).map_err(ClientError::Protocol)
     }
 
+    /// Nonblocking process-owned record locks. The attached object selects
+    /// the file; the kernel-authenticated sender selects its lock owner.
+    pub fn record_lock(
+        &self,
+        file: ObjectHandleAttachment<T::Handle>,
+        request: protocol::record_lock::Request,
+    ) -> Result<protocol::record_lock::Reply, ClientError<T::Error>> {
+        use protocol::record_lock::{self as wire, Operation, Reply};
+        let mut payload = [0; wire::REQUEST_LEN];
+        wire::encode_request(request, &mut payload).map_err(ClientError::Protocol)?;
+        let rights = wire::required_rights(request);
+        if file.rights & rights != rights {
+            return Err(ClientError::Remote(-13));
+        }
+        let file = ObjectHandleAttachment {
+            handle: file.handle,
+            rights,
+        };
+        let mut response = [0; wire::REPLY_LEN];
+        let length = self.file_request(protocol::OP_RECORD_LOCK, &payload, file, &mut response)?;
+        let reply = wire::decode_reply(&response[..length]).map_err(ClientError::Protocol)?;
+        match (request.operation, reply) {
+            (Operation::Query(_), Reply::Unlocked | Reply::Conflict { .. })
+            | (Operation::Set(_) | Operation::Unlock | Operation::ReleaseFile, Reply::Done) => {
+                Ok(reply)
+            }
+            _ => Err(ClientError::MismatchedResponse),
+        }
+    }
+
     pub fn access_at(
         &self,
         base: AccessAtBase<T::Handle>,
