@@ -4326,12 +4326,15 @@ pub extern "C" fn _write(fd: c_int, buffer: *const c_void, length: usize) -> isi
         set_errno(EFAULT);
         return -1;
     }
-    // A pipe stream operation owns only its borrow-book pin. Complex socket,
-    // terminal and file paths retain the ordinary fork blocker.
+    // Pipe and stream-socket operations own only their borrow-book pin.
+    // Datagram, terminal and file paths retain the ordinary fork blocker.
     let result = unsafe {
         io_resources::with_fork_opaque(
             || with_fd_entry(fd),
-            |entry| entry.handle.kind == FdKind::ObjectStreamWrite,
+            |entry| matches!(
+                entry.handle.kind,
+                FdKind::ObjectStreamWrite | FdKind::ObjectSocket
+            ),
             |entry| syscall_write(**entry, buffer, length),
         )
     };
@@ -4477,11 +4480,14 @@ pub extern "C" fn _read(fd: c_int, buffer: *mut c_void, length: usize) -> isize 
         set_errno(EFAULT);
         return -1;
     }
-    // Only the pipe-stream case satisfies the FD-only rule used by _write.
+    // Stream sockets, like pipes, use no temporary native references.
     let result = unsafe {
         io_resources::with_fork_opaque(
             || with_fd_entry(fd),
-            |entry| entry.handle.kind == FdKind::ObjectStreamRead,
+            |entry| matches!(
+                entry.handle.kind,
+                FdKind::ObjectStreamRead | FdKind::ObjectSocket
+            ),
             |entry| syscall_read(**entry, buffer, length),
         )
     };

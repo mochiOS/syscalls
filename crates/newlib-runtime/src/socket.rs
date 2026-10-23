@@ -784,10 +784,15 @@ fn message_io(
     flags: c_int,
     sending: bool,
 ) -> Result<isize, c_int> {
-    io_resources::with(
-        || with_fd_entry(fd),
-        |entry| message_entry(**entry, buffer, length, flags, sending),
-    )
+    // Stream payload/control calls use the retained descriptor directly.
+    // Datagram jobs own additional Handles and keep the ordinary blocker.
+    unsafe {
+        io_resources::with_fork_opaque(
+            || with_fd_entry(fd),
+            |entry| entry.handle.kind == FdKind::ObjectSocket,
+            |entry| message_entry(**entry, buffer, length, flags, sending),
+        )
+    }
 }
 
 pub(super) fn is_datagram(entry: FdEntry) -> Result<bool, c_int> {
@@ -868,7 +873,10 @@ pub(super) fn message_entry(
             },
         );
         if sending && !options.no_signal && matches!(result, Err(EPIPE)) {
-            generate_thread_signal(posix_protocol::SIGNAL_PIPE)?;
+            io_resources::with(
+                || Ok(()),
+                |_| generate_thread_signal(posix_protocol::SIGNAL_PIPE),
+            )?;
         }
         result
     };
