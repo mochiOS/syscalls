@@ -361,6 +361,9 @@ pub const OP_RECORD_LOCK_EXEC: u16 = 118;
 pub const OP_RECORD_LOCK_WAIT: u16 = 119;
 /// Interrupt POSIX waits of an explicitly delegated, same-owner ThreadHandle.
 pub const OP_THREAD_WAIT_INTERRUPT: u16 = 120;
+/// StatAtRequest with zero flags; returns filesystem object_limits::Limits.
+/// Path credentials come from the authenticated session, with retained anchors.
+pub const OP_PATH_LIMITS_AT: u16 = 121;
 pub const THREAD_WAIT_INTERRUPT_RIGHTS: u64 =
     mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_TRANSFER;
 pub mod record_lock_wait;

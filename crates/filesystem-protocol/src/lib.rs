@@ -143,6 +143,10 @@ pub const OP_DEVICE_NODE_REMOVE_IF_SAME: u16 = 48;
 /// device_attributes. Compare the original NodeStatus identity and atomically
 /// replace mode/uid/gid plus ctime. A stale name never mutates its replacement.
 pub const OP_DEVICE_NODE_SET_ATTRIBUTES_IF_SAME: u16 = 49;
+/// Resolve an existing path and return object_limits::Limits. Uses STAT_AT
+/// root/base flags only, authenticated credentials and ordered directory Handles.
+/// Does not open the target or require target data-read permission.
+pub const OP_OBJECT_LIMITS_AT: u16 = 50;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const OPEN_STATUS_APPEND: u32 = 1 << 0;

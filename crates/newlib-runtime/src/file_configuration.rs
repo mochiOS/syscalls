@@ -53,7 +53,19 @@ fn query(entry: FdEntry, name: c_int) -> Result<CLong, c_int> {
     {
         return Err(ENOTSUP);
     }
-    let limits = limits(entry)?;
+    filesystem_value(limits(entry)?, name)
+}
+
+pub(super) fn filesystem_selector(name: c_int) -> Result<(), c_int> {
+    match name {
+        PC_LINK_MAX | PC_NAME_MAX | PC_PATH_MAX => Ok(()),
+        0..=20 => Err(ENOTSUP),
+        _ => Err(EINVAL),
+    }
+}
+
+pub(super) fn filesystem_value(limits: wire::Limits, name: c_int) -> Result<CLong, c_int> {
+    filesystem_selector(name)?;
     let value = match name {
         PC_LINK_MAX => limits.link_count_max,
         PC_NAME_MAX => limits.name_bytes_max,
