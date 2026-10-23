@@ -35,6 +35,9 @@ fn query(entry: FdEntry, name: c_int) -> Result<CLong, c_int> {
     if !(0..=20).contains(&name) {
         return Err(EINVAL);
     }
+    if let Some(value) = mochios_posix_client::configuration::file_option(name) {
+        return Ok(value);
+    }
     if name == PC_PIPE_BUF {
         return if matches!(
             entry.handle.kind,

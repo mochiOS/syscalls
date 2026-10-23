@@ -10,6 +10,24 @@ pub const DEFAULT_EXECUTABLE_PATH: &[u8] = b"/bin:/usr/bin";
 /// SDK confstr selector; unrelated to native kernel selectors.
 pub const CS_PATH: i32 = 0;
 
+/// The runtime currently has no POSIX AIO/prioritized I/O API and rejects
+/// synchronized-open modes. A known unavailable option is a successful -1
+/// answer, distinct from an unknown selector or an indeterminate size limit.
+/// Values are newlib selectors, never native kernel selectors.
+pub const fn system_option(selector: i32) -> Option<i64> {
+    match selector {
+        21 | 28 | 32 => Some(-1), // ASYNCHRONOUS / PRIORITIZED / SYNCHRONIZED_IO
+        _ => None,
+    }
+}
+
+pub const fn file_option(selector: i32) -> Option<i64> {
+    match selector {
+        9..=11 => Some(-1), // ASYNC_IO / PRIO_IO / SYNC_IO
+        _ => None,
+    }
+}
+
 /// Translate libc selectors using a validated native processor snapshot.
 /// Unknown or inconsistent data is an error, never a fabricated single CPU.
 pub fn processor_count(selector: i32, info: mnu_abi::ProcessorInfo) -> Result<u32, i32> {

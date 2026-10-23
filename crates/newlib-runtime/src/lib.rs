@@ -6822,6 +6822,9 @@ pub extern "C" fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c_int {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn sysconf(name: c_int) -> CLong {
+    if let Some(value) = mochios_posix_client::configuration::system_option(name) {
+        return value;
+    }
     if let Some(limit) = mochios_posix_client::configuration::local_limit(name) {
         return limit as CLong;
     }
