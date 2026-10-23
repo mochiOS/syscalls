@@ -63,6 +63,7 @@ mod address_space;
 mod heap;
 use heap::HeapState;
 mod atfork;
+mod libc_lock;
 mod thread_lifecycle;
 mod thread_reference;
 mod thread_clock;
@@ -240,6 +241,8 @@ pub struct LockOpaque {
     owner: AtomicU64,
     depth: AtomicU32,
     dynamic: bool,
+    previous: AtomicUsize,
+    next: AtomicUsize,
 }
 
 impl LockOpaque {
@@ -249,6 +252,8 @@ impl LockOpaque {
             owner: AtomicU64::new(0),
             depth: AtomicU32::new(0),
             dynamic,
+            previous: AtomicUsize::new(0),
+            next: AtomicUsize::new(0),
         }
     }
 }
@@ -3006,6 +3011,7 @@ fn clone_registered_process_owned(
     // Do not snapshot a thread slot during publication/reclamation. Acquire
     // this before the allocator, which those operations may themselves use.
     let lifecycle_guard = thread_lifecycle::capture()?;
+    let libc_guard = libc_lock::capture()?;
     // malloc can enter _sbrk and acquire STATE. Stabilize its arena first, not
     // after taking STATE, and retain the caller's existing recursion depth.
     let allocator_guard = atfork::freeze_allocator();
@@ -3108,12 +3114,14 @@ fn clone_registered_process_owned(
     mnu_abi::process_create::attach_handle_capture(&mut metadata, length, capture.handle())
         .map_err(|_| EINVAL)?;
     authorize_clone_path(identity)?;
+    let libc_registry = libc_guard.freeze_registry();
     let image = unsafe {
         mochios_posix_client::snapshot::capture_native(
             &mut context,
             thread_control.thread_local_base.load(Ordering::Relaxed),
         )
     };
+    drop(libc_registry);
     // Keep the captured image and Handle capture protected while releasing
     // the copied locks. The parent publishes its child owner before reopening
     // delivery; neither temporary reference is left on an abandonable stack.
@@ -3145,6 +3153,7 @@ fn clone_registered_process_owned(
     drop(registry_guard);
     drop(policy_guard);
     drop(allocator_guard);
+    drop(libc_guard);
     drop(lifecycle_guard);
     if image == 0 {
         drop(creation_delivery);
@@ -9484,7 +9493,7 @@ pub extern "C" fn __retarget_lock_acquire(lock: *mut LockOpaque) {
     let Some(lock) = (unsafe { lock.as_ref() }) else {
         process_exit(127);
     };
-    native_mutex_acquire(&lock.state);
+    libc_lock::acquire(lock);
 }
 
 #[unsafe(no_mangle)]
@@ -9509,7 +9518,7 @@ pub extern "C" fn __retarget_lock_try_acquire(lock: *mut LockOpaque) -> c_int {
     let Some(lock) = (unsafe { lock.as_ref() }) else {
         return 0;
     };
-    c_int::from(native_mutex_try_acquire(&lock.state))
+    c_int::from(libc_lock::try_acquire(lock))
 }
 
 #[unsafe(no_mangle)]
@@ -9537,7 +9546,7 @@ pub extern "C" fn __retarget_lock_release(lock: *mut LockOpaque) {
     let Some(lock) = (unsafe { lock.as_ref() }) else {
         process_exit(127);
     };
-    native_mutex_release(&lock.state);
+    libc_lock::release(lock);
 }
 
 #[unsafe(no_mangle)]
@@ -9557,8 +9566,6 @@ pub extern "C" fn __retarget_lock_release_recursive(lock: *mut LockOpaque) {
         lock_ref.depth.store(depth - 1, Ordering::Relaxed);
         return;
     }
-    lock_ref.owner.store(0, Ordering::Release);
-    lock_ref.depth.store(0, Ordering::Relaxed);
     __retarget_lock_release(lock);
 }
 
