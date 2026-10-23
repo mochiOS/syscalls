@@ -4,6 +4,7 @@ pub mod device_open;
 pub mod device_metadata;
 pub mod device_registration;
 pub mod device_removal;
+pub mod device_attributes;
 
 mod timestamps;
 pub mod device_namespace;
@@ -136,6 +137,10 @@ pub const OP_DEVICE_NODE_REGISTER_EXTERNAL: u16 = 47;
 /// return ESTALE if the name now denotes another node. IDs grant no authority.
 /// Identity values are the unmodified device/node_id from NodeStatus.
 pub const OP_DEVICE_NODE_REMOVE_IF_SAME: u16 = 48;
+/// Owner configuration, one CONTROL|TRANSFER parent attachment. Payload:
+/// device_attributes. Compare the original NodeStatus identity and atomically
+/// replace mode/uid/gid plus ctime. A stale name never mutates its replacement.
+pub const OP_DEVICE_NODE_SET_ATTRIBUTES_IF_SAME: u16 = 49;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const OPEN_STATUS_APPEND: u32 = 1 << 0;
