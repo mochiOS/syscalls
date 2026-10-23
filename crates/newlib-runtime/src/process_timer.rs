@@ -239,12 +239,31 @@ pub extern "C" fn timer_create(clock_id: u64, event: *const c_void, output: *mut
         }
         let (mut notification, value, default) = notification(event)?;
         let mut creation = Creation::new()?;
+        let target = if thread_clock::is_id(clock_id) {
+            Some(thread_clock::timer_target(clock_id)?)
+        } else {
+            None
+        };
         if let Some(value) = value {
             let token = if clock == Clock::ThreadCpu {
                 let (_, control) = current_thread_control().ok_or(EAGAIN)?;
-                state()
-                    .timer_values
-                    .reserve_owned(value, control.native_id.load(Ordering::Acquire))
+                let mut state = state();
+                if let Some((_, native)) = &target {
+                    if !state
+                        .thread_clocks
+                        .resolve(clock_id)
+                        .is_some_and(|target| target.native_thread == *native)
+                    {
+                        return Err(EINVAL);
+                    }
+                }
+                state.timer_values.reserve_owned(
+                    value,
+                    target.as_ref().map_or_else(
+                        || control.native_id.load(Ordering::Acquire),
+                        |(_, native)| *native,
+                    ),
+                )
             } else {
                 state().timer_values.reserve(value)
             }
@@ -255,10 +274,17 @@ pub extern "C" fn timer_create(clock_id: u64, event: *const c_void, output: *mut
             }
         }
         let client = posix_client().map_err(map_posix_client_error)?;
-        let id = client
-            .timer_create(clock, notification)
-            .map_err(map_posix_client_error)?;
+        let id = match &target {
+            Some((reference, _)) => {
+                client.timer_create_for_thread(reference.handle(), notification)
+            }
+            None => client.timer_create(clock, notification),
+        }
+        .map_err(map_posix_client_error)?;
         creation.id = Some(id);
+        // Release the native reference and its fork/callback guard before
+        // touching application output. A fault may escape this C entry point.
+        drop(target);
         if let Some(token) = creation.token {
             let mut state = state();
             if default {
@@ -278,8 +304,13 @@ pub extern "C" fn timer_create(clock_id: u64, event: *const c_void, output: *mut
 
 /// No RPC or application callback during final native-thread retirement.
 /// The service retires the corresponding timer after observing native exit.
-pub(super) fn thread_exit(owner: u64) {
-    state().timer_values.retire_owner(owner);
+pub(super) fn thread_exit(owner: u64, publish_exit: impl FnOnce()) {
+    let mut state = state();
+    state.timer_values.retire_owner(owner);
+    state.thread_clocks.retire_native(owner);
+    // Exclude new clock/value registration until the exited state is visible.
+    // Otherwise a foreign timer could reserve a token after final retirement.
+    publish_exit();
 }
 
 #[unsafe(no_mangle)]

@@ -52,8 +52,11 @@ fn target(id: u64) -> Result<Target, c_int> {
     Ok(target)
 }
 
-fn reference(target: Target) -> Result<thread_reference::Reference, c_int> {
-    let reference = thread_reference::snapshot(target.thread, syscall::HANDLE_RIGHT_WAIT)
+fn reference_with_rights(
+    target: Target,
+    rights: u64,
+) -> Result<thread_reference::Reference, c_int> {
+    let reference = thread_reference::snapshot(target.thread, rights)
         .map_err(|error| if error == ESRCH { EINVAL } else { error })?;
     let identity =
         status(&reference).map_err(|error| if error == ESRCH { EINVAL } else { error })?;
@@ -61,6 +64,10 @@ fn reference(target: Target) -> Result<thread_reference::Reference, c_int> {
         return Err(EINVAL);
     }
     Ok(reference)
+}
+
+fn reference(target: Target) -> Result<thread_reference::Reference, c_int> {
+    reference_with_rights(target, syscall::HANDLE_RIGHT_WAIT)
 }
 
 #[unsafe(no_mangle)]
@@ -154,14 +161,18 @@ pub(super) fn resolution(id: u64, output: *mut Timespec) -> Result<c_int, c_int>
     Ok(0)
 }
 
-/// The current-thread wire clock binds authenticated IPC metadata, not this
-/// local record. Foreign thread-clock timer creation is explicitly unsupported.
-pub(super) fn timer_source(id: u64) -> Result<posix_protocol::process_timer::Clock, c_int> {
+/// The local clock ID grants no authority. Pin and explicitly transfer a
+/// rights-reduced reference to select its native thread during timer creation.
+pub(super) fn timer_target(id: u64) -> Result<(thread_reference::Reference, u64), c_int> {
     let target = target(id)?;
-    let (current, control) = current_thread_control().ok_or(EAGAIN)?;
-    if current != target.thread || control.native_id.load(Ordering::Acquire) != target.native_thread
-    {
-        return Err(ENOTSUP);
-    }
+    let reference = reference_with_rights(
+        target,
+        syscall::HANDLE_RIGHT_WAIT | syscall::HANDLE_RIGHT_TRANSFER,
+    )?;
+    Ok((reference, target.native_thread))
+}
+
+pub(super) fn timer_source(id: u64) -> Result<posix_protocol::process_timer::Clock, c_int> {
+    target(id)?;
     Ok(posix_protocol::process_timer::Clock::ThreadCpu)
 }

@@ -1646,13 +1646,11 @@ fn finish_thread(control: &ThreadControl, result: *mut c_void) -> ! {
     run_thread_specific_destructors(control);
     {
         let _delivery = defer_native_delivery();
-        process_timer::thread_exit(control.native_id.load(Ordering::Acquire));
-        state()
-            .thread_clocks
-            .retire_native(control.native_id.load(Ordering::Acquire));
+        process_timer::thread_exit(control.native_id.load(Ordering::Acquire), || {
+            control.result.store(result as usize, Ordering::Relaxed);
+            control.state.store(THREAD_EXITED, Ordering::Release);
+        });
     }
-    control.result.store(result as usize, Ordering::Relaxed);
-    control.state.store(THREAD_EXITED, Ordering::Release);
     notify_join_waiter(control);
     native_mutex_wake_all(&control.state);
     let _ = syscall::raw_syscall1(syscall::SyscallNumber::ThreadExit, 0);

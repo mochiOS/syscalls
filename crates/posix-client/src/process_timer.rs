@@ -28,6 +28,33 @@ impl<T: ObjectTransport> Client<T> {
         wire::decode_id(&output[..length]).map_err(ClientError::Protocol)
     }
 
+    /// Select a CPU clock by an explicitly transferred Thread Handle. Only
+    /// WAIT is delegated; the source must separately permit TRANSFER.
+    pub fn timer_create_for_thread(
+        &self,
+        thread: T::Handle,
+        notification: Notification,
+    ) -> Result<u64, ClientError<T::Error>> {
+        let mut input = [0; wire::CREATE_LEN];
+        wire::encode_create(Clock::ThreadCpu, notification, &mut input)
+            .map_err(ClientError::Protocol)?;
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(ObjectHandleAttachment {
+                handle: thread,
+                rights: mnu_abi::HANDLE_RIGHT_WAIT,
+            })
+            .map_err(|_| ClientError::MismatchedResponse)?;
+        let mut output = [0; 8];
+        let length = self.request_without_reply_handles(
+            protocol::OP_TIMER_CREATE,
+            &input,
+            &mut output,
+            &mut handles,
+        )?;
+        wire::decode_id(&output[..length]).map_err(ClientError::Protocol)
+    }
+
     pub fn timer_delete(&self, id: u64) -> Result<(), ClientError<T::Error>> {
         let input = id.to_le_bytes();
         wire::decode_id(&input).map_err(ClientError::Protocol)?;

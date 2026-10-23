@@ -13,7 +13,8 @@ pub enum Clock {
     Realtime = 1,
     Monotonic = 2,
     ProcessCpu = 3,
-    /// Creating IPC thread's CPU clock; no identity is encoded in the frame.
+    /// CPU clock of the creating IPC thread, or of one attached WAIT Thread
+    /// Handle. No identity or Handle selector is encoded in the frame.
     ThreadCpu = 4,
 }
 
