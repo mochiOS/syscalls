@@ -9,6 +9,26 @@ use core::{
 };
 use mochios_posix_client::upcall_guard::Guard;
 
+const FROZEN: u32 = 1 << 31;
+const WAITING: u32 = 1 << 30;
+
+/// Held during construction/publication or destruction, not across I/O waits.
+struct Preparation<'a>(&'a Chain);
+impl Drop for Preparation<'_> {
+    fn drop(&mut self) {
+        self.0.mutations.fetch_sub(1, Ordering::Release);
+    }
+}
+
+pub(super) struct Capture<'a>(&'a Chain);
+impl Drop for Capture<'_> {
+    fn drop(&mut self) {
+        if self.0.mutations.swap(0, Ordering::Release) & WAITING != 0 {
+            (self.0.wake)(&self.0.mutations);
+        }
+    }
+}
+
 #[repr(C)]
 struct Link {
     previous: *mut Link,
@@ -21,15 +41,78 @@ pub(super) struct Chain {
     head: AtomicPtr<Link>,
     callback_defer: AtomicU32,
     pending: AtomicBool,
+    mutations: AtomicU32,
+    wait: fn(&AtomicU32, u32),
+    wake: fn(&AtomicU32),
 }
 
 impl Chain {
+    #[cfg(not(target_os = "mochios"))]
     pub(super) const fn new() -> Self {
+        // Host ownership fixtures do not freeze concurrently. A concurrent
+        // fixture must explicitly supply its controlled wait transport.
+        Self::with_wait(
+            |_, _| panic!("resource wait transport not configured"),
+            |_| {},
+        )
+    }
+
+    pub(super) const fn with_wait(wait: fn(&AtomicU32, u32), wake: fn(&AtomicU32)) -> Self {
         Self {
             head: AtomicPtr::new(ptr::null_mut()),
             callback_defer: AtomicU32::new(0),
             pending: AtomicBool::new(false),
+            mutations: AtomicU32::new(0),
+            wait,
+            wake,
         }
+    }
+
+    fn prepare(&self) -> Preparation<'_> {
+        let mut value = self.mutations.load(Ordering::Acquire);
+        loop {
+            if value & FROZEN != 0 {
+                // Publish the waiter before parking. Thaw either observes the
+                // bit and wakes us, or makes this CAS fail before we can wait.
+                let waiting = value | WAITING;
+                match self.mutations.compare_exchange(
+                    value,
+                    waiting,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        (self.wait)(&self.mutations, waiting);
+                        value = self.mutations.load(Ordering::Acquire);
+                    }
+                    Err(current) => value = current,
+                }
+                continue;
+            }
+            assert!(value < WAITING - 1, "resource mutation counter overflow");
+            match self.mutations.compare_exchange_weak(
+                value,
+                value + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Preparation(self),
+                Err(current) => value = current,
+            }
+        }
+    }
+
+    /// Freeze only an empty, fully published chain. Never walk another
+    /// thread's stack or destroy an operation it may still be mutating.
+    pub(super) fn capture_empty(&self) -> Option<Capture<'_>> {
+        self.mutations
+            .compare_exchange(0, FROZEN, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        let capture = Capture(self);
+        if !self.is_empty() || self.is_deferred() {
+            return None;
+        }
+        Some(capture)
     }
     pub(super) fn is_empty(&self) -> bool {
         self.head.load(Ordering::Acquire).is_null()
@@ -66,7 +149,7 @@ impl Chain {
     }
 
     pub(super) fn reset_empty(&self) -> bool {
-        if !self.is_empty() || self.is_deferred() {
+        if !self.is_empty() || self.is_deferred() || self.mutations.load(Ordering::Acquire) != 0 {
             return false;
         }
         self.pending.store(false, Ordering::Release);
@@ -83,6 +166,7 @@ impl Chain {
     /// particular, a tracked operation may invoke application code only in a
     /// nested callback context, not directly in its own creation context.
     pub(super) unsafe fn abandon_from(&self, context: u64) {
+        let _preparation = self.prepare();
         loop {
             let pointer = self.head.load(Ordering::Acquire);
             if pointer.is_null() {
@@ -109,11 +193,13 @@ pub(super) struct Scope<'a, R> {
     link: Link,
     chain: &'a Chain,
     resource: Option<R>,
+    preparing: Option<Preparation<'a>>,
     _pinned: PhantomPinned,
 }
 
 impl<'a, R> Scope<'a, R> {
     pub(super) fn new(chain: &'a Chain, context: u64, resource: R) -> Self {
+        let preparing = chain.prepare();
         Self {
             link: Link {
                 previous: ptr::null_mut(),
@@ -123,6 +209,7 @@ impl<'a, R> Scope<'a, R> {
             },
             chain,
             resource: Some(resource),
+            preparing: Some(preparing),
             _pinned: PhantomPinned,
         }
     }
@@ -147,6 +234,7 @@ impl<'a, R> Scope<'a, R> {
         }
         scope.link.active = true;
         scope.chain.head.store(&mut scope.link, Ordering::Release);
+        drop(scope.preparing.take());
     }
 
     pub(super) fn resource(&self) -> Option<&R> {
@@ -166,6 +254,7 @@ impl<'a, R> Scope<'a, R> {
     }
 
     fn retire_inner(&mut self) {
+        let _preparation = self.chain.prepare();
         if self.link.active {
             assert_eq!(
                 self.chain.head.load(Ordering::Acquire),

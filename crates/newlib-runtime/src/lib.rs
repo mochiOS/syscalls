@@ -389,7 +389,10 @@ impl ThreadControl {
             next_native_signal_frame_id: AtomicU64::new(1),
             native_delivery_defer: AtomicU32::new(0),
             active_signal_scope: AtomicUsize::new(0),
-            callback_resources: callback_resources::Chain::new(),
+            callback_resources: callback_resources::Chain::with_wait(
+                native_mutex_wait,
+                native_mutex_wake_all,
+            ),
             active_signal_scope_id: AtomicU64::new(0),
             next_signal_scope_id: AtomicU64::new(1),
             alternate_stack: mochios_posix_client::signal_stack::AlternateStack::new(),
@@ -3011,6 +3014,12 @@ fn clone_registered_process_owned(
     // Do not snapshot a thread slot during publication/reclamation. Acquire
     // this before the allocator, which those operations may themselves use.
     let lifecycle_guard = thread_lifecycle::capture()?;
+    let mut resource_guards = [const { None }; mochios_posix_client::thread::MAX_THREADS];
+    for (index, other) in THREADS.iter().enumerate() {
+        if !ptr::eq(other, thread_control) {
+            resource_guards[index] = Some(other.callback_resources.capture_empty().ok_or(EAGAIN)?);
+        }
+    }
     let libc_guard = libc_lock::capture()?;
     // malloc can enter _sbrk and acquire STATE. Stabilize its arena first, not
     // after taking STATE, and retain the caller's existing recursion depth.
@@ -3164,6 +3173,7 @@ fn clone_registered_process_owned(
     drop(policy_guard);
     drop(allocator_guard);
     drop(libc_guard);
+    drop(resource_guards);
     drop(lifecycle_guard);
     if image == 0 {
         drop(creation_delivery);

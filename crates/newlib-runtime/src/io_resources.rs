@@ -22,17 +22,24 @@ pub(super) fn with_initialized<R, T: Copy>(
     let mut scope = core::pin::pin!(callback_resources::Scope::new(
         &control.callback_resources,
         control.active_signal_scope_id.load(Ordering::Acquire),
-        prepare()?
+        None::<R>
     ));
     // Pin and publish before reopening delivery. The operation may invoke C
     // only through the runtime's nested signal contexts, never directly.
     unsafe { scope.as_mut().activate() };
-    if let Err(error) = initialize(scope.as_mut().resource_mut().unwrap()) {
+    // Publish an empty owner before allocating/opening any resources. A fork
+    // must see this preparation even before it has produced its first Handle.
+    let initialized = (|| {
+        let resource = prepare()?;
+        *scope.as_mut().resource_mut().unwrap() = Some(resource);
+        initialize(scope.as_mut().resource_mut().unwrap().as_mut().unwrap())
+    })();
+    if let Err(error) = initialized {
         unsafe { scope.as_mut().retire() };
         return Err(error);
     }
     drop(native);
-    let result = operation(scope.as_mut().resource_mut().unwrap());
+    let result = operation(scope.as_mut().resource_mut().unwrap().as_mut().unwrap());
     {
         let _native = defer_native_delivery();
         unsafe { scope.as_mut().retire() };
