@@ -80,6 +80,7 @@ mod thread_clock;
 mod process_clock;
 mod thread_stack;
 mod pthread_attr;
+mod pthread_concurrency;
 mod credentials;
 mod groups;
 mod groups_memory;
