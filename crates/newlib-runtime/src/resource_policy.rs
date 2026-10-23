@@ -132,6 +132,12 @@ pub(super) fn read(resource: u32) -> Result<posix_protocol::ResourceLimit, c_int
     }
 }
 
+pub(super) fn record_locks() -> Result<bool, c_int> {
+    let mut guard = POLICY.lock();
+    if guard.is_none() { *guard = Some(Mapping::open()?); }
+    guard.as_ref().unwrap().policy().read_record_locks().map_err(policy_error)
+}
+
 /// Acquire after allocator and before STATE. SyscallEndpointTransport and
 /// Client's control messages use fixed stack buffers; discovery must never
 /// allocate through libc. This excludes transient Handles and incomplete

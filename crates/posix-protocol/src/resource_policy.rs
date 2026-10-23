@@ -15,7 +15,11 @@ pub const MAGIC: u64 = u64::from_le_bytes(*b"POSXRLM\0");
 pub const VERSION: u32 = 1;
 pub const HEADER_LEN: usize = 24;
 pub const LIMIT_LEN: usize = 16;
-pub const BYTE_LEN: usize = HEADER_LEN + RLIMIT_COUNT as usize * LIMIT_LEN;
+pub const BASE_BYTE_LEN: usize = HEADER_LEN + RLIMIT_COUNT as usize * LIMIT_LEN;
+/// The v1 limit prefix remains unchanged for existing SDK readers. The lock
+/// state extension is independently tagged, and never interpreted by mnu.
+pub const BYTE_LEN: usize = BASE_BYTE_LEN + 16;
+const LOCK_STATE_MAGIC: u64 = u64::from_le_bytes(*b"LCKSTAT1");
 pub const READER_RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_MAP;
 const FORMAT: u64 = (VERSION as u64) << 32 | RLIMIT_COUNT as u64;
 
@@ -35,6 +39,8 @@ pub struct ResourcePolicy {
     format: AtomicU64,
     generation: AtomicU64,
     limits: [[AtomicU64; 2]; RLIMIT_COUNT as usize],
+    lock_format: AtomicU64,
+    record_locks: AtomicU64,
 }
 
 const _: () = {
@@ -42,6 +48,7 @@ const _: () = {
     assert!(core::mem::align_of::<ResourcePolicy>() == 8);
     assert!(core::mem::offset_of!(ResourcePolicy, generation) == 16);
     assert!(core::mem::offset_of!(ResourcePolicy, limits) == HEADER_LEN);
+    assert!(core::mem::offset_of!(ResourcePolicy, lock_format) == BASE_BYTE_LEN);
 };
 
 impl ResourcePolicy {
@@ -61,7 +68,31 @@ impl ResourcePolicy {
                     AtomicU64::new(limits[index].hard.to_le()),
                 ]
             }),
+            lock_format: AtomicU64::new(LOCK_STATE_MAGIC.to_le()),
+            record_locks: AtomicU64::new(0),
         })
+    }
+
+    /// Only a service-owned writable mapping may publish. One atomic scalar
+    /// is independent of the limit seqlock; no fallible work or allocation.
+    pub fn publish_record_locks(&self, held: bool) {
+        self.record_locks
+            .store(u64::from(held).to_le(), Ordering::SeqCst);
+    }
+
+    /// Read-only-safe access to authoritative process state, with no RPC.
+    pub fn read_record_locks(&self) -> Result<bool, Error> {
+        self.validate()?;
+        if u64::from_le(self.lock_format.load(Ordering::Relaxed)) != LOCK_STATE_MAGIC {
+            return Err(Error::InvalidLayout);
+        }
+        let value = u64::from_le(self.record_locks.load(Ordering::Relaxed));
+        fence(Ordering::Acquire);
+        match value {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(Error::InvalidLayout),
+        }
     }
 
     pub fn validate(&self) -> Result<(), Error> {

@@ -1,10 +1,13 @@
 #![no_std]
 #![feature(linkage)]
+#![feature(c_variadic)]
 
 mod child_cleanup;
 mod child_startup;
 mod fd_lease;
 mod fd_creation;
+mod record_lock;
+mod record_lock_memory;
 use fd_creation::PendingFdReservation;
 mod file_handle_import;
 mod callback_resources;
@@ -158,6 +161,9 @@ const F_GETFD: c_int = 1;
 const F_SETFD: c_int = 2;
 const F_GETFL: c_int = 3;
 const F_SETFL: c_int = 4;
+const F_GETLK: c_int = 7;
+const F_SETLK: c_int = 8;
+const F_SETLKW: c_int = 9;
 const SEEK_CUR: c_int = 1;
 const WNOHANG: c_int = 1;
 const WUNTRACED: c_int = 2;
@@ -2679,26 +2685,11 @@ fn clone_current_fd_table() -> Result<(FdTable<FdObject>, [Option<fd_lease::Leas
 
 fn close_fd_entry(fds: &mut FdTable<FdObject>, fd: c_int) -> Result<(), c_int> {
     let entry = fds.get(fd).ok_or(EBADF)?;
+    if fds.is_reserved(fd) {
+        return Err(EBUSY);
+    }
     fd_lease::retire(entry.handle)?;
     fds.take(fd).map_err(|_| EBADF)?;
-    Ok(())
-}
-
-fn duplicate_fd_entry(
-    fds: &mut FdTable<FdObject>,
-    old_fd: c_int,
-    new_fd: c_int,
-    limit: c_int,
-) -> Result<(), c_int> {
-    if old_fd < 0 || new_fd < 0 || old_fd as usize >= MAX_FDS || new_fd as usize >= MAX_FDS {
-        return Err(EBADF);
-    }
-    if old_fd != new_fd && new_fd >= limit {
-        return Err(EBADF);
-    }
-    let mut operations = RuntimeFdOps;
-    fds.duplicate_to(old_fd, new_fd, &mut operations)
-        .map_err(map_fd_error)?;
     Ok(())
 }
 
@@ -2741,9 +2732,7 @@ fn duplicate_live_fd(old_fd: c_int, new_fd: c_int) -> Result<c_int, c_int> {
     } else {
         process_fd_limit()?
     };
-    let mut state = state();
-    duplicate_fd_entry(&mut state.fds, old_fd, new_fd, limit)?;
-    Ok(new_fd)
+    record_lock::duplicate(old_fd, new_fd, limit)
 }
 
 fn duplicate_fd_from(
@@ -3037,6 +3026,7 @@ fn execve_with_launch_context_owned(
     envp: *const *const c_char,
 ) -> Result<(), c_int> {
     let (_, control) = register_current_thread().ok_or(EAGAIN)?;
+    let _record_gate = record_lock::gate();
     let delivery = mochios_posix_client::upcall_guard::Guard::enter(&control.native_delivery_defer)
         .ok_or(EOVERFLOW)?;
     let captured = clone_current_fd_table()?;
@@ -3048,12 +3038,12 @@ fn execve_with_launch_context_owned(
     // Keep snapshot leases tracked if a signal abandons the exec preparation.
     unsafe { scope.as_mut().activate() };
     drop(delivery);
-    let result = replace_process_image(
-        path,
-        argv,
-        envp,
-        &scope.as_ref().get_ref().resource().unwrap().0,
-    );
+    let snapshot = &scope.as_ref().get_ref().resource().unwrap().0;
+    let result = record_lock::prepare_exec(snapshot)
+        .and_then(|()| replace_process_image(path, argv, envp, snapshot));
+    // Replacement cannot return on success. Failed cancellation stays in the
+    // local cleanup slot and is retried by the next gated policy operation.
+    let _ = record_lock::cancel_exec();
     let _delivery =
         mochios_posix_client::upcall_guard::Guard::enter(&control.native_delivery_defer)
             .unwrap_or_else(|| process_exit(EOVERFLOW));
@@ -3089,6 +3079,7 @@ fn clone_registered_process_owned(
             resource_guards[index] = Some(other.callback_resources.capture_for_fork().ok_or(EAGAIN)?);
         }
     }
+    let record_guard = record_lock::gate();
     let libc_guard = libc_lock::capture()?;
     // malloc can enter _sbrk and acquire STATE. Stabilize its arena first, not
     // after taking STATE, and retain the caller's existing recursion depth.
@@ -3259,6 +3250,10 @@ fn clone_registered_process_owned(
     drop(policy_guard);
     drop(allocator_guard);
     drop(libc_guard);
+    if image == 0 {
+        record_lock::reset_for_fork();
+    }
+    drop(record_guard);
     drop(resource_guards);
     drop(lifecycle_guard);
     if image == 0 {
@@ -4791,6 +4786,8 @@ pub extern "C" fn openat(dirfd: c_int, path: *const c_char, flags: c_int, mode: 
 #[unsafe(no_mangle)]
 pub extern "C" fn _close(fd: c_int) -> c_int {
     let result = (|| {
+        let _gate = record_lock::gate();
+        record_lock::before_close(fd)?;
         let mut state = state();
         close_fd_entry(&mut state.fds, fd)?;
         Ok(0)
@@ -4897,6 +4894,7 @@ pub extern "C" fn dup(fd: c_int) -> c_int {
     let result = (|| {
         with_fd_entry(fd)?;
         let limit = process_fd_limit()?;
+        let _record_gate = record_lock::gate();
         duplicate_fd_from(&mut state().fds, fd, None, false, limit)
     })();
     result_with_errno(result, -1)
@@ -4908,7 +4906,16 @@ pub extern "C" fn dup2(old_fd: c_int, new_fd: c_int) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
+pub unsafe extern "C" fn fcntl(fd: c_int, cmd: c_int, mut arguments: ...) -> c_int {
+    if matches!(cmd, F_GETLK | F_SETLK | F_SETLKW) {
+        let input = unsafe { arguments.next_arg::<*mut record_lock::Flock>() };
+        return result_with_errno(record_lock::fcntl(fd, cmd, input), -1);
+    }
+    let arg = if matches!(cmd, F_DUPFD | F_DUPFD_CLOEXEC | F_SETFD | F_SETFL) {
+        unsafe { arguments.next_arg::<c_int>() }
+    } else {
+        0
+    };
     let result = (|| {
         if fd < 0 || fd as usize >= MAX_FDS {
             return Err(EBADF);
@@ -4923,6 +4930,11 @@ pub extern "C" fn fcntl(fd: c_int, cmd: c_int, arg: c_int) -> c_int {
             process_fd_limit()?
         } else {
             MAX_FDS as c_int
+        };
+        let _record_gate = if matches!(cmd, F_DUPFD | F_DUPFD_CLOEXEC | F_SETFD) {
+            Some(record_lock::gate())
+        } else {
+            None
         };
         let mut state = state();
         let entry = state.fds.get(fd).ok_or(EBADF)?;

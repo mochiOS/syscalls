@@ -175,6 +175,13 @@ impl<H: Copy> FdTable<H> {
         self.entries[index].is_none() && self.reservations[index] == 0
     }
 
+    pub fn is_reserved(&self, fd: i32) -> bool {
+        usize::try_from(fd)
+            .ok()
+            .and_then(|index| self.reservations.get(index))
+            .is_some_and(|generation| *generation != 0)
+    }
+
     /// The caller must serialize access to this table. It may release its lock
     /// after reserving: open/dup/close cannot consume this destination until
     /// commit or cancellation. Neither this method nor commit disposes Handles.
