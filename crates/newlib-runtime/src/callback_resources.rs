@@ -42,6 +42,7 @@ pub(super) struct Chain {
     callback_defer: AtomicU32,
     pending: AtomicBool,
     mutations: AtomicU32,
+    blockers: AtomicU32,
     wait: fn(&AtomicU32, u32),
     wake: fn(&AtomicU32),
 }
@@ -63,6 +64,7 @@ impl Chain {
             callback_defer: AtomicU32::new(0),
             pending: AtomicBool::new(false),
             mutations: AtomicU32::new(0),
+            blockers: AtomicU32::new(0),
             wait,
             wake,
         }
@@ -104,15 +106,47 @@ impl Chain {
 
     /// Freeze only an empty, fully published chain. Never walk another
     /// thread's stack or destroy an operation it may still be mutating.
+    #[cfg(not(target_os = "mochios"))]
     pub(super) fn capture_empty(&self) -> Option<Capture<'_>> {
+        self.capture(true)
+    }
+
+    /// Admit stable FD-only scopes without reading their foreign stack nodes.
+    /// Every other resource owner remains a blocker until it retires.
+    pub(super) fn capture_for_fork(&self) -> Option<Capture<'_>> {
+        self.capture(false)
+    }
+
+    fn capture(&self, require_empty: bool) -> Option<Capture<'_>> {
         self.mutations
             .compare_exchange(0, FROZEN, Ordering::AcqRel, Ordering::Acquire)
             .ok()?;
         let capture = Capture(self);
-        if !self.is_empty() || self.is_deferred() {
+        if (require_empty && !self.is_empty())
+            || self.is_deferred()
+            || self.blockers.load(Ordering::Acquire) != 0
+        {
             return None;
         }
         Some(capture)
+    }
+
+    /// Child-only detachment. The snapshot held capture_for_fork and no owner
+    /// of this chain resumes here. FD pins were reconciled separately. Keep
+    /// all private stack/heap memory, and never invoke a foreign destructor.
+    ///
+    /// # Safety
+    /// No detached scope may resume or later be retired in this image.
+    pub(super) unsafe fn discard_fork_opaque(&self) -> bool {
+        if self.blockers.load(Ordering::Acquire) != 0
+            || self.is_deferred()
+            || self.mutations.load(Ordering::Acquire) != 0
+        {
+            return false;
+        }
+        self.head.store(ptr::null_mut(), Ordering::Release);
+        self.pending.store(false, Ordering::Release);
+        true
     }
     pub(super) fn is_empty(&self) -> bool {
         self.head.load(Ordering::Acquire).is_null()
@@ -149,7 +183,11 @@ impl Chain {
     }
 
     pub(super) fn reset_empty(&self) -> bool {
-        if !self.is_empty() || self.is_deferred() || self.mutations.load(Ordering::Acquire) != 0 {
+        if !self.is_empty()
+            || self.is_deferred()
+            || self.mutations.load(Ordering::Acquire) != 0
+            || self.blockers.load(Ordering::Acquire) != 0
+        {
             return false;
         }
         self.pending.store(false, Ordering::Release);
@@ -194,6 +232,7 @@ pub(super) struct Scope<'a, R> {
     chain: &'a Chain,
     resource: Option<R>,
     preparing: Option<Preparation<'a>>,
+    fork_opaque: bool,
     _pinned: PhantomPinned,
 }
 
@@ -210,6 +249,7 @@ impl<'a, R> Scope<'a, R> {
             chain,
             resource: Some(resource),
             preparing: Some(preparing),
+            fork_opaque: false,
             _pinned: PhantomPinned,
         }
     }
@@ -233,8 +273,23 @@ impl<'a, R> Scope<'a, R> {
             );
         }
         scope.link.active = true;
+        scope.chain.blockers.fetch_add(1, Ordering::Release);
         scope.chain.head.store(&mut scope.link, Ordering::Release);
         drop(scope.preparing.take());
+    }
+
+    /// # Safety
+    /// Publish only after initialization, with callbacks deferred. R and the
+    /// remaining operation must retain no native references except FD pins
+    /// handled by the child borrow-book transition. Any nested operation that
+    /// can obtain temporary Handles must publish its own ordinary scope first.
+    /// Ownership metadata must not change until normal retirement/abandonment.
+    pub(super) unsafe fn allow_fork_opaque(self: Pin<&mut Self>) {
+        let scope = unsafe { self.get_unchecked_mut() };
+        let _preparation = scope.chain.prepare();
+        assert!(scope.link.active && scope.resource.is_some() && !scope.fork_opaque);
+        scope.fork_opaque = true;
+        scope.chain.blockers.fetch_sub(1, Ordering::Release);
     }
 
     pub(super) fn resource(&self) -> Option<&R> {
@@ -263,6 +318,9 @@ impl<'a, R> Scope<'a, R> {
             );
             self.chain.head.store(self.link.previous, Ordering::Release);
             self.link.active = false;
+            if !self.fork_opaque {
+                self.chain.blockers.fetch_sub(1, Ordering::Release);
+            }
         }
         drop(self.resource.take());
     }
@@ -283,5 +341,8 @@ impl<R> Drop for Scope<'_, R> {
 unsafe fn discard<R>(pointer: *mut Link) {
     let scope = unsafe { &mut *pointer.cast::<Scope<'_, R>>() };
     scope.link.active = false;
+    if !scope.fork_opaque {
+        scope.chain.blockers.fetch_sub(1, Ordering::Release);
+    }
     drop(scope.resource.take());
 }

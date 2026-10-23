@@ -1252,7 +1252,14 @@ fn reclaim_thread_control(control: &ThreadControl, reason: ThreadReclamation) {
     let _reclamation = thread_lifecycle::mutate();
     let keep_private_memory = matches!(reason, ThreadReclamation::ForkLive);
     // Never follow a resource link after its owner's stack has been reclaimed.
-    if !control.callback_resources.reset_empty() {
+    let resources_retired = if keep_private_memory {
+        // These foreign frames never resume. Their FD pins were discarded
+        // under the copied borrow-book lock before child runtime rebuilding.
+        unsafe { control.callback_resources.discard_fork_opaque() }
+    } else {
+        control.callback_resources.reset_empty()
+    };
+    if !resources_retired {
         process_exit(127);
     }
     control.active_native_signal_frame.store(0, Ordering::Relaxed);
@@ -3028,7 +3035,7 @@ fn clone_registered_process_owned(
     let mut resource_guards = [const { None }; mochios_posix_client::thread::MAX_THREADS];
     for (index, other) in THREADS.iter().enumerate() {
         if !ptr::eq(other, thread_control) {
-            resource_guards[index] = Some(other.callback_resources.capture_empty().ok_or(EAGAIN)?);
+            resource_guards[index] = Some(other.callback_resources.capture_for_fork().ok_or(EAGAIN)?);
         }
     }
     let libc_guard = libc_lock::capture()?;
@@ -4074,7 +4081,12 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
                         )),
                     );
                     if matches!(result, Err(EPIPE)) {
-                        generate_thread_signal(posix_protocol::SIGNAL_PIPE)?;
+                        // Signal dispatch can perform IPC and invoke handlers.
+                        // Its preparation is not part of the FD-only stream wait.
+                        io_resources::with(
+                            || Ok(()),
+                            |_| generate_thread_signal(posix_protocol::SIGNAL_PIPE),
+                        )?;
                     }
                     result.and_then(|count| usize::try_from(count).map_err(|_| EIO))
                 },
@@ -4314,10 +4326,15 @@ pub extern "C" fn _write(fd: c_int, buffer: *const c_void, length: usize) -> isi
         set_errno(EFAULT);
         return -1;
     }
-    let result = io_resources::with(
-        || with_fd_entry(fd),
-        |entry| syscall_write(**entry, buffer, length),
-    );
+    // A pipe stream operation owns only its borrow-book pin. Complex socket,
+    // terminal and file paths retain the ordinary fork blocker.
+    let result = unsafe {
+        io_resources::with_fork_opaque(
+            || with_fd_entry(fd),
+            |entry| entry.handle.kind == FdKind::ObjectStreamWrite,
+            |entry| syscall_write(**entry, buffer, length),
+        )
+    };
     record_stdio_io(&result);
     result_with_errno(result, -1)
 }
@@ -4460,10 +4477,14 @@ pub extern "C" fn _read(fd: c_int, buffer: *mut c_void, length: usize) -> isize 
         set_errno(EFAULT);
         return -1;
     }
-    let result = io_resources::with(
-        || with_fd_entry(fd),
-        |entry| syscall_read(**entry, buffer, length),
-    );
+    // Only the pipe-stream case satisfies the FD-only rule used by _write.
+    let result = unsafe {
+        io_resources::with_fork_opaque(
+            || with_fd_entry(fd),
+            |entry| entry.handle.kind == FdKind::ObjectStreamRead,
+            |entry| syscall_read(**entry, buffer, length),
+        )
+    };
     record_stdio_io(&result);
     result_with_errno(result, -1)
 }

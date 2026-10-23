@@ -17,6 +17,28 @@ pub(super) fn with_initialized<R, T: Copy>(
     initialize: impl FnOnce(&mut R) -> Result<(), c_int>,
     operation: impl FnOnce(&mut R) -> Result<T, c_int>,
 ) -> Result<T, c_int> {
+    with_policy(prepare, initialize, operation, |_| false)
+}
+
+/// # Safety
+/// When allow returns true, R contains only FD pins/private memory and the
+/// operation cannot acquire additional native references outside a nested
+/// ordinary scope. Otherwise retain the ordinary blocking scope, including
+/// during complex I/O and its waits.
+pub(super) unsafe fn with_fork_opaque<R, T: Copy>(
+    prepare: impl FnOnce() -> Result<R, c_int>,
+    allow: impl FnOnce(&R) -> bool,
+    operation: impl FnOnce(&mut R) -> Result<T, c_int>,
+) -> Result<T, c_int> {
+    with_policy(prepare, |_| Ok(()), operation, allow)
+}
+
+fn with_policy<R, T: Copy>(
+    prepare: impl FnOnce() -> Result<R, c_int>,
+    initialize: impl FnOnce(&mut R) -> Result<(), c_int>,
+    operation: impl FnOnce(&mut R) -> Result<T, c_int>,
+    fork_opaque: impl FnOnce(&R) -> bool,
+) -> Result<T, c_int> {
     let (_, control) = register_current_thread().ok_or(EAGAIN)?;
     let native = defer_native_delivery();
     let mut scope = core::pin::pin!(callback_resources::Scope::new(
@@ -37,6 +59,17 @@ pub(super) fn with_initialized<R, T: Copy>(
     if let Err(error) = initialized {
         unsafe { scope.as_mut().retire() };
         return Err(error);
+    }
+    if fork_opaque(
+        scope
+            .as_ref()
+            .get_ref()
+            .resource()
+            .unwrap()
+            .as_ref()
+            .unwrap(),
+    ) {
+        unsafe { scope.as_mut().allow_fork_opaque() };
     }
     drop(native);
     let result = operation(scope.as_mut().resource_mut().unwrap().as_mut().unwrap());
