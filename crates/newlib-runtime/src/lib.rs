@@ -14,6 +14,7 @@ mod file_handle_import;
 mod callback_resources;
 mod file_mutation;
 mod file_metadata;
+mod file_configuration;
 mod file_time;
 mod stat_output;
 mod terminal_memory;
