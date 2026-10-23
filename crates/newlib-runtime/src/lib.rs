@@ -8559,6 +8559,7 @@ pub unsafe extern "C" fn pthread_key_create(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn pthread_key_delete(key: PthreadKey) -> c_int {
+    let _native = defer_native_delivery();
     let Some((_, control)) = thread_key_control(key) else {
         return EINVAL;
     };
@@ -8566,7 +8567,7 @@ pub extern "C" fn pthread_key_delete(key: PthreadKey) -> c_int {
         .allocated
         .compare_exchange(
             THREAD_KEY_ALLOCATED,
-            THREAD_KEY_FREE,
+            THREAD_KEY_INITIALIZING,
             Ordering::AcqRel,
             Ordering::Relaxed,
         )
@@ -8574,7 +8575,11 @@ pub extern "C" fn pthread_key_delete(key: PthreadKey) -> c_int {
     {
         return EINVAL;
     }
+    // Keep the slot unavailable until the old callback is cleared. Publishing
+    // FREE first lets a concurrent creator install a destructor that this
+    // deletion would then overwrite.
     control.destructor.store(0, Ordering::Release);
+    control.allocated.store(THREAD_KEY_FREE, Ordering::Release);
     0
 }
 
