@@ -318,6 +318,7 @@ pub const NODE_TYPE_DIRECTORY: u32 = 2;
 pub const NODE_TYPE_SYMLINK: u32 = 3;
 pub const NODE_TYPE_SPECIAL: u32 = 4;
 pub const NODE_TYPE_SOCKET: u32 = 5;
+pub const NODE_TYPE_FIFO: u32 = 6;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Header {
