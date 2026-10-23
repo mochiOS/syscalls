@@ -3,6 +3,10 @@ use mochios_posix_client::thread_lifecycle::{Activity, EnterError, Freeze, Gate}
 
 static GATE: Gate = Gate::new();
 
+pub(super) fn stable_revision() -> Option<u32> {
+    GATE.stable_revision()
+}
+
 pub(super) struct Mutation {
     // Release the activity before permitting a deferred callback to fork.
     _activity: Activity<'static>,

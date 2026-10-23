@@ -1393,12 +1393,25 @@ fn reap_detached_threads() {
 }
 
 fn current_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
+    static CACHE: thread_lookup::TokenCache = thread_lookup::TokenCache::new();
     loop {
         let epoch = FORK_EPOCH.load(Ordering::Acquire);
         // Registered nonzero TLS bases are runtime-private thread identities,
         // not authentication. Native threads without a private TLS base keep
         // the kernel-identity path; nothing here changes IPC sender identity.
         let from_tls = thread_lookup::local_base().and_then(|base| {
+            let revision = thread_lifecycle::stable_revision();
+            if let Some(revision) = revision {
+                if let Some(token) = CACHE.get(base, revision) {
+                    if let Some(control) = thread_control(token) {
+                        if control.thread_local_base.load(Ordering::Acquire) == base
+                            && thread_lifecycle::stable_revision() == Some(revision)
+                        {
+                            return Some((token, control));
+                        }
+                    }
+                }
+            }
             let mut matches = THREADS.iter().enumerate().filter(|(_, control)| {
                 let state = control.state.load(Ordering::Acquire);
                 state != THREAD_FREE
@@ -1408,7 +1421,14 @@ fn current_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
             let (index, control) = matches.next()?;
             // An ambiguous registration cannot establish a local identity.
             if matches.next().is_none() {
-                thread_token_for(index, control).map(|token| (token, control))
+                thread_token_for(index, control).map(|token| {
+                    if let Some(revision) = revision {
+                        if thread_lifecycle::stable_revision() == Some(revision) {
+                            CACHE.insert(base, revision, token);
+                        }
+                    }
+                    (token, control)
+                })
             } else {
                 None
             }

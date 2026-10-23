@@ -1,5 +1,36 @@
 //! Read the runtime's current TLS selector without entering the kernel.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
+/// Process-private hints, never authentication. Each hit must validate the
+/// generation-bearing token and its TLS base against the live thread record.
+/// Keep revision and token in one atomic word so colliding writers cannot
+/// publish a token from one lifecycle revision with another's revision.
+pub(super) struct TokenCache([AtomicU64; 64]);
+
+impl TokenCache {
+    pub(super) const fn new() -> Self {
+        Self([const { AtomicU64::new(0) }; 64])
+    }
+
+    fn bucket(&self, base: u64) -> &AtomicU64 {
+        &self.0[((base >> 4) ^ (base >> 16)) as usize & 63]
+    }
+
+    pub(super) fn get(&self, base: u64, revision: u32) -> Option<u32> {
+        let value = self.bucket(base).load(Ordering::Relaxed);
+        (revision != 0 && revision != u32::MAX && value >> 32 == u64::from(revision))
+            .then_some(value as u32)
+    }
+
+    pub(super) fn insert(&self, base: u64, revision: u32, token: u32) {
+        self.bucket(base).store(
+            (u64::from(revision) << 32) | u64::from(token),
+            Ordering::Relaxed,
+        );
+    }
+}
+
 #[cfg(all(target_arch = "x86_64", target_os = "mochios"))]
 fn cpu_supports_local_base() -> bool {
     core::arch::x86_64::__cpuid(0).eax >= 7 && core::arch::x86_64::__cpuid_count(7, 0).ebx & 1 != 0
