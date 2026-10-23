@@ -1387,6 +1387,30 @@ impl<T: ObjectTransport> Client<T> {
         }
     }
 
+    /// Advance a same-process thread's wait epoch without an application
+    /// signal. Target identity comes only from its explicitly attached Handle.
+    pub fn interrupt_thread_waits(
+        &self,
+        thread: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<(), ClientError<T::Error>> {
+        let rights = protocol::THREAD_WAIT_INTERRUPT_RIGHTS;
+        if thread.rights & rights != rights {
+            return Err(ClientError::Remote(-13));
+        }
+        let thread = ObjectHandleAttachment {
+            handle: thread.handle,
+            rights,
+        };
+        self.file_request(protocol::OP_THREAD_WAIT_INTERRUPT, &[], thread, &mut [])
+            .and_then(|length| {
+                if length == 0 {
+                    Ok(())
+                } else {
+                    Err(ClientError::MismatchedResponse)
+                }
+            })
+    }
+
     pub fn access_at(
         &self,
         base: AccessAtBase<T::Handle>,

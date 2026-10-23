@@ -20,7 +20,7 @@ pub(super) fn reset_for_fork() {
 
 pub(super) use crate::record_lock_memory::Flock;
 
-fn apply(entry: FdEntry, request: Request) -> Result<Reply, c_int> {
+pub(super) fn apply(entry: FdEntry, request: Request) -> Result<Reply, c_int> {
     posix_client()
         .map_err(map_posix_client_error)?
         .record_lock(
@@ -34,36 +34,43 @@ fn apply(entry: FdEntry, request: Request) -> Result<Reply, c_int> {
 }
 
 pub(super) fn fcntl(fd: c_int, command: c_int, input: *mut Flock) -> Result<c_int, c_int> {
+    if command == F_SETLKW {
+        return record_lock_blocking::fcntl(fd, input);
+    }
     let _gate = gate();
     let lease = with_fd_entry(fd)?;
-    if lease.handle.kind != FdKind::ObjectFile {
-        return Err(EBADF);
-    }
-    let request = record_lock_memory::read_request(command, input)?;
-    match request.operation {
-        Operation::Set(Kind::Read)
-            if !mochios_posix_client::fd::access_allows_read(lease.handle.open_flags as u32) =>
-        {
-            return Err(EBADF);
-        }
-        Operation::Set(Kind::Write)
-            if !mochios_posix_client::fd::access_allows_write(lease.handle.open_flags as u32) =>
-        {
-            return Err(EBADF);
-        }
-        _ => {}
-    }
-    // A waiting operation needs cancellation/interruption admission; never
-    // silently turn F_SETLKW into a nonblocking F_SETLK.
-    if command == F_SETLKW && matches!(request.operation, Operation::Set(_)) {
-        return Err(ENOSYS);
-    }
+    let request = read_request(*lease, command, input)?;
     cancel_exec()?;
     let reply = apply(*lease, request)?;
     if command == F_GETLK {
         record_lock_memory::write_reply(input, reply)?;
     }
     Ok(0)
+}
+
+pub(super) fn read_request(
+    entry: FdEntry,
+    command: c_int,
+    input: *mut Flock,
+) -> Result<Request, c_int> {
+    if entry.handle.kind != FdKind::ObjectFile {
+        return Err(EBADF);
+    }
+    let request = record_lock_memory::read_request(command, input)?;
+    match request.operation {
+        Operation::Set(Kind::Read)
+            if !mochios_posix_client::fd::access_allows_read(entry.handle.open_flags as u32) =>
+        {
+            return Err(EBADF);
+        }
+        Operation::Set(Kind::Write)
+            if !mochios_posix_client::fd::access_allows_write(entry.handle.open_flags as u32) =>
+        {
+            return Err(EBADF);
+        }
+        _ => {}
+    }
+    Ok(request)
 }
 
 /// Caller holds GATE. Keep the source reference alive across remote fstat.

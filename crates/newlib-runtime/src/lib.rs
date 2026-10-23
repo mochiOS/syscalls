@@ -8,6 +8,7 @@ mod fd_lease;
 mod fd_creation;
 mod record_lock;
 mod record_lock_memory;
+mod record_lock_blocking;
 use fd_creation::PendingFdReservation;
 mod file_handle_import;
 mod callback_resources;
@@ -9012,8 +9013,17 @@ pub extern "C" fn pthread_cancel(thread: Pthread) -> c_int {
         notify_thread_waiter(control);
         native_mutex_wake_all(&control.state);
         cancellation::notify_async(control)
+            .map(|()| control.cancel_state.load(Ordering::Acquire) == PTHREAD_CANCEL_ENABLE)
     })
     .and_then(|result| result)
+    // The reference-retirement lock is gone before any service request.
+    .and_then(|enabled| {
+        if enabled {
+            record_lock_blocking::interrupt(thread)
+        } else {
+            Ok(())
+        }
+    })
     .err()
     .unwrap_or(0);
     cancellation::test_async();

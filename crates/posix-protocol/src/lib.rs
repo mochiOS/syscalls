@@ -359,6 +359,10 @@ pub const OP_RECORD_LOCK: u16 = 117;
 pub const OP_RECORD_LOCK_EXEC: u16 = 118;
 /// Blocking record lock with an explicit file and signal delivery epoch.
 pub const OP_RECORD_LOCK_WAIT: u16 = 119;
+/// Interrupt POSIX waits of an explicitly delegated, same-owner ThreadHandle.
+pub const OP_THREAD_WAIT_INTERRUPT: u16 = 120;
+pub const THREAD_WAIT_INTERRUPT_RIGHTS: u64 =
+    mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_TRANSFER;
 pub mod record_lock_wait;
 pub mod record_lock_exec;
 pub mod timer_callback;
