@@ -4,6 +4,7 @@ pub mod device_open;
 pub mod device_observation;
 pub mod description_flags;
 pub mod object_limits;
+pub mod volume_status;
 pub mod device_metadata;
 pub mod device_registration;
 pub mod device_removal;
@@ -152,6 +153,9 @@ pub const OP_OBJECT_LIMITS_AT: u16 = 50;
 /// and ordered directory attachments; authenticated credentials wrap a fixed
 /// device_observation::Request followed by raw pathname bytes. Reply: bytes only.
 pub const OP_DEVICE_OBSERVATION_AT: u16 = 51;
+/// Authenticated STAT_AT root/base traversal; returns volume_status::Status
+/// without opening target data or allocating an open description.
+pub const OP_VOLUME_STATUS_AT: u16 = 52;
 /// Exclusive FIFO inode creation. Uses MKDIR_AT root/base flags and ordered
 /// directory attachments. Authenticated credentials come only from the held
 /// control endpoint. No new Handle or reply payload; no data-open rendezvous.
