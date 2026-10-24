@@ -16,3 +16,4 @@ mochios-capability-protocol = { path = "../capability-protocol", default-feature
 mochios-filesystem-protocol = { path = "../filesystem-protocol" }
 mochios-posix-client = { path = "../posix-client", default-features = false, features = ["syscall-endpoint", "fd-table"] }
 mochios-posix-protocol = { path = "../posix-protocol" }
+sha2 = { version = "0.10", default-features = false }

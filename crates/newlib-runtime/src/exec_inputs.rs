@@ -51,6 +51,20 @@ impl Inputs {
         self.capture_vector(1, envp)
     }
 
+    /// Descriptor execution has no pathname input. Snapshot vectors with the
+    /// same fault-safe copy and shared text budget used by pathname exec.
+    pub(super) fn capture_fd(
+        &mut self,
+        argv: *const *const c_char,
+        envp: *const *const c_char,
+    ) -> Result<(), c_int> {
+        self.used = 0;
+        self.counts = [0; 2];
+        self.path_length = 0;
+        self.capture_vector(0, argv)?;
+        self.capture_vector(1, envp)
+    }
+
     fn capture_vector(&mut self, kind: usize, vector: *const *const c_char) -> Result<(), c_int> {
         if vector.is_null() {
             return Ok(());

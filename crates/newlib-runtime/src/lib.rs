@@ -42,6 +42,7 @@ mod directory_io;
 mod path_io;
 mod user_copy;
 mod exec_inputs;
+mod exec_handle;
 mod exec_search;
 mod exec_interpreter;
 mod string_configuration;
@@ -2948,82 +2949,44 @@ fn replace_process_image(
     let identity_length = absolute_exec_identity(path_bytes, &mut identity)?;
     let identity = &identity[..identity_length];
     let identity_text = core::str::from_utf8(identity).map_err(|_| EINVAL)?;
-    let mut arguments = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
-    let mut environment = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
-    let (mut argument_count, environment_count) = inputs.vectors(&mut arguments, &mut environment);
-    if argument_count == 0 {
-        arguments[0] = path_bytes;
-        argument_count = 1;
-    }
-    let mut random = [0u8; 16];
-    let random_length = syscall_errno(syscall::raw_syscall2(
-        syscall::SyscallNumber::RandomFill,
-        random.as_mut_ptr() as u64,
-        random.len() as u64,
-    ))?;
-    if random_length != random.len() as u64 {
-        return Err(EIO);
-    }
-    let mut startup_image = [0u8; MAX_STARTUP_IMAGE_BYTES];
-    let plan = image_startup::Plan::new(random)?;
-    let startup_length = mochios_posix_client::process_image::encode_initial_stack_with_aux(
-        &arguments[..argument_count],
-        &environment[..environment_count],
-        path_bytes,
-        random,
-        &plan.auxiliary(),
-        &mut startup_image,
-    )
-    .map_err(|error| match error {
-        mochios_posix_client::process_image::EncodeError::ImageTooLarge
-        | mochios_posix_client::process_image::EncodeError::EmptyArgumentVector => E2BIG,
-        mochios_posix_client::process_image::EncodeError::InvalidText => EINVAL,
-        mochios_posix_client::process_image::EncodeError::Codec(_) => EIO,
-    })?;
-    let startup_length = mnu_abi::process_image::attach_mappings(
-        &mut startup_image,
-        startup_length,
-        &plan.mappings(),
-    )
-    .map_err(|_| EIO)?;
-    let startup_length = attach_fd_launch_context(fds, &mut startup_image, startup_length)?;
-
-    let byte_ceiling = address_space::snapshot()?.byte_ceiling();
-    let client = posix_client().map_err(map_posix_client_error)?;
-    let opened = client
-        .open_at(
-            if path_bytes.first() == Some(&b'/') {
-                OpenAtBase::ProcessRoot
-            } else {
-                OpenAtBase::ProcessCwd
-            },
-            posix_protocol::OPEN_READ | posix_protocol::OPEN_EXECUTE,
-            0,
-            path_text,
-        )
-        .map_err(map_posix_client_error)?;
-    // Native image snapshots use bounded positional reads, never the shared
-    // open-file cursor. Do not require unrelated SEEK authority here.
-    let required_rights = syscall::HANDLE_RIGHT_READ;
-    if opened.rights & required_rights != required_rights {
+    exec_handle::with_startup(&inputs, path_bytes, fds, |startup_image| {
+        let byte_ceiling = address_space::snapshot()?.byte_ceiling();
+        let client = posix_client().map_err(map_posix_client_error)?;
+        let opened = client
+            .open_at(
+                if path_bytes.first() == Some(&b'/') {
+                    OpenAtBase::ProcessRoot
+                } else {
+                    OpenAtBase::ProcessCwd
+                },
+                posix_protocol::OPEN_READ | posix_protocol::OPEN_EXECUTE,
+                0,
+                path_text,
+            )
+            .map_err(map_posix_client_error)?;
+        // Native image snapshots use bounded positional reads, never the shared
+        // open-file cursor. Do not require unrelated SEEK authority here.
+        let required_rights = syscall::HANDLE_RIGHT_READ;
+        if opened.rights & required_rights != required_rights {
+            close_object_handle(opened.handle);
+            return Err(EACCES);
+        }
+        if let Err(error) = authorize_exec_path(identity) {
+            close_object_handle(opened.handle);
+            return Err(error);
+        }
+        let result = match syscall::image::replace_bounded(
+            opened.handle,
+            identity_text,
+            startup_image,
+            byte_ceiling,
+        ) {
+            Ok(never) => match never {},
+            Err(error) => Err(mochios_posix_client::image_error::errno(error.raw())),
+        };
         close_object_handle(opened.handle);
-        return Err(EACCES);
-    }
-    if let Err(error) = authorize_exec_path(identity) {
-        close_object_handle(opened.handle);
-        return Err(error);
-    }
-    let result = match syscall::image::replace_bounded(
-        opened.handle,
-        identity_text,
-        &startup_image[..startup_length],
-        byte_ceiling,
-    ) {
-        Ok(never) => match never {},
-        Err(error) => Err(mochios_posix_client::image_error::errno(error.raw())),
-    };
-    close_object_handle(opened.handle);
-    result
+        result
+    })
 }
 
 fn execve_with_launch_context(
@@ -3031,13 +2994,22 @@ fn execve_with_launch_context(
     argv: *const *const c_char,
     envp: *const *const c_char,
 ) -> Result<(), c_int> {
-    io_resources::with(|| Ok(()), |_| execve_with_launch_context_owned(path, argv, envp))
+    io_resources::with(
+        || Ok(()),
+        |_| execve_with_launch_context_owned(path, argv, envp),
+    )
 }
 
 fn execve_with_launch_context_owned(
     path: *const c_char,
     argv: *const *const c_char,
     envp: *const *const c_char,
+) -> Result<(), c_int> {
+    with_exec_fd_snapshot(|snapshot| replace_process_image(path, argv, envp, snapshot))
+}
+
+fn with_exec_fd_snapshot(
+    operation: impl FnOnce(&FdTable<FdObject>) -> Result<(), c_int>,
 ) -> Result<(), c_int> {
     let (_, control) = register_current_thread().ok_or(EAGAIN)?;
     let _record_gate = record_lock::gate();
@@ -3053,8 +3025,7 @@ fn execve_with_launch_context_owned(
     unsafe { scope.as_mut().activate() };
     drop(delivery);
     let snapshot = &scope.as_ref().get_ref().resource().unwrap().0;
-    let result = record_lock::prepare_exec(snapshot)
-        .and_then(|()| replace_process_image(path, argv, envp, snapshot));
+    let result = record_lock::prepare_exec(snapshot).and_then(|()| operation(snapshot));
     // Replacement cannot return on success. Failed cancellation stays in the
     // local cleanup slot and is retried by the next gated policy operation.
     let _ = record_lock::cancel_exec();
@@ -8534,6 +8505,18 @@ pub extern "C" fn execve(
     envp: *const *const c_char,
 ) -> c_int {
     _execve(path, argv, envp)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fexecve(
+    fd: c_int,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> c_int {
+    let result = io_resources::with(|| Ok(()), |_| {
+        with_exec_fd_snapshot(|snapshot| exec_handle::replace(fd, argv, envp, snapshot))
+    });
+    result_with_errno(result.map(|()| 0), -1)
 }
 
 #[unsafe(no_mangle)]
