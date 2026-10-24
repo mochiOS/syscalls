@@ -1,5 +1,5 @@
-//! Bounded keychain IPC. Caller identity is never supplied by clients. Only the
-//! trusted session controller may select an active UID through ActivateSession.
+//! Bounded keychain IPC. Caller identity is never supplied by clients. Only
+//! authenticated session/account brokers can select OS users for their operations.
 #![cfg_attr(not(feature = "std"), no_std)]
 extern crate alloc;
 use alloc::{string::String, vec::Vec};
@@ -19,7 +19,8 @@ pub const SERVICE_NAME: &str = "keychain.service";
 pub const ACCESS: &str = "keychain.access";
 pub const MANAGE: &str = "keychain.manage";
 pub const SESSION: &str = "keychain.session";
-const MAGIC: &[u8; 8] = b"MKCHN003";
+pub const AUTHENTICATION: &str = "keychain.authentication";
+const MAGIC: &[u8; 8] = b"MKCHN004";
 const HEADER: usize = 24;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -211,6 +212,20 @@ pub enum Request {
     ActivateSession {
         uid: u32,
     },
+    AuthenticationEpoch,
+    VerifiedLogin {
+        uid: u32,
+        epoch: u64,
+        tag: [u8; 32],
+        password: Secret,
+    },
+    PrepareLoginPassword {
+        uid: u32,
+        epoch: u64,
+        current_tag: [u8; 32],
+        next_tag: [u8; 32],
+        password: Secret,
+    },
 }
 impl Request {
     pub fn opcode(&self) -> u16 {
@@ -230,6 +245,9 @@ impl Request {
             Self::Applications { .. } => 13,
             Self::LockAll => 14,
             Self::ActivateSession { .. } => 15,
+            Self::AuthenticationEpoch => 16,
+            Self::VerifiedLogin { .. } => 17,
+            Self::PrepareLoginPassword { .. } => 18,
         }
     }
     pub fn manager(&self) -> bool {
@@ -250,6 +268,31 @@ impl Request {
         let mut w = Writer::new();
         match self {
             Self::Status | Self::Lock | Self::LockAll => {}
+            Self::AuthenticationEpoch => {}
+            Self::VerifiedLogin {
+                uid,
+                epoch,
+                tag,
+                password,
+            } => {
+                w.raw(&uid.to_le_bytes());
+                w.u64(*epoch);
+                w.raw(tag);
+                w.bytes(password.expose(), MAX_PASSWORD)?;
+            }
+            Self::PrepareLoginPassword {
+                uid,
+                epoch,
+                current_tag,
+                next_tag,
+                password,
+            } => {
+                w.raw(&uid.to_le_bytes());
+                w.u64(*epoch);
+                w.raw(current_tag);
+                w.raw(next_tag);
+                w.bytes(password.expose(), MAX_PASSWORD)?;
+            }
             Self::ActivateSession { uid } => w.raw(&uid.to_le_bytes()),
             Self::Applications { offset, generation } => {
                 w.u16(*offset);
@@ -386,6 +429,20 @@ impl Request {
             15 => Self::ActivateSession {
                 uid: u32::from_le_bytes(r.array()?),
             },
+            16 => Self::AuthenticationEpoch,
+            17 => Self::VerifiedLogin {
+                uid: u32::from_le_bytes(r.array()?),
+                epoch: r.u64()?,
+                tag: r.array()?,
+                password: r.secret(MAX_PASSWORD)?,
+            },
+            18 => Self::PrepareLoginPassword {
+                uid: u32::from_le_bytes(r.array()?),
+                epoch: r.u64()?,
+                current_tag: r.array()?,
+                next_tag: r.array()?,
+                password: r.secret(MAX_PASSWORD)?,
+            },
             _ => return Err(Error::Invalid),
         };
         r.end()?;
@@ -403,6 +460,8 @@ pub enum Reply {
         initialized: bool,
         unlocked: bool,
         session_epoch: u64,
+        login_managed: bool,
+        needs_recovery: bool,
     },
     Id(ItemId),
     Secret(Secret),
@@ -416,6 +475,7 @@ pub enum Reply {
         total: u16,
         applications: Vec<Application>,
     },
+    AuthenticationEpoch(u64),
 }
 impl Reply {
     pub fn encode(&self, id: u64) -> Result<Zeroizing<Vec<u8>>> {
@@ -426,10 +486,14 @@ impl Reply {
                 initialized,
                 unlocked,
                 session_epoch,
+                login_managed,
+                needs_recovery,
             } => {
                 w.u8(u8::from(*initialized));
                 w.u8(u8::from(*unlocked));
                 w.u64(*session_epoch);
+                w.u8(u8::from(*login_managed));
+                w.u8(u8::from(*needs_recovery));
                 1
             }
             Self::Id(id) => {
@@ -480,6 +544,10 @@ impl Reply {
                 }
                 5
             }
+            Self::AuthenticationEpoch(epoch) => {
+                w.u64(*epoch);
+                6
+            }
         };
         frame(op, 0, id, &w.finish())
     }
@@ -504,6 +572,8 @@ impl Reply {
                 initialized: r.boolean()?,
                 unlocked: r.boolean()?,
                 session_epoch: r.u64()?,
+                login_managed: r.boolean()?,
+                needs_recovery: r.boolean()?,
             },
             2 => Self::Id(r.array()?),
             3 => Self::Secret(r.secret(MAX_SECRET)?),
@@ -549,6 +619,7 @@ impl Reply {
                     applications: apps,
                 }
             }
+            6 => Self::AuthenticationEpoch(r.u64()?),
             _ => return Err(Error::Invalid),
         };
         r.end()?;
@@ -844,6 +915,50 @@ mod tests {
             assert!(Request::decode(&bytes[..bytes.len() - 1]).is_err());
             assert!(Reply::decode(&bytes[..bytes.len() - 1], 42).is_err());
         }
+    }
+    #[test]
+    fn login_broker_requests_and_managed_status_are_bounded_and_round_trip() {
+        for request in [
+            Request::AuthenticationEpoch,
+            Request::VerifiedLogin {
+                uid: 1000,
+                epoch: 7,
+                tag: [1; 32],
+                password: Secret::new(b"login secret".to_vec()),
+            },
+            Request::PrepareLoginPassword {
+                uid: 1000,
+                epoch: 7,
+                current_tag: [1; 32],
+                next_tag: [2; 32],
+                password: Secret::new(b"next secret".to_vec()),
+            },
+        ] {
+            let frame = request.encode(19).unwrap();
+            assert!(frame.len() <= 8192);
+            let (id, decoded) = Request::decode(&frame).unwrap();
+            assert_eq!(id, 19);
+            assert_eq!(decoded.opcode(), request.opcode());
+            assert!(!alloc::format!("{request:?}").contains("secret"));
+            for n in 0..frame.len() {
+                assert!(Request::decode(&frame[..n]).is_err());
+            }
+        }
+        let reply = Reply::Status {
+            initialized: true,
+            unlocked: false,
+            session_epoch: 7,
+            login_managed: true,
+            needs_recovery: true,
+        };
+        assert!(matches!(
+            Reply::decode(&reply.encode(19).unwrap(), 19),
+            Ok(Reply::Status {
+                login_managed: true,
+                needs_recovery: true,
+                ..
+            })
+        ));
     }
     #[test]
     fn request_limits_reject_control_characters_and_large_secrets() {
