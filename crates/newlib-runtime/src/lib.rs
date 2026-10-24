@@ -125,9 +125,9 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use mochi_user_syscall as syscall;
 use mochios_capability_protocol::{
-    AUTHORIZE_EXEC_OPCODE, CAPABILITY_PERSISTENT_QUERY_OPCODE, CAPABILITY_PROMPT_OPCODE,
+    CAPABILITY_PERSISTENT_QUERY_OPCODE, CAPABILITY_PROMPT_OPCODE,
     CapabilityClass, CapabilityDecision, CapabilityExecutableIdentity, CapabilityPromptRequest,
-    CapabilityResourceDescriptor, MAX_CAPABILITY_NAME_LEN, MAX_EXECUTABLE_PATH_LEN, MAX_REASON_LEN,
+    CapabilityResourceDescriptor, MAX_CAPABILITY_NAME_LEN, MAX_REASON_LEN,
 };
 use mochios_filesystem_protocol as filesystem_protocol;
 use mochios_posix_client::fd::{
@@ -2817,81 +2817,6 @@ fn close_object_handle(handle: u32) {
     ));
 }
 
-fn absolute_exec_identity(
-    path: &[u8],
-    output: &mut [u8; MAX_EXECUTABLE_PATH_LEN],
-) -> Result<usize, c_int> {
-    if path.is_empty() {
-        return Err(ENOENT);
-    }
-    if path[0] == b'/' {
-        if path.len() >= output.len() {
-            return Err(ENAMETOOLONG);
-        }
-        output[..path.len()].copy_from_slice(path);
-        return Ok(path.len());
-    }
-    let client = posix_client().map_err(map_posix_client_error)?;
-    let mut cwd = [0u8; posix_protocol::MAX_PATH_LEN];
-    let cwd_length = client.getcwd(&mut cwd).map_err(map_posix_client_error)?;
-    let separator = usize::from(cwd_length != 1);
-    let length = cwd_length
-        .checked_add(separator)
-        .and_then(|length| length.checked_add(path.len()))
-        .ok_or(ENAMETOOLONG)?;
-    if length >= output.len() {
-        return Err(ENAMETOOLONG);
-    }
-    output[..cwd_length].copy_from_slice(&cwd[..cwd_length]);
-    let mut written = cwd_length;
-    if separator != 0 {
-        output[written] = b'/';
-        written += 1;
-    }
-    output[written..length].copy_from_slice(path);
-    Ok(length)
-}
-
-fn authorize_exec_path(path_bytes: &[u8]) -> Result<(), c_int> {
-    if path_bytes.is_empty() || path_bytes[0] != b'/' {
-        return Err(EINVAL);
-    }
-    if path_bytes.len() >= MAX_EXECUTABLE_PATH_LEN {
-        return Err(ENAMETOOLONG);
-    }
-    let endpoint = syscall_errno(syscall::raw_syscall2(
-        syscall::SyscallNumber::FindProcessByName,
-        CAPABILITY_SERVICE_NAME.as_ptr() as u64,
-        CAPABILITY_SERVICE_NAME.len() as u64,
-    ))?;
-    if endpoint == 0 {
-        return Err(ENOENT);
-    }
-    let mut request = [0u8; core::mem::size_of::<u32>() + MAX_EXECUTABLE_PATH_LEN];
-    request[..4].copy_from_slice(&AUTHORIZE_EXEC_OPCODE.to_le_bytes());
-    request[4..4 + path_bytes.len()].copy_from_slice(path_bytes);
-    let request_len = 4 + path_bytes.len();
-    let mut reply = [0u8; 8];
-    let message = syscall_errno(syscall::raw_syscall5(
-        syscall::SyscallNumber::IpcCall,
-        endpoint,
-        request.as_ptr() as u64,
-        request_len as u64,
-        reply.as_mut_ptr() as u64,
-        reply.len() as u64,
-    ))?;
-    if (message & 0xffff_ffff) as usize != reply.len() {
-        return Err(EIO);
-    }
-    let status = u64::from_le_bytes(reply);
-    if status == 0 {
-        Ok(())
-    } else {
-        let status = i64::try_from(status).map_err(|_| EIO)?;
-        Err(map_kernel_errno(status))
-    }
-}
-
 fn authorize_captured_image(identity: &str) -> Result<(), c_int> {
     let mut request = [0u8; 8 + mochios_capability_protocol::MAX_EXECUTABLE_IDENTITY_LEN];
     let length = mochios_capability_protocol::encode_authorize_captured_image_request(
@@ -2936,50 +2861,7 @@ fn replace_process_image(
 ) -> Result<(), c_int> {
     let mut inputs = exec_inputs::Inputs::new();
     inputs.capture(path, argv, envp)?;
-    let path_bytes = inputs.path();
-    let path_text = core::str::from_utf8(path_bytes).map_err(|_| EINVAL)?;
-    let mut identity = [0u8; MAX_EXECUTABLE_PATH_LEN];
-    let identity_length = absolute_exec_identity(path_bytes, &mut identity)?;
-    let identity = &identity[..identity_length];
-    let identity_text = core::str::from_utf8(identity).map_err(|_| EINVAL)?;
-    exec_handle::with_startup(&inputs, path_bytes, fds, |startup_image| {
-        let byte_ceiling = address_space::snapshot()?.byte_ceiling();
-        let client = posix_client().map_err(map_posix_client_error)?;
-        let opened = client
-            .open_at(
-                if path_bytes.first() == Some(&b'/') {
-                    OpenAtBase::ProcessRoot
-                } else {
-                    OpenAtBase::ProcessCwd
-                },
-                posix_protocol::OPEN_READ | posix_protocol::OPEN_EXECUTE,
-                0,
-                path_text,
-            )
-            .map_err(map_posix_client_error)?;
-        // Native image snapshots use bounded positional reads, never the shared
-        // open-file cursor. Do not require unrelated SEEK authority here.
-        let required_rights = syscall::HANDLE_RIGHT_READ;
-        if opened.rights & required_rights != required_rights {
-            close_object_handle(opened.handle);
-            return Err(EACCES);
-        }
-        if let Err(error) = authorize_exec_path(identity) {
-            close_object_handle(opened.handle);
-            return Err(error);
-        }
-        let result = match syscall::image::replace_bounded(
-            opened.handle,
-            identity_text,
-            startup_image,
-            byte_ceiling,
-        ) {
-            Ok(never) => match never {},
-            Err(error) => Err(mochios_posix_client::image_error::errno(error.raw())),
-        };
-        close_object_handle(opened.handle);
-        result
-    })
+    exec_handle::replace_path(&inputs, fds)
 }
 
 fn execve_with_launch_context(
@@ -3099,11 +2981,9 @@ fn clone_registered_process_owned(
     // bookkeeping with the FD table, and unlock the copied book in both images.
     let mut fd_borrows = fd_lease::BORROWS.lock();
     let inherited_fds = guard.fds.clone();
-    if guard.executable.is_null() {
-        return Err(ENOENT);
-    }
-    let identity = unsafe { c_bytes(guard.executable) };
-    let identity = core::str::from_utf8(identity).map_err(|_| EINVAL)?;
+    // This is only the one-shot authorization key. The native mechanism
+    // binds actual identity/measurement; AT_EXECFN may contain arbitrary bytes.
+    let identity = "captured-image";
     let mut capture = handle_capture::Capture::new()?;
     let mut records = [mnu_abi::HandleInfo::default(); mnu_abi::process_create::MAX_HANDLES];
     let count = capture.records(&mut records)?;

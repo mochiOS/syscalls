@@ -7,7 +7,7 @@ struct Span {
 }
 
 pub(super) struct Inputs {
-    path: [u8; MAX_EXECUTABLE_PATH_LEN],
+    path: [u8; posix_protocol::MAX_PATH_LEN],
     path_length: usize,
     text: [u8; mnu_abi::process_image::MAX_STACK_BYTES],
     used: usize,
@@ -17,7 +17,7 @@ pub(super) struct Inputs {
 impl Inputs {
     pub(super) fn new() -> Self {
         Self {
-            path: [0; MAX_EXECUTABLE_PATH_LEN],
+            path: [0; posix_protocol::MAX_PATH_LEN],
             path_length: 0,
             text: [0; mnu_abi::process_image::MAX_STACK_BYTES],
             used: 0,
@@ -39,14 +39,12 @@ impl Inputs {
         self.counts = [0; 2];
         self.path_length = user_copy::capture_text(
             path,
-            &mut self.path[..MAX_EXECUTABLE_PATH_LEN - 1],
+            &mut self.path[..posix_protocol::MAX_PATH_LEN - 1],
             ENAMETOOLONG,
         )?;
         if self.path_length == 0 {
             return Err(ENOENT);
         }
-        // Preserve the existing executable-name boundary; vector text is bytes.
-        core::str::from_utf8(self.path()).map_err(|_| EINVAL)?;
         self.capture_vector(0, argv)?;
         self.capture_vector(1, envp)
     }

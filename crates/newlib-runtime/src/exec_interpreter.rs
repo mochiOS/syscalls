@@ -18,7 +18,7 @@ pub(super) fn replace(
             if arguments > MAX_EXEC_VECTOR_ENTRIES - 3 {
                 return Err(E2BIG);
             }
-            let mut script = [0; MAX_EXECUTABLE_PATH_LEN + 2];
+            let mut script = [0; posix_protocol::MAX_PATH_LEN + 2];
             let path = inputs.path();
             // A PATH entry can be empty. Keep a leading '-' in the filename
             // from becoming an option to sh while retaining the same file.

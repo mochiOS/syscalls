@@ -1,4 +1,4 @@
-//! Descriptor image execution. No pathname recovery or reopen is permitted.
+//! Execute retained image objects. Neither authorization nor loading reopens a path.
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -85,11 +85,65 @@ pub(super) fn replace(
         .map_err(map_posix_client_error)?;
     // An opaque execution key, not a reconstructed pathname or FD number.
     const IDENTITY: &str = "fexecve";
-    with_startup(&inputs, IDENTITY.as_bytes(), fds, |startup| {
-        let ceiling = address_space::snapshot()?.byte_ceiling();
+    let ceiling = address_space::snapshot()?.byte_ceiling();
+    replace_image(image, IDENTITY, IDENTITY.as_bytes(), &inputs, fds, ceiling)
+}
+
+/// Own the newly opened image through callbacks that may abandon the C call.
+/// The descriptor variant instead borrows the surrounding exec FD snapshot.
+struct OpenImage(u32);
+impl Drop for OpenImage {
+    fn drop(&mut self) {
+        let _delivery = defer_native_delivery();
+        close_object_handle(self.0);
+    }
+}
+
+pub(super) fn replace_path(
+    inputs: &exec_inputs::Inputs,
+    fds: &FdTable<FdObject>,
+) -> Result<(), c_int> {
+    let ceiling = address_space::snapshot()?.byte_ceiling();
+    let client = posix_client().map_err(map_posix_client_error)?;
+    let path = inputs.path();
+    io_resources::with(
+        || {
+            let opened = client
+                .open_at(
+                    if path.first() == Some(&b'/') {
+                        OpenAtBase::ProcessRoot
+                    } else {
+                        OpenAtBase::ProcessCwd
+                    },
+                    posix_protocol::OPEN_READ | posix_protocol::OPEN_EXECUTE,
+                    0,
+                    path,
+                )
+                .map_err(map_posix_client_error)?;
+            let image = OpenImage(opened.handle);
+            // Positional reads and explicit broker transfer; no cursor authority.
+            let required = posix_protocol::CHECK_EXECUTABLE_RIGHTS;
+            if opened.rights & required != required {
+                return Err(EACCES);
+            }
+            Ok(image)
+        },
+        |image| replace_image(image.0, "execve", path, inputs, fds, ceiling),
+    )
+}
+
+fn replace_image(
+    image: u32,
+    identity: &str,
+    execfn: &[u8],
+    inputs: &exec_inputs::Inputs,
+    fds: &FdTable<FdObject>,
+    ceiling: u64,
+) -> Result<(), c_int> {
+    with_startup(inputs, execfn, fds, |startup| {
         let digest = digest(image)?;
-        authorize(image, IDENTITY, &digest)?;
-        match syscall::image::replace_bounded(image, IDENTITY, startup, ceiling) {
+        authorize(image, identity, &digest)?;
+        match syscall::image::replace_bounded(image, identity, startup, ceiling) {
             Ok(never) => match never {},
             Err(error) => Err(mochios_posix_client::image_error::errno(error.raw())),
         }
