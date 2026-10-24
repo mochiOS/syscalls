@@ -4,17 +4,21 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 use zeroize::Zeroizing;
-pub const MAX_FRAME: usize = 64 * 1024;
+// mochiOS' native inline IPC capacity is 8 KiB. Linux must enforce it too.
+pub const MAX_FRAME: usize = 8 * 1024;
 pub const MAX_SECRET: usize = 4096;
 pub const MAX_PASSWORD: usize = 1024;
 pub const MAX_ITEMS: usize = 256;
-pub const PAGE_SIZE: usize = 16;
+// Two worst-case items (including all grants) fit in native IPC.
+pub const PAGE_SIZE: usize = 2;
+pub const APPLICATION_PAGE_SIZE: usize = 32;
+pub const MAX_APPLICATIONS: usize = MAX_ITEMS * (MAX_GRANTS + 2);
 pub const MAX_GRANTS: usize = 16;
 pub const SERVICE_NAME: &str = "keychain.service";
 pub const ACCESS: &str = "keychain.access";
 pub const MANAGE: &str = "keychain.manage";
 pub const SESSION: &str = "keychain.session";
-const MAGIC: &[u8; 8] = b"MKCHN001";
+const MAGIC: &[u8; 8] = b"MKCHN002";
 const HEADER: usize = 24;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -192,7 +196,10 @@ pub enum Request {
         old: Secret,
         new: Secret,
     },
-    Applications,
+    Applications {
+        offset: u16,
+        generation: u64,
+    },
     LockAll,
 }
 impl Request {
@@ -210,7 +217,7 @@ impl Request {
             Self::ManageDelete { .. } => 10,
             Self::Grant { .. } => 11,
             Self::ChangePassword { .. } => 12,
-            Self::Applications => 13,
+            Self::Applications { .. } => 13,
             Self::LockAll => 14,
         }
     }
@@ -225,13 +232,17 @@ impl Request {
                 | Self::ManageDelete { .. }
                 | Self::Grant { .. }
                 | Self::ChangePassword { .. }
-                | Self::Applications
+                | Self::Applications { .. }
         )
     }
     pub fn encode(&self, id: u64) -> Result<Zeroizing<Vec<u8>>> {
         let mut w = Writer::new();
         match self {
-            Self::Status | Self::Lock | Self::Applications | Self::LockAll => {}
+            Self::Status | Self::Lock | Self::LockAll => {}
+            Self::Applications { offset, generation } => {
+                w.u16(*offset);
+                w.u64(*generation);
+            }
             Self::Initialize { password } | Self::Unlock { password } => {
                 w.bytes(password.expose(), MAX_PASSWORD)?
             }
@@ -335,7 +346,10 @@ impl Request {
                 old: r.secret(MAX_PASSWORD)?,
                 new: r.secret(MAX_PASSWORD)?,
             },
-            13 => Self::Applications,
+            13 => Self::Applications {
+                offset: r.u16()?,
+                generation: r.u64()?,
+            },
             14 => Self::LockAll,
             _ => return Err(Error::Invalid),
         };
@@ -361,7 +375,11 @@ pub enum Reply {
         total: u16,
         items: Vec<Item>,
     },
-    Applications(Vec<Application>),
+    Applications {
+        generation: u64,
+        total: u16,
+        applications: Vec<Application>,
+    },
 }
 impl Reply {
     pub fn encode(&self, id: u64) -> Result<Zeroizing<Vec<u8>>> {
@@ -389,7 +407,11 @@ impl Reply {
                 total,
                 items,
             } => {
-                if items.len() > PAGE_SIZE || usize::from(*total) > MAX_ITEMS {
+                if *generation == 0
+                    || items.len() > PAGE_SIZE
+                    || usize::from(*total) > MAX_ITEMS
+                    || items.len() > usize::from(*total)
+                {
                     return Err(Error::Invalid);
                 }
                 w.u64(*generation);
@@ -400,10 +422,20 @@ impl Reply {
                 }
                 4
             }
-            Self::Applications(apps) => {
-                if apps.len() > MAX_ITEMS {
+            Self::Applications {
+                generation,
+                total,
+                applications: apps,
+            } => {
+                if *generation == 0
+                    || usize::from(*total) > MAX_APPLICATIONS
+                    || apps.len() > APPLICATION_PAGE_SIZE
+                    || apps.len() > usize::from(*total)
+                {
                     return Err(Error::Invalid);
                 }
+                w.u64(*generation);
+                w.u16(*total);
                 w.u16(apps.len() as u16);
                 for a in apps {
                     w.application(a)?;
@@ -440,7 +472,11 @@ impl Reply {
                 let generation = r.u64()?;
                 let total = r.u16()?;
                 let n = r.u16()? as usize;
-                if n > PAGE_SIZE || usize::from(total) > MAX_ITEMS || n > total as usize {
+                if generation == 0
+                    || n > PAGE_SIZE
+                    || usize::from(total) > MAX_ITEMS
+                    || n > total as usize
+                {
                     return Err(Error::Invalid);
                 }
                 let mut items = Vec::with_capacity(n);
@@ -454,15 +490,25 @@ impl Reply {
                 }
             }
             5 => {
+                let generation = r.u64()?;
+                let total = r.u16()?;
                 let n = r.u16()? as usize;
-                if n > MAX_ITEMS {
+                if generation == 0
+                    || usize::from(total) > MAX_APPLICATIONS
+                    || n > APPLICATION_PAGE_SIZE
+                    || n > usize::from(total)
+                {
                     return Err(Error::Invalid);
                 }
                 let mut apps = Vec::with_capacity(n);
                 for _ in 0..n {
                     apps.push(r.application()?);
                 }
-                Self::Applications(apps)
+                Self::Applications {
+                    generation,
+                    total,
+                    applications: apps,
+                }
             }
             _ => return Err(Error::Invalid),
         };
@@ -734,6 +780,30 @@ mod tests {
         extra.push(0);
         assert!(Request::decode(&extra).is_err());
         assert!(Reply::decode(&Reply::Ok.encode(42).unwrap(), 41).is_err());
+    }
+    #[test]
+    fn malformed_native_frames_never_panic_or_accept_trailing_data() {
+        let mut rng = 0x9e3779b97f4a7c15u64;
+        for i in 0..4096 {
+            let n = i % (MAX_FRAME + 1);
+            let mut bytes = alloc::vec![0; HEADER + n];
+            for b in &mut bytes {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                *b = rng as u8;
+            }
+            bytes[..8].copy_from_slice(MAGIC);
+            bytes[8..10].copy_from_slice(&((i % 15) as u16).to_le_bytes());
+            bytes[10..12].copy_from_slice(&0u16.to_le_bytes());
+            bytes[12..16].copy_from_slice(&(n as u32).to_le_bytes());
+            bytes[16..24].copy_from_slice(&42u64.to_le_bytes());
+            let _ = Request::decode(&bytes);
+            let _ = Reply::decode(&bytes, 42);
+            // Truncation of a declared frame must never expose partial results.
+            assert!(Request::decode(&bytes[..bytes.len() - 1]).is_err());
+            assert!(Reply::decode(&bytes[..bytes.len() - 1], 42).is_err());
+        }
     }
     #[test]
     fn request_limits_reject_control_characters_and_large_secrets() {
