@@ -379,6 +379,11 @@ pub const OP_FIFO_WAIT: u16 = 124;
 pub const OP_VOLUME_STATUS_AT: u16 = 125;
 /// Empty body and one TRANSFER Handle; returns its owning volume status.
 pub const OP_VOLUME_STATUS_HANDLE: u16 = 126;
+/// Empty body and one readable, transferable FileHandle. Check the current
+/// regular-file execute mode against the authenticated session's effective IDs.
+pub const OP_CHECK_EXECUTABLE: u16 = 127;
+pub const CHECK_EXECUTABLE_RIGHTS: u64 =
+    mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_TRANSFER;
 
 /// Recognize assigned requests before operation-specific attachment admission.
 /// Holes are unassigned, not aliases or compatibility operations. OP_STATUS is
@@ -392,7 +397,7 @@ pub const fn is_request_opcode(opcode: u16) -> bool {
             | OP_SIGNAL_THREAD_REGISTER..=OP_SIGNAL_THREAD_SEND
             | OP_WAITED_CHILD_CPU_USAGE..=OP_SIGNAL_THREAD_FAULT
             | OP_SIGNAL_DELIVERY_ORIGIN..=OP_SOCKET_RECORD_ENDPOINT
-            | OP_FORK_PREPARE..=OP_VOLUME_STATUS_HANDLE
+            | OP_FORK_PREPARE..=OP_CHECK_EXECUTABLE
     )
 }
 pub const THREAD_WAIT_INTERRUPT_RIGHTS: u64 =

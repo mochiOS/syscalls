@@ -1972,6 +1972,27 @@ impl<T: ObjectTransport> Client<T> {
         self.file_operation(protocol::OP_FUTIMENS, &payload, file)
     }
 
+    /// Check a retained file using current POSIX credentials, without resolving
+    /// a pathname or changing its cursor. This does not grant native authority
+    /// or authorize image replacement.
+    pub fn check_executable(
+        &self,
+        file: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<(), ClientError<T::Error>> {
+        let rights = protocol::CHECK_EXECUTABLE_RIGHTS;
+        if file.rights & rights != rights {
+            return Err(ClientError::Remote(-13));
+        }
+        self.file_operation(
+            protocol::OP_CHECK_EXECUTABLE,
+            &[],
+            ObjectHandleAttachment {
+                handle: file.handle,
+                rights,
+            },
+        )
+    }
+
     pub fn fchmod(
         &self,
         file: ObjectHandleAttachment<T::Handle>,
@@ -2123,7 +2144,14 @@ impl<T: ObjectTransport> Client<T> {
         if header.opcode != protocol::OP_STATUS || header.request_id != request_id {
             return Err(ClientError::MismatchedResponse);
         }
-        if matches!(opcode, protocol::OP_FIFO_WAIT | protocol::OP_VOLUME_STATUS_AT | protocol::OP_VOLUME_STATUS_HANDLE) && header.flags != 0 {
+        if matches!(
+            opcode,
+            protocol::OP_FIFO_WAIT
+                | protocol::OP_VOLUME_STATUS_AT
+                | protocol::OP_VOLUME_STATUS_HANDLE
+                | protocol::OP_CHECK_EXECUTABLE
+        ) && header.flags != 0
+        {
             return Err(ClientError::MismatchedResponse);
         }
         if header.status == protocol::STATUS_MEMORY_ADMISSION_BUSY
