@@ -43,6 +43,7 @@ mod path_io;
 mod user_copy;
 mod exec_inputs;
 mod exec_handle;
+mod exec_image;
 mod exec_search;
 mod exec_interpreter;
 mod string_configuration;

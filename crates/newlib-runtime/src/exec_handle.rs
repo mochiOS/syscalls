@@ -6,6 +6,7 @@ pub(super) fn with_startup(
     inputs: &exec_inputs::Inputs,
     execfn: &[u8],
     fds: &FdTable<FdObject>,
+    image: Option<mochios_posix_client::process_image::Executable>,
     operation: impl FnOnce(&[u8]) -> Result<(), c_int>,
 ) -> Result<(), c_int> {
     let mut arguments = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
@@ -30,12 +31,13 @@ pub(super) fn with_startup(
         || image_startup::Plan::new(random),
         |plan| {
             let mut startup = [0; MAX_STARTUP_IMAGE_BYTES];
-            let length = mochios_posix_client::process_image::encode_initial_stack_with_aux(
+            let length = mochios_posix_client::process_image::encode_initial_stack_for_image(
                 &arguments[..argument_count],
                 &environment[..environment_count],
                 execfn,
                 random,
                 &plan.auxiliary(),
+                image,
                 &mut startup,
             )
             .map_err(|error| match error {
@@ -140,13 +142,15 @@ fn replace_image(
     fds: &FdTable<FdObject>,
     ceiling: u64,
 ) -> Result<(), c_int> {
-    with_startup(inputs, execfn, fds, |startup| {
-        let digest = digest(image)?;
-        authorize(image, identity, &digest)?;
-        match syscall::image::replace_bounded(image, identity, startup, ceiling) {
-            Ok(never) => match never {},
-            Err(error) => Err(mochios_posix_client::image_error::errno(error.raw())),
-        }
+    exec_image::with_image(image, |image, auxiliary| {
+        with_startup(inputs, execfn, fds, auxiliary, |startup| {
+            let digest = digest(image)?;
+            authorize(image, identity, &digest)?;
+            match syscall::image::replace_bounded(image, identity, startup, ceiling) {
+                Ok(never) => match never {},
+                Err(error) => Err(mochios_posix_client::image_error::errno(error.raw())),
+            }
+        })
     })
 }
 

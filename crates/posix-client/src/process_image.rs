@@ -109,12 +109,35 @@ pub fn encode_initial_stack(
     encode_initial_stack_with_aux(argv, envp, execfn, random, &[], output)
 }
 
+/// Program metadata selected by a userspace loader. The native ELF container
+/// may be a prepared image and need not be the program described to the ABI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Executable {
+    pub entry: u64,
+    pub program_headers: u64,
+    pub program_header_size: u64,
+    pub program_header_count: u64,
+    pub interpreter_base: u64,
+}
+
 pub fn encode_initial_stack_with_aux(
     argv: &[&[u8]],
     envp: &[&[u8]],
     execfn: &[u8],
     random: [u8; 16],
     auxiliary: &[(u64, u64)],
+    output: &mut [u8],
+) -> Result<usize, EncodeError> {
+    encode_initial_stack_for_image(argv, envp, execfn, random, auxiliary, None, output)
+}
+
+pub fn encode_initial_stack_for_image(
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    execfn: &[u8],
+    random: [u8; 16],
+    auxiliary: &[(u64, u64)],
+    image: Option<Executable>,
     output: &mut [u8],
 ) -> Result<usize, EncodeError> {
     for (index, &(key, _)) in auxiliary.iter().enumerate() {
@@ -229,6 +252,20 @@ pub fn encode_initial_stack_with_aux(
     .chain(auxiliary.iter().map(|&(key, value)| (key, value, None)))
     .chain(core::iter::once((AT_NULL, 0, None)))
     {
+        let (value, relocation) = match image
+            .map(|image| match key {
+                AT_PHDR => Some(image.program_headers),
+                AT_PHENT => Some(image.program_header_size),
+                AT_PHNUM => Some(image.program_header_count),
+                AT_ENTRY => Some(image.entry),
+                AT_BASE => Some(image.interpreter_base),
+                _ => None,
+            })
+            .flatten()
+        {
+            Some(value) => (value, None),
+            None => (value, relocation),
+        };
         put_word(&mut stack, &mut cursor, key)?;
         match relocation {
             Some(kind) => put_relocated_word(
