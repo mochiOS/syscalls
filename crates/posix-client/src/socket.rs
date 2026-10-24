@@ -532,6 +532,55 @@ impl<T: ObjectTransport> Client<T> {
         Err(outcome.err().unwrap_or(ClientError::MismatchedResponse))
     }
 
+    /// Create an IPv4 UDP description using explicitly delegated factory
+    /// authority. No network endpoint or claimed sender identity is accepted.
+    pub fn open_inet_datagram(
+        &self,
+        create: wire::Create,
+        factory: ObjectHandleAttachment<T::Handle>,
+        mut close: impl FnMut(T::Handle),
+    ) -> Result<ObjectHandleAttachment<T::Handle>, ClientError<T::Error>> {
+        if create.domain != wire::Domain::Ipv4
+            || create.kind != wire::Kind::Datagram
+            || !matches!(create.protocol, 0 | 17)
+            || create.options & !wire::NONBLOCKING != 0
+        {
+            return Err(ClientError::Remote(-22));
+        }
+        let rights = wire::inet_factory_rights();
+        if factory.handle == T::Handle::default() || factory.rights & rights != rights {
+            return Err(ClientError::Remote(-13));
+        }
+        let mut payload = [0; wire::CREATE_LEN];
+        create.encode(&mut payload).map_err(ClientError::Protocol)?;
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(ObjectHandleAttachment {
+                handle: factory.handle,
+                rights,
+            })
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        let borrowed = handles.clone();
+        let outcome = self.request_with_handles(
+            protocol::OP_SOCKET_CREATE,
+            0,
+            &payload,
+            &mut [],
+            &mut handles,
+        );
+        if matches!(outcome, Ok(0)) && handles.len() == 1 {
+            let received = handles.get(0).unwrap();
+            if received.handle != T::Handle::default()
+                && received.handle != factory.handle
+                && received.rights == wire::descriptor_rights()
+            {
+                return Ok(received);
+            }
+        }
+        crate::drain_received_handles(&mut handles, &borrowed, &mut close);
+        Err(outcome.err().unwrap_or(ClientError::MismatchedResponse))
+    }
+
     /// Returns ownership of two receiver-local Handles. The caller must reserve
     /// both local FD slots before requesting resources and close both Handles
     /// if installation fails. `close` releases distinct valid owned attachments

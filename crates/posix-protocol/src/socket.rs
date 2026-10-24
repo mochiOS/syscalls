@@ -157,6 +157,11 @@ pub const READINESS_MASK: u32 =
     READY_READ | READY_WRITE | READ_CLOSED | WRITE_CLOSED | WRITE_ERROR | ERROR_PENDING;
 
 /// No seek/map authority: a socket description is a duplex byte stream.
+/// Borrowed factory authority forwarded to the socket Provider worker.
+pub const fn inet_factory_rights() -> u64 {
+    mnu_abi::HANDLE_RIGHT_CONTROL | mnu_abi::HANDLE_RIGHT_TRANSFER
+}
+
 pub const fn descriptor_rights() -> u64 {
     mnu_abi::HANDLE_RIGHT_READ
         | mnu_abi::HANDLE_RIGHT_WRITE

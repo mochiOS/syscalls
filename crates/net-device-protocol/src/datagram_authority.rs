@@ -1,6 +1,7 @@
 //! Authority acquisition for the datagram backend. Object identity and resource
 //! authority travel only as native Handle attachments, never as wire integers.
 pub const ACQUIRE: [u8; 8] = [b'N', b'U', b'D', b'P', 1, 0, 1, 0];
+pub const VALIDATE: [u8; 8] = [b'N', b'U', b'D', b'P', 1, 0, 3, 0];
 pub const REPLY_LEN: usize = 16;
 pub const LIMITS_LEN: usize = 12;
 pub const QUERY_LIMITS: u64 = u64::from_le_bytes(*b"NUDPLIM1");
