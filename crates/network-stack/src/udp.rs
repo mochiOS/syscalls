@@ -83,8 +83,27 @@ pub struct UdpPacket {
     pub payload: Vec<u8>,
 }
 
+/// Worker-private identity, not an IPC capability, client FD or port lookup
+/// authority. A service must select it through its authenticated Handle owner.
+/// IDs are never reused within a table, including after a port is rebound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UdpSocketId(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UdpEndpoint {
+    pub address: [u8; 4],
+    pub port: u16,
+}
+impl UdpEndpoint {
+    fn overlaps(self, other: Self) -> bool {
+        self.port == other.port
+            && (self.address == [0; 4] || other.address == [0; 4] || self.address == other.address)
+    }
+}
+
 struct UdpBinding {
-    port: u16,
+    id: UdpSocketId,
+    local: UdpEndpoint,
     received: VecDeque<UdpPacket>,
 }
 
@@ -94,48 +113,104 @@ pub struct UdpSocketTable {
     queue_limit: usize,
     payload_limit: usize,
     next_ephemeral: u16,
+    next_id: u64,
 }
 
 impl UdpSocketTable {
     pub fn new(socket_limit: usize, queue_limit: usize, payload_limit: usize) -> Self {
         Self {
-            bindings: Vec::with_capacity(socket_limit),
+            bindings: Vec::new(),
             socket_limit,
             queue_limit,
             payload_limit,
             next_ephemeral: EPHEMERAL_PORT_START,
+            next_id: 1,
         }
     }
 
+    /// Compatibility for the stack's private DHCP/DNS wildcard bindings.
+    /// Port-based methods never select an address-specific application socket.
     pub fn bind(&mut self, requested_port: u16) -> Result<u16, PacketError> {
-        if self.bindings.len() >= self.socket_limit {
+        let id = self.bind_endpoint([0; 4], requested_port)?;
+        Ok(self.local_endpoint(id)?.port)
+    }
+
+    /// Address availability, privileged-port policy and Capability checks belong
+    /// to the service. This table enforces overlap, bounded storage and identity.
+    /// No SO_REUSEADDR/SO_REUSEPORT sharing is implicitly enabled.
+    pub fn bind_endpoint(
+        &mut self,
+        address: [u8; 4],
+        requested_port: u16,
+    ) -> Result<UdpSocketId, PacketError> {
+        if self.bindings.len() >= self.socket_limit || self.next_id == u64::MAX {
             return Err(PacketError::Capacity);
         }
         let port = if requested_port == 0 {
-            self.allocate_ephemeral().ok_or(PacketError::Capacity)?
+            self.allocate_ephemeral(address)
+                .ok_or(PacketError::Capacity)?
         } else {
-            if self.is_bound(requested_port) {
+            if self.conflicts(UdpEndpoint {
+                address,
+                port: requested_port,
+            }) {
                 return Err(PacketError::Mismatch);
             }
             requested_port
         };
+        // Complete every allocation before publishing the binding or its ID.
+        self.bindings
+            .try_reserve(1)
+            .map_err(|_| PacketError::Capacity)?;
+        let mut received = VecDeque::new();
+        received
+            .try_reserve(self.queue_limit)
+            .map_err(|_| PacketError::Capacity)?;
+        let id = UdpSocketId(self.next_id);
         self.bindings.push(UdpBinding {
-            port,
-            received: VecDeque::with_capacity(self.queue_limit),
+            id,
+            local: UdpEndpoint { address, port },
+            received,
         });
-        Ok(port)
+        self.next_id += 1;
+        Ok(id)
+    }
+
+    pub fn local_endpoint(&self, id: UdpSocketId) -> Result<UdpEndpoint, PacketError> {
+        Ok(self.binding(id)?.local)
+    }
+
+    fn binding(&self, id: UdpSocketId) -> Result<&UdpBinding, PacketError> {
+        self.bindings
+            .iter()
+            .find(|b| b.id == id)
+            .ok_or(PacketError::Mismatch)
+    }
+
+    pub fn unbind_endpoint(&mut self, id: UdpSocketId) -> bool {
+        let Some(index) = self.bindings.iter().position(|b| b.id == id) else {
+            return false;
+        };
+        self.bindings.swap_remove(index);
+        true
+    }
+
+    fn wildcard_id(&self, port: u16) -> Option<UdpSocketId> {
+        self.bindings
+            .iter()
+            .find(|b| {
+                b.local
+                    == UdpEndpoint {
+                        address: [0; 4],
+                        port,
+                    }
+            })
+            .map(|b| b.id)
     }
 
     pub fn unbind(&mut self, port: u16) -> bool {
-        let Some(index) = self
-            .bindings
-            .iter()
-            .position(|binding| binding.port == port)
-        else {
-            return false;
-        };
-        self.bindings.remove(index);
-        true
+        self.wildcard_id(port)
+            .is_some_and(|id| self.unbind_endpoint(id))
     }
 
     pub fn enqueue(
@@ -150,40 +225,67 @@ impl UdpSocketTable {
         let binding = self
             .bindings
             .iter_mut()
-            .find(|binding| binding.port == datagram.destination_port)
+            .find(|b| {
+                b.local.port == datagram.destination_port
+                    && (b.local.address == [0; 4] || b.local.address == destination_address)
+            })
             .ok_or(PacketError::Mismatch)?;
         if binding.received.len() >= self.queue_limit {
             return Err(PacketError::Capacity);
         }
+        let mut payload = Vec::new();
+        payload
+            .try_reserve_exact(datagram.payload.len())
+            .map_err(|_| PacketError::Capacity)?;
+        payload.extend_from_slice(datagram.payload);
         binding.received.push_back(UdpPacket {
             source_address,
             destination_address,
             source_port: datagram.source_port,
             destination_port: datagram.destination_port,
-            payload: datagram.payload.to_vec(),
+            payload,
         });
         Ok(())
     }
 
-    pub fn receive(&mut self, port: u16) -> Option<UdpPacket> {
-        self.bindings
+    /// An empty live queue is distinct from a stale, already-released identity.
+    pub fn receive_for(&mut self, id: UdpSocketId) -> Result<Option<UdpPacket>, PacketError> {
+        Ok(self
+            .bindings
             .iter_mut()
-            .find(|binding| binding.port == port)
-            .and_then(|binding| binding.received.pop_front())
+            .find(|b| b.id == id)
+            .ok_or(PacketError::Mismatch)?
+            .received
+            .pop_front())
+    }
+
+    /// Borrow one complete record without consuming it or changing capacity.
+    pub fn peek_for(&self, id: UdpSocketId) -> Result<Option<&UdpPacket>, PacketError> {
+        Ok(self.binding(id)?.received.front())
+    }
+
+    pub fn queued_for(&self, id: UdpSocketId) -> Result<usize, PacketError> {
+        Ok(self.binding(id)?.received.len())
+    }
+
+    pub fn receive(&mut self, port: u16) -> Option<UdpPacket> {
+        let id = self.wildcard_id(port)?;
+        self.receive_for(id).ok().flatten()
     }
 
     pub fn queued(&self, port: u16) -> usize {
+        self.wildcard_id(port)
+            .and_then(|id| self.queued_for(id).ok())
+            .unwrap_or(0)
+    }
+
+    fn conflicts(&self, local: UdpEndpoint) -> bool {
         self.bindings
             .iter()
-            .find(|binding| binding.port == port)
-            .map_or(0, |binding| binding.received.len())
+            .any(|binding| binding.local.overlaps(local))
     }
 
-    fn is_bound(&self, port: u16) -> bool {
-        self.bindings.iter().any(|binding| binding.port == port)
-    }
-
-    fn allocate_ephemeral(&mut self) -> Option<u16> {
+    fn allocate_ephemeral(&mut self, address: [u8; 4]) -> Option<u16> {
         let count = u32::from(EPHEMERAL_PORT_END) - u32::from(EPHEMERAL_PORT_START) + 1;
         for _ in 0..count {
             let candidate = self.next_ephemeral;
@@ -192,7 +294,10 @@ impl UdpSocketTable {
             } else {
                 candidate + 1
             };
-            if !self.is_bound(candidate) {
+            if !self.conflicts(UdpEndpoint {
+                address,
+                port: candidate,
+            }) {
                 return Some(candidate);
             }
         }
