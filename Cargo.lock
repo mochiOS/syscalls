@@ -581,6 +581,13 @@ name = "mochios-http-client"
 version = "0.1.0"
 
 [[package]]
+name = "mochios-keychain-protocol"
+version = "0.1.0"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
 name = "mochios-linux-gui-protocol"
 version = "0.1.0"
 
@@ -1474,13 +1481,13 @@ dependencies = [
 ]
 
 [[patch.unused]]
+name = "viewkit"
+version = "2.0.0"
+
+[[patch.unused]]
+name = "viewkit"
+version = "2.0.0"
+
+[[patch.unused]]
 name = "mnu"
 version = "0.1.0"
-
-[[patch.unused]]
-name = "viewkit"
-version = "2.0.0"
-
-[[patch.unused]]
-name = "viewkit"
-version = "2.0.0"
