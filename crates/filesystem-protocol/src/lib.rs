@@ -271,6 +271,14 @@ pub const OPEN_AT_CURSOR_RECORDS: u32 = 1 << 12;
 /// Check execute permission while opening an existing regular image object.
 /// This adds no Handle rights and cannot be combined with file mutations.
 pub const OPEN_AT_EXECUTE: u32 = 1 << 13;
+/// Opt in to a retained FIFO inode instead of disk byte I/O. The successful
+/// OPEN_REPLY_FIFO response carries NodeStatus and one metadata-only Handle.
+/// This prepares identity/authority; it does not complete a FIFO data open.
+/// The policy caller must preserve its authenticated admission context; this
+/// metadata-only reference does not independently grant read/write authority.
+pub const OPEN_AT_RETAIN_FIFO: u32 = 1 << 14;
+/// OPEN_AT success only: payload is NodeStatus for the exact retained FIFO.
+pub const OPEN_REPLY_FIFO: u32 = 1;
 pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
     | OPEN_AT_WRITE
     | OPEN_AT_CREATE
@@ -284,7 +292,8 @@ pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
     | OPEN_AT_NONBLOCK
     | OPEN_AT_SEARCH
     | OPEN_AT_CURSOR_RECORDS
-    | OPEN_AT_EXECUTE;
+    | OPEN_AT_EXECUTE
+    | OPEN_AT_RETAIN_FIFO;
 
 pub const STAT_AT_NOFOLLOW: u32 = 1 << 0;
 pub const STAT_AT_BASE_ATTACHED: u32 = 1 << 1;
