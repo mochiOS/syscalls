@@ -514,6 +514,20 @@ impl Writer {
         }
     }
     pub fn raw(&mut self, b: &[u8]) {
+        let required = self
+            .bytes
+            .len()
+            .checked_add(b.len())
+            .expect("encoder size overflow");
+        if required > self.bytes.capacity() {
+            // Vec::reserve/realloc would release the previous secret allocation
+            // without zeroizing it. Allocate separately and let Zeroizing erase
+            // the old allocation (including spare capacity) before releasing it.
+            let capacity = required.max(self.bytes.capacity().saturating_mul(2));
+            let mut next = Zeroizing::new(Vec::with_capacity(capacity));
+            next.extend_from_slice(&self.bytes);
+            self.bytes = next;
+        }
         self.bytes.extend_from_slice(b)
     }
     pub fn u8(&mut self, n: u8) {
@@ -652,6 +666,55 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::alloc::{GlobalAlloc, Layout, System};
+
+    struct AuditAllocator;
+    static WATCHED: AtomicUsize = AtomicUsize::new(0);
+    static RELEASED: AtomicBool = AtomicBool::new(false);
+    static UNWIPED: AtomicBool = AtomicBool::new(false);
+    // Inspect only an explicitly watched, still-live allocation immediately before
+    // handing it back to System. Never inspect memory after free/realloc.
+    fn inspect_release(ptr: *mut u8, layout: Layout) {
+        if WATCHED
+            .compare_exchange(ptr as usize, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let bytes = unsafe { core::slice::from_raw_parts(ptr, layout.size()) };
+            UNWIPED.store(bytes.iter().any(|&b| b != 0), Ordering::SeqCst);
+            RELEASED.store(true, Ordering::SeqCst);
+        }
+    }
+    unsafe impl GlobalAlloc for AuditAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            inspect_release(ptr, layout);
+            unsafe { System.dealloc(ptr, layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            inspect_release(ptr, layout);
+            unsafe { System.realloc(ptr, layout, size) }
+        }
+    }
+    #[global_allocator]
+    static ALLOCATOR: AuditAllocator = AuditAllocator;
+
+    #[test]
+    fn growing_writer_wipes_old_allocation_before_release() {
+        let mut writer = Writer::new();
+        writer.raw(&[0xa5; 64]);
+        WATCHED.store(writer.bytes.as_ptr() as usize, Ordering::SeqCst);
+        writer.raw(&[0x5a; 8192]);
+        assert!(RELEASED.load(Ordering::SeqCst));
+        assert!(
+            !UNWIPED.load(Ordering::SeqCst),
+            "secret bytes were released without erasure"
+        );
+        assert_eq!(&writer.bytes[..64], &[0xa5; 64]);
+        assert_eq!(&writer.bytes[64..], &[0x5a; 8192]);
+    }
     #[test]
     fn frames_are_bounded_and_secrets_redacted() {
         let r = Request::Initialize {
