@@ -2892,13 +2892,13 @@ fn authorize_exec_path(path_bytes: &[u8]) -> Result<(), c_int> {
     }
 }
 
-fn authorize_clone_path(identity: &str) -> Result<(), c_int> {
-    use mochios_capability_protocol::{
-        RESOLVE_EXECUTION_SECURITY_OPCODE, decode_resolve_execution_security_reply,
-    };
-    if !identity.starts_with('/') || identity.len() >= MAX_EXECUTABLE_PATH_LEN {
-        return Err(EINVAL);
-    }
+fn authorize_captured_image(identity: &str) -> Result<(), c_int> {
+    let mut request = [0u8; 8 + mochios_capability_protocol::MAX_EXECUTABLE_IDENTITY_LEN];
+    let length = mochios_capability_protocol::encode_authorize_captured_image_request(
+        identity,
+        &mut request,
+    )
+    .map_err(|_| EINVAL)?;
     let endpoint = syscall_errno(syscall::raw_syscall2(
         syscall::SyscallNumber::FindProcessByName,
         CAPABILITY_SERVICE_NAME.as_ptr() as u64,
@@ -2907,31 +2907,24 @@ fn authorize_clone_path(identity: &str) -> Result<(), c_int> {
     if endpoint == 0 {
         return Err(ENOENT);
     }
-    let mut request = [0u8; 12 + MAX_EXECUTABLE_PATH_LEN];
-    request[..4].copy_from_slice(&RESOLVE_EXECUTION_SECURITY_OPCODE.to_le_bytes());
-    request[4..12].copy_from_slice(
-        &mnu_abi::exec::ExecutionClass::Unprivileged
-            .as_raw()
-            .to_le_bytes(),
-    );
-    request[12..12 + identity.len()].copy_from_slice(identity.as_bytes());
-    let mut response = [0u8; 8192];
+    let mut response = [0u8; 8];
     let result = syscall_errno(syscall::raw_syscall5(
         syscall::SyscallNumber::IpcCall,
         endpoint,
         request.as_ptr() as u64,
-        (12 + identity.len()) as u64,
+        length as u64,
         response.as_mut_ptr() as u64,
         response.len() as u64,
     ))?;
-    let length = (result & 0xffff_ffff) as usize;
-    let response = response.get(..length).ok_or(EIO)?;
-    let reply = decode_resolve_execution_security_reply(response).map_err(|_| EIO)?;
-    if reply.status == 0 {
+    // Scalar IPC packs the authenticated reply sender above the byte count.
+    if (result & 0xffff_ffff) as usize != response.len() {
+        return Err(EIO);
+    }
+    let status = u64::from_le_bytes(response);
+    if status == 0 {
         Ok(())
     } else {
-        let status = i64::try_from(reply.status).map_err(|_| EIO)?;
-        Err(map_kernel_errno(status))
+        Err(map_kernel_errno(i64::try_from(status).map_err(|_| EIO)?))
     }
 }
 
@@ -3173,7 +3166,7 @@ fn clone_registered_process_owned(
     .map_err(|_| EINVAL)?;
     mnu_abi::process_create::attach_handle_capture(&mut metadata, length, capture.handle())
         .map_err(|_| EINVAL)?;
-    authorize_clone_path(identity)?;
+    authorize_captured_image(identity)?;
     let libc_registry = libc_guard.freeze_registry();
     let image = unsafe {
         mochios_posix_client::snapshot::capture_native(

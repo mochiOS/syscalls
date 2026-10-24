@@ -29,6 +29,9 @@ pub const AUTHORIZE_EXEC_OPCODE: u32 = 0x4341_4558;
 /// object is explicitly attached; the broker performs no Provider I/O. Native
 /// replacement verifies the actual bytes without granting additional authority.
 pub const AUTHORIZE_EXEC_OBJECT_OPCODE: u32 = 0x4341_454f;
+/// Authorize creation from the caller's captured address space. No path,
+/// caller-supplied measurement, identity override or grants are accepted.
+pub const AUTHORIZE_CAPTURED_IMAGE_OPCODE: u32 = 0x4341_4543;
 pub const PROTOCOL_VERSION: u32 = 1;
 
 pub const RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN: usize = size_of::<u32>();
@@ -74,6 +77,36 @@ pub fn decode_authorize_exec_object_request(bytes: &[u8]) -> Result<([u8; 32], &
     let identity = core::str::from_utf8(&bytes[40..]).map_err(|_| ProtocolError::InvalidUtf8)?;
     validate_executable_identity(identity)?;
     Ok((bytes[8..40].try_into().unwrap(), identity))
+}
+
+pub fn encode_authorize_captured_image_request(
+    identity: &str,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    validate_executable_identity(identity)?;
+    let length = 8 + identity.len();
+    if output.len() < length {
+        return Err(ProtocolError::InvalidLength);
+    }
+    output[..4].copy_from_slice(&AUTHORIZE_CAPTURED_IMAGE_OPCODE.to_le_bytes());
+    output[4..8].copy_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+    output[8..length].copy_from_slice(identity.as_bytes());
+    Ok(length)
+}
+
+pub fn decode_authorize_captured_image_request(bytes: &[u8]) -> Result<&str, ProtocolError> {
+    if bytes.len() < 8 {
+        return Err(ProtocolError::TooShort);
+    }
+    if u32::from_le_bytes(bytes[..4].try_into().unwrap()) != AUTHORIZE_CAPTURED_IMAGE_OPCODE {
+        return Err(ProtocolError::UnknownOpcode);
+    }
+    if u32::from_le_bytes(bytes[4..8].try_into().unwrap()) != PROTOCOL_VERSION {
+        return Err(ProtocolError::UnsupportedVersion);
+    }
+    let identity = core::str::from_utf8(&bytes[8..]).map_err(|_| ProtocolError::InvalidUtf8)?;
+    validate_executable_identity(identity)?;
+    Ok(identity)
 }
 
 fn validate_executable_identity(identity: &str) -> Result<(), ProtocolError> {
