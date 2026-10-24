@@ -1,4 +1,5 @@
-//! Bounded keychain IPC. User IDs and caller application identities are never request fields.
+//! Bounded keychain IPC. Caller identity is never supplied by clients. Only the
+//! trusted session controller may select an active UID through ActivateSession.
 #![cfg_attr(not(feature = "std"), no_std)]
 extern crate alloc;
 use alloc::{string::String, vec::Vec};
@@ -18,7 +19,7 @@ pub const SERVICE_NAME: &str = "keychain.service";
 pub const ACCESS: &str = "keychain.access";
 pub const MANAGE: &str = "keychain.manage";
 pub const SESSION: &str = "keychain.session";
-const MAGIC: &[u8; 8] = b"MKCHN002";
+const MAGIC: &[u8; 8] = b"MKCHN003";
 const HEADER: usize = 24;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -155,9 +156,11 @@ pub fn valid_text(text: &str, max: usize, empty: bool) -> Result<()> {
 pub enum Request {
     Status,
     Initialize {
+        epoch: u64,
         password: Secret,
     },
     Unlock {
+        epoch: u64,
         password: Secret,
     },
     Lock,
@@ -179,20 +182,24 @@ pub enum Request {
         generation: u64,
     },
     Reveal {
+        epoch: u64,
         id: ItemId,
         password: Secret,
     },
     ManageDelete {
+        epoch: u64,
         id: ItemId,
         password: Secret,
     },
     Grant {
+        epoch: u64,
         id: ItemId,
         target: Application,
         revoke: bool,
         password: Secret,
     },
     ChangePassword {
+        epoch: u64,
         old: Secret,
         new: Secret,
     },
@@ -201,6 +208,9 @@ pub enum Request {
         generation: u64,
     },
     LockAll,
+    ActivateSession {
+        uid: u32,
+    },
 }
 impl Request {
     pub fn opcode(&self) -> u16 {
@@ -219,6 +229,7 @@ impl Request {
             Self::ChangePassword { .. } => 12,
             Self::Applications { .. } => 13,
             Self::LockAll => 14,
+            Self::ActivateSession { .. } => 15,
         }
     }
     pub fn manager(&self) -> bool {
@@ -239,11 +250,13 @@ impl Request {
         let mut w = Writer::new();
         match self {
             Self::Status | Self::Lock | Self::LockAll => {}
+            Self::ActivateSession { uid } => w.raw(&uid.to_le_bytes()),
             Self::Applications { offset, generation } => {
                 w.u16(*offset);
                 w.u64(*generation);
             }
-            Self::Initialize { password } | Self::Unlock { password } => {
+            Self::Initialize { epoch, password } | Self::Unlock { epoch, password } => {
+                w.u64(*epoch);
                 w.bytes(password.expose(), MAX_PASSWORD)?
             }
             Self::Put {
@@ -270,22 +283,35 @@ impl Request {
                 w.u16(*offset);
                 w.u64(*generation);
             }
-            Self::Reveal { id, password } | Self::ManageDelete { id, password } => {
+            Self::Reveal {
+                epoch,
+                id,
+                password,
+            }
+            | Self::ManageDelete {
+                epoch,
+                id,
+                password,
+            } => {
+                w.u64(*epoch);
                 w.raw(id);
                 w.bytes(password.expose(), MAX_PASSWORD)?;
             }
             Self::Grant {
+                epoch,
                 id,
                 target,
                 revoke,
                 password,
             } => {
+                w.u64(*epoch);
                 w.raw(id);
                 w.application(target)?;
                 w.u8(u8::from(*revoke));
                 w.bytes(password.expose(), MAX_PASSWORD)?;
             }
-            Self::ChangePassword { old, new } => {
+            Self::ChangePassword { epoch, old, new } => {
+                w.u64(*epoch);
                 w.bytes(old.expose(), MAX_PASSWORD)?;
                 w.bytes(new.expose(), MAX_PASSWORD)?;
             }
@@ -301,9 +327,11 @@ impl Request {
         let req = match op {
             1 => Self::Status,
             2 => Self::Initialize {
+                epoch: r.u64()?,
                 password: r.secret(MAX_PASSWORD)?,
             },
             3 => Self::Unlock {
+                epoch: r.u64()?,
                 password: r.secret(MAX_PASSWORD)?,
             },
             4 => Self::Lock,
@@ -329,20 +357,24 @@ impl Request {
                 generation: r.u64()?,
             },
             9 => Self::Reveal {
+                epoch: r.u64()?,
                 id: r.array()?,
                 password: r.secret(MAX_PASSWORD)?,
             },
             10 => Self::ManageDelete {
+                epoch: r.u64()?,
                 id: r.array()?,
                 password: r.secret(MAX_PASSWORD)?,
             },
             11 => Self::Grant {
+                epoch: r.u64()?,
                 id: r.array()?,
                 target: r.application()?,
                 revoke: r.boolean()?,
                 password: r.secret(MAX_PASSWORD)?,
             },
             12 => Self::ChangePassword {
+                epoch: r.u64()?,
                 old: r.secret(MAX_PASSWORD)?,
                 new: r.secret(MAX_PASSWORD)?,
             },
@@ -351,6 +383,9 @@ impl Request {
                 generation: r.u64()?,
             },
             14 => Self::LockAll,
+            15 => Self::ActivateSession {
+                uid: u32::from_le_bytes(r.array()?),
+            },
             _ => return Err(Error::Invalid),
         };
         r.end()?;
@@ -367,6 +402,7 @@ pub enum Reply {
     Status {
         initialized: bool,
         unlocked: bool,
+        session_epoch: u64,
     },
     Id(ItemId),
     Secret(Secret),
@@ -389,9 +425,11 @@ impl Reply {
             Self::Status {
                 initialized,
                 unlocked,
+                session_epoch,
             } => {
                 w.u8(u8::from(*initialized));
                 w.u8(u8::from(*unlocked));
+                w.u64(*session_epoch);
                 1
             }
             Self::Id(id) => {
@@ -465,6 +503,7 @@ impl Reply {
             1 => Self::Status {
                 initialized: r.boolean()?,
                 unlocked: r.boolean()?,
+                session_epoch: r.u64()?,
             },
             2 => Self::Id(r.array()?),
             3 => Self::Secret(r.secret(MAX_SECRET)?),
@@ -764,6 +803,7 @@ mod tests {
     #[test]
     fn frames_are_bounded_and_secrets_redacted() {
         let r = Request::Initialize {
+            epoch: 1,
             password: Secret::new(b"never-log-me".to_vec()),
         };
         assert!(!alloc::format!("{r:?}").contains("never-log-me"));
@@ -819,6 +859,7 @@ mod tests {
         );
         assert!(
             Request::Initialize {
+                epoch: 1,
                 password: Secret::new(alloc::vec![1;MAX_PASSWORD+1])
             }
             .encode(1)
