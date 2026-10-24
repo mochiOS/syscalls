@@ -260,6 +260,9 @@ impl<T: ObjectTransport> Client<T> {
         loop {
             let mut outgoing = sources.clone();
             let mut flags = protocol::MUTATION_ADMISSION;
+            if opcode == protocol::OP_OPEN_AT {
+                flags |= protocol::fifo::OPEN_CONTINUATION;
+            }
             if let Some(ticket) = ticket.as_ref() {
                 outgoing
                     .push(ticket.object)
@@ -296,11 +299,64 @@ impl<T: ObjectTransport> Client<T> {
             let (header, body) = protocol::decode(response).map_err(ClientError::Protocol)?;
             if header.opcode != protocol::OP_STATUS
                 || header.request_id != request_id
-                || header.flags != 0
+                || (header.flags != 0 && header.flags != protocol::fifo::OPEN_PENDING_REPLY)
                 || !body.is_empty()
                 || header.status > 0
             {
                 return Err(ClientError::MismatchedResponse.into());
+            }
+            if header.flags == protocol::fifo::OPEN_PENDING_REPLY {
+                let options = (opcode == protocol::OP_OPEN_AT && success_objects == 1)
+                    .then(|| protocol::decode_open_at(payload).ok())
+                    .flatten()
+                    .ok_or(ClientError::MismatchedResponse)?
+                    .options;
+                let expected = protocol::fifo::data_rights(options)
+                    .filter(|_| options & protocol::OPEN_NONBLOCK == 0)
+                    .ok_or(ClientError::MismatchedResponse)?;
+                if header.status != 0 || received.handles.len() != 2 {
+                    return Err(ClientError::MismatchedResponse.into());
+                }
+                let data = received
+                    .handles
+                    .get(0)
+                    .ok_or(ClientError::MismatchedResponse)?;
+                let notification = received
+                    .handles
+                    .get(1)
+                    .ok_or(ClientError::MismatchedResponse)?;
+                if data.handle == T::Handle::default()
+                    || notification.handle == T::Handle::default()
+                    || data.handle == notification.handle
+                    || data.rights != expected
+                    || notification.rights != protocol::fifo::NOTIFICATION_RIGHTS
+                    || received.borrowed.iter().any(|source| {
+                        source.handle == data.handle || source.handle == notification.handle
+                    })
+                {
+                    return Err(ClientError::MismatchedResponse.into());
+                }
+                // Keep data in Received's owner across the wait. Only the
+                // notification is moved to its own owner; all failure/unwind
+                // paths close both, including before libc dispatches C code.
+                let mut data_only = ObjectHandles::new();
+                data_only
+                    .push(data)
+                    .map_err(|_| ClientError::RequestTooLarge)?;
+                let notification = Owned {
+                    transport: &self.transport,
+                    object: notification,
+                };
+                received.handles = data_only;
+                drop(ticket.take());
+                wait(&notification.object).map_err(Error::Wait)?;
+                drop(notification);
+                // No second OPEN_AT: the name may have been unlinked or
+                // replaced while waiting. Return the retained description.
+                return received
+                    .take_only()
+                    .map(Some)
+                    .ok_or(ClientError::MismatchedResponse.into());
             }
             if header.status == protocol::STATUS_MEMORY_ADMISSION_BUSY {
                 let next = received
