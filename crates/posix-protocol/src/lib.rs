@@ -15,6 +15,7 @@ pub const PIPE_BUF: usize = 512;
 pub mod named_semaphore;
 pub mod shared_memory;
 pub mod socket;
+pub mod network;
 pub mod socket_record;
 pub mod socket_route;
 pub mod socket_transfer;
@@ -478,6 +479,9 @@ pub struct SignalDisposition {
     pub kind: u32,
     pub child_options: u32,
 }
+/// One-time boot-manager handoff of the native network endpoint.
+pub const OP_NETWORK_ENDPOINT_INSTALL: u16 = 128;
+
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const STATUS_OK: i32 = 0;
