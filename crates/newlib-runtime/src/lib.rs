@@ -16,6 +16,7 @@ mod file_mutation;
 mod file_metadata;
 mod file_configuration;
 mod path_configuration;
+mod volume_status;
 mod file_time;
 mod stat_output;
 mod terminal_memory;

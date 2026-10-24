@@ -32,7 +32,7 @@ impl<T: ObjectTransport> Client<T> {
         .map_err(ClientError::Protocol)
     }
 
-    fn configuration_at(
+    pub(super) fn configuration_at(
         &self,
         base: StatAtBase<T::Handle>,
         path: impl AsRef<[u8]>,

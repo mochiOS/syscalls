@@ -6,6 +6,7 @@ use mochios_posix_protocol as protocol;
 
 pub mod configuration;
 mod path_limits;
+mod volume_status;
 pub mod file_size_limit;
 pub mod file_admission;
 pub mod fifo;
@@ -2122,7 +2123,7 @@ impl<T: ObjectTransport> Client<T> {
         if header.opcode != protocol::OP_STATUS || header.request_id != request_id {
             return Err(ClientError::MismatchedResponse);
         }
-        if opcode == protocol::OP_FIFO_WAIT && header.flags != 0 {
+        if matches!(opcode, protocol::OP_FIFO_WAIT | protocol::OP_VOLUME_STATUS_AT | protocol::OP_VOLUME_STATUS_HANDLE) && header.flags != 0 {
             return Err(ClientError::MismatchedResponse);
         }
         if header.status == protocol::STATUS_MEMORY_ADMISSION_BUSY

@@ -375,6 +375,10 @@ pub const OP_MKFIFO_AT: u16 = 123;
 /// FIFO WaitCondition with one explicitly delegated data Handle; returns one
 /// notification Handle. No PID, FD or inode number is accepted as authority.
 pub const OP_FIFO_WAIT: u16 = 124;
+/// StatAtRequest with flags zero; returns filesystem volume_status::Status.
+pub const OP_VOLUME_STATUS_AT: u16 = 125;
+/// Empty body and one TRANSFER Handle; returns its owning volume status.
+pub const OP_VOLUME_STATUS_HANDLE: u16 = 126;
 
 /// Recognize assigned requests before operation-specific attachment admission.
 /// Holes are unassigned, not aliases or compatibility operations. OP_STATUS is
@@ -388,7 +392,7 @@ pub const fn is_request_opcode(opcode: u16) -> bool {
             | OP_SIGNAL_THREAD_REGISTER..=OP_SIGNAL_THREAD_SEND
             | OP_WAITED_CHILD_CPU_USAGE..=OP_SIGNAL_THREAD_FAULT
             | OP_SIGNAL_DELIVERY_ORIGIN..=OP_SOCKET_RECORD_ENDPOINT
-            | OP_FORK_PREPARE..=OP_FIFO_WAIT
+            | OP_FORK_PREPARE..=OP_VOLUME_STATUS_HANDLE
     )
 }
 pub const THREAD_WAIT_INTERRUPT_RIGHTS: u64 =
