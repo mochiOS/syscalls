@@ -65,6 +65,8 @@ pub const INHERITED_FD_KIND_SPECIAL: u8 = 13;
 pub const INHERITED_FD_KIND_TERMINAL_FILE: u8 = 14;
 /// Filesystem FIFO metadata with a userspace data Provider description.
 pub const INHERITED_FD_KIND_FIFO: u8 = 15;
+/// Connection-mode records, distinct from byte streams and datagrams.
+pub const INHERITED_FD_KIND_SEQPACKET: u8 = 16;
 pub const INHERITED_FD_DESCRIPTOR_CLOEXEC: u8 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +104,7 @@ const fn valid_inherited_fd_kind(kind: u8) -> bool {
             | INHERITED_FD_KIND_SHARED_MEMORY
             | INHERITED_FD_KIND_SOCKET
             | INHERITED_FD_KIND_DATAGRAM
+            | INHERITED_FD_KIND_SEQPACKET
             | INHERITED_FD_KIND_SPECIAL
             | INHERITED_FD_KIND_TERMINAL_FILE
             | INHERITED_FD_KIND_FIFO
@@ -122,6 +125,7 @@ pub const fn inherited_fd_kind_requires_handle(kind: u8) -> Option<bool> {
             | INHERITED_FD_KIND_SHARED_MEMORY
             | INHERITED_FD_KIND_SOCKET
             | INHERITED_FD_KIND_DATAGRAM
+            | INHERITED_FD_KIND_SEQPACKET
             | INHERITED_FD_KIND_SPECIAL
             | INHERITED_FD_KIND_TERMINAL_FILE
             | INHERITED_FD_KIND_FIFO

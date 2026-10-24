@@ -19,7 +19,7 @@ pub(super) fn receive(
     }
     let capacity = socket_memory::read_length(address_length)? as usize;
     let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
-    let (count, required) = if socket::is_datagram(entry)? {
+    let (count, required) = if socket::is_record(entry) {
         let record = socket_record::io(entry, buffer as u64, length, flags, false)?;
         let source =
             wire::Address::decode(&record.source[..record.source_length]).map_err(|_| EIO)?;

@@ -1,4 +1,4 @@
-//! Datagram data path. RAM is explicitly attached to the delegated worker;
+//! Datagram and sequenced-packet data path. RAM is explicitly attached to the delegated worker;
 //! retries never concatenate records or change shared descriptor flags.
 use super::*;
 use mochios_posix_protocol::socket_record as wire;
@@ -106,6 +106,7 @@ fn io_using(
     route: Option<ObjectHandleAttachment<u32>>,
 ) -> Result<ResultRecord, c_int> {
     const MSG_TRUNC: c_int = 0x20;
+    let flags = socket::message_flags(entry, flags, sending);
     let truncate = !sending && flags & MSG_TRUNC != 0;
     let options = mochios_posix_client::socket::message_options(
         if truncate { flags & !MSG_TRUNC } else { flags },
@@ -257,7 +258,19 @@ fn io_using(
                             )?;
                         }
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        if sending
+                            && entry.handle.kind == FdKind::ObjectSeqPacket
+                            && !options.no_signal
+                            && error == EPIPE
+                        {
+                            io_resources::with(
+                                || Ok(()),
+                                |_| generate_thread_signal(posix_protocol::SIGNAL_PIPE),
+                            )?;
+                        }
+                        return Err(error);
+                    }
                 }
             };
             if !sending && received.copied != 0 {

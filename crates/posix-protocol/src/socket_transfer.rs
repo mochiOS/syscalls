@@ -262,6 +262,9 @@ pub fn peek(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReceiveReply<'a> {
+    /// Record boundary, including empty records; false for byte streams and EOF.
+    /// Encoded at byte 22, bit 0; other flag bits remain invalid.
+    pub end_of_record: bool,
     pub copied: u32,
     /// Original datagram size, or actual returned span for a byte stream.
     pub length: u32,
@@ -321,6 +324,7 @@ impl<'a> ReceiveReply<'a> {
         out[12..16].copy_from_slice(&self.length.to_le_bytes());
         out[16..18].copy_from_slice(&self.total_rights.to_le_bytes());
         out[18..20].copy_from_slice(&self.available_rights.to_le_bytes());
+        out[22] = u8::from(self.end_of_record);
         out[20..22].copy_from_slice(&(count as u16).to_le_bytes());
         out[24..total].copy_from_slice(&source[..count]);
         Ok(total)
@@ -337,7 +341,7 @@ impl<'a> ReceiveReply<'a> {
         input: &'a [u8],
         operation: u16,
     ) -> Result<Self, ProtocolError> {
-        if input.len() < RECEIVE_REPLY_HEADER_LEN || input[22..24] != [0; 2] {
+        if input.len() < RECEIVE_REPLY_HEADER_LEN || (input[22] > 1 || input[23] != 0) {
             return Err(ProtocolError::InvalidLength);
         }
         reply_prefix(input, operation)?;
@@ -350,6 +354,7 @@ impl<'a> ReceiveReply<'a> {
             length: u32::from_le_bytes(input[12..16].try_into().unwrap()),
             total_rights: u16::from_le_bytes(input[16..18].try_into().unwrap()),
             available_rights: u16::from_le_bytes(input[18..20].try_into().unwrap()),
+            end_of_record: input[22] != 0,
             source: crate::socket::Address::decode(&input[24..])?,
         };
         reply.validate(length, maximum)?;

@@ -1,8 +1,8 @@
 //! Local socket FDs own native Provider Handles. Pair installation is atomic;
 //! descriptor flags stay local while status options are shared by the Provider.
 
-use super::*;
 use super::fd_creation::{PendingHandles, PendingPair};
+use super::*;
 use mochios_posix_protocol::socket as wire;
 
 pub(super) struct SocketWait {
@@ -173,7 +173,10 @@ pub unsafe extern "C" fn getsockopt(
             let decoded = mochios_posix_client::socket::newlib_getsockopt_value(tag, &response)
                 .map_err(|_| EIO)?;
             socket_memory::write_output(
-                value, length, &decoded.to_ne_bytes()[..count], count as u32,
+                value,
+                length,
+                &decoded.to_ne_bytes()[..count],
+                count as u32,
             )?;
             Ok(0)
         },
@@ -435,7 +438,7 @@ unsafe fn accept_entry(
     let entry = object_entry(
         u64::from(accepted.value.socket.handle),
         accepted.value.socket.rights,
-        FdKind::ObjectSocket,
+        entry.handle.kind,
         local_flags,
     );
     let result = state()
@@ -552,11 +555,7 @@ pub extern "C" fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int {
                 let entry = object_entry(
                     u64::from(handle.handle),
                     handle.rights,
-                    if create.kind == wire::Kind::Datagram {
-                        FdKind::ObjectDatagram
-                    } else {
-                        FdKind::ObjectSocket
-                    },
+                    fd_kind(create.kind),
                     flags,
                 );
                 let fd = state()
@@ -612,11 +611,7 @@ pub unsafe extern "C" fn socketpair(
                     object_entry(
                         u64::from(opened.handle),
                         opened.rights,
-                        if create.kind == wire::Kind::Datagram {
-                            FdKind::ObjectDatagram
-                        } else {
-                            FdKind::ObjectSocket
-                        },
+                        fd_kind(create.kind),
                         flags,
                     )
                 });
@@ -689,13 +684,22 @@ pub(super) fn socket_name_entry(
     }
     let capacity = socket_memory::read_length(length)? as usize;
     let mut encoded = [0; wire::MAX_ADDRESS_LEN];
-    let tag = if peer { wire::CONTROL_PEER_ADDRESS } else { wire::CONTROL_LOCAL_ADDRESS };
+    let tag = if peer {
+        wire::CONTROL_PEER_ADDRESS
+    } else {
+        wire::CONTROL_LOCAL_ADDRESS
+    };
     let count = query_control(entry, tag, &[], &mut encoded)?;
     let decoded = wire::Address::decode(&encoded[..count]).map_err(|_| EIO)?;
     let mut native = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
-    let required = mochios_posix_client::socket::encode_sockaddr(decoded, &mut native)
-        .map_err(|_| EIO)?;
-    socket_memory::write_output(address, length, &native[..capacity.min(required)], required as u32)?;
+    let required =
+        mochios_posix_client::socket::encode_sockaddr(decoded, &mut native).map_err(|_| EIO)?;
+    socket_memory::write_output(
+        address,
+        length,
+        &native[..capacity.min(required)],
+        required as u32,
+    )?;
     Ok(0)
 }
 
@@ -795,6 +799,33 @@ fn message_io(
     }
 }
 
+pub(super) const MSG_EOR: c_int = 0x80;
+
+fn fd_kind(kind: wire::Kind) -> FdKind {
+    match kind {
+        wire::Kind::Stream => FdKind::ObjectSocket,
+        wire::Kind::Datagram => FdKind::ObjectDatagram,
+        wire::Kind::SequencedPacket => FdKind::ObjectSeqPacket,
+    }
+}
+
+pub(super) fn message_flags(entry: FdEntry, flags: c_int, sending: bool) -> c_int {
+    // Each UNIX sequenced-packet send commits one complete record. MSG_EOR
+    // explicitly states the same boundary; it has no byte-stream meaning.
+    if sending && entry.handle.kind == FdKind::ObjectSeqPacket {
+        flags & !MSG_EOR
+    } else {
+        flags
+    }
+}
+
+pub(super) fn is_record(entry: FdEntry) -> bool {
+    matches!(
+        entry.handle.kind,
+        FdKind::ObjectDatagram | FdKind::ObjectSeqPacket
+    )
+}
+
 pub(super) fn is_datagram(entry: FdEntry) -> Result<bool, c_int> {
     Ok(entry.handle.kind == FdKind::ObjectDatagram)
 }
@@ -809,7 +840,7 @@ pub(super) fn message_entry(
     if !entry.handle.kind.is_socket() {
         return Err(mochios_posix_client::newlib_errno::from_status(-88));
     }
-    if is_datagram(entry)? {
+    if is_record(entry) {
         return super::socket_record::io(entry, buffer, length, flags, sending)
             .map(|record| record.count);
     }
@@ -945,9 +976,8 @@ fn send_record_to(
     let mut bytes = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
     let bytes = &mut bytes[..address_length as usize];
     user_copy::read(address.cast(), bytes)?;
-    let address = mochios_posix_client::socket::decode_sockaddr(bytes).map_err(|error| {
-        mochios_posix_client::newlib_errno::from_status(i64::from(error))
-    })?;
+    let address = mochios_posix_client::socket::decode_sockaddr(bytes)
+        .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
     if !matches!(address, wire::Address::UnixPath(_)) {
         return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
     }
@@ -984,9 +1014,9 @@ pub unsafe extern "C" fn recvfrom(
     pthread_testcancel();
     let result = io_resources::with(
         || with_fd_entry(fd),
-        |entry| socket_receive_address::receive(
-            **entry, buffer, length, flags, address, address_length,
-        ),
+        |entry| {
+            socket_receive_address::receive(**entry, buffer, length, flags, address, address_length)
+        },
     );
     finish_io_cancellation(result_with_errno(result, -1))
 }

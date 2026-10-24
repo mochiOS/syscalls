@@ -37,11 +37,14 @@ pub(super) fn status(fd: c_int, command: c_int, argument: c_int) -> Result<c_int
 
 fn get_status_flags(entry: FdEntry) -> Result<c_int, c_int> {
     match entry.handle.kind {
-        FdKind::ObjectSocket | FdKind::ObjectDatagram => socket::get_status_flags(entry),
-        FdKind::ObjectSharedMemory => shared_memory::get_status_flags(entry),
-        FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory | FdKind::ObjectFifo => {
-            file_description_flags::get(entry)
+        FdKind::ObjectSocket | FdKind::ObjectDatagram | FdKind::ObjectSeqPacket => {
+            socket::get_status_flags(entry)
         }
+        FdKind::ObjectSharedMemory => shared_memory::get_status_flags(entry),
+        FdKind::ObjectFile
+        | FdKind::ObjectSpecial
+        | FdKind::ObjectDirectory
+        | FdKind::ObjectFifo => file_description_flags::get(entry),
         FdKind::ObjectStreamRead
         | FdKind::ObjectStreamWrite
         | FdKind::ObjectPty
@@ -63,11 +66,14 @@ fn get_status_flags(entry: FdEntry) -> Result<c_int, c_int> {
 
 fn set_status_flags(entry: FdEntry, flags: c_int) -> Result<(), c_int> {
     match entry.handle.kind {
-        FdKind::ObjectSocket | FdKind::ObjectDatagram => socket::set_status_flags(entry, flags),
-        FdKind::ObjectSharedMemory => shared_memory::set_status_flags(entry, flags),
-        FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory | FdKind::ObjectFifo => {
-            file_description_flags::set(entry, flags)
+        FdKind::ObjectSocket | FdKind::ObjectDatagram | FdKind::ObjectSeqPacket => {
+            socket::set_status_flags(entry, flags)
         }
+        FdKind::ObjectSharedMemory => shared_memory::set_status_flags(entry, flags),
+        FdKind::ObjectFile
+        | FdKind::ObjectSpecial
+        | FdKind::ObjectDirectory
+        | FdKind::ObjectFifo => file_description_flags::set(entry, flags),
         FdKind::ObjectStreamRead
         | FdKind::ObjectStreamWrite
         | FdKind::ObjectPty
@@ -97,13 +103,16 @@ fn set_nonblocking(fd: c_int, enabled: bool) -> Result<c_int, c_int> {
             let mask = posix_protocol::OPEN_NONBLOCK;
             let flags = if enabled { mask } else { 0 };
             match entry.handle.kind {
-                FdKind::ObjectSocket | FdKind::ObjectDatagram => {
+                FdKind::ObjectSocket | FdKind::ObjectDatagram | FdKind::ObjectSeqPacket => {
                     socket::set_status_flags(**entry, if enabled { O_NONBLOCK } else { 0 })?;
                 }
                 FdKind::ObjectSharedMemory => {
                     shared_memory::update_status_flags(**entry, mask, flags)?
                 }
-                FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory | FdKind::ObjectFifo => {
+                FdKind::ObjectFile
+                | FdKind::ObjectSpecial
+                | FdKind::ObjectDirectory
+                | FdKind::ObjectFifo => {
                     let mask = mochios_filesystem_protocol::OPEN_STATUS_NONBLOCK;
                     file_description_flags::update(**entry, mask, if enabled { mask } else { 0 })?;
                 }

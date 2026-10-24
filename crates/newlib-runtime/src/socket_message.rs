@@ -88,7 +88,7 @@ unsafe fn send_message(fd: c_int, input: *const Message, flags: c_int) -> Result
     {
         return Err(EFAULT);
     }
-    mochios_posix_client::socket::message_options(flags, true)
+    mochios_posix_client::socket::message_options(flags & !socket::MSG_EOR, true)
         .map_err(|_| mochios_posix_client::newlib_errno::EOPNOTSUPP)?;
     let mut vectors = [Vector {
         base: ptr::null_mut(),
@@ -138,12 +138,13 @@ unsafe fn send_vectors(
         job: outgoing_job,
         notification: outgoing_notification,
     } = outgoing;
+    let flags = socket::message_flags(**entry, flags, true);
     let options = mochios_posix_client::socket::message_options(flags, true)
         .map_err(|_| mochios_posix_client::newlib_errno::EOPNOTSUPP)?;
     if !entry.handle.kind.is_socket() {
         return Err(mochios_posix_client::newlib_errno::from_status(-88));
     }
-    if socket::is_datagram(**entry)? && total > posix_protocol::socket_record::MAX_RECORD_SIZE {
+    if socket::is_record(**entry) && total > posix_protocol::socket_record::MAX_RECORD_SIZE {
         return Err(mochios_posix_client::newlib_errno::from_status(-90));
     }
     // Snapshot the complete control chain before lookup or staging. The codec
@@ -203,7 +204,7 @@ unsafe fn send_vectors(
         }
         return socket::message_entry(**entry, bytes.as_ptr() as u64, bytes.len(), flags, true);
     }
-    let datagram = socket::is_datagram(**entry)?;
+    let record_oriented = socket::is_record(**entry);
     if total > wire::MAX_PAYLOAD_LEN as usize {
         return Err(mochios_posix_client::newlib_errno::from_status(-90));
     }
@@ -248,7 +249,7 @@ unsafe fn send_vectors(
     let mut address = [0; mochios_posix_client::socket::MAX_SOCKADDR_LEN];
     {
         let _native = defer_native_delivery();
-        *route = if message.name.is_null() || !datagram {
+        *route = if message.name.is_null() || !socket::is_datagram(**entry)? {
             None
         } else {
             let length = message.name_length as usize;
@@ -337,7 +338,7 @@ unsafe fn send_vectors(
         }
         let result = {
             let _native = defer_native_delivery();
-            if datagram {
+            if record_oriented {
                 socket_transfer::commit(
                     &transport,
                     job_handle,
@@ -387,7 +388,7 @@ unsafe fn send_vectors(
                     let notification = mochios_posix_client::socket_record::wait_send(
                         &transport,
                         source,
-                        if datagram { total } else { 1 },
+                        if record_oriented { total } else { 1 },
                         close_object_handle,
                     )
                     .map_err(map_posix_client_error)?;
@@ -413,7 +414,10 @@ unsafe fn send_vectors(
             }
             Err(error) => {
                 let error = map_posix_client_error(error);
-                if !datagram && !options.no_signal && error == EPIPE {
+                if (!record_oriented || entry.handle.kind == FdKind::ObjectSeqPacket)
+                    && !options.no_signal
+                    && error == EPIPE
+                {
                     generate_thread_signal(posix_protocol::SIGNAL_PIPE)?;
                 }
                 return Err(error);
@@ -511,8 +515,7 @@ unsafe fn receive_vectors(
     if !entry.handle.kind.is_socket() {
         return Err(mochios_posix_client::newlib_errno::from_status(-88));
     }
-    let wait_all =
-        !socket::is_datagram(entry)? && flags & MSG_WAITALL != 0 && flags & MSG_PEEK == 0;
+    let wait_all = !socket::is_record(entry) && flags & MSG_WAITALL != 0 && flags & MSG_PEEK == 0;
     let (_, thread) = register_current_thread().ok_or(EAGAIN)?;
     let mut call = ReceiveCall {
         entry,
@@ -615,11 +618,11 @@ unsafe fn receive_once(
         false,
     )
     .map_err(|_| mochios_posix_client::newlib_errno::EOPNOTSUPP)?;
-    let datagram = socket::is_datagram(entry)?;
+    let record_oriented = socket::is_record(entry);
     // Like Linux UNIX streams, a peek returns the currently visible prefix
     // even with WAITALL. Only an empty queue waits; repeated offset reads would
     // combine different queue heads and bypass the first ancillary barrier.
-    if !datagram && flags & MSG_TRUNC != 0 {
+    if !record_oriented && flags & MSG_TRUNC != 0 {
         return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
     }
     let capacity = message.control_length.saturating_sub(control::HEADER_LEN) / 4;
@@ -768,7 +771,7 @@ unsafe fn receive_once(
     let required =
         mochios_posix_client::socket::encode_sockaddr(received.message.source, &mut native)
             .map_err(|_| EIO)?;
-    if !datagram {
+    if !record_oriented {
         message.name_length = 0;
     } else if !message.name.is_null() {
         user_copy::write(
@@ -789,15 +792,20 @@ unsafe fn receive_once(
         user_copy::write(message.control.cast(), &ancillary[..encoded.length])?;
     }
     message.control_length = encoded.length;
-    message.flags = if received.message.length > received.message.copied {
-        MSG_TRUNC
-    } else {
-        0
-    } | if received.message.total_rights as usize > incoming.count {
-        MSG_CTRUNC
-    } else {
-        0
-    };
+    message.flags =
+        if entry.handle.kind == FdKind::ObjectSeqPacket && received.message.end_of_record {
+            socket::MSG_EOR
+        } else {
+            0
+        } | if received.message.length > received.message.copied {
+            MSG_TRUNC
+        } else {
+            0
+        } | if received.message.total_rights as usize > incoming.count {
+            MSG_CTRUNC
+        } else {
+            0
+        };
     *output = message;
     Ok(if flags & MSG_TRUNC != 0 {
         received.message.length

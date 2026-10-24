@@ -518,11 +518,15 @@ enum FdKind {
     ObjectSpecial = 13,
     ObjectTerminalFile = 14,
     ObjectFifo = 15,
+    ObjectSeqPacket = 16,
 }
 
 impl FdKind {
     const fn is_socket(self) -> bool {
-        matches!(self, Self::ObjectSocket | Self::ObjectDatagram)
+        matches!(
+            self,
+            Self::ObjectSocket | Self::ObjectDatagram | Self::ObjectSeqPacket
+        )
     }
 }
 
@@ -621,6 +625,7 @@ fn inherited_fd_kind(kind: FdKind) -> Option<u8> {
         FdKind::ObjectSharedMemory => Some(posix_protocol::INHERITED_FD_KIND_SHARED_MEMORY),
         FdKind::ObjectSocket => Some(posix_protocol::INHERITED_FD_KIND_SOCKET),
         FdKind::ObjectDatagram => Some(posix_protocol::INHERITED_FD_KIND_DATAGRAM),
+        FdKind::ObjectSeqPacket => Some(posix_protocol::INHERITED_FD_KIND_SEQPACKET),
         FdKind::ObjectSpecial => Some(posix_protocol::INHERITED_FD_KIND_SPECIAL),
         FdKind::ObjectTerminalFile => Some(posix_protocol::INHERITED_FD_KIND_TERMINAL_FILE),
         FdKind::ObjectFifo => Some(posix_protocol::INHERITED_FD_KIND_FIFO),
@@ -640,6 +645,7 @@ fn fd_kind_from_inherited(kind: u8) -> Option<FdKind> {
         posix_protocol::INHERITED_FD_KIND_SHARED_MEMORY => Some(FdKind::ObjectSharedMemory),
         posix_protocol::INHERITED_FD_KIND_SOCKET => Some(FdKind::ObjectSocket),
         posix_protocol::INHERITED_FD_KIND_DATAGRAM => Some(FdKind::ObjectDatagram),
+        posix_protocol::INHERITED_FD_KIND_SEQPACKET => Some(FdKind::ObjectSeqPacket),
         posix_protocol::INHERITED_FD_KIND_SPECIAL => Some(FdKind::ObjectSpecial),
         posix_protocol::INHERITED_FD_KIND_TERMINAL_FILE => Some(FdKind::ObjectTerminalFile),
         posix_protocol::INHERITED_FD_KIND_FIFO => Some(FdKind::ObjectFifo),
@@ -5130,7 +5136,8 @@ fn select_with_deadline(
                         FdKind::ObjectPty
                         | FdKind::ObjectTerminalFile
                         | FdKind::ObjectSocket
-                        | FdKind::ObjectDatagram => {
+                        | FdKind::ObjectDatagram
+                        | FdKind::ObjectSeqPacket => {
                             let mut interests = if entry.handle.kind.is_socket() {
                                 0
                             } else {
@@ -5274,7 +5281,8 @@ fn poll_with_deadline(
                         continue;
                     };
                     match entry.handle.kind {
-                        FdKind::ObjectSocket | FdKind::ObjectDatagram => {
+                        FdKind::ObjectSocket | FdKind::ObjectDatagram
+                        | FdKind::ObjectSeqPacket => {
                             pollfds[index].revents =
                                 socket::poll_events(**entry, pollfds[index].events)?;
                             immediately_ready |= pollfds[index].revents != 0;

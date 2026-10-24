@@ -97,6 +97,7 @@ static inline struct cmsghdr *__mochios_cmsg_nxthdr(const struct msghdr *m,
 #define MSG_CTRUNC 0x8
 #define MSG_TRUNC 0x20
 #define MSG_DONTWAIT 0x40
+#define MSG_EOR 0x80
 #define MSG_WAITALL 0x100
 #define MSG_NOSIGNAL 0x4000
 #define MSG_MORE 0x8000
