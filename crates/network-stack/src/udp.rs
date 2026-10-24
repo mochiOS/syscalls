@@ -104,6 +104,7 @@ impl UdpEndpoint {
 struct UdpBinding {
     id: UdpSocketId,
     local: UdpEndpoint,
+    peer: Option<UdpEndpoint>,
     received: VecDeque<UdpPacket>,
 }
 
@@ -170,6 +171,7 @@ impl UdpSocketTable {
         self.bindings.push(UdpBinding {
             id,
             local: UdpEndpoint { address, port },
+            peer: None,
             received,
         });
         self.next_id += 1;
@@ -178,6 +180,29 @@ impl UdpSocketTable {
 
     pub fn local_endpoint(&self, id: UdpSocketId) -> Result<UdpEndpoint, PacketError> {
         Ok(self.binding(id)?.local)
+    }
+
+    pub fn peer(&self, id: UdpSocketId) -> Result<Option<UdpEndpoint>, PacketError> {
+        Ok(self.binding(id)?.peer)
+    }
+
+    /// Select the default remote endpoint and filter future arrivals by both
+    /// source address and source port. Already accepted records remain queued;
+    /// discarding them is a separate, higher-level socket policy decision.
+    /// None removes only the association, preserving binding and queued data.
+    /// Route, address and permission validation belongs to the service caller.
+    pub fn set_peer(
+        &mut self,
+        id: UdpSocketId,
+        peer: Option<UdpEndpoint>,
+    ) -> Result<(), PacketError> {
+        let binding = self
+            .bindings
+            .iter_mut()
+            .find(|b| b.id == id)
+            .ok_or(PacketError::Mismatch)?;
+        binding.peer = peer;
+        Ok(())
     }
 
     fn binding(&self, id: UdpSocketId) -> Result<&UdpBinding, PacketError> {
@@ -230,6 +255,12 @@ impl UdpSocketTable {
                     && (b.local.address == [0; 4] || b.local.address == destination_address)
             })
             .ok_or(PacketError::Mismatch)?;
+        if binding
+            .peer
+            .is_some_and(|peer| peer.address != source_address || peer.port != datagram.source_port)
+        {
+            return Err(PacketError::Mismatch);
+        }
         if binding.received.len() >= self.queue_limit {
             return Err(PacketError::Capacity);
         }
