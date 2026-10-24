@@ -364,6 +364,9 @@ pub const OP_THREAD_WAIT_INTERRUPT: u16 = 120;
 pub const OP_PATH_LIMITS_AT: u16 = 121;
 /// StatAtRequest with flags zero, no returned Handle; terminal_limits reply.
 pub const OP_TERMINAL_LIMITS_AT: u16 = 122;
+/// OpenAtRequest with options zero; create a FIFO using session credentials
+/// and umask. Optional directory Handle is explicit; success has no payload.
+pub const OP_MKFIFO_AT: u16 = 123;
 
 /// Recognize assigned requests before operation-specific attachment admission.
 /// Holes are unassigned, not aliases or compatibility operations. OP_STATUS is
@@ -377,7 +380,7 @@ pub const fn is_request_opcode(opcode: u16) -> bool {
             | OP_SIGNAL_THREAD_REGISTER..=OP_SIGNAL_THREAD_SEND
             | OP_WAITED_CHILD_CPU_USAGE..=OP_SIGNAL_THREAD_FAULT
             | OP_SIGNAL_DELIVERY_ORIGIN..=OP_SOCKET_RECORD_ENDPOINT
-            | OP_FORK_PREPARE..=OP_TERMINAL_LIMITS_AT
+            | OP_FORK_PREPARE..=OP_MKFIFO_AT
     )
 }
 pub const THREAD_WAIT_INTERRUPT_RIGHTS: u64 =

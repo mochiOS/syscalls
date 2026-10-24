@@ -152,6 +152,10 @@ pub const OP_OBJECT_LIMITS_AT: u16 = 50;
 /// and ordered directory attachments; authenticated credentials wrap a fixed
 /// device_observation::Request followed by raw pathname bytes. Reply: bytes only.
 pub const OP_DEVICE_OBSERVATION_AT: u16 = 51;
+/// Exclusive FIFO inode creation. Uses MKDIR_AT root/base flags and ordered
+/// directory attachments. Authenticated credentials come only from the held
+/// control endpoint. No new Handle or reply payload; no data-open rendezvous.
+pub const OP_CREATE_FIFO_AT: u16 = 52;
 pub const OP_STATUS: u16 = 0x8000;
 
 pub const OPEN_STATUS_APPEND: u32 = 1 << 0;

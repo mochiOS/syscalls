@@ -256,6 +256,20 @@ pub(super) fn mkdir(dirfd: c_int, path: *const c_char, mode: u32) -> Result<(), 
     })
 }
 
+pub(super) fn mkfifo(dirfd: c_int, path: *const c_char, mode: u32) -> Result<(), c_int> {
+    at(dirfd, path, |base, path| {
+        let base = match base {
+            StatAtBase::ProcessRoot => OpenAtBase::ProcessRoot,
+            StatAtBase::ProcessCwd => OpenAtBase::ProcessCwd,
+            StatAtBase::Directory(handle) => OpenAtBase::Directory(handle),
+        };
+        posix_client()
+            .map_err(map_posix_client_error)?
+            .mkfifo_at(base, mode, path)
+            .map_err(map_posix_client_error)
+    })
+}
+
 pub(super) fn readlink(
     dirfd: c_int,
     path: *const c_char,

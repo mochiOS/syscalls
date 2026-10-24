@@ -8348,6 +8348,16 @@ pub extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: c_int) -> c_i
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn mkfifo(path: *const c_char, mode: u32) -> c_int {
+    mkfifoat(-2, path, mode)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn mkfifoat(dirfd: c_int, path: *const c_char, mode: u32) -> c_int {
+    result_with_errno(path_io::mkfifo(dirfd, path, mode).map(|_| 0), -1)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn _rmdir(path: *const c_char) -> c_int {
     if path.is_null() {
         set_errno(EFAULT);

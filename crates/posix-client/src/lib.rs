@@ -1557,6 +1557,25 @@ impl<T: ObjectTransport> Client<T> {
         mode: u32,
         path: impl AsRef<[u8]>,
     ) -> Result<(), ClientError<T::Error>> {
+        self.create_node_at(protocol::OP_MKDIR_AT, base, mode, path.as_ref())
+    }
+
+    pub fn mkfifo_at(
+        &self,
+        base: OpenAtBase<T::Handle>,
+        mode: u32,
+        path: impl AsRef<[u8]>,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.create_node_at(protocol::OP_MKFIFO_AT, base, mode, path.as_ref())
+    }
+
+    fn create_node_at(
+        &self,
+        opcode: u16,
+        base: OpenAtBase<T::Handle>,
+        mode: u32,
+        path: &[u8],
+    ) -> Result<(), ClientError<T::Error>> {
         let (base, directory) = match base {
             OpenAtBase::ProcessRoot => (protocol::OpenBase::ProcessRoot, None),
             OpenAtBase::ProcessCwd => (protocol::OpenBase::ProcessCwd, None),
@@ -1580,7 +1599,7 @@ impl<T: ObjectTransport> Client<T> {
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
         self.request_without_reply_handles(
-            protocol::OP_MKDIR_AT,
+            opcode,
             &payload[..payload_len],
             &mut [],
             &mut handles,
