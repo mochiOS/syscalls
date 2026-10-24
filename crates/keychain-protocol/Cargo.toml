@@ -1,0 +1,9 @@
+[package]
+name = "mochios-keychain-protocol"
+version.workspace = true
+edition.workspace = true
+[features]
+default = ["std"]
+std = []
+[dependencies]
+zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
