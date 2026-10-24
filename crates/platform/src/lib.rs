@@ -1679,6 +1679,8 @@ pub mod capability {
         decode_resolve_capabilities_reply, decode_resolve_capabilities_request,
         decode_resolve_execution_security_reply, decode_resolve_execution_security_request,
         encode_authorize_exec_request, encode_decision_request, encode_request,
+        AUTHORIZE_EXEC_OBJECT_OPCODE, MAX_EXECUTABLE_IDENTITY_LEN,
+        encode_authorize_exec_object_request, decode_authorize_exec_object_request,
         encode_resolve_capabilities_reply, encode_resolve_capabilities_request,
         encode_resolve_execution_security_reply, encode_resolve_execution_security_request,
     };

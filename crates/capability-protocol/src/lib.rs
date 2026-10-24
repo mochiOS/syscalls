@@ -25,6 +25,9 @@ pub const PACKAGE_INDEX_CHANGED_OPCODE: u32 = 0x4341_5049;
 /// service manager delivers this handle after posix.service becomes ready.
 pub const INSTALL_POSIX_ENDPOINT_OPCODE: u32 = 0x4341_5058;
 pub const AUTHORIZE_EXEC_OPCODE: u32 = 0x4341_4558;
+/// Authorize exact bytes from one explicitly attached READ object, keeping
+/// the requester's current application identity and ordinary native grants.
+pub const AUTHORIZE_EXEC_OBJECT_OPCODE: u32 = 0x4341_454f;
 pub const PROTOCOL_VERSION: u32 = 1;
 
 pub const RESOLVE_CAPABILITIES_REQUEST_PREFIX_LEN: usize = size_of::<u32>();
@@ -33,10 +36,52 @@ pub const RESOLVE_EXECUTION_SECURITY_REPLY_HEADER_LEN: usize = size_of::<u64>() 
 
 pub const MAX_CAPABILITY_NAME_LEN: usize = 64;
 pub const MAX_EXECUTABLE_PATH_LEN: usize = 256;
+pub const MAX_EXECUTABLE_IDENTITY_LEN: usize = 255;
 pub const MAX_RESOURCE_PATH_LEN: usize = 256;
 pub const MAX_REASON_LEN: usize = 128;
 pub const MAX_PAYLOAD_SIZE: usize = size_of::<CapabilityRequest>();
 pub const MAX_DECISION_PAYLOAD_SIZE: usize = size_of::<CapabilityDecisionRequest>();
+
+/// The identity is an opaque one-shot lookup key, not a pathname.
+pub fn encode_authorize_exec_object_request(
+    identity: &str,
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    validate_executable_identity(identity)?;
+    let length = 8 + identity.len();
+    if output.len() < length {
+        return Err(ProtocolError::InvalidLength);
+    }
+    output[..4].copy_from_slice(&AUTHORIZE_EXEC_OBJECT_OPCODE.to_le_bytes());
+    output[4..8].copy_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+    output[8..length].copy_from_slice(identity.as_bytes());
+    Ok(length)
+}
+
+pub fn decode_authorize_exec_object_request(bytes: &[u8]) -> Result<&str, ProtocolError> {
+    if bytes.len() < 8 {
+        return Err(ProtocolError::TooShort);
+    }
+    if u32::from_le_bytes(bytes[..4].try_into().unwrap()) != AUTHORIZE_EXEC_OBJECT_OPCODE {
+        return Err(ProtocolError::UnknownOpcode);
+    }
+    if u32::from_le_bytes(bytes[4..8].try_into().unwrap()) != PROTOCOL_VERSION {
+        return Err(ProtocolError::UnsupportedVersion);
+    }
+    let identity = core::str::from_utf8(&bytes[8..]).map_err(|_| ProtocolError::InvalidUtf8)?;
+    validate_executable_identity(identity)?;
+    Ok(identity)
+}
+
+fn validate_executable_identity(identity: &str) -> Result<(), ProtocolError> {
+    if identity.is_empty()
+        || identity.len() > MAX_EXECUTABLE_IDENTITY_LEN
+        || identity.as_bytes().contains(&0)
+    {
+        return Err(ProtocolError::InvalidField);
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolError {
