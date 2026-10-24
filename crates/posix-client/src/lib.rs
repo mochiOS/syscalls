@@ -8,6 +8,7 @@ pub mod configuration;
 mod path_limits;
 pub mod file_size_limit;
 pub mod file_admission;
+pub mod fifo;
 pub mod atfork;
 pub mod thread_lifecycle;
 pub mod accounting;
@@ -2119,6 +2120,9 @@ impl<T: ObjectTransport> Client<T> {
             .ok_or(ClientError::ResponseTooLarge)?;
         let (header, payload) = protocol::decode(response_bytes).map_err(ClientError::Protocol)?;
         if header.opcode != protocol::OP_STATUS || header.request_id != request_id {
+            return Err(ClientError::MismatchedResponse);
+        }
+        if opcode == protocol::OP_FIFO_WAIT && header.flags != 0 {
             return Err(ClientError::MismatchedResponse);
         }
         if header.status == protocol::STATUS_MEMORY_ADMISSION_BUSY

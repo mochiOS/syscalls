@@ -60,6 +60,7 @@ mod shared_memory_namespace;
 mod current_directory;
 mod canonical_path;
 mod pipe;
+mod fifo;
 mod pty_creation;
 mod terminal_lock;
 mod terminal_grant;
@@ -133,7 +134,7 @@ use mochios_posix_client::fd::{
 };
 use mochios_posix_client::newlib_errno::{
     E2BIG, EACCES, EAGAIN, EBADF, EBUSY, ECHILD, EDEADLK, EEXIST, EFAULT, EFBIG, EINTR, EINVAL,
-    EIO, EISDIR, EMFILE, ENAMETOOLONG, ENOENT, ENOEXEC, ENOMEM, ENOSYS, ENOTDIR, ENOTSUP,
+    EIO, EISDIR, EMFILE, ENAMETOOLONG, ENODEV, ENOENT, ENOEXEC, ENOMEM, ENOSYS, ENOTDIR, ENOTSUP,
     ENOTTY, EOVERFLOW, EPERM, EPIPE, ERANGE, ESPIPE, ESRCH,
 };
 use mochios_posix_client::signal_context::{SigInfo, UContext};
@@ -513,6 +514,7 @@ enum FdKind {
     ObjectDatagram = 12,
     ObjectSpecial = 13,
     ObjectTerminalFile = 14,
+    ObjectFifo = 15,
 }
 
 impl FdKind {
@@ -618,6 +620,7 @@ fn inherited_fd_kind(kind: FdKind) -> Option<u8> {
         FdKind::ObjectDatagram => Some(posix_protocol::INHERITED_FD_KIND_DATAGRAM),
         FdKind::ObjectSpecial => Some(posix_protocol::INHERITED_FD_KIND_SPECIAL),
         FdKind::ObjectTerminalFile => Some(posix_protocol::INHERITED_FD_KIND_TERMINAL_FILE),
+        FdKind::ObjectFifo => Some(posix_protocol::INHERITED_FD_KIND_FIFO),
     }
 }
 
@@ -636,6 +639,7 @@ fn fd_kind_from_inherited(kind: u8) -> Option<FdKind> {
         posix_protocol::INHERITED_FD_KIND_DATAGRAM => Some(FdKind::ObjectDatagram),
         posix_protocol::INHERITED_FD_KIND_SPECIAL => Some(FdKind::ObjectSpecial),
         posix_protocol::INHERITED_FD_KIND_TERMINAL_FILE => Some(FdKind::ObjectTerminalFile),
+        posix_protocol::INHERITED_FD_KIND_FIFO => Some(FdKind::ObjectFifo),
         _ => None,
     }
 }
@@ -3897,6 +3901,9 @@ fn allocate_fd_entry(
 }
 
 fn handle_is_nonblocking(entry: FdEntry) -> Result<bool, c_int> {
+    if entry.handle.kind == FdKind::ObjectFifo {
+        return file_description_flags::get(entry).map(|flags| flags & O_NONBLOCK != 0);
+    }
     if entry.handle.kind.is_socket() {
         return Ok(socket::get_status_flags(entry)? & O_NONBLOCK != 0);
     }
@@ -4118,7 +4125,7 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
     if entry.handle.kind.is_socket() {
         return socket::message_entry(entry, buffer as u64, length, 0, true);
     }
-    if matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectTerminalFile | FdKind::ObjectSharedMemory)
+    if matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectTerminalFile | FdKind::ObjectSharedMemory | FdKind::ObjectFifo)
         && !mochios_posix_client::fd::access_allows_write(entry.handle.open_flags as u32)
     {
         return Err(EBADF);
@@ -4127,6 +4134,7 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
         return Ok(0);
     }
     let written = match entry.handle.kind {
+        FdKind::ObjectFifo => return fifo::write(entry, buffer, length),
         FdKind::Stdout | FdKind::Stderr => syscall_errno(syscall::raw_syscall2(
             syscall::SyscallNumber::DebugWrite,
             buffer as u64,
@@ -4238,7 +4246,7 @@ fn syscall_write(entry: FdEntry, buffer: *const c_void, length: usize) -> Result
 }
 
 fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<isize, c_int> {
-    if matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectTerminalFile | FdKind::ObjectSharedMemory)
+    if matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectTerminalFile | FdKind::ObjectSharedMemory | FdKind::ObjectFifo)
         && !mochios_posix_client::fd::access_allows_read(entry.handle.open_flags as u32)
     {
         return Err(EBADF);
@@ -4250,6 +4258,7 @@ fn syscall_read(entry: FdEntry, buffer: *mut c_void, length: usize) -> Result<is
         return socket::message_entry(entry, buffer as u64, length, 0, false);
     }
     let read = match entry.handle.kind {
+        FdKind::ObjectFifo => return fifo::read(entry, buffer, length),
         FdKind::Stdin => return Err(EBADF),
         FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectSharedMemory => syscall_errno(syscall::raw_syscall3(
             syscall::SyscallNumber::HandleRead,
@@ -4415,7 +4424,7 @@ pub extern "C" fn _write(fd: c_int, buffer: *const c_void, length: usize) -> isi
             || with_fd_entry(fd),
             |entry| matches!(
                 entry.handle.kind,
-                FdKind::ObjectStreamWrite | FdKind::ObjectSocket
+                FdKind::ObjectStreamWrite | FdKind::ObjectSocket | FdKind::ObjectFifo
             ),
             |entry| syscall_write(**entry, buffer, length),
         )
@@ -4536,7 +4545,7 @@ pub unsafe extern "C" fn writev(fd: c_int, iov: *const IoVec, iovcnt: c_int) -> 
             },
             |(entry, _, _)| matches!(
                 entry.handle.kind,
-                FdKind::ObjectStreamWrite | FdKind::ObjectSocket
+                FdKind::ObjectStreamWrite | FdKind::ObjectSocket | FdKind::ObjectFifo
             ),
             |(entry, metadata, buffer)| {
                 mochios_posix_client::io_vector::write(
@@ -4577,7 +4586,7 @@ pub extern "C" fn _read(fd: c_int, buffer: *mut c_void, length: usize) -> isize 
             || with_fd_entry(fd),
             |entry| matches!(
                 entry.handle.kind,
-                FdKind::ObjectStreamRead | FdKind::ObjectSocket
+                FdKind::ObjectStreamRead | FdKind::ObjectSocket | FdKind::ObjectFifo
             ),
             |entry| syscall_read(**entry, buffer, length),
         )
@@ -4714,7 +4723,7 @@ pub unsafe extern "C" fn readv(fd: c_int, iov: *const IoVecMut, iovcnt: c_int) -
             },
             |(entry, _, _)| matches!(
                 entry.handle.kind,
-                FdKind::ObjectStreamRead | FdKind::ObjectSocket
+                FdKind::ObjectStreamRead | FdKind::ObjectSocket | FdKind::ObjectFifo
             ),
             |(entry, metadata, buffer)| {
                 mochios_posix_client::io_vector::read(
@@ -5236,7 +5245,11 @@ fn select_with_deadline(
                     }
                     let entry = leases[fd].as_ref().unwrap();
                     match entry.handle.kind {
-                        FdKind::ObjectStreamRead if requested_read & mask != 0 => {
+                        FdKind::ObjectStreamRead | FdKind::ObjectFifo if requested_read & mask != 0
+                            && (entry.handle.kind != FdKind::ObjectFifo
+                                || mochios_posix_client::fd::access_allows_read(
+                                    entry.handle.open_flags as u32,
+                                )) => {
                             items[item_count] = syscall::HandleWaitItem {
                                 handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
                                 minimum_write_bytes: 0,
@@ -5250,7 +5263,11 @@ fn select_with_deadline(
                                 ready_write |= requested_write & mask;
                             }
                         }
-                        FdKind::ObjectStreamWrite if requested_write & mask != 0 => {
+                        FdKind::ObjectStreamWrite | FdKind::ObjectFifo if requested_write & mask != 0
+                            && (entry.handle.kind != FdKind::ObjectFifo
+                                || mochios_posix_client::fd::access_allows_write(
+                                    entry.handle.open_flags as u32,
+                                )) => {
                             items[item_count] = syscall::HandleWaitItem {
                                 handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
                                 minimum_write_bytes: 0,
@@ -5434,20 +5451,27 @@ fn poll_with_deadline(
                         }
                         FdKind::ObjectStreamRead
                         | FdKind::ObjectStreamWrite
+                        | FdKind::ObjectFifo
                         | FdKind::ObjectPty
                         | FdKind::ObjectTerminalFile => {
                             let mut interests = syscall::HANDLE_SIGNAL_PEER_CLOSED;
-                            if matches!(
+                            if (matches!(
                                 entry.handle.kind,
                                 FdKind::ObjectStreamRead | FdKind::ObjectPty | FdKind::ObjectTerminalFile
-                            ) && pollfds[index].events & READ_EVENTS != 0
+                            ) || entry.handle.kind == FdKind::ObjectFifo
+                                && mochios_posix_client::fd::access_allows_read(
+                                    entry.handle.open_flags as u32,
+                                )) && pollfds[index].events & READ_EVENTS != 0
                             {
                                 interests |= syscall::HANDLE_SIGNAL_READABLE;
                             }
-                            if matches!(
+                            if (matches!(
                                 entry.handle.kind,
                                 FdKind::ObjectStreamWrite | FdKind::ObjectPty | FdKind::ObjectTerminalFile
-                            ) && pollfds[index].events & WRITE_EVENTS != 0
+                            ) || entry.handle.kind == FdKind::ObjectFifo
+                                && mochios_posix_client::fd::access_allows_write(
+                                    entry.handle.open_flags as u32,
+                                )) && pollfds[index].events & WRITE_EVENTS != 0
                             {
                                 interests |= syscall::HANDLE_SIGNAL_WRITABLE;
                             }
@@ -5500,6 +5524,16 @@ fn poll_with_deadline(
                                 pollfds[poll_index].revents |= pollfds[poll_index].events & READ_EVENTS;
                             }
                             FdKind::ObjectStreamWrite => pollfds[poll_index].revents |= POLLERR,
+                            FdKind::ObjectFifo => {
+                                if mochios_posix_client::fd::access_allows_read(
+                                    leases[poll_index].as_ref().unwrap().handle.open_flags as u32,
+                                ) {
+                                    pollfds[poll_index].revents |= POLLHUP;
+                                    pollfds[poll_index].revents |= pollfds[poll_index].events & READ_EVENTS;
+                                } else {
+                                    pollfds[poll_index].revents |= POLLERR;
+                                }
+                            }
                             FdKind::ObjectPty | FdKind::ObjectTerminalFile => {
                                 pollfds[poll_index].revents |= POLLHUP;
                                 pollfds[poll_index].revents |= pollfds[poll_index].events & READ_EVENTS;
@@ -5853,6 +5887,7 @@ pub extern "C" fn fchmod(fd: c_int, mode: u32) -> c_int {
                 FdKind::ObjectFile
                     | FdKind::ObjectSpecial
                     | FdKind::ObjectTerminalFile
+                    | FdKind::ObjectFifo
                     | FdKind::ObjectDirectory
             ) {
                 return Err(EBADF);
@@ -5934,6 +5969,7 @@ pub extern "C" fn fchown(fd: c_int, uid: u32, gid: u32) -> c_int {
                 FdKind::ObjectFile
                     | FdKind::ObjectSpecial
                     | FdKind::ObjectTerminalFile
+                    | FdKind::ObjectFifo
                     | FdKind::ObjectDirectory
             ) {
                 return Err(EBADF);
@@ -6171,7 +6207,7 @@ fn sync_file_descriptor(fd: c_int) -> Result<c_int, c_int> {
     io_resources::with(
         || with_fd_entry(fd),
         |entry| {
-            if entry.handle.kind == FdKind::ObjectTerminalFile {
+            if matches!(entry.handle.kind, FdKind::ObjectTerminalFile | FdKind::ObjectFifo) {
                 return Err(EINVAL);
             }
             if !matches!(
@@ -6251,6 +6287,7 @@ pub extern "C" fn _fstat(fd: c_int, stat_buf: *mut c_void) -> c_int {
                 FdKind::ObjectFile
                     | FdKind::ObjectSpecial
                     | FdKind::ObjectTerminalFile
+                    | FdKind::ObjectFifo
                     | FdKind::ObjectDirectory
             ) {
                 let handle = u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?;
@@ -6691,6 +6728,9 @@ pub extern "C" fn mmap(
                         && access & mnu_abi::MEMORY_ACCESS_WRITE != 0;
                     return mapping_backing::with(entry, writable, map);
                 } else {
+                    if entry.handle.kind == FdKind::ObjectFifo {
+                        return Err(ENODEV);
+                    }
                     if !matches!(entry.handle.kind, FdKind::ObjectFile | FdKind::ObjectSpecial) {
                         return Err(EACCES);
                     }

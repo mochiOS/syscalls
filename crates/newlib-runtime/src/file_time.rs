@@ -37,6 +37,7 @@ pub(super) fn fd(fd: c_int, times: *const Timespec) -> Result<(), c_int> {
                 FdKind::ObjectFile
                     | FdKind::ObjectSpecial
                     | FdKind::ObjectTerminalFile
+                    | FdKind::ObjectFifo
                     | FdKind::ObjectDirectory
             ) {
                 // A valid stream/socket/VM descriptor is not an invalid FD, but

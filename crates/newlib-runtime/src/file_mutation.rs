@@ -128,7 +128,7 @@ fn ftruncate_prepared(fd: c_int, length: u64) -> Result<c_int, c_int> {
             shared_memory::truncate(entry, length)?;
             return Ok(0);
         }
-        if entry.handle.kind == FdKind::ObjectTerminalFile {
+        if matches!(entry.handle.kind,FdKind::ObjectTerminalFile | FdKind::ObjectFifo) {
             return Err(EINVAL);
         }
         if !matches!(

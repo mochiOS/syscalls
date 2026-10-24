@@ -63,6 +63,8 @@ pub const INHERITED_FD_KIND_DATAGRAM: u8 = 12;
 pub const INHERITED_FD_KIND_SPECIAL: u8 = 13;
 /// A filesystem-backed terminal: native terminal data path, inode metadata.
 pub const INHERITED_FD_KIND_TERMINAL_FILE: u8 = 14;
+/// Filesystem FIFO metadata with a userspace data Provider description.
+pub const INHERITED_FD_KIND_FIFO: u8 = 15;
 pub const INHERITED_FD_DESCRIPTOR_CLOEXEC: u8 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +104,7 @@ const fn valid_inherited_fd_kind(kind: u8) -> bool {
             | INHERITED_FD_KIND_DATAGRAM
             | INHERITED_FD_KIND_SPECIAL
             | INHERITED_FD_KIND_TERMINAL_FILE
+            | INHERITED_FD_KIND_FIFO
     )
 }
 
@@ -121,6 +124,7 @@ pub const fn inherited_fd_kind_requires_handle(kind: u8) -> Option<bool> {
             | INHERITED_FD_KIND_DATAGRAM
             | INHERITED_FD_KIND_SPECIAL
             | INHERITED_FD_KIND_TERMINAL_FILE
+            | INHERITED_FD_KIND_FIFO
     ))
 }
 
@@ -368,6 +372,9 @@ pub const OP_TERMINAL_LIMITS_AT: u16 = 122;
 /// OpenAtRequest with options zero; create a FIFO using session credentials
 /// and umask. Optional directory Handle is explicit; success has no payload.
 pub const OP_MKFIFO_AT: u16 = 123;
+/// FIFO WaitCondition with one explicitly delegated data Handle; returns one
+/// notification Handle. No PID, FD or inode number is accepted as authority.
+pub const OP_FIFO_WAIT: u16 = 124;
 
 /// Recognize assigned requests before operation-specific attachment admission.
 /// Holes are unassigned, not aliases or compatibility operations. OP_STATUS is
@@ -381,7 +388,7 @@ pub const fn is_request_opcode(opcode: u16) -> bool {
             | OP_SIGNAL_THREAD_REGISTER..=OP_SIGNAL_THREAD_SEND
             | OP_WAITED_CHILD_CPU_USAGE..=OP_SIGNAL_THREAD_FAULT
             | OP_SIGNAL_DELIVERY_ORIGIN..=OP_SOCKET_RECORD_ENDPOINT
-            | OP_FORK_PREPARE..=OP_MKFIFO_AT
+            | OP_FORK_PREPARE..=OP_FIFO_WAIT
     )
 }
 pub const THREAD_WAIT_INTERRUPT_RIGHTS: u64 =

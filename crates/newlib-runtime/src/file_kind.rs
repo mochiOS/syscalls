@@ -6,6 +6,15 @@ pub(super) fn opened(object: ObjectHandleAttachment<u32>, mode: u32) -> Result<F
     match mode & 0o170000 {
         0o040000 => Ok(FdKind::ObjectDirectory),
         0o100000 => Ok(FdKind::ObjectFile),
+        0o010000 => {
+            let direction =
+                object.rights & (syscall::HANDLE_RIGHT_READ | syscall::HANDLE_RIGHT_WRITE);
+            if direction == syscall::HANDLE_RIGHT_READ || direction == syscall::HANDLE_RIGHT_WRITE {
+                Ok(FdKind::ObjectFifo)
+            } else {
+                Err(EIO)
+            }
+        }
         0o020000 => {
             let entry = object_entry(
                 u64::from(object.handle),

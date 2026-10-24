@@ -80,7 +80,7 @@ fn query(entry: FdEntry, name: c_int) -> Result<CLong, c_int> {
     if name == PC_PIPE_BUF {
         return if matches!(
             entry.handle.kind,
-            FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite
+            FdKind::ObjectStreamRead | FdKind::ObjectStreamWrite | FdKind::ObjectFifo
         ) {
             Ok(mochios_posix_client::stream::PIPE_BUF as CLong)
         } else {

@@ -39,7 +39,7 @@ fn get_status_flags(entry: FdEntry) -> Result<c_int, c_int> {
     match entry.handle.kind {
         FdKind::ObjectSocket | FdKind::ObjectDatagram => socket::get_status_flags(entry),
         FdKind::ObjectSharedMemory => shared_memory::get_status_flags(entry),
-        FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory => {
+        FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory | FdKind::ObjectFifo => {
             file_description_flags::get(entry)
         }
         FdKind::ObjectStreamRead
@@ -65,7 +65,7 @@ fn set_status_flags(entry: FdEntry, flags: c_int) -> Result<(), c_int> {
     match entry.handle.kind {
         FdKind::ObjectSocket | FdKind::ObjectDatagram => socket::set_status_flags(entry, flags),
         FdKind::ObjectSharedMemory => shared_memory::set_status_flags(entry, flags),
-        FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory => {
+        FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory | FdKind::ObjectFifo => {
             file_description_flags::set(entry, flags)
         }
         FdKind::ObjectStreamRead
@@ -103,7 +103,7 @@ fn set_nonblocking(fd: c_int, enabled: bool) -> Result<c_int, c_int> {
                 FdKind::ObjectSharedMemory => {
                     shared_memory::update_status_flags(**entry, mask, flags)?
                 }
-                FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory => {
+                FdKind::ObjectFile | FdKind::ObjectSpecial | FdKind::ObjectDirectory | FdKind::ObjectFifo => {
                     let mask = mochios_filesystem_protocol::OPEN_STATUS_NONBLOCK;
                     file_description_flags::update(**entry, mask, if enabled { mask } else { 0 })?;
                 }
