@@ -6,6 +6,7 @@ pub const ENDPOINT_LEN: usize = 8;
 pub const RECEIVE_HEADER_LEN: usize = 12;
 pub const MAX_PAYLOAD: usize = 1472;
 pub const TAKE_STATUS: u64 = u64::from_le_bytes(*b"NUDPERR1");
+pub const SOURCE: u64 = u64::from_le_bytes(*b"NUDPSRC1");
 pub const LOCAL: u64 = u64::from_le_bytes(*b"NUDPLOC1");
 pub const PEER: u64 = u64::from_le_bytes(*b"NUDPPEE1");
 pub const SET_PEER: u64 = u64::from_le_bytes(*b"NUDPSET1");
