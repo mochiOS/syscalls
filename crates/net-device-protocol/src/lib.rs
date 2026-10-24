@@ -2,6 +2,7 @@
 
 use core::fmt;
 
+pub mod datagram;
 pub mod datagram_authority;
 mod http;
 mod tls;

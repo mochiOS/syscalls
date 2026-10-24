@@ -9,17 +9,25 @@ pub enum Error {
     Invalid,
 }
 pub fn reply(status: i32, output: &mut [u8]) -> Result<usize, Error> {
+    reply_for(1, status, output)
+}
+pub fn reply_for(operation: u16, status: i32, output: &mut [u8]) -> Result<usize, Error> {
     if output.len() < REPLY_LEN || status > 0 {
         return Err(Error::Invalid);
     }
     output[..REPLY_LEN].fill(0);
     output[..8].copy_from_slice(&[b'N', b'U', b'D', b'R', 1, 0, 1, 0]);
+    output[6..8].copy_from_slice(&operation.to_le_bytes());
     output[8..12].copy_from_slice(&status.to_le_bytes());
     Ok(REPLY_LEN)
 }
 pub fn status(input: &[u8]) -> Result<i32, Error> {
+    status_for(1, input)
+}
+pub fn status_for(operation: u16, input: &[u8]) -> Result<i32, Error> {
     if input.len() != REPLY_LEN
-        || input[..8] != [b'N', b'U', b'D', b'R', 1, 0, 1, 0]
+        || input[..6] != [b'N', b'U', b'D', b'R', 1, 0]
+        || input[6..8] != operation.to_le_bytes()
         || input[12..16] != [0; 4]
     {
         return Err(Error::Invalid);
