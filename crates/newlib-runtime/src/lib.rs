@@ -54,6 +54,8 @@ mod spawn_file_actions;
 mod spawn_resources;
 mod wait_output;
 mod wait_id;
+mod wait_usage;
+mod wait_usage_output;
 mod io_resources;
 mod cpu_sleep;
 mod mapping_io;

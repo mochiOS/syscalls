@@ -28,6 +28,11 @@ extern "C" {
 pid_t wait(int *);
 pid_t waitpid(pid_t, int *, int);
 pid_t _wait(int *);
+#if __BSD_VISIBLE || __GNU_VISIBLE
+struct rusage;
+pid_t wait4(pid_t, int *, int, struct rusage *);
+pid_t wait3(int *, int, struct rusage *);
+#endif
 #if __POSIX_VISIBLE >= 200809 || __XSI_VISIBLE >= 500
 int waitid(idtype_t, id_t, siginfo_t *, int);
 #endif
