@@ -3,6 +3,26 @@
 use super::{ExecutionIdentity, ProcessExecutionUsage, SysError, SysResult, SyscallNumber};
 use mnu_abi::status::Error;
 
+/// No process lookup: only the caller or a retained WAIT Process Handle.
+pub fn memory_usage(handle: Option<u32>) -> SysResult<super::ProcessMemoryUsage> {
+    let raw = match handle {
+        None => 0,
+        Some(0) => return Err(SysError::from_raw(Error::InvalidArgument.into_raw() as i64)),
+        Some(handle) => handle,
+    };
+    let mut usage = super::ProcessMemoryUsage::default();
+    let status = super::call3(
+        SyscallNumber::ProcessMemoryRead,
+        u64::from(raw),
+        (&mut usage as *mut super::ProcessMemoryUsage) as u64,
+        core::mem::size_of::<super::ProcessMemoryUsage>() as u64,
+    )?;
+    if status != mnu_abi::SUCCESS || usage.current_bytes > usage.peak_bytes {
+        return Err(SysError::from_raw(Error::BackingFailure.into_raw() as i64));
+    }
+    Ok(usage)
+}
+
 /// Observe only the caller (None) or an explicit WAIT-capable Process Handle.
 pub fn usage(handle: Option<u32>) -> SysResult<ProcessExecutionUsage> {
     let raw = match handle {

@@ -16,6 +16,7 @@ pub use mnu_abi::{
     AddressWaitGuard, HandleInfo, HandleWaitGuard,
     ExecutionIdentity,
     ProcessExecutionUsage,
+    ProcessMemoryUsage,
     ADDRESS_WAIT_INFINITE, AddressWaitResult, ClockId, ClockInstant,
     HANDLE_OPTION_NONBLOCKING, HANDLE_OPTIONS_ALL, HANDLE_RIGHT_ALL,
     HANDLE_RIGHT_CONTROL, HANDLE_RIGHT_DUPLICATE, HANDLE_RIGHT_MAP, HANDLE_RIGHT_READ,
