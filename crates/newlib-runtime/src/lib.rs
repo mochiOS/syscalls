@@ -3,6 +3,7 @@
 #![feature(c_variadic)]
 
 mod auxiliary;
+mod static_tls;
 mod child_cleanup;
 mod child_startup;
 mod fd_lease;
@@ -340,6 +341,8 @@ struct ThreadControl {
     newlib_lock_identity: AtomicU64,
     native_handle: AtomicU32,
     thread_local_base: AtomicU64,
+    tls_mapping_base: AtomicUsize,
+    tls_mapping_size: AtomicUsize,
     start: AtomicUsize,
     argument: AtomicUsize,
     result: AtomicUsize,
@@ -387,6 +390,8 @@ impl ThreadControl {
             newlib_lock_identity: AtomicU64::new(0),
             native_handle: AtomicU32::new(0),
             thread_local_base: AtomicU64::new(0),
+            tls_mapping_base: AtomicUsize::new(0),
+            tls_mapping_size: AtomicUsize::new(0),
             start: AtomicUsize::new(0),
             argument: AtomicUsize::new(0),
             result: AtomicUsize::new(0),
@@ -1221,6 +1226,8 @@ fn reserve_thread_control()
         control.start.store(0, Ordering::Relaxed);
         control.argument.store(0, Ordering::Relaxed);
         control.thread_local_base.store(0, Ordering::Relaxed);
+        control.tls_mapping_base.store(0, Ordering::Relaxed);
+        control.tls_mapping_size.store(0, Ordering::Relaxed);
         control.result.store(0, Ordering::Relaxed);
         control.stack_base.store(0, Ordering::Relaxed);
         control.stack_size.store(0, Ordering::Relaxed);
@@ -1345,6 +1352,15 @@ fn reclaim_thread_control(control: &ThreadControl, reason: ThreadReclamation) {
             syscall::SyscallNumber::MemoryUnmap,
             reent as u64,
             reent_mapping_size as u64,
+        );
+    }
+    let tls_base = control.tls_mapping_base.swap(0, Ordering::Relaxed);
+    let tls_size = control.tls_mapping_size.swap(0, Ordering::Relaxed);
+    if !keep_private_memory && tls_base != 0 && tls_size != 0 {
+        let _ = syscall::raw_syscall2(
+            syscall::SyscallNumber::MemoryUnmap,
+            tls_base as u64,
+            tls_size as u64,
         );
     }
     let stack_base = control.stack_base.swap(0, Ordering::Relaxed);
@@ -1521,6 +1537,14 @@ fn register_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
         release_thread_control(control);
         return None;
     }
+    if static_tls::allocate(control)
+        .and_then(|()| static_tls::activate(control))
+        .is_err()
+    {
+        control.state.store(THREAD_REAPING, Ordering::Relaxed);
+        release_thread_control(control);
+        return None;
+    }
     Some((token, control))
 }
 
@@ -1532,13 +1556,14 @@ fn register_initial_thread() -> Option<(Pthread, &'static ThreadControl)> {
     let (token, control, _preparation) = reserve_thread_control()?;
     control.native_id.store(native_id, Ordering::Relaxed);
     control.newlib_lock_identity.store(native_id, Ordering::Relaxed);
-    // The current initial-runtime TCB ABI places its own base in its first
-    // word. Other runtime-created threads explicitly use a zero TLS base.
-    let tls_base: u64;
-    unsafe {
-        core::arch::asm!("mov {}, fs:[0]", out(reg) tls_base, options(nostack, readonly, preserves_flags));
+    if static_tls::allocate(control)
+        .and_then(|()| static_tls::activate(control))
+        .is_err()
+    {
+        control.state.store(THREAD_REAPING, Ordering::Relaxed);
+        release_thread_control(control);
+        return None;
     }
-    control.thread_local_base.store(tls_base, Ordering::Relaxed);
     control
         .reent
         .store(unsafe { _impure_ptr } as usize, Ordering::Relaxed);
@@ -8586,7 +8611,7 @@ pub unsafe extern "C" fn pthread_create(
     control
         .signal_mask
         .store(inherited_signal_mask, Ordering::Relaxed);
-    if let Err(error) = allocate_thread_reent(control) {
+    if let Err(error) = static_tls::allocate(control).and_then(|()| allocate_thread_reent(control)) {
         control.state.store(THREAD_REAPING, Ordering::Relaxed);
         release_thread_control(control);
         return if error == ENOMEM { EAGAIN } else { error };
@@ -8620,7 +8645,7 @@ pub unsafe extern "C" fn pthread_create(
         entry: pthread_start_trampoline as *const () as u64,
         stack_pointer: stack_pointer as u64,
         argument: control as *const ThreadControl as u64,
-        thread_local_base: 0,
+        thread_local_base: control.thread_local_base.load(Ordering::Acquire),
         flags: 0,
         reserved: [0; 3],
         registers: syscall::ThreadInitialRegisters::default(),

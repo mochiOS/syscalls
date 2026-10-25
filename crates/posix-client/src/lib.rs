@@ -61,6 +61,7 @@ pub mod socket_transfer;
 pub mod pthread_cond;
 pub mod thread;
 pub mod thread_stack;
+pub mod static_tls;
 pub mod time;
 pub mod thread_clock;
 pub mod process_clock;

@@ -7,6 +7,7 @@ PHDRS
     text PT_LOAD FLAGS(5);
     rodata PT_LOAD FLAGS(4);
     data PT_LOAD FLAGS(6);
+    tls PT_TLS FLAGS(4);
     stack PT_GNU_STACK FLAGS(6);
 }
 
@@ -62,11 +63,11 @@ SECTIONS
 
     .tdata : ALIGN(16) {
         *(.tdata .tdata.*)
-    } :data
+    } :data :tls
 
     .tbss : ALIGN(16) {
         *(.tbss .tbss.*)
-    } :data
+    } :data :tls
 
     .bss : ALIGN(4K) {
         *(COMMON)

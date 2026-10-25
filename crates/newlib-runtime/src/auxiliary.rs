@@ -19,6 +19,11 @@ pub(super) struct Vector {
     pub count: usize,
 }
 
+pub(super) fn vector() -> Option<Vector> {
+    let base = BASE.load(Ordering::Acquire);
+    (base != 0).then(|| Vector { base, count: COUNT.load(Ordering::Relaxed) })
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct Identity {
     pub real_uid: u32,
