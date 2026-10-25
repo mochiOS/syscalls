@@ -3,6 +3,7 @@ const SC_THREAD_KEYS_MAX: i32 = 38;
 const SC_THREAD_THREADS_MAX: i32 = 40;
 const SC_THREAD_DESTRUCTOR_ITERATIONS: i32 = 53;
 const SC_IOV_MAX: i32 = 66;
+const SC_HOST_NAME_MAX: i32 = 65;
 
 /// Default executable search list, independent of the caller's PATH variable.
 pub const DEFAULT_EXECUTABLE_PATH: &[u8] = b"/bin:/usr/bin";
@@ -53,6 +54,7 @@ pub const fn local_limit(selector: i32) -> Option<usize> {
         SC_THREAD_THREADS_MAX => Some(crate::thread::MAX_THREADS),
         SC_THREAD_DESTRUCTOR_ITERATIONS => Some(crate::thread::DESTRUCTOR_ITERATIONS),
         SC_IOV_MAX => Some(crate::io_vector::IOV_MAX),
+        SC_HOST_NAME_MAX => Some(mochios_posix_protocol::system_identity::HOST_NAME_MAX),
         _ => None,
     }
 }

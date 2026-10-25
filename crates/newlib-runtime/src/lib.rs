@@ -3,6 +3,7 @@
 #![feature(c_variadic)]
 
 mod auxiliary;
+mod system_identity;
 mod static_tls;
 mod child_cleanup;
 mod child_startup;

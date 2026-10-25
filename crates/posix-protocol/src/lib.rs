@@ -14,6 +14,7 @@ pub const MAX_MESSAGE_LEN: usize = 64 * 1024;
 pub const PIPE_BUF: usize = 512;
 pub mod named_semaphore;
 pub mod shared_memory;
+pub mod system_identity;
 pub mod socket;
 pub mod network;
 pub mod socket_record;
@@ -402,7 +403,7 @@ pub const fn is_request_opcode(opcode: u16) -> bool {
             | OP_SIGNAL_THREAD_REGISTER..=OP_SIGNAL_THREAD_SEND
             | OP_WAITED_CHILD_CPU_USAGE..=OP_SIGNAL_THREAD_FAULT
             | OP_SIGNAL_DELIVERY_ORIGIN..=OP_SOCKET_RECORD_ENDPOINT
-            | OP_FORK_PREPARE..=OP_ACCOUNT_LOOKUP
+            | OP_FORK_PREPARE..=OP_HOSTNAME_SET
     )
 }
 pub const THREAD_WAIT_INTERRUPT_RIGHTS: u64 =
@@ -2408,6 +2409,8 @@ fn get_i64(input: &[u8], offset: usize) -> i64 {
 pub const OP_ACCOUNT_ENDPOINT_INSTALL: u16 = 132;
 /// Read public account data using a UID or name, never an authority identity.
 pub const OP_ACCOUNT_LOOKUP: u16 = 133;
+pub const OP_SYSTEM_IDENTITY: u16 = 134;
+pub const OP_HOSTNAME_SET: u16 = 135;
 pub use mochios_user_protocol::public_account as account;
 
 pub const ACCOUNT_ENDPOINT_RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_SEND
