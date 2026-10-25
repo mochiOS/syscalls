@@ -118,6 +118,7 @@ mod signal_preparation;
 mod signal_scope;
 mod signal_jump;
 mod process_accounting;
+mod resource_usage_output;
 use signal_preparation::Preparation;
 
 use core::cell::UnsafeCell;

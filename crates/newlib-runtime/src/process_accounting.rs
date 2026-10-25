@@ -1,18 +1,18 @@
 use super::*;
-use mochios_posix_client::accounting::cpu_timeval;
 
-/// The newlib SDK exposes the two POSIX CPU durations, not Linux's extended
-/// rusage layout. Do not fabricate unmeasured RSS, fault or I/O counters.
+/// The mochiOS newlib ABI: two timeval values and a peak RSS value in KiB.
 #[repr(C)]
 struct Rusage {
     ru_utime: Timeval,
     ru_stime: Timeval,
+    ru_maxrss: CLong,
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<Rusage>() == 32);
+    assert!(core::mem::size_of::<Rusage>() == resource_usage_output::LEN);
     assert!(core::mem::align_of::<Rusage>() == 8);
     assert!(core::mem::offset_of!(Rusage, ru_stime) == 16);
+    assert!(core::mem::offset_of!(Rusage, ru_maxrss) == 32);
 };
 
 #[unsafe(no_mangle)]
@@ -24,41 +24,33 @@ unsafe extern "C" fn getrusage(who: c_int, output: *mut Rusage) -> c_int {
         if output.is_null() {
             return Err(EFAULT);
         }
-        let (user, kernel, rate) = if who == 0 {
-            // SELF has no process-shared POSIX policy to consult and also
-            // works in a native bootstrap process without a POSIX endpoint.
-            let usage =
+        let usage = if who == 0 {
+            let cpu =
                 syscall::execution::usage(None).map_err(|error| map_kernel_errno(error.raw()))?;
-            (
-                u128::from(usage.user_ticks),
-                u128::from(usage.kernel_ticks),
-                usage.ticks_per_second,
-            )
+            let memory = syscall::execution::memory_usage(None)
+                .map_err(|error| map_kernel_errno(error.raw()))?;
+            if cpu.ticks_per_second == 0
+                || cpu.reserved != 0
+                || memory.current_bytes > memory.peak_bytes
+            {
+                return Err(EIO);
+            }
+            posix_protocol::wait_usage::Usage {
+                cpu: posix_protocol::WaitedChildCpuUsage {
+                    user_ticks: u128::from(cpu.user_ticks),
+                    kernel_ticks: u128::from(cpu.kernel_ticks),
+                    ticks_per_second: cpu.ticks_per_second,
+                },
+                peak_resident_bytes: memory.peak_bytes,
+            }
         } else {
-            // Only waited children/descendants, owned by this authenticated
-            // process. A client never supplies a PID or a foreign identity.
-            let usage = posix_client()
+            posix_client()
                 .map_err(map_posix_client_error)?
-                .waited_child_cpu_usage()
-                .map_err(map_posix_client_error)?;
-            (usage.user_ticks, usage.kernel_ticks, usage.ticks_per_second)
+                .waited_child_usage()
+                .map_err(map_posix_client_error)?
         };
-        let (user_seconds, user_microseconds) = cpu_timeval(user, rate)?;
-        let (kernel_seconds, kernel_microseconds) = cpu_timeval(kernel, rate)?;
-        let value = Rusage {
-            ru_utime: Timeval {
-                tv_sec: user_seconds,
-                tv_usec: user_microseconds,
-            },
-            ru_stime: Timeval {
-                tv_sec: kernel_seconds,
-                tv_usec: kernel_microseconds,
-            },
-        };
-        // No partial output if either counter or the service reply is invalid.
-        unsafe {
-            output.write(value);
-        }
+        let bytes = resource_usage_output::encode(usage)?;
+        user_copy::write(output.cast(), &bytes)?;
         Ok(0)
     })();
     result_with_errno(result, -1)

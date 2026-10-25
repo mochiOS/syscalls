@@ -263,6 +263,12 @@ impl<T: Transport> Client<T> {
         protocol::decode_waited_child_cpu_usage(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    pub fn waited_child_usage(&self) -> Result<protocol::wait_usage::Usage, ClientError<T::Error>> {
+        let mut response = [0; protocol::wait_usage::USAGE_LEN];
+        let length = self.request(protocol::OP_WAITED_CHILD_USAGE, 0, &[], &mut response)?;
+        protocol::wait_usage::decode_usage(&response[..length]).map_err(ClientError::Protocol)
+    }
+
     pub fn thread_signal_epoch(&self) -> Result<u64, ClientError<T::Error>> {
         let mut response = [0; protocol::SIGNAL_MASK_LEN];
         let length = self.request(protocol::OP_SIGNAL_THREAD_EPOCH, 0, &[], &mut response)?;

@@ -402,7 +402,7 @@ pub const fn is_request_opcode(opcode: u16) -> bool {
             | OP_SIGNAL_THREAD_REGISTER..=OP_SIGNAL_THREAD_SEND
             | OP_WAITED_CHILD_CPU_USAGE..=OP_SIGNAL_THREAD_FAULT
             | OP_SIGNAL_DELIVERY_ORIGIN..=OP_SOCKET_RECORD_ENDPOINT
-            | OP_FORK_PREPARE..=OP_WAIT_CHILD_USAGE
+            | OP_FORK_PREPARE..=OP_WAITED_CHILD_USAGE
     )
 }
 pub const THREAD_WAIT_INTERRUPT_RIGHTS: u64 =
@@ -485,6 +485,8 @@ pub const OP_NETWORK_ENDPOINT_INSTALL: u16 = 128;
 pub const OP_NETWORK_ENDPOINT_GET: u16 = 129;
 /// Guarded wait request; one selected child event and its CPU usage, no objects.
 pub const OP_WAIT_CHILD_USAGE: u16 = 130;
+/// Empty request; CPU totals and peak resident bytes of waited children.
+pub const OP_WAITED_CHILD_USAGE: u16 = 131;
 pub mod wait_usage;
 
 pub const OP_STATUS: u16 = 0x8000;
