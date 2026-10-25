@@ -5,6 +5,7 @@ pub mod device_observation;
 pub mod description_flags;
 pub mod object_limits;
 pub mod volume_status;
+pub mod storage_inventory;
 pub mod device_metadata;
 pub mod device_registration;
 pub mod device_removal;
