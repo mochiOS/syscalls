@@ -5,6 +5,7 @@ extern crate std;
 
 use core::arch::asm;
 pub mod execution;
+pub mod thread_local;
 pub mod memory;
 pub mod image;
 pub use mnu_abi::status::Error as NativeError;
