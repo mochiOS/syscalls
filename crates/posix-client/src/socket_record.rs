@@ -82,6 +82,38 @@ where
         return Err(ClientError::Remote(-22));
     }
     let bytes = request.encode().map_err(ClientError::Protocol)?;
+    exchange_frame(transport, request, &bytes, socket, buffer, response, close)
+}
+pub fn send_to<'a, T: ObjectTransport>(
+    transport: &T,
+    request: wire::Request,
+    address: protocol::socket::Address<'_>,
+    socket: Handle<T::Handle>,
+    buffer: Handle<T::Handle>,
+    response: &'a mut [u8],
+    close: impl FnMut(T::Handle),
+) -> Result<wire::Reply<'a>, ClientError<T::Error>> {
+    let mut bytes = [0; wire::REQUEST_LEN + protocol::socket::MAX_ADDRESS_LEN];
+    let n = wire::encode_send_to(request, address, &mut bytes).map_err(ClientError::Protocol)?;
+    exchange_frame(
+        transport,
+        request,
+        &bytes[..n],
+        socket,
+        buffer,
+        response,
+        close,
+    )
+}
+fn exchange_frame<'a, T: ObjectTransport>(
+    transport: &T,
+    request: wire::Request,
+    bytes: &[u8],
+    socket: Handle<T::Handle>,
+    buffer: Handle<T::Handle>,
+    response: &'a mut [u8],
+    mut close: impl FnMut(T::Handle),
+) -> Result<wire::Reply<'a>, ClientError<T::Error>> {
     let mut handles = ObjectHandles::new();
     attach::<T>(&mut handles, socket, request.socket_rights())?;
     attach::<T>(&mut handles, buffer, request.buffer_rights())?;

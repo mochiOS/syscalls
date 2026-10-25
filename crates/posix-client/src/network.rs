@@ -2,6 +2,32 @@
 use crate::{Client, ClientError, ObjectHandleAttachment, ObjectHandles, ObjectTransport};
 use mochios_posix_protocol as protocol;
 impl<T: ObjectTransport> Client<T> {
+    /// Obtain only a callable endpoint. The network service authenticates the
+    /// actual caller when the caller subsequently acquires a factory.
+    pub fn network_endpoint(
+        &self,
+        mut close: impl FnMut(T::Handle),
+    ) -> Result<ObjectHandleAttachment<T::Handle>, ClientError<T::Error>> {
+        let mut handles = ObjectHandles::new();
+        let borrowed = handles.clone();
+        let result = self.request_with_handles(
+            protocol::OP_NETWORK_ENDPOINT_GET,
+            0,
+            &[],
+            &mut [],
+            &mut handles,
+        );
+        if matches!(result, Ok(0)) && handles.len() == 1 {
+            let handle = handles.get(0).unwrap();
+            if handle.handle != T::Handle::default()
+                && handle.rights == protocol::network::client_endpoint_rights()
+            {
+                return Ok(handle);
+            }
+        }
+        crate::drain_received_handles(&mut handles, &borrowed, &mut close);
+        Err(result.err().unwrap_or(ClientError::MismatchedResponse))
+    }
     /// The endpoint is borrowed. Only the native-authenticated bootstrap
     /// process may install it. Receiving it never grants network Capability.
     pub fn install_network_endpoint(
@@ -37,4 +63,42 @@ impl<T: ObjectTransport> Client<T> {
             Err(result.err().unwrap_or(ClientError::MismatchedResponse))
         }
     }
+}
+
+/// Invoke the explicitly held endpoint as this process. No service-name
+/// discovery or POSIX-service CapabilitySet impersonation is involved.
+pub fn acquire_factory<T: ObjectTransport>(
+    transport: &T,
+    mut close: impl FnMut(T::Handle),
+) -> Result<ObjectHandleAttachment<T::Handle>, ClientError<T::Error>> {
+    use mochios_net_device_protocol::datagram_authority as wire;
+    let mut response = [0; wire::REPLY_LEN];
+    let mut handles = ObjectHandles::new();
+    let borrowed = handles.clone();
+    let result = transport
+        .call_with_handles(&wire::ACQUIRE, &mut response, &mut handles)
+        .map_err(ClientError::Transport);
+    let checked = (|| {
+        let n = result?;
+        let status = wire::status(response.get(..n).ok_or(ClientError::MismatchedResponse)?)
+            .map_err(|_| ClientError::MismatchedResponse)?;
+        if status != 0 {
+            return Err(ClientError::Remote(status));
+        }
+        if handles.len() != 1 {
+            return Err(ClientError::MismatchedResponse);
+        }
+        let object = handles.get(0).unwrap();
+        let rights = mnu_abi::HANDLE_RIGHT_CONTROL
+            | mnu_abi::HANDLE_RIGHT_DUPLICATE
+            | mnu_abi::HANDLE_RIGHT_TRANSFER;
+        if object.handle == T::Handle::default() || object.rights != rights {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(object)
+    })();
+    if checked.is_err() {
+        crate::drain_received_handles(&mut handles, &borrowed, &mut close);
+    }
+    checked
 }

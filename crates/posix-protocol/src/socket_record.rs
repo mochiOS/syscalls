@@ -4,7 +4,7 @@
 //! number or address-space pointer. Sender identity/delivery flags come from
 //! the kernel. This envelope is separate from chunked native stream I/O.
 
-use crate::{socket::Address, ProtocolError};
+use crate::{ProtocolError, socket::Address};
 
 pub const MAX_RECORD_SIZE: usize = 64 * 1024;
 pub const REQUEST_LEN: usize = 32;
@@ -22,6 +22,7 @@ pub enum Operation {
     Receive = 2,
     WaitSend = 3,
     SendRoute = 4,
+    SendTo = 5,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,7 +81,7 @@ impl Request {
     /// The sender must separately possess TRANSFER to attach these references.
     pub const fn socket_rights(self) -> u64 {
         match self.operation {
-            Operation::Send | Operation::WaitSend | Operation::SendRoute => {
+            Operation::Send | Operation::WaitSend | Operation::SendRoute | Operation::SendTo => {
                 mnu_abi::HANDLE_RIGHT_WRITE
             }
             Operation::Receive => mnu_abi::HANDLE_RIGHT_READ,
@@ -95,7 +96,9 @@ impl Request {
         }
         mnu_abi::HANDLE_RIGHT_MAP
             | match self.operation {
-                Operation::Send | Operation::SendRoute => mnu_abi::HANDLE_RIGHT_READ,
+                Operation::Send | Operation::SendRoute | Operation::SendTo => {
+                    mnu_abi::HANDLE_RIGHT_READ
+                }
                 Operation::Receive => mnu_abi::HANDLE_RIGHT_WRITE,
                 Operation::WaitSend => 0,
             }
@@ -119,14 +122,19 @@ impl<'a> Reply<'a> {
             return Err(ProtocolError::InvalidLength);
         }
         match (request.operation, self.source) {
-            (Operation::Send | Operation::SendRoute, None)
+            (Operation::Send | Operation::SendRoute | Operation::SendTo, None)
                 if self.copied == request.length && self.length == request.length =>
             {
                 Ok(())
             }
             (
                 Operation::Receive,
-                Some(Address::UnixUnnamed | Address::UnixPath(_) | Address::UnixAbstract(_)),
+                Some(
+                    Address::UnixUnnamed
+                    | Address::UnixPath(_)
+                    | Address::UnixAbstract(_)
+                    | Address::Ipv4 { .. },
+                ),
             ) if self.copied == request.length.min(self.length) => Ok(()),
             _ => Err(ProtocolError::InvalidLength),
         }
@@ -196,6 +204,44 @@ fn operation(input: &[u8]) -> Result<Operation, ProtocolError> {
         2 => Ok(Operation::Receive),
         3 => Ok(Operation::WaitSend),
         4 => Ok(Operation::SendRoute),
+        5 => Ok(Operation::SendTo),
         _ => Err(ProtocolError::InvalidLength),
+    }
+}
+
+/// The fixed header remains usable for connected sends. A numeric sendto
+/// carries its address inline, never as a pointer or a control-plane mutation.
+pub fn encode_send_to(
+    request: Request,
+    address: Address<'_>,
+    out: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    if request.operation != Operation::SendTo || !matches!(address, Address::Ipv4 { .. }) {
+        return Err(ProtocolError::InvalidLength);
+    }
+    if out.len() < REQUEST_LEN {
+        return Err(ProtocolError::BufferTooSmall);
+    }
+    out[..REQUEST_LEN].copy_from_slice(&request.encode()?);
+    let n = address.encode(&mut out[REQUEST_LEN..])?;
+    Ok(REQUEST_LEN + n)
+}
+pub fn decode_frame(input: &[u8]) -> Result<(Request, Option<Address<'_>>), ProtocolError> {
+    let request = Request::decode(
+        input
+            .get(..REQUEST_LEN)
+            .ok_or(ProtocolError::InvalidLength)?,
+    )?;
+    if request.operation == Operation::SendTo {
+        let address = Address::decode(&input[REQUEST_LEN..])?;
+        if !matches!(address, Address::Ipv4 { .. }) {
+            return Err(ProtocolError::InvalidLength);
+        }
+        Ok((request, Some(address)))
+    } else {
+        if input.len() != REQUEST_LEN {
+            return Err(ProtocolError::InvalidLength);
+        }
+        Ok((request, None))
     }
 }

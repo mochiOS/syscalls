@@ -55,7 +55,7 @@ pub(super) fn io(
     flags: c_int,
     sending: bool,
 ) -> Result<ResultRecord, c_int> {
-    io_using(entry, buffer, length, flags, sending, None)
+    io_using(entry, buffer, length, flags, sending, None, None)
 }
 
 pub(super) fn send_to(
@@ -76,6 +76,9 @@ pub(super) fn send_to(
     if length != 0 && buffer == 0 {
         return Err(EFAULT);
     }
+    if matches!(address, posix_protocol::socket::Address::Ipv4 { .. }) {
+        return io_using(entry, buffer, length, flags, true, None, Some(address));
+    }
     let transport = endpoint()?;
     let source = ObjectHandleAttachment {
         handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
@@ -93,7 +96,7 @@ pub(super) fn send_to(
             .map_err(map_posix_client_error)?;
             Ok((route, socket::PendingSocketJob(route.handle)))
         },
-        |(route, _)| io_using(entry, buffer, length, flags, true, Some(*route)),
+        |(route, _)| io_using(entry, buffer, length, flags, true, Some(*route), None),
     )
 }
 
@@ -104,6 +107,7 @@ fn io_using(
     flags: c_int,
     sending: bool,
     route: Option<ObjectHandleAttachment<u32>>,
+    destination: Option<posix_protocol::socket::Address<'_>>,
 ) -> Result<ResultRecord, c_int> {
     const MSG_TRUNC: c_int = 0x20;
     let flags = socket::message_flags(entry, flags, sending);
@@ -166,7 +170,9 @@ fn io_using(
                 rights: entry.rights,
             };
             let request = wire::Request {
-                operation: if route.is_some() {
+                operation: if destination.is_some() {
+                    wire::Operation::SendTo
+                } else if route.is_some() {
                     wire::Operation::SendRoute
                 } else if sending {
                     wire::Operation::Send
@@ -187,17 +193,30 @@ fn io_using(
                 let exchanged = {
                     // Retire unexpected reply attachments before reopening delivery.
                     let _native = defer_native_delivery();
-                    mochios_posix_client::socket_record::exchange(
-                        &transport,
-                        request,
-                        route.unwrap_or(socket),
-                        ObjectHandleAttachment {
-                            handle: ram.0,
-                            rights: *rights,
-                        },
-                        &mut response,
-                        close_object_handle,
-                    )
+                    let buffer = ObjectHandleAttachment {
+                        handle: ram.0,
+                        rights: *rights,
+                    };
+                    if let Some(destination) = destination {
+                        mochios_posix_client::socket_record::send_to(
+                            &transport,
+                            request,
+                            destination,
+                            socket,
+                            buffer,
+                            &mut response,
+                            close_object_handle,
+                        )
+                    } else {
+                        mochios_posix_client::socket_record::exchange(
+                            &transport,
+                            request,
+                            route.unwrap_or(socket),
+                            buffer,
+                            &mut response,
+                            close_object_handle,
+                        )
+                    }
                     .map_err(map_posix_client_error)
                 };
                 match exchanged {
@@ -213,6 +232,17 @@ fn io_using(
                             wait_for_handle_capacity(
                                 notification,
                                 syscall::HANDLE_SIGNAL_WRITABLE,
+                                thread,
+                                caught,
+                                0,
+                                wait.deadline(entry)?,
+                            )?;
+                        } else if sending
+                            && (destination.is_some() || socket::is_inet_datagram(entry)?)
+                        {
+                            wait_for_handle_capacity(
+                                entry,
+                                interests,
                                 thread,
                                 caught,
                                 0,

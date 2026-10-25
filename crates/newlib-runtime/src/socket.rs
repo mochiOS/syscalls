@@ -184,6 +184,15 @@ pub unsafe extern "C" fn getsockopt(
     result_with_errno(result, -1)
 }
 
+pub(super) fn is_inet_datagram(entry: FdEntry) -> Result<bool, c_int> {
+    let mut bytes = [0; wire::MAX_ADDRESS_LEN];
+    let n = query_control(entry, wire::CONTROL_LOCAL_ADDRESS, &[], &mut bytes)?;
+    Ok(matches!(
+        wire::Address::decode(&bytes[..n]).map_err(|_| EIO)?,
+        wire::Address::Ipv4 { .. }
+    ))
+}
+
 pub(super) struct PendingSocketJob(pub(super) u32);
 impl Drop for PendingSocketJob {
     fn drop(&mut self) {
@@ -536,10 +545,27 @@ pub extern "C" fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int {
                 let limit = process_fd_limit()?;
                 let pending =
                     PendingFdReservation(state().fds.reserve_from(0, limit).map_err(|_| EMFILE)?);
-                let opened = posix_client()
-                    .map_err(map_posix_client_error)?
-                    .open_socket(create, close_object_handle)
-                    .map_err(map_posix_client_error)?;
+                let client = posix_client().map_err(map_posix_client_error)?;
+                let opened =
+                    if create.domain == wire::Domain::Ipv4 && create.kind == wire::Kind::Datagram {
+                        let endpoint = client
+                            .network_endpoint(close_object_handle)
+                            .map_err(map_posix_client_error)?;
+                        let _endpoint = PendingSocketJob(endpoint.handle);
+                        let factory = mochios_posix_client::network::acquire_factory(
+                            &SyscallEndpointTransport::new(endpoint.handle),
+                            close_object_handle,
+                        )
+                        .map_err(map_posix_client_error)?;
+                        let _factory = PendingSocketJob(factory.handle);
+                        client
+                            .open_inet_datagram(create, factory, close_object_handle)
+                            .map_err(map_posix_client_error)?
+                    } else {
+                        client
+                            .open_socket(create, close_object_handle)
+                            .map_err(map_posix_client_error)?
+                    };
                 Ok((
                     pending,
                     PendingHandles {
@@ -978,8 +1004,8 @@ fn send_record_to(
     user_copy::read(address.cast(), bytes)?;
     let address = mochios_posix_client::socket::decode_sockaddr(bytes)
         .map_err(|error| mochios_posix_client::newlib_errno::from_status(i64::from(error)))?;
-    if !matches!(address, wire::Address::UnixPath(_)) {
-        return Err(mochios_posix_client::newlib_errno::EOPNOTSUPP);
+    if !matches!(address, wire::Address::UnixPath(_) | wire::Address::Ipv4 { .. }) {
+        return Err(mochios_posix_client::newlib_errno::from_status(-97));
     }
     super::socket_record::send_to(entry, buffer as u64, length, flags, address)
         .map(|record| record.count)
