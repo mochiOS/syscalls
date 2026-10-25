@@ -2,6 +2,7 @@
 #![feature(linkage)]
 #![feature(c_variadic)]
 
+mod auxiliary;
 mod child_cleanup;
 mod child_startup;
 mod fd_lease;
@@ -1040,6 +1041,8 @@ struct StackView {
     envp: *mut *mut c_char,
     stack_top: usize,
     executable: *const c_char,
+    auxiliary: *const usize,
+    auxiliary_count: usize,
     resource_policy: u64,
     upcall_stack: usize,
     initial_heap: usize,
@@ -1931,6 +1934,8 @@ unsafe fn parse_stack(sp: *const usize) -> StackView {
         cursor = unsafe { cursor.add(1) };
     }
     let mut auxiliary = unsafe { cursor.add(1).cast::<usize>() };
+    let auxiliary_base = auxiliary;
+    let mut auxiliary_count = 0;
     let mut executable = ptr::null();
     let mut resource_policy = 0;
     let mut upcall_stack = 0;
@@ -1952,6 +1957,7 @@ unsafe fn parse_stack(sp: *const usize) -> StackView {
             _ => {}
         }
         auxiliary = unsafe { auxiliary.add(2) };
+        auxiliary_count += 1;
     }
     StackView {
         argc,
@@ -1959,6 +1965,8 @@ unsafe fn parse_stack(sp: *const usize) -> StackView {
         envp,
         stack_top: sp as usize,
         executable,
+        auxiliary: auxiliary_base,
+        auxiliary_count,
         resource_policy,
         upcall_stack,
         initial_heap,
@@ -2568,6 +2576,7 @@ unsafe fn initialize_runtime(stack: StackView) {
     state.argv = stack.argv;
     state.envp = stack.envp;
     state.executable = stack.executable;
+    auxiliary::initialize(stack.auxiliary as usize, stack.auxiliary_count);
     match restore_fd_state_from_launch_context(&mut state.fds) {
         Ok(true) => {}
         Ok(false) => {
@@ -4213,6 +4222,16 @@ pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
         Ok(false) => {}
         Ok(true) => match posix_client().and_then(|client| client.signal_image_started()) {
             Ok(ignored) => {
+                let session = posix_client().and_then(|client| client.session_info())
+                    .unwrap_or_else(|error| startup_failure(
+                        b"newlib: initial POSIX identity failed: ", map_posix_client_error(error),
+                    ));
+                if let Err(error) = auxiliary::install_identity(auxiliary::Identity {
+                    real_uid: session.real_uid, effective_uid: session.effective_uid,
+                    real_gid: session.real_gid, effective_gid: session.effective_gid,
+                }) {
+                    startup_failure(b"newlib: initial ELF identity failed: ", error);
+                }
                 let mut actions = SIGNAL_ACTIONS.lock();
                 for (index, action) in actions.iter_mut().enumerate() {
                     if ignored & (1u64 << index) != 0 {

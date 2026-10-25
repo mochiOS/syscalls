@@ -237,7 +237,7 @@ pub fn encode_initial_stack_for_image(
         (AT_GID, 0, None),
         (AT_EGID, 0, None),
         (AT_HWCAP, 0, None),
-        (AT_CLKTCK, 100, None),
+        (AT_CLKTCK, crate::accounting::CLOCK_TICKS_PER_SECOND, None),
         (AT_SECURE, 0, None),
         (
             AT_RANDOM,
