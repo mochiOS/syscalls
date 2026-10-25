@@ -6668,6 +6668,25 @@ pub extern "C" fn mprotect(addr: *mut c_void, len: usize, prot: c_int) -> c_int 
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn posix_madvise(addr: *mut c_void, len: usize, advice: c_int) -> c_int {
+    mochios_posix_client::memory::advise(
+        addr as u64,
+        len as u64,
+        advice,
+        PAGE_SIZE as u64,
+        |address, length| {
+            syscall::raw_syscall2(
+                syscall::SyscallNumber::MemoryRangeCheck, address, length,
+            )
+            .into_result()
+            .map(|_| ())
+            .map_err(|error| error.raw())
+        },
+    )
+    .map_or_else(|error| error, |()| 0)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c_int {
     let result = (|| {
         if addr.is_null() || len == 0 || (addr as usize) & (PAGE_SIZE - 1) != 0 {

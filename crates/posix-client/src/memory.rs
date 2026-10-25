@@ -53,6 +53,36 @@ pub const MS_ASYNC: i32 = 0x1;
 pub const MS_INVALIDATE: i32 = 0x2;
 pub const MS_SYNC: i32 = 0x4;
 
+pub const POSIX_MADV_NORMAL: i32 = 0;
+pub const POSIX_MADV_RANDOM: i32 = 1;
+pub const POSIX_MADV_SEQUENTIAL: i32 = 2;
+pub const POSIX_MADV_WILLNEED: i32 = 3;
+pub const POSIX_MADV_DONTNEED: i32 = 4;
+
+/// POSIX advice cannot change memory access semantics, even for DONTNEED.
+/// The current VM keeps its allocation strategy and validates ownership
+/// without touching contents, permissions or backing I/O. Optimization of
+/// these optional hints can be added independently of the POSIX contract.
+pub fn advise(
+    address: u64,
+    length: u64,
+    advice: i32,
+    page_size: u64,
+    check_range: impl FnOnce(u64, u64) -> Result<(), i64>,
+) -> Result<(), i32> {
+    if !matches!(advice, POSIX_MADV_NORMAL..=POSIX_MADV_DONTNEED)
+        || !page_size.is_power_of_two()
+        || address & (page_size - 1) != 0
+        || length == 0
+    {
+        return Err(crate::newlib_errno::EINVAL);
+    }
+    address
+        .checked_add(length)
+        .ok_or(crate::newlib_errno::ENOMEM)?;
+    check_range(address, length).map_err(map_errno)
+}
+
 /// POSIX writeback policy, interpreted by the compatibility layer only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SyncPolicy {
