@@ -402,7 +402,7 @@ pub const fn is_request_opcode(opcode: u16) -> bool {
             | OP_SIGNAL_THREAD_REGISTER..=OP_SIGNAL_THREAD_SEND
             | OP_WAITED_CHILD_CPU_USAGE..=OP_SIGNAL_THREAD_FAULT
             | OP_SIGNAL_DELIVERY_ORIGIN..=OP_SOCKET_RECORD_ENDPOINT
-            | OP_FORK_PREPARE..=OP_WAITED_CHILD_USAGE
+            | OP_FORK_PREPARE..=OP_ACCOUNT_LOOKUP
     )
 }
 pub const THREAD_WAIT_INTERRUPT_RIGHTS: u64 =
@@ -2403,3 +2403,12 @@ fn get_u64(input: &[u8], offset: usize) -> u64 {
 fn get_i64(input: &[u8], offset: usize) -> i64 {
     i64::from_le_bytes(input[offset..offset + 8].try_into().unwrap())
 }
+
+/// Bootstrap-only installation of an explicitly delegated account endpoint.
+pub const OP_ACCOUNT_ENDPOINT_INSTALL: u16 = 132;
+/// Read public account data using a UID or name, never an authority identity.
+pub const OP_ACCOUNT_LOOKUP: u16 = 133;
+pub use mochios_user_protocol::public_account as account;
+
+pub const ACCOUNT_ENDPOINT_RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_SEND
+    | mnu_abi::HANDLE_RIGHT_DUPLICATE | mnu_abi::HANDLE_RIGHT_TRANSFER;

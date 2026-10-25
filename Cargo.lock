@@ -625,6 +625,7 @@ name = "mochios-posix-protocol"
 version = "0.1.0"
 dependencies = [
  "mnu-abi",
+ "mochios-user-protocol",
 ]
 
 [[package]]
