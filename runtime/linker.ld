@@ -21,8 +21,18 @@ SECTIONS
 
     .rodata : ALIGN(4K) {
         *(.rodata .rodata.*)
-        *(.eh_frame_hdr)
-        *(.eh_frame)
+    } :rodata
+
+    .eh_frame_hdr : ALIGN(8) {
+        HIDDEN(__eh_frame_hdr_start = .);
+        KEEP(*(.eh_frame_hdr))
+        HIDDEN(__eh_frame_hdr_end = .);
+    } :rodata
+
+    .eh_frame : ALIGN(8) {
+        HIDDEN(__eh_frame_start = .);
+        KEEP(*(.eh_frame .eh_frame.*))
+        HIDDEN(__eh_frame_end = .);
     } :rodata
 
     .preinit_array : ALIGN(8) {
