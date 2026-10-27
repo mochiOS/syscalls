@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stdio.h>
+#include <unistd.h>
 
 extern void __sinit(struct _reent *);
 
@@ -71,4 +72,22 @@ ssize_t getdelim(char **lineptr, size_t *capacity, int delimiter, FILE *stream) 
 
 ssize_t getline(char **lineptr, size_t *capacity, FILE *stream) {
     return __getdelim(lineptr, capacity, '\n', stream);
+}
+
+/* Newlib's default remove only unlinks files. POSIX also removes empty
+ * directories. Try the atomic unlink first; never stat and then act on a
+ * possibly replaced path, or turn permission/I/O failures into a retry. */
+int _remove_r(struct _reent *reent, const char *path) {
+    int result = unlink(path);
+    if (result != 0 && errno == EISDIR) {
+        result = rmdir(path);
+    }
+    if (result != 0) {
+        _REENT_ERRNO(reent) = errno;
+    }
+    return result;
+}
+
+int remove(const char *path) {
+    return _remove_r(_REENT, path);
 }
