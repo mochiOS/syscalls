@@ -1,7 +1,23 @@
 //! Allocation-free x86-64 static-PIE preparation. Dynamic linking policy lives
 //! in user space; this produces an ordinary fixed-address ELF for native exec.
-//! Symbol lookup, interpreters and resolver execution require a runtime
+//! Inter-object symbol lookup, interpreters and resolver execution require a runtime
 //! linker and are deliberately reported as unsupported, never silently ignored.
+mod symbols;
+
+#[derive(Clone, Copy)]
+enum Value {
+    Relative(u64),
+    Absolute(u64),
+}
+impl Value {
+    fn at(self, bias: u64) -> u64 {
+        match self {
+            Self::Relative(value) => bias.wrapping_add(value),
+            Self::Absolute(value) => value,
+        }
+    }
+}
+
 const PAGE: u64 = 4096;
 const LOAD: u32 = 1;
 const DYNAMIC: u32 = 2;
@@ -99,9 +115,12 @@ pub struct Pie<'a> {
     entry: u64,
     rela_offset: usize,
     rela_count: usize,
+    plt_offset: usize,
+    plt_count: usize,
     relr_offset: usize,
     relr_count: usize,
     retained: usize,
+    symbols: Option<symbols::Table<'a>>,
 }
 impl<'a> Pie<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
@@ -126,9 +145,12 @@ impl<'a> Pie<'a> {
             entry: u64_at(bytes, 24)?,
             rela_offset: 0,
             rela_count: 0,
+            plt_offset: 0,
+            plt_count: 0,
             relr_offset: 0,
             relr_count: 0,
             retained: 0,
+            symbols: None,
         };
         let mut dynamic = None;
         let mut executable = false;
@@ -275,9 +297,14 @@ impl<'a> Pie<'a> {
         let mut rela = None;
         let mut size = None;
         let mut entry = None;
+        let mut plt = None;
+        let mut plt_size = None;
+        let mut plt_kind = None;
         let mut relr = None;
         let mut relr_size = None;
         let mut relr_entry = None;
+        let mut symbol_tags = [None; 6];
+        let mut versioned = false;
         let mut terminated = false;
         for o in extent(self.bytes, d.offset, d.file)?.step_by(16) {
             let tag = u64_at(self.bytes, o)?;
@@ -286,8 +313,44 @@ impl<'a> Pie<'a> {
                 terminated = true;
                 break;
             }
+            let symbol_index = match tag {
+                4 => Some(0),
+                5 => Some(1),
+                6 => Some(2),
+                10 => Some(3),
+                11 => Some(4),
+                0x6ffffef5 => Some(5),
+                _ => None,
+            };
+            if let Some(index) = symbol_index {
+                if symbol_tags[index].replace(value).is_some() {
+                    return Err(Error::Invalid);
+                }
+            }
+            if matches!(tag, 0x6ffffff0 | 0x6ffffffc..=0x6fffffff) {
+                versioned = true;
+            }
             match tag {
-                1 => return Err(Error::Unsupported), // DT_NEEDED requires symbol scope/lifetime management.
+                // Dependency loading and external audit/filter scopes require
+                // an object graph, lifetime management and authority checks.
+                1 | 0x6ffffefb | 0x6ffffefc | 0x7ffffffd | 0x7fffffff => {
+                    return Err(Error::Unsupported);
+                }
+                2 => {
+                    if plt_size.replace(value).is_some() {
+                        return Err(Error::Invalid);
+                    }
+                }
+                20 => {
+                    if plt_kind.replace(value).is_some() {
+                        return Err(Error::Invalid);
+                    }
+                }
+                23 => {
+                    if plt.replace(value).is_some() {
+                        return Err(Error::Invalid);
+                    }
+                }
                 7 => {
                     if rela.replace(value).is_some() {
                         return Err(Error::Invalid);
@@ -318,13 +381,20 @@ impl<'a> Pie<'a> {
                         return Err(Error::Invalid);
                     }
                 }
-                // DT_PLTRELSZ, DT_REL/RELSZ, DT_JMPREL.
-                2 | 17 | 18 | 23 if value != 0 => return Err(Error::Unsupported),
+                // DT_REL/RELSZ.
+                17 | 18 if value != 0 => return Err(Error::Unsupported),
                 _ => {}
             }
         }
         if !terminated {
             return Err(Error::Invalid);
+        }
+        if symbol_tags.iter().any(Option::is_some) {
+            self.symbols = Some(symbols::Table::parse(
+                symbol_tags,
+                versioned,
+                |address, length| Ok(&self.bytes[self.file_range(address, length)?]),
+            )?);
         }
         let size = size.unwrap_or(0);
         if size != 0 {
@@ -334,6 +404,18 @@ impl<'a> Pie<'a> {
             let range = self.file_range(rela.ok_or(Error::Invalid)?, size)?;
             self.rela_offset = range.start;
             self.rela_count = range.len() / 24;
+        }
+        if plt.is_some() || plt_size.is_some() || plt_kind.is_some() {
+            let size = plt_size.ok_or(Error::Invalid)?;
+            if plt_kind != Some(7) {
+                return Err(Error::Unsupported);
+            }
+            if size % 24 != 0 {
+                return Err(Error::Invalid);
+            }
+            let range = self.file_range(plt.ok_or(Error::Invalid)?, size)?;
+            self.plt_offset = range.start;
+            self.plt_count = range.len() / 24;
         }
         if relr.is_some() || relr_size.is_some() || relr_entry.is_some() {
             let size = relr_size.ok_or(Error::Invalid)?;
@@ -369,13 +451,13 @@ impl<'a> Pie<'a> {
     /// in a LOAD that also contains relocation targets.
     fn relocations(
         &self,
-        mut apply: impl FnMut(u64, u64) -> Result<(), Error>,
+        mut apply: impl FnMut(u64, Value) -> Result<(), Error>,
     ) -> Result<(), Error> {
         let mut cursor = None;
         for index in 0..self.relr_count {
             let word = u64_at(self.bytes, self.relr_offset + index * 8)?;
             if word & 1 == 0 {
-                apply(word, self.relative_word(word)?)?;
+                apply(word, Value::Relative(self.relative_word(word)?))?;
                 cursor = Some(add(word, 8)?);
             } else {
                 let base = cursor.ok_or(Error::Invalid)?;
@@ -383,29 +465,60 @@ impl<'a> Pie<'a> {
                 for bit in 1..64 {
                     if word & (1u64 << bit) != 0 {
                         let target = add(base, (bit - 1) * 8)?;
-                        apply(target, self.relative_word(target)?)?;
+                        apply(target, Value::Relative(self.relative_word(target)?))?;
                     }
                 }
                 cursor = Some(end);
             }
         }
-        for i in 0..self.rela_count {
-            if let (target, Some(addend)) = self.relocation(i)? {
-                apply(target, addend as u64)?;
+        for (offset, count) in [
+            (self.rela_offset, self.rela_count),
+            (self.plt_offset, self.plt_count),
+        ] {
+            for index in 0..count {
+                if let (target, Some(value)) = self.relocation(offset + index * 24)? {
+                    apply(target, value)?;
+                }
             }
         }
         Ok(())
     }
-    /// (target, signed relative addend); NONE performs no write.
-    fn relocation(&self, index: usize) -> Result<(u64, Option<i64>), Error> {
-        let o = self.rela_offset + index * 24;
+    /// Relative and single-image symbol bindings. Symbol version scopes,
+    /// dependencies, TLS and IFUNC are not approximated by local lookup.
+    fn relocation(&self, o: usize) -> Result<(u64, Option<Value>), Error> {
         let target = u64_at(self.bytes, o)?;
         let info = u64_at(self.bytes, o + 8)?;
-        match info {
-            0 => Ok((target, None)),
-            8 => Ok((target, Some(u64_at(self.bytes, o + 16)? as i64))),
-            _ => Err(Error::Unsupported),
-        }
+        let kind = info as u32;
+        let symbol = (info >> 32) as u32;
+        let addend = u64_at(self.bytes, o + 16)?;
+        let value = match kind {
+            0 => return Ok((target, None)),
+            8 if symbol == 0 => Value::Relative(addend),
+            1 | 6 | 7 => {
+                let definition = self
+                    .symbols
+                    .as_ref()
+                    .ok_or(Error::Unsupported)?
+                    .definition(symbol)?;
+                // GLOB_DAT and JUMP_SLOT use S, while R_X86_64_64 uses S+A.
+                let addend = if kind == 1 { addend } else { 0 };
+                match definition {
+                    symbols::Definition::Absolute(value) => {
+                        Value::Absolute(value.wrapping_add(addend))
+                    }
+                    symbols::Definition::Image { value, size } => {
+                        if !(0..self.count)
+                            .any(|i| self.segment(i).is_ok_and(|s| s.contains(value, size)))
+                        {
+                            return Err(Error::Invalid);
+                        }
+                        Value::Relative(value.wrapping_add(addend))
+                    }
+                }
+            }
+            _ => return Err(Error::Unsupported),
+        };
+        Ok((target, Some(value)))
     }
     /// Retain the source program's PHDR view, not the native wrapper's table.
     /// A runtime linker/self-relocator interprets these with the program bias.
@@ -573,10 +686,10 @@ impl<'a> Pie<'a> {
             // Compute layout once per LOAD, rather than rescanning all fixups
             // for every individual word in a dense RELR bitmap.
             let destination = self.load_offset(j)?;
-            self.relocations(|target, addend| {
+            self.relocations(|target, value| {
                 if s.contains(target, 8) {
                     // ELF64 B + A is modular data, not an authorized range.
-                    let value = bias.wrapping_add(addend);
+                    let value = value.at(bias);
                     let offset = add(destination, target - s.address)? as usize;
                     output[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
