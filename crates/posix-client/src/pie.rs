@@ -99,6 +99,8 @@ pub struct Pie<'a> {
     entry: u64,
     rela_offset: usize,
     rela_count: usize,
+    relr_offset: usize,
+    relr_count: usize,
     retained: usize,
 }
 impl<'a> Pie<'a> {
@@ -124,6 +126,8 @@ impl<'a> Pie<'a> {
             entry: u64_at(bytes, 24)?,
             rela_offset: 0,
             rela_count: 0,
+            relr_offset: 0,
+            relr_count: 0,
             retained: 0,
         };
         let mut dynamic = None;
@@ -209,21 +213,29 @@ impl<'a> Pie<'a> {
             crate::static_tls::Error::InvalidImage => Error::Invalid,
             crate::static_tls::Error::Read(error) => error,
         })?;
-        for i in 0..result.rela_count {
-            let (target, value) = result.relocation(i)?;
-            if value.is_none() {
-                continue;
-            }
+        let mut seen = 0usize;
+        let mut highest_end = 0;
+        result.relocations(|target, _| {
+            let end = add(target, 8)?;
             if !(0..count).any(|n| result.segment(n).is_ok_and(|s| s.contains(target, 8))) {
                 return Err(Error::Invalid);
             }
-            for j in 0..i {
-                let (old, value) = result.relocation(j)?;
-                if value.is_some() && target < add(old, 8)? && old < add(target, 8)? {
-                    return Err(Error::Invalid);
-                }
+            // Linkers normally emit sorted targets. Validate these in one pass;
+            // unsorted tables are allowed but must still have disjoint writes.
+            if target < highest_end {
+                let mut index = 0;
+                result.relocations(|old, _| {
+                    if index < seen && target < add(old, 8)? && old < end {
+                        return Err(Error::Invalid);
+                    }
+                    index += 1;
+                    Ok(())
+                })?;
             }
-        }
+            highest_end = highest_end.max(end);
+            seen += 1;
+            Ok(())
+        })?;
         Ok(result)
     }
     fn segment(&self, index: usize) -> Result<Segment, Error> {
@@ -263,6 +275,9 @@ impl<'a> Pie<'a> {
         let mut rela = None;
         let mut size = None;
         let mut entry = None;
+        let mut relr = None;
+        let mut relr_size = None;
+        let mut relr_entry = None;
         let mut terminated = false;
         for o in extent(self.bytes, d.offset, d.file)?.step_by(16) {
             let tag = u64_at(self.bytes, o)?;
@@ -288,8 +303,23 @@ impl<'a> Pie<'a> {
                         return Err(Error::Invalid);
                     }
                 }
-                // DT_PLTRELSZ, DT_REL/RELSZ, DT_JMPREL, DT_RELR/RELRSZ.
-                2 | 17 | 18 | 23 | 35 | 36 if value != 0 => return Err(Error::Unsupported),
+                35 => {
+                    if relr_size.replace(value).is_some() {
+                        return Err(Error::Invalid);
+                    }
+                }
+                36 => {
+                    if relr.replace(value).is_some() {
+                        return Err(Error::Invalid);
+                    }
+                }
+                37 => {
+                    if relr_entry.replace(value).is_some() {
+                        return Err(Error::Invalid);
+                    }
+                }
+                // DT_PLTRELSZ, DT_REL/RELSZ, DT_JMPREL.
+                2 | 17 | 18 | 23 if value != 0 => return Err(Error::Unsupported),
                 _ => {}
             }
         }
@@ -297,15 +327,73 @@ impl<'a> Pie<'a> {
             return Err(Error::Invalid);
         }
         let size = size.unwrap_or(0);
-        if size == 0 {
-            return Ok(());
+        if size != 0 {
+            if size % 24 != 0 || entry != Some(24) {
+                return Err(Error::Invalid);
+            }
+            let range = self.file_range(rela.ok_or(Error::Invalid)?, size)?;
+            self.rela_offset = range.start;
+            self.rela_count = range.len() / 24;
         }
-        if size % 24 != 0 || entry != Some(24) {
-            return Err(Error::Invalid);
+        if relr.is_some() || relr_size.is_some() || relr_entry.is_some() {
+            let size = relr_size.ok_or(Error::Invalid)?;
+            if relr_entry != Some(8) || size % 8 != 0 {
+                return Err(Error::Invalid);
+            }
+            let range = self.file_range(relr.ok_or(Error::Invalid)?, size)?;
+            self.relr_offset = range.start;
+            self.relr_count = range.len() / 8;
         }
-        let range = self.file_range(rela.ok_or(Error::Invalid)?, size)?;
-        self.rela_offset = range.start;
-        self.rela_count = range.len() / 24;
+        Ok(())
+    }
+    /// Read an implicit addend from the unmodified LOAD image, including a word
+    /// that straddles file bytes and zero-fill. Never read it from prior fixups.
+    fn relative_word(&self, target: u64) -> Result<u64, Error> {
+        for i in 0..self.count {
+            let s = self.segment(i)?;
+            if s.contains(target, 8) {
+                let within = target - s.address;
+                let length = s.file.saturating_sub(within).min(8);
+                let mut word = [0; 8];
+                if length != 0 {
+                    let range = extent(self.bytes, add(s.offset, within)?, length)?;
+                    word[..length as usize].copy_from_slice(&self.bytes[range]);
+                }
+                return Ok(u64::from_le_bytes(word));
+            }
+        }
+        Err(Error::Invalid)
+    }
+    /// gABI RELR bitmaps cover the next 63 words, including zero bits. Process
+    /// RELR before RELA; all reads use the immutable source so tables may reside
+    /// in a LOAD that also contains relocation targets.
+    fn relocations(
+        &self,
+        mut apply: impl FnMut(u64, u64) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let mut cursor = None;
+        for index in 0..self.relr_count {
+            let word = u64_at(self.bytes, self.relr_offset + index * 8)?;
+            if word & 1 == 0 {
+                apply(word, self.relative_word(word)?)?;
+                cursor = Some(add(word, 8)?);
+            } else {
+                let base = cursor.ok_or(Error::Invalid)?;
+                let end = add(base, 63 * 8)?;
+                for bit in 1..64 {
+                    if word & (1u64 << bit) != 0 {
+                        let target = add(base, (bit - 1) * 8)?;
+                        apply(target, self.relative_word(target)?)?;
+                    }
+                }
+                cursor = Some(end);
+            }
+        }
+        for i in 0..self.rela_count {
+            if let (target, Some(addend)) = self.relocation(i)? {
+                apply(target, addend as u64)?;
+            }
+        }
         Ok(())
     }
     /// (target, signed relative addend); NONE performs no write.
@@ -351,12 +439,12 @@ impl<'a> Pie<'a> {
     }
     fn materialized(&self, s: Segment) -> Result<u64, Error> {
         let mut length = s.file;
-        for i in 0..self.rela_count {
-            let (target, value) = self.relocation(i)?;
-            if value.is_some() && s.contains(target, 8) {
+        self.relocations(|target, _| {
+            if s.contains(target, 8) {
                 length = length.max(add(target - s.address, 8)?);
             }
-        }
+            Ok(())
+        })?;
         Ok(length)
     }
     fn metadata_bytes(&self) -> Result<u64, Error> {
@@ -477,21 +565,23 @@ impl<'a> Pie<'a> {
             s.write(output, next);
             next += 56;
         }
-        for i in 0..self.rela_count {
-            let (target, Some(addend)) = self.relocation(i)? else {
+        for j in 0..self.count {
+            let s = self.segment(j)?;
+            if s.kind != LOAD {
                 continue;
-            };
-            // ELF64 relocation fields hold B + A modulo 2^64. This is
-            // data, not a range used to authorize or map an address.
-            let value = bias.wrapping_add(addend as u64);
-            for j in 0..self.count {
-                let s = self.segment(j)?;
-                if s.contains(target, 8) {
-                    let offset = add(self.load_offset(j)?, target - s.address)? as usize;
-                    output[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-                    break;
-                }
             }
+            // Compute layout once per LOAD, rather than rescanning all fixups
+            // for every individual word in a dense RELR bitmap.
+            let destination = self.load_offset(j)?;
+            self.relocations(|target, addend| {
+                if s.contains(target, 8) {
+                    // ELF64 B + A is modular data, not an authorized range.
+                    let value = bias.wrapping_add(addend);
+                    let offset = add(destination, target - s.address)? as usize;
+                    output[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+                }
+                Ok(())
+            })?;
         }
         Ok(length)
     }
