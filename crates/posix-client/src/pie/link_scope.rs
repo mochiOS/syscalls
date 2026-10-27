@@ -2,6 +2,8 @@
 //! execution authority remain the caller's responsibility; no path is opened.
 use super::{Error, LOAD, PAGE, Pie, USER_END, USER_MIN, add, page};
 
+mod bundle;
+
 pub struct Object<'scope, 'image> {
     /// Name by which this already-captured object satisfies DT_NEEDED.
     pub name: &'scope [u8],
