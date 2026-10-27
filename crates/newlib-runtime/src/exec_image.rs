@@ -1,7 +1,7 @@
 //! User-space image preparation. Source references remain borrowed; every
 //! allocated byte buffer and RAM reference is owned through callback abandonment.
 use super::*;
-const MAX_IMAGE: usize = 64 * 1024 * 1024;
+const MAX_IMAGE: usize = mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES;
 
 #[derive(Default)]
 struct Buffer {

@@ -174,7 +174,7 @@ fn digest(image: u32) -> Result<[u8; 32], c_int> {
         }
         offset = offset
             .checked_add(count)
-            .filter(|offset| *offset <= 64 * 1024 * 1024)
+            .filter(|offset| *offset <= mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES as u64)
             .ok_or(EFBIG)?;
         hash.update(&bytes[..count as usize]);
     }
