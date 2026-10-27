@@ -102,6 +102,15 @@ impl Inputs {
         Err(E2BIG)
     }
 
+    /// First matching environment entry from owned exec text, never getenv().
+    pub(super) fn environment(&self, name: &[u8]) -> Option<&[u8]> {
+        self.spans[1][..self.counts[1]].iter().find_map(|span| {
+            let text = &self.text[span.start..span.start + span.length];
+            text.strip_prefix(name)
+                .and_then(|tail| tail.strip_prefix(b"="))
+        })
+    }
+
     pub(super) fn path(&self) -> &[u8] {
         &self.path[..self.path_length]
     }

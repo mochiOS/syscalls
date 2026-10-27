@@ -104,7 +104,7 @@ fn is_pie(image: u32) -> Result<bool, c_int> {
         && header[16..18] == 3u16.to_le_bytes())
 }
 impl Preparation {
-    fn build(&mut self, image: u32) -> Result<(), c_int> {
+    fn build(&mut self, image: u32, inputs: &exec_inputs::Inputs) -> Result<(), c_int> {
         let mut chunk = [0u8; mnu_abi::provider::MAX_DATA_LEN];
         loop {
             let n = read_at(image, &mut chunk, self.source.length)?;
@@ -132,10 +132,11 @@ impl Preparation {
             })
             .map_err(|_| ENOEXEC)?;
         let length = if dependent {
-            self.executable = Some(
-                self.dependencies
-                    .build(self.source.bytes(), &mut self.output)?,
-            );
+            self.executable = Some(self.dependencies.build(
+                self.source.bytes(),
+                &mut self.output,
+                inputs,
+            )?);
             self.output.length
         } else {
             let pie =
@@ -209,6 +210,7 @@ impl Preparation {
 
 pub(super) fn with_image(
     image: u32,
+    inputs: &exec_inputs::Inputs,
     operation: impl FnOnce(
         u32,
         Option<mochios_posix_client::process_image::Executable>,
@@ -220,7 +222,7 @@ pub(super) fn with_image(
     io_resources::with(
         || Ok(Preparation::default()),
         |preparation| {
-            preparation.build(image)?;
+            preparation.build(image, inputs)?;
             operation(preparation.handle, preparation.executable)
         },
     )

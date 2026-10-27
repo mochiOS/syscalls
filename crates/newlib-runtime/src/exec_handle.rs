@@ -142,7 +142,7 @@ fn replace_image(
     fds: &FdTable<FdObject>,
     ceiling: u64,
 ) -> Result<(), c_int> {
-    exec_image::with_image(image, |image, auxiliary| {
+    exec_image::with_image(image, inputs, |image, auxiliary| {
         with_startup(inputs, execfn, fds, auxiliary, |startup| {
             let digest = digest(image)?;
             authorize(image, identity, &digest)?;

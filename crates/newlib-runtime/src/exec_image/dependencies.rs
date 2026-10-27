@@ -6,11 +6,60 @@ use mochios_posix_client::pie::{
     link_scope::{Object, Scope},
 };
 
+#[derive(Clone, Copy, Default)]
+struct Paths {
+    rpath: Option<(usize, usize)>,
+    runpath: Option<(usize, usize)>,
+    no_default: bool,
+}
+impl Paths {
+    fn capture(
+        source: &[u8],
+        paths: mochios_posix_client::pie::SearchPaths<'_>,
+    ) -> Result<Self, c_int> {
+        let span = |text: Option<&[u8]>| -> Result<Option<(usize, usize)>, c_int> {
+            text.map(|text| {
+                let offset = (text.as_ptr() as usize)
+                    .checked_sub(source.as_ptr() as usize)
+                    .ok_or(ENOEXEC)?;
+                offset
+                    .checked_add(text.len())
+                    .filter(|end| *end <= source.len())
+                    .ok_or(ENOEXEC)?;
+                Ok((offset, text.len()))
+            })
+            .transpose()
+        };
+        Ok(Self {
+            rpath: span(paths.rpath)?,
+            runpath: span(paths.runpath)?,
+            no_default: paths.no_default_library_path,
+        })
+    }
+    fn view(self, source: &[u8]) -> Result<mochios_posix_client::pie::SearchPaths<'_>, c_int> {
+        let text = |span: Option<(usize, usize)>| -> Result<Option<&[u8]>, c_int> {
+            span.map(|(start, length)| {
+                source
+                    .get(start..start.checked_add(length).ok_or(ENOEXEC)?)
+                    .ok_or(ENOEXEC)
+            })
+            .transpose()
+        };
+        Ok(mochios_posix_client::pie::SearchPaths {
+            rpath: text(self.rpath)?,
+            runpath: text(self.runpath)?,
+            no_default_library_path: self.no_default,
+        })
+    }
+}
+
 #[derive(Default)]
 struct Node {
     name: Buffer,
     source: Buffer,
     handle: u32,
+    parent: usize,
+    paths: Paths,
 }
 impl Drop for Node {
     fn drop(&mut self) {
@@ -48,7 +97,7 @@ impl Dependencies {
         assert!(index < self.count());
         unsafe { &mut *self.nodes.pointer.cast::<Node>().add(index) }
     }
-    fn append(&mut self, name: &[u8]) -> Result<usize, c_int> {
+    fn append(&mut self, name: &[u8], parent: usize) -> Result<usize, c_int> {
         let _delivery = defer_native_delivery();
         let index = self.count();
         let length = self
@@ -66,6 +115,7 @@ impl Dependencies {
         };
         self.nodes.length = length; // Publish ownership before any further allocation/RPC.
         let node = self.node_mut(index);
+        node.parent = parent;
         node.name.reserve(name.len())?;
         unsafe { ptr::copy_nonoverlapping(name.as_ptr(), node.name.pointer, name.len()) };
         node.name.length = name.len();
@@ -100,38 +150,135 @@ impl Dependencies {
         }
         Ok(())
     }
-    fn open(&mut self, index: usize) -> Result<(), c_int> {
+    fn source<'a>(&'a self, root: &'a [u8], index: usize) -> &'a [u8] {
+        if index == 0 {
+            root
+        } else {
+            self.node(index - 1).source.bytes()
+        }
+    }
+    fn search_list(
+        &mut self,
+        index: usize,
+        list: &[u8],
+        environment: bool,
+        denied: &mut bool,
+    ) -> Result<bool, c_int> {
+        if list.is_empty() {
+            return Ok(false);
+        }
+        // Tokens require origin/platform metadata. Never interpret an unsupported
+        // expansion as a literal path or substitute the caller's pathname.
+        if list.contains(&b'$') {
+            return Err(ENOEXEC);
+        }
+        let name = self.node(index).name.bytes();
+        // This immutable allocation stays stable as Handle fields change.
+        let name = unsafe { core::slice::from_raw_parts(name.as_ptr(), name.len()) };
+        let mut candidate = [0; posix_protocol::MAX_PATH_LEN];
+        for directory in list.split(|byte| *byte == b':' || (environment && *byte == b';')) {
+            let prefix = if directory.is_empty() {
+                0
+            } else {
+                directory.len().checked_add(1).ok_or(ENAMETOOLONG)?
+            };
+            let length = prefix
+                .checked_add(name.len())
+                .filter(|length| *length <= candidate.len())
+                .ok_or(ENAMETOOLONG)?;
+            if prefix != 0 {
+                candidate[..directory.len()].copy_from_slice(directory);
+                candidate[directory.len()] = b'/';
+            }
+            candidate[prefix..length].copy_from_slice(name);
+            match self.open_path(index, &candidate[..length]) {
+                Ok(()) => return Ok(true),
+                Err(ENOENT | ENOTDIR) if self.node(index).handle == 0 => {}
+                Err(EACCES) if self.node(index).handle == 0 => *denied = true,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(false)
+    }
+    fn open(
+        &mut self,
+        index: usize,
+        root: &[u8],
+        environment: Option<&[u8]>,
+        root_paths: Paths,
+    ) -> Result<(), c_int> {
         let name = self.node(index).name.bytes();
         if name.len() > posix_protocol::MAX_PATH_LEN {
             return Err(ENAMETOOLONG);
         }
-        // Changing a Handle field does not move or mutate this owned name.
+        if name.contains(&b'$') {
+            return Err(ENOEXEC);
+        }
         let name = unsafe { core::slice::from_raw_parts(name.as_ptr(), name.len()) };
         if name.contains(&b'/') {
             return self.open_path(index, name);
         }
-        let mut path = [0; posix_protocol::MAX_PATH_LEN];
-        let mut permission_denied = false;
-        for directory in mochios_posix_client::configuration::DEFAULT_SHARED_LIBRARY_PATH
-            .split(|byte| *byte == b':')
-        {
-            let length = directory
-                .len()
-                .checked_add(1)
-                .and_then(|n| n.checked_add(name.len()))
-                .filter(|n| *n <= path.len())
-                .ok_or(ENAMETOOLONG)?;
-            path[..directory.len()].copy_from_slice(directory);
-            path[directory.len()] = b'/';
-            path[directory.len() + 1..length].copy_from_slice(name);
-            match self.open_path(index, &path[..length]) {
-                Ok(()) => return Ok(()),
-                Err(ENOENT | ENOTDIR) if self.node(index).handle == 0 => {}
-                Err(EACCES) if self.node(index).handle == 0 => permission_denied = true,
-                Err(error) => return Err(error),
+        let requester = self.node(index).parent;
+        let bytes = self.source(root, requester);
+        // Captured source allocations are immutable. Only the unopened node's
+        // Handle changes during search; no source buffer grows here.
+        let bytes = unsafe { core::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) };
+        let fields = if requester == 0 {
+            root_paths
+        } else {
+            self.node(requester - 1).paths
+        };
+        let paths = fields.view(bytes)?;
+        let mut denied = false;
+        if paths.runpath.is_none() {
+            let mut parent = requester;
+            loop {
+                let bytes = self.source(root, parent);
+                let bytes = unsafe { core::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) };
+                let fields = if parent == 0 {
+                    root_paths
+                } else {
+                    self.node(parent - 1).paths
+                };
+                let paths = fields.view(bytes)?;
+                if paths.runpath.is_none() {
+                    if let Some(list) = paths.rpath {
+                        if self.search_list(index, list, false, &mut denied)? {
+                            return Ok(());
+                        }
+                    }
+                }
+                if parent == 0 {
+                    break;
+                }
+                let next = self.node(parent - 1).parent;
+                if next >= parent {
+                    return Err(ENOEXEC);
+                }
+                parent = next;
             }
         }
-        Err(if permission_denied { EACCES } else { ENOENT })
+        if let Some(list) = environment {
+            if self.search_list(index, list, true, &mut denied)? {
+                return Ok(());
+            }
+        }
+        if let Some(list) = paths.runpath {
+            if self.search_list(index, list, false, &mut denied)? {
+                return Ok(());
+            }
+        }
+        if !paths.no_default_library_path
+            && self.search_list(
+                index,
+                mochios_posix_client::configuration::DEFAULT_SHARED_LIBRARY_PATH,
+                false,
+                &mut denied,
+            )?
+        {
+            return Ok(());
+        }
+        Err(if denied { EACCES } else { ENOENT })
     }
     fn capture(&mut self, index: usize, total: &mut usize) -> Result<(), c_int> {
         let mut chunk = [0; mnu_abi::provider::MAX_DATA_LEN];
@@ -166,9 +313,38 @@ impl Dependencies {
         &mut self,
         root: &[u8],
         output: &mut Buffer,
+        inputs: &exec_inputs::Inputs,
     ) -> Result<mochios_posix_client::process_image::Executable, c_int> {
+        let path = inputs
+            .environment(b"LD_LIBRARY_PATH")
+            .filter(|value| !value.is_empty());
+        let preload = inputs
+            .environment(b"LD_PRELOAD")
+            .filter(|value| !value.is_empty());
+        let audit = inputs
+            .environment(b"LD_AUDIT")
+            .filter(|value| !value.is_empty());
+        let environment = if path.is_some() || preload.is_some() || audit.is_some() {
+            let identity = posix_client()
+                .map_err(map_posix_client_error)?
+                .session_info()
+                .map_err(map_posix_client_error)?;
+            if identity.real_uid == identity.effective_uid
+                && identity.real_gid == identity.effective_gid
+            {
+                if preload.is_some() || audit.is_some() {
+                    return Err(ENOEXEC);
+                }
+                path
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let mut total = root.len();
         let mut cursor = 0;
+        let mut root_paths = Paths::default();
         loop {
             // Captured buffers never grow after parsing. Adding Nodes may move
             // Node records, but their independent source/name allocations stay
@@ -181,11 +357,17 @@ impl Dependencies {
             let source = unsafe { core::slice::from_raw_parts(source.as_ptr(), source.len()) };
             let image = Pie::parse_object(source).map_err(|_| ENOEXEC)?;
             image.validate_direct_scope_startup().map_err(|_| ENOEXEC)?;
+            let paths = Paths::capture(source, image.search_paths().map_err(|_| ENOEXEC)?)?;
+            if cursor == 0 {
+                root_paths = paths;
+            } else {
+                self.node_mut(cursor - 1).paths = paths;
+            }
             let mut discovery_error = ENOEXEC;
             image
                 .dependencies(|name| {
                     if !(0..self.count()).any(|i| self.node(i).name.bytes() == name) {
-                        self.append(name).map_err(|error| {
+                        self.append(name, cursor).map_err(|error| {
                             discovery_error = error;
                             mochios_posix_client::pie::Error::Invalid
                         })?;
@@ -196,7 +378,7 @@ impl Dependencies {
             if cursor == self.count() {
                 break;
             }
-            self.open(cursor)?;
+            self.open(cursor, root, environment, root_paths)?;
             self.capture(cursor, &mut total)?;
             cursor += 1;
         }

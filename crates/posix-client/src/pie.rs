@@ -113,6 +113,14 @@ impl Segment {
     }
 }
 
+/// User-space search metadata; strings remain borrowed from captured bytes.
+#[derive(Default)]
+pub struct SearchPaths<'a> {
+    pub rpath: Option<&'a [u8]>,
+    pub runpath: Option<&'a [u8]>,
+    pub no_default_library_path: bool,
+}
+
 pub struct Pie<'a> {
     bytes: &'a [u8],
     count: usize,
@@ -237,6 +245,7 @@ impl<'a> Pie<'a> {
             result.dynamic(d)?;
         }
         result.dependencies(|_| Ok(()))?;
+        result.search_paths()?;
         // Reuse the runtime's TLS validation, reading the source PHDR bytes.
         // Only the initialized template must be file-backed; .tbss may extend
         // beyond LOAD memory. Symbol-bearing TLS relocations remain rejected.
@@ -614,8 +623,36 @@ impl<'a> Pie<'a> {
         let bias = add(required, alignment - 1)? & !(alignment - 1);
         Ok((bias, add(end, bias)?))
     }
-    /// A direct-entry scope currently has no constructor runner or path-list
-    /// policy. Do not silently ignore these requirements while wiring exec.
+    pub fn search_paths(&self) -> Result<SearchPaths<'a>, Error> {
+        let mut paths = SearchPaths::default();
+        if let Some(dynamic) = self.dynamic_segment {
+            for offset in extent(self.bytes, dynamic.offset, dynamic.file)?.step_by(16) {
+                let tag = u64_at(self.bytes, offset)?;
+                if tag == 0 {
+                    break;
+                }
+                let value = u64_at(self.bytes, offset + 8)?;
+                match tag {
+                    15 | 29 => {
+                        let text = self.symbols.as_ref().ok_or(Error::Invalid)?.string(value)?;
+                        let destination = if tag == 15 {
+                            &mut paths.rpath
+                        } else {
+                            &mut paths.runpath
+                        };
+                        if destination.replace(text).is_some() {
+                            return Err(Error::Invalid);
+                        }
+                    }
+                    0x6ffffffb => paths.no_default_library_path = value & 0x800 != 0,
+                    _ => {}
+                }
+            }
+        }
+        Ok(paths)
+    }
+    /// A direct-entry scope currently has no constructor runner. Do not
+    /// silently ignore these requirements while wiring exec.
     pub fn validate_direct_scope_startup(&self) -> Result<(), Error> {
         if let Some(dynamic) = self.dynamic_segment {
             for offset in extent(self.bytes, dynamic.offset, dynamic.file)?.step_by(16) {
@@ -623,9 +660,8 @@ impl<'a> Pie<'a> {
                 if tag == 0 {
                     break;
                 }
-                if matches!(tag, 15 | 29)
-                    || (matches!(tag, 12 | 13 | 25..=28 | 32 | 33)
-                        && u64_at(self.bytes, offset + 8)? != 0)
+                if matches!(tag, 12 | 13 | 25..=28 | 32 | 33)
+                    && u64_at(self.bytes, offset + 8)? != 0
                 {
                     return Err(Error::Unsupported);
                 }
