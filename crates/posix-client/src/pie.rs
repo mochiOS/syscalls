@@ -1,20 +1,24 @@
 //! Allocation-free x86-64 static-PIE preparation. Dynamic linking policy lives
 //! in user space; this produces an ordinary fixed-address ELF for native exec.
-//! Inter-object symbol lookup, interpreters and resolver execution require a runtime
-//! linker and are deliberately reported as unsupported, never silently ignored.
+//! Explicit captured object sets can use link_scope for inter-object binding.
+//! Standalone exec rejects dependencies, interpreters and resolver execution;
+//! acquiring, mapping and initializing a complete object set remains user-space policy.
+pub mod link_scope;
 mod symbols;
 
 #[derive(Clone, Copy)]
 enum Value {
     Relative(u64),
     Absolute(u64),
+    Symbol { index: u32, addend: u64 },
 }
 impl Value {
-    fn at(self, bias: u64) -> u64 {
-        match self {
+    fn at(self, bias: u64) -> Result<u64, Error> {
+        Ok(match self {
             Self::Relative(value) => bias.wrapping_add(value),
             Self::Absolute(value) => value,
-        }
+            Self::Symbol { .. } => return Err(Error::Unsupported),
+        })
     }
 }
 
@@ -121,9 +125,20 @@ pub struct Pie<'a> {
     relr_count: usize,
     retained: usize,
     symbols: Option<symbols::Table<'a>>,
+    dynamic_segment: Option<Segment>,
+    linkable: bool,
+    symbolic: bool,
 }
 impl<'a> Pie<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
+        Self::parse_mode(bytes, false)
+    }
+    /// Parse a member of an explicit user-space link scope. Dependencies and
+    /// unresolved symbols must be supplied by that scope before writing it.
+    pub fn parse_object(bytes: &'a [u8]) -> Result<Self, Error> {
+        Self::parse_mode(bytes, true)
+    }
+    fn parse_mode(bytes: &'a [u8], linkable: bool) -> Result<Self, Error> {
         if bytes.len() < 64
             || bytes[..7] != [0x7f, b'E', b'L', b'F', 2, 1, 1]
             || u16_at(bytes, 16)? != 3
@@ -151,6 +166,9 @@ impl<'a> Pie<'a> {
             relr_count: 0,
             retained: 0,
             symbols: None,
+            dynamic_segment: None,
+            linkable,
+            symbolic: false,
         };
         let mut dynamic = None;
         let mut executable = false;
@@ -206,7 +224,7 @@ impl<'a> Pie<'a> {
                 }
             }
         }
-        if !executable
+        if (!executable && !linkable)
             || result
                 .retained
                 .checked_add(2)
@@ -215,8 +233,10 @@ impl<'a> Pie<'a> {
             return Err(Error::Invalid);
         }
         if let Some(d) = dynamic {
+            result.dynamic_segment = Some(d);
             result.dynamic(d)?;
         }
+        result.dependencies(|_| Ok(()))?;
         // Reuse the runtime's TLS validation, reading the source PHDR bytes.
         // Only the initialized template must be file-backed; .tbss may extend
         // beyond LOAD memory. Symbol-bearing TLS relocations remain rejected.
@@ -333,9 +353,12 @@ impl<'a> Pie<'a> {
             match tag {
                 // Dependency loading and external audit/filter scopes require
                 // an object graph, lifetime management and authority checks.
-                1 | 0x6ffffefb | 0x6ffffefc | 0x7ffffffd | 0x7fffffff => {
+                1 if !self.linkable => return Err(Error::Unsupported),
+                0x6ffffefb | 0x6ffffefc | 0x7ffffffd | 0x7fffffff => {
                     return Err(Error::Unsupported);
                 }
+                16 => self.symbolic = true,
+                30 => self.symbolic |= value & 2 != 0,
                 2 => {
                     if plt_size.replace(value).is_some() {
                         return Err(Error::Invalid);
@@ -495,30 +518,57 @@ impl<'a> Pie<'a> {
             0 => return Ok((target, None)),
             8 if symbol == 0 => Value::Relative(addend),
             1 | 6 | 7 => {
-                let definition = self
-                    .symbols
-                    .as_ref()
-                    .ok_or(Error::Unsupported)?
-                    .definition(symbol)?;
-                // GLOB_DAT and JUMP_SLOT use S, while R_X86_64_64 uses S+A.
-                let addend = if kind == 1 { addend } else { 0 };
-                match definition {
-                    symbols::Definition::Absolute(value) => {
-                        Value::Absolute(value.wrapping_add(addend))
-                    }
-                    symbols::Definition::Image { value, size } => {
-                        if !(0..self.count)
-                            .any(|i| self.segment(i).is_ok_and(|s| s.contains(value, size)))
-                        {
-                            return Err(Error::Invalid);
-                        }
-                        Value::Relative(value.wrapping_add(addend))
-                    }
+                let table = self.symbols.as_ref().ok_or(Error::Unsupported)?;
+                let reference = table.entry(symbol)?;
+                if let Some(definition) = reference.definition {
+                    self.definition_value(definition)?;
+                }
+                if !self.linkable {
+                    table.definition(symbol)?;
+                }
+                Value::Symbol {
+                    index: symbol,
+                    addend: if kind == 1 { addend } else { 0 },
                 }
             }
             _ => return Err(Error::Unsupported),
         };
         Ok((target, Some(value)))
+    }
+    fn definition_value(&self, definition: symbols::Definition) -> Result<Value, Error> {
+        match definition {
+            symbols::Definition::Absolute(value) => Ok(Value::Absolute(value)),
+            symbols::Definition::Image { value, size } => {
+                if !(0..self.count).any(|i| self.segment(i).is_ok_and(|s| s.contains(value, size)))
+                {
+                    return Err(Error::Invalid);
+                }
+                Ok(Value::Relative(value))
+            }
+        }
+    }
+    /// Enumerate DT_NEEDED names in source order. This never opens a pathname.
+    pub fn dependencies(
+        &self,
+        mut visit: impl FnMut(&[u8]) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        if let Some(dynamic) = self.dynamic_segment {
+            for offset in extent(self.bytes, dynamic.offset, dynamic.file)?.step_by(16) {
+                match u64_at(self.bytes, offset)? {
+                    0 => break,
+                    1 => {
+                        let table = self.symbols.as_ref().ok_or(Error::Invalid)?;
+                        let name = table.string(u64_at(self.bytes, offset + 8)?)?;
+                        if name.is_empty() {
+                            return Err(Error::Invalid);
+                        }
+                        visit(name)?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
     }
     /// Retain the source program's PHDR view, not the native wrapper's table.
     /// A runtime linker/self-relocator interprets these with the program bias.
@@ -591,6 +641,22 @@ impl<'a> Pie<'a> {
     /// Constructs a fixed-address ELF in caller-owned storage. A synthetic
     /// read-only LOAD owns its program headers, independent of source offsets.
     pub fn write(&self, bias: u64, output: &mut [u8]) -> Result<usize, Error> {
+        self.dependencies(|_| Err(Error::Unsupported))?;
+        self.write_resolved(bias, output, |index| {
+            let definition = self
+                .symbols
+                .as_ref()
+                .ok_or(Error::Unsupported)?
+                .definition(index)?;
+            self.definition_value(definition)?.at(bias)
+        })
+    }
+    fn write_resolved(
+        &self,
+        bias: u64,
+        output: &mut [u8],
+        mut resolve: impl FnMut(u32) -> Result<u64, Error>,
+    ) -> Result<usize, Error> {
         if bias % self.alignment() != 0 {
             return Err(Error::Invalid);
         }
@@ -689,7 +755,10 @@ impl<'a> Pie<'a> {
             self.relocations(|target, value| {
                 if s.contains(target, 8) {
                     // ELF64 B + A is modular data, not an authorized range.
-                    let value = value.at(bias);
+                    let value = match value {
+                        Value::Symbol { index, addend } => resolve(index)?.wrapping_add(addend),
+                        value => value.at(bias)?,
+                    };
                     let offset = add(destination, target - s.address)? as usize;
                     output[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
