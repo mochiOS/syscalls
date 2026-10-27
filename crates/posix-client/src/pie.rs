@@ -594,6 +594,45 @@ impl<'a> Pie<'a> {
         Err(Error::Unsupported)
     }
 
+    /// Conservative placement after a caller-selected address, including the
+    /// native metadata mapping. Returns (load bias, first free page).
+    pub fn placement(&self, minimum: u64) -> Result<(u64, u64), Error> {
+        let mut start = u64::MAX;
+        let mut end = 0;
+        for index in 0..self.count {
+            let segment = self.segment(index)?;
+            if segment.kind == LOAD && segment.memory != 0 {
+                start = start.min(segment.address & !(PAGE - 1));
+                end = end.max(page(add(segment.address, segment.memory)?)?);
+            }
+        }
+        if start == u64::MAX {
+            return Err(Error::Invalid);
+        }
+        let required = add(minimum, self.metadata_bytes()?)?.saturating_sub(start);
+        let alignment = self.alignment();
+        let bias = add(required, alignment - 1)? & !(alignment - 1);
+        Ok((bias, add(end, bias)?))
+    }
+    /// A direct-entry scope currently has no constructor runner or path-list
+    /// policy. Do not silently ignore these requirements while wiring exec.
+    pub fn validate_direct_scope_startup(&self) -> Result<(), Error> {
+        if let Some(dynamic) = self.dynamic_segment {
+            for offset in extent(self.bytes, dynamic.offset, dynamic.file)?.step_by(16) {
+                let tag = u64_at(self.bytes, offset)?;
+                if tag == 0 {
+                    break;
+                }
+                if matches!(tag, 15 | 29)
+                    || (matches!(tag, 12 | 13 | 25..=28 | 32 | 33)
+                        && u64_at(self.bytes, offset + 8)? != 0)
+                {
+                    return Err(Error::Unsupported);
+                }
+            }
+        }
+        Ok(())
+    }
     pub fn alignment(&self) -> u64 {
         (0..self.count)
             .filter_map(|i| self.segment(i).ok())

@@ -8,6 +8,9 @@ const SC_HOST_NAME_MAX: i32 = 65;
 /// Default executable search list, independent of the caller's PATH variable.
 pub const DEFAULT_EXECUTABLE_PATH: &[u8] = b"/bin:/usr/bin";
 
+/// System DSO search list. Kernel code never interprets these paths.
+pub const DEFAULT_SHARED_LIBRARY_PATH: &[u8] = b"/lib:/usr/lib";
+
 /// SDK confstr selector; unrelated to native kernel selectors.
 pub const CS_PATH: i32 = 0;
 

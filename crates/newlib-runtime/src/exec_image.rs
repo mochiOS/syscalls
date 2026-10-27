@@ -1,6 +1,9 @@
 //! User-space image preparation. Source references remain borrowed; every
 //! allocated byte buffer and RAM reference is owned through callback abandonment.
 use super::*;
+#[path = "exec_image/dependencies.rs"]
+mod dependencies;
+
 const MAX_IMAGE: usize = mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES;
 
 #[derive(Default)]
@@ -16,6 +19,12 @@ impl Buffer {
         } else {
             unsafe { core::slice::from_raw_parts(self.pointer, self.length) }
         }
+    }
+    fn slots<T>(&mut self, count: usize) -> Result<*mut T, c_int> {
+        let bytes = count.checked_mul(core::mem::size_of::<T>()).ok_or(ENOMEM)?;
+        self.reserve(bytes)?;
+        self.length = bytes;
+        Ok(self.pointer.cast())
     }
     fn reserve(&mut self, required: usize) -> Result<(), c_int> {
         if required > MAX_IMAGE {
@@ -55,6 +64,7 @@ impl Drop for Buffer {
 struct Preparation {
     source: Buffer,
     output: Buffer,
+    dependencies: dependencies::Dependencies,
     handle: u32,
     executable: Option<mochios_posix_client::process_image::Executable>,
 }
@@ -112,34 +122,52 @@ impl Preparation {
             };
             self.source.length = length;
         }
-        let pie =
-            mochios_posix_client::pie::Pie::parse(self.source.bytes()).map_err(|_| ENOEXEC)?;
-        let length = pie.output_length().map_err(|_| ENOEXEC)?;
-        self.output.reserve(length)?;
-        self.output.length = length;
-        let mut entropy = [0u8; 8];
-        if syscall_errno(syscall::raw_syscall2(
-            syscall::SyscallNumber::RandomFill,
-            entropy.as_mut_ptr() as u64,
-            entropy.len() as u64,
-        ))? != entropy.len() as u64
-        {
-            return Err(EIO);
-        }
-        let alignment = pie.alignment();
-        let base = 0x2000_0000u64
-            .checked_add(alignment - 1)
-            .map(|base| base & !(alignment - 1))
-            .ok_or(ENOEXEC)?;
-        let slots = (64 * 1024 * 1024 / alignment).max(1);
-        let bias = base
-            .checked_add((u64::from_le_bytes(entropy) % slots) * alignment)
-            .ok_or(ENOEXEC)?;
-        self.executable = Some(pie.executable(bias).map_err(|_| ENOEXEC)?);
-        let output = unsafe { core::slice::from_raw_parts_mut(self.output.pointer, length) };
-        if pie.write(bias, output).map_err(|_| ENOEXEC)? != length {
-            return Err(EIO);
-        }
+        let candidate = mochios_posix_client::pie::Pie::parse_object(self.source.bytes())
+            .map_err(|_| ENOEXEC)?;
+        let mut dependent = false;
+        candidate
+            .dependencies(|_| {
+                dependent = true;
+                Ok(())
+            })
+            .map_err(|_| ENOEXEC)?;
+        let length = if dependent {
+            self.executable = Some(
+                self.dependencies
+                    .build(self.source.bytes(), &mut self.output)?,
+            );
+            self.output.length
+        } else {
+            let pie =
+                mochios_posix_client::pie::Pie::parse(self.source.bytes()).map_err(|_| ENOEXEC)?;
+            let length = pie.output_length().map_err(|_| ENOEXEC)?;
+            self.output.reserve(length)?;
+            self.output.length = length;
+            let mut entropy = [0u8; 8];
+            if syscall_errno(syscall::raw_syscall2(
+                syscall::SyscallNumber::RandomFill,
+                entropy.as_mut_ptr() as u64,
+                entropy.len() as u64,
+            ))? != entropy.len() as u64
+            {
+                return Err(EIO);
+            }
+            let alignment = pie.alignment();
+            let base = 0x2000_0000u64
+                .checked_add(alignment - 1)
+                .map(|base| base & !(alignment - 1))
+                .ok_or(ENOEXEC)?;
+            let slots = (64 * 1024 * 1024 / alignment).max(1);
+            let bias = base
+                .checked_add((u64::from_le_bytes(entropy) % slots) * alignment)
+                .ok_or(ENOEXEC)?;
+            self.executable = Some(pie.executable(bias).map_err(|_| ENOEXEC)?);
+            let output = unsafe { core::slice::from_raw_parts_mut(self.output.pointer, length) };
+            if pie.write(bias, output).map_err(|_| ENOEXEC)? != length {
+                return Err(EIO);
+            }
+            length
+        };
         {
             let _delivery = defer_native_delivery();
             let raw = syscall_errno(syscall::raw_syscall2(
