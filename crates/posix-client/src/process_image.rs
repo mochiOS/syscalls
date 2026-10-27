@@ -17,10 +17,13 @@ const AT_CLKTCK: u64 = 17;
 const AT_SECURE: u64 = 23;
 const AT_RANDOM: u64 = 25;
 const AT_EXECFN: u64 = 31;
-const AUXILIARY_VECTOR_ENTRIES: usize = 17;
+const AUXILIARY_VECTOR_ENTRIES: usize = 18;
 pub const AT_RESOURCE_POLICY: u64 = 0x6d00_0001;
 pub const AT_UPCALL_STACK: u64 = 0x6d00_0002;
 pub const AT_INITIAL_HEAP: u64 = 0x6d00_0003;
+/// Bias of the program described by AT_PHDR. AT_BASE remains the interpreter's
+/// base. This userspace-owned entry is opaque data to the native kernel.
+pub const AT_IMAGE_LOAD_BIAS: u64 = 0x6d00_0004;
 pub const INITIAL_HEAP_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +121,7 @@ pub struct Executable {
     pub program_header_size: u64,
     pub program_header_count: u64,
     pub interpreter_base: u64,
+    pub load_bias: u64,
 }
 
 pub fn encode_initial_stack_with_aux(
@@ -141,7 +145,10 @@ pub fn encode_initial_stack_for_image(
     output: &mut [u8],
 ) -> Result<usize, EncodeError> {
     for (index, &(key, _)) in auxiliary.iter().enumerate() {
-        if key <= AT_EXECFN || auxiliary[..index].iter().any(|&(other, _)| other == key) {
+        if key <= AT_EXECFN
+            || key == AT_IMAGE_LOAD_BIAS
+            || auxiliary[..index].iter().any(|&(other, _)| other == key)
+        {
             return Err(EncodeError::InvalidText);
         }
     }
@@ -245,6 +252,7 @@ pub fn encode_initial_stack_for_image(
             Some(RelocationKind::StackAddress),
         ),
         (AT_EXECFN, execfn_offset, Some(RelocationKind::StackAddress)),
+        (AT_IMAGE_LOAD_BIAS, 0, None),
         (AT_NULL, 0, None),
     ]
     .into_iter()
@@ -259,6 +267,7 @@ pub fn encode_initial_stack_for_image(
                 AT_PHNUM => Some(image.program_header_count),
                 AT_ENTRY => Some(image.entry),
                 AT_BASE => Some(image.interpreter_base),
+                AT_IMAGE_LOAD_BIAS => Some(image.load_bias),
                 _ => None,
             })
             .flatten()

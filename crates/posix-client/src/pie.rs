@@ -1,13 +1,12 @@
 //! Allocation-free x86-64 static-PIE preparation. Dynamic linking policy lives
 //! in user space; this produces an ordinary fixed-address ELF for native exec.
-//! Symbol lookup, interpreters, TLS and resolver execution require a runtime
+//! Symbol lookup, interpreters and resolver execution require a runtime
 //! linker and are deliberately reported as unsupported, never silently ignored.
 const PAGE: u64 = 4096;
 const LOAD: u32 = 1;
 const DYNAMIC: u32 = 2;
 const INTERP: u32 = 3;
 const PHDR: u32 = 6;
-const TLS: u32 = 7;
 const EH_FRAME: u32 = 0x6474e550;
 const GNU_STACK: u32 = 0x6474e551;
 const RELRO: u32 = 0x6474e552;
@@ -131,7 +130,7 @@ impl<'a> Pie<'a> {
         let mut executable = false;
         for i in 0..count {
             let s = result.segment(i)?;
-            if matches!(s.kind, INTERP | TLS) {
+            if s.kind == INTERP {
                 return Err(Error::Unsupported);
             }
             if s.kind == GNU_STACK && s.flags & 1 != 0 {
@@ -192,6 +191,24 @@ impl<'a> Pie<'a> {
         if let Some(d) = dynamic {
             result.dynamic(d)?;
         }
+        // Reuse the runtime's TLS validation, reading the source PHDR bytes.
+        // Only the initialized template must be file-backed; .tbss may extend
+        // beyond LOAD memory. Symbol-bearing TLS relocations remain rejected.
+        crate::static_tls::template(
+            usize::try_from(u64_at(bytes, 32)?).map_err(|_| Error::Overflow)?,
+            56,
+            count,
+            0,
+            |address, output| {
+                let range = extent(bytes, address as u64, output.len() as u64)?;
+                output.copy_from_slice(&bytes[range]);
+                Ok(())
+            },
+        )
+        .map_err(|error| match error {
+            crate::static_tls::Error::InvalidImage => Error::Invalid,
+            crate::static_tls::Error::Read(error) => error,
+        })?;
         for i in 0..result.rela_count {
             let (target, value) = result.relocation(i)?;
             if value.is_none() {
@@ -319,6 +336,7 @@ impl<'a> Pie<'a> {
                     program_header_size: 56,
                     program_header_count: self.count as u64,
                     interpreter_base: 0,
+                    load_bias: bias,
                 });
             }
         }

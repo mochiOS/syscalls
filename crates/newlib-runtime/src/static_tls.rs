@@ -1,7 +1,7 @@
 //! Static ELF TLS is owned by the C runtime, never by the native kernel.
 use super::{
-    ENOEXEC, EOVERFLOW, NATIVE_READ_WRITE, Ordering, PAGE_SIZE, ThreadControl, address_space,
-    auxiliary, c_int, syscall, user_copy,
+    ENOENT, ENOEXEC, EOVERFLOW, NATIVE_READ_WRITE, Ordering, PAGE_SIZE, ThreadControl,
+    address_space, auxiliary, c_int, syscall, user_copy,
 };
 use mochios_posix_client::static_tls::{self as policy, Layout};
 
@@ -14,9 +14,16 @@ fn image() -> Result<Option<policy::Template>, c_int> {
     let table = vector.lookup(3)?;
     let stride = vector.lookup(4)?;
     let count = vector.lookup(5)?;
-    // Native exec consumes fixed-address images. Static PIE preparation in
-    // posix-client already relocates ELF headers before native image creation.
-    policy::template(table, stride, count, 0, |address, bytes| {
+    // The native container is fixed-address, but AT_PHDR may describe the
+    // original unrebased program. AT_BASE describes an interpreter, not this
+    // program's bias. Absent optional loader metadata means fixed-address.
+    let bias = match vector.lookup(mochios_posix_client::process_image::AT_IMAGE_LOAD_BIAS as usize)
+    {
+        Ok(bias) => bias,
+        Err(ENOENT) => 0,
+        Err(error) => return Err(error),
+    };
+    policy::template(table, stride, count, bias, |address, bytes| {
         user_copy::read(address as *const u8, bytes)
     })
     .map_err(|error| match error {
