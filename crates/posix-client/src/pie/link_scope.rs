@@ -3,6 +3,8 @@
 use super::{Error, LOAD, PAGE, Pie, USER_END, USER_MIN, add, page};
 
 mod bundle;
+mod lifecycle;
+pub use lifecycle::{Lifecycle, Step};
 
 pub struct Object<'scope, 'image> {
     /// Name by which this already-captured object satisfies DT_NEEDED.

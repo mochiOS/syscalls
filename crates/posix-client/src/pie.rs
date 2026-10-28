@@ -3,6 +3,7 @@
 //! Explicit captured object sets can use link_scope for inter-object binding.
 //! Standalone exec rejects dependencies, interpreters and resolver execution;
 //! acquiring, mapping and initializing a complete object set remains user-space policy.
+mod lifecycle;
 pub mod link_scope;
 mod symbols;
 
@@ -136,6 +137,7 @@ pub struct Pie<'a> {
     dynamic_segment: Option<Segment>,
     linkable: bool,
     symbolic: bool,
+    lifecycle: lifecycle::Metadata,
 }
 impl<'a> Pie<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
@@ -177,6 +179,7 @@ impl<'a> Pie<'a> {
             dynamic_segment: None,
             linkable,
             symbolic: false,
+            lifecycle: lifecycle::Metadata::default(),
         };
         let mut dynamic = None;
         let mut executable = false;
@@ -246,6 +249,7 @@ impl<'a> Pie<'a> {
         }
         result.dependencies(|_| Ok(()))?;
         result.search_paths()?;
+        result.lifecycle = lifecycle::Metadata::parse(&result)?;
         // Reuse the runtime's TLS validation, reading the source PHDR bytes.
         // Only the initialized template must be file-backed; .tbss may extend
         // beyond LOAD memory. Symbol-bearing TLS relocations remain rejected.
@@ -654,18 +658,8 @@ impl<'a> Pie<'a> {
     /// A direct-entry scope currently has no constructor runner. Do not
     /// silently ignore these requirements while wiring exec.
     pub fn validate_direct_scope_startup(&self) -> Result<(), Error> {
-        if let Some(dynamic) = self.dynamic_segment {
-            for offset in extent(self.bytes, dynamic.offset, dynamic.file)?.step_by(16) {
-                let tag = u64_at(self.bytes, offset)?;
-                if tag == 0 {
-                    break;
-                }
-                if matches!(tag, 12 | 13 | 25..=28 | 32 | 33)
-                    && u64_at(self.bytes, offset + 8)? != 0
-                {
-                    return Err(Error::Unsupported);
-                }
-            }
+        if self.lifecycle.has_calls() {
+            return Err(Error::Unsupported);
         }
         Ok(())
     }
