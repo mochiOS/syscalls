@@ -1,4 +1,4 @@
-//! Allocation-free x86-64 static-PIE preparation. Dynamic linking policy lives
+//! Allocation-free x86-64 ELF preparation. Dynamic linking policy lives
 //! in user space; this produces an ordinary fixed-address ELF for native exec.
 //! Explicit captured object sets can use link_scope for inter-object binding.
 //! Standalone exec rejects dependencies, interpreters and resolver execution;
@@ -138,6 +138,7 @@ pub struct Pie<'a> {
     linkable: bool,
     symbolic: bool,
     lifecycle: lifecycle::Metadata,
+    fixed: bool,
 }
 impl<'a> Pie<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
@@ -145,13 +146,14 @@ impl<'a> Pie<'a> {
     }
     /// Parse a member of an explicit user-space link scope. Dependencies and
     /// unresolved symbols must be supplied by that scope before writing it.
+    /// ET_EXEC is permitted only as the fixed root, as enforced by Scope.
     pub fn parse_object(bytes: &'a [u8]) -> Result<Self, Error> {
         Self::parse_mode(bytes, true)
     }
     fn parse_mode(bytes: &'a [u8], linkable: bool) -> Result<Self, Error> {
         if bytes.len() < 64
             || bytes[..7] != [0x7f, b'E', b'L', b'F', 2, 1, 1]
-            || u16_at(bytes, 16)? != 3
+            || !(u16_at(bytes, 16)? == 3 || (linkable && u16_at(bytes, 16)? == 2))
             || u16_at(bytes, 18)? != 62
             || u32_at(bytes, 20)? != 1
             || u16_at(bytes, 52)? != 64
@@ -180,6 +182,7 @@ impl<'a> Pie<'a> {
             linkable,
             symbolic: false,
             lifecycle: lifecycle::Metadata::default(),
+            fixed: u16_at(bytes, 16)? == 2,
         };
         let mut dynamic = None;
         let mut executable = false;
@@ -586,6 +589,24 @@ impl<'a> Pie<'a> {
     /// Retain the source program's PHDR view, not the native wrapper's table.
     /// A runtime linker/self-relocator interprets these with the program bias.
     pub fn executable(&self, bias: u64) -> Result<crate::process_image::Executable, Error> {
+        if self.fixed && bias != 0 {
+            return Err(Error::Invalid);
+        }
+        let program_headers = match self.source_program_headers(bias)? {
+            Some(address) => address,
+            None => add(self.metadata_address(bias)?, self.metadata_header_bytes())?,
+        };
+        Ok(crate::process_image::Executable {
+            entry: add(self.entry, bias)?,
+            program_headers,
+            program_header_size: 56,
+            program_header_count: self.count as u64,
+            interpreter_base: 0,
+            load_bias: bias,
+        })
+    }
+
+    fn source_program_headers(&self, bias: u64) -> Result<Option<u64>, Error> {
         let offset = u64_at(self.bytes, 32)?;
         let length = (self.count as u64) * 56;
         for i in 0..self.count {
@@ -594,22 +615,59 @@ impl<'a> Pie<'a> {
                 && offset >= s.offset
                 && add(offset, length)? <= add(s.offset, s.file)?
             {
-                return Ok(crate::process_image::Executable {
-                    entry: add(self.entry, bias)?,
-                    program_headers: add(add(s.address, offset - s.offset)?, bias)?,
-                    program_header_size: 56,
-                    program_header_count: self.count as u64,
-                    interpreter_base: 0,
-                    load_bias: bias,
-                });
+                return Ok(Some(add(add(s.address, offset - s.offset)?, bias)?));
             }
         }
-        Err(Error::Unsupported)
+        Ok(None)
     }
 
-    /// Conservative placement after a caller-selected address, including the
-    /// native metadata mapping. Returns (load bias, first free page).
+    pub fn is_fixed(&self) -> bool {
+        self.fixed
+    }
+
+    fn load_bounds(&self) -> Result<(u64, u64), Error> {
+        let mut start = u64::MAX;
+        let mut end = 0;
+        for index in 0..self.count {
+            let segment = self.segment(index)?;
+            if segment.kind == LOAD && segment.memory != 0 {
+                start = start.min(segment.address & !(PAGE - 1));
+                end = end.max(page(add(segment.address, segment.memory)?)?);
+            }
+        }
+        if start == u64::MAX {
+            return Err(Error::Invalid);
+        }
+        Ok((start, end))
+    }
+
+    fn metadata_address(&self, bias: u64) -> Result<u64, Error> {
+        let (start, end) = self.load_bounds()?;
+        let address = if self.fixed {
+            if bias != 0 || start < USER_MIN {
+                return Err(Error::Invalid);
+            }
+            end
+        } else {
+            add(start, bias)?
+                .checked_sub(self.metadata_bytes()?)
+                .ok_or(Error::Invalid)?
+        };
+        if address < USER_MIN || add(address, self.metadata_bytes()?)? > USER_END {
+            return Err(Error::Invalid);
+        }
+        Ok(address)
+    }
+
+    /// Relocatable objects are placed after a caller-selected address, including
+    /// native metadata. Fixed roots retain their addresses and ignore minimum.
+    /// Returns (load bias, first free page).
     pub fn placement(&self, minimum: u64) -> Result<(u64, u64), Error> {
+        // A fixed root keeps its original addresses. The caller's placement
+        // preference only applies to relocatable members of the scope.
+        if self.fixed {
+            return Ok((0, add(self.metadata_address(0)?, self.metadata_bytes()?)?));
+        }
         let mut start = u64::MAX;
         let mut end = 0;
         for index in 0..self.count {
@@ -699,7 +757,15 @@ impl<'a> Pie<'a> {
         Ok(length)
     }
     fn metadata_bytes(&self) -> Result<u64, Error> {
-        page(64 + (self.retained as u64 + 2) * 56)
+        let copy = if self.source_program_headers(0)?.is_none() {
+            self.count as u64 * 56
+        } else {
+            0
+        };
+        page(add(self.metadata_header_bytes(), copy)?)
+    }
+    fn metadata_header_bytes(&self) -> u64 {
+        64 + (self.retained as u64 + 2) * 56
     }
     fn load_offset(&self, index: usize) -> Result<u64, Error> {
         let mut offset = self.metadata_bytes()?;
@@ -752,17 +818,8 @@ impl<'a> Pie<'a> {
         if output.len() < length {
             return Err(Error::BufferTooSmall);
         }
-        let minimum = (0..self.count)
-            .filter_map(|i| self.segment(i).ok())
-            .filter(|s| s.kind == LOAD && s.memory != 0)
-            .map(|s| s.address & !(PAGE - 1))
-            .min()
-            .ok_or(Error::Invalid)?;
         let metadata = self.metadata_bytes()?;
-        let base = add(bias, minimum)?
-            .checked_sub(metadata)
-            .filter(|a| *a >= USER_MIN)
-            .ok_or(Error::Invalid)?;
+        let base = self.metadata_address(bias)?;
         let entry = add(self.entry, bias)?;
         for i in 0..self.count {
             let s = self.segment(i)?;
@@ -778,6 +835,11 @@ impl<'a> Pie<'a> {
         output[40..48].fill(0); // source section headers do not describe this image.
         output[56..58].copy_from_slice(&((self.retained + 2) as u16).to_le_bytes());
         output[58..64].fill(0);
+        if self.source_program_headers(0)?.is_none() {
+            let source = extent(self.bytes, u64_at(self.bytes, 32)?, self.count as u64 * 56)?;
+            let start = self.metadata_header_bytes() as usize;
+            output[start..start + source.len()].copy_from_slice(&self.bytes[source]);
+        }
         Segment {
             kind: LOAD,
             flags: 4,

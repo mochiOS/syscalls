@@ -90,7 +90,7 @@ fn read_at(image: u32, output: &mut [u8], offset: usize) -> Result<usize, c_int>
         .filter(|count| *count <= output.len())
         .ok_or(EIO)
 }
-fn is_pie(image: u32) -> Result<bool, c_int> {
+fn needs_preparation(image: u32) -> Result<bool, c_int> {
     let mut header = [0u8; 64];
     let mut read = 0;
     while read < header.len() {
@@ -100,9 +100,42 @@ fn is_pie(image: u32) -> Result<bool, c_int> {
         }
         read += n;
     }
-    Ok(read == 64
-        && header[..7] == [0x7f, b'E', b'L', b'F', 2, 1, 1]
-        && header[16..18] == 3u16.to_le_bytes())
+    if read != 64 || header[..7] != [0x7f, b'E', b'L', b'F', 2, 1, 1] {
+        return Ok(false);
+    }
+    if header[16..18] == 3u16.to_le_bytes() {
+        return Ok(true);
+    }
+    if header[16..18] != 2u16.to_le_bytes() {
+        return Ok(false);
+    }
+    let offset = usize::try_from(u64::from_le_bytes(header[32..40].try_into().unwrap()))
+        .map_err(|_| ENOEXEC)?;
+    let stride = usize::from(u16::from_le_bytes(header[54..56].try_into().unwrap()));
+    let count = usize::from(u16::from_le_bytes(header[56..58].try_into().unwrap()));
+    if stride < 56
+        || count == 0
+        || offset
+            .checked_add(count.checked_mul(stride).ok_or(ENOEXEC)?)
+            .is_none_or(|end| end > MAX_IMAGE)
+    {
+        return Err(ENOEXEC);
+    }
+    for index in 0..count {
+        let mut entry = [0; 56];
+        let mut done = 0;
+        while done < entry.len() {
+            let amount = read_at(image, &mut entry[done..], offset + index * stride + done)?;
+            if amount == 0 {
+                return Err(ENOEXEC);
+            }
+            done += amount;
+        }
+        if matches!(u32::from_le_bytes(entry[..4].try_into().unwrap()), 2 | 3) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 impl Preparation {
     fn build(
@@ -138,7 +171,9 @@ impl Preparation {
             })
             .map_err(|_| ENOEXEC)?;
         let runtime = candidate.has_lifecycle_runtime().map_err(|_| ENOEXEC)?;
-        let length = if dependent || (runtime && candidate.validate_direct_scope_startup().is_err())
+        let length = if candidate.is_fixed()
+            || dependent
+            || (runtime && candidate.validate_direct_scope_startup().is_err())
         {
             self.executable = Some(self.dependencies.build(
                 self.source.bytes(),
@@ -229,7 +264,7 @@ pub(super) fn with_image(
         &[u8],
     ) -> Result<(), c_int>,
 ) -> Result<(), c_int> {
-    if !is_pie(image)? {
+    if !needs_preparation(image)? {
         return operation(image, None, &[]);
     }
     io_resources::with(

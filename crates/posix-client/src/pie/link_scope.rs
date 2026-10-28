@@ -28,6 +28,9 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             return Err(Error::BufferTooSmall);
         }
         for (index, object) in objects.iter().enumerate() {
+            if object.image.is_fixed() && (index != 0 || object.bias != 0) {
+                return Err(Error::Invalid);
+            }
             if objects[..index]
                 .iter()
                 .any(|other| object.name == other.name)
@@ -145,18 +148,14 @@ impl<'scope, 'image> Scope<'scope, 'image> {
 fn ranges<'a>(object: &'a Object<'_, '_>) -> Result<impl Iterator<Item = (u64, u64)> + 'a, Error> {
     let image = object.image;
     // Validate all checked arithmetic before constructing the infallible view.
-    let mut minimum = u64::MAX;
     for index in 0..image.count {
         let segment = image.segment(index)?;
         if segment.kind == LOAD && segment.memory != 0 {
-            minimum = minimum.min(segment.address & !(PAGE - 1));
             page(add(add(segment.address, object.bias)?, segment.memory)?)?;
         }
     }
     let metadata = image.metadata_bytes()?;
-    let base = add(minimum, object.bias)?
-        .checked_sub(metadata)
-        .ok_or(Error::Invalid)?;
+    let base = image.metadata_address(object.bias)?;
     let metadata_end = add(base, metadata)?;
     Ok(
         core::iter::once((base, metadata_end)).chain((0..image.count).filter_map(move |index| {

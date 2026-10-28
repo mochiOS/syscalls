@@ -412,7 +412,7 @@ impl Dependencies {
                 * PAGE_SIZE as u64;
         for (index, image) in images.iter().enumerate() {
             let (bias, end) = image.placement(address).map_err(|_| ENOEXEC)?;
-            address = end;
+            address = address.max(end);
             let name = if index == 0 {
                 &[][..]
             } else {

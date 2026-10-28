@@ -1,7 +1,9 @@
 //! One fixed-address native container for a complete, already-captured scope.
-//! Original per-object PHDR views stay intact in their source LOADs.
+//! Original per-object PHDR views remain intact, including a private copy when
+//! the source file prefix was not mapped by any LOAD.
 use super::super::{
-    Error, GNU_STACK, LOAD, PAGE, PHDR, Segment, USER_MIN, add, page, u16_at, u32_at, u64_at,
+    Error, GNU_STACK, LOAD, PAGE, PHDR, Segment, USER_END, USER_MIN, add, page, u16_at, u32_at,
+    u64_at,
 };
 use super::{Scope, ranges};
 
@@ -25,6 +27,7 @@ impl Scope<'_, '_> {
         }
         let mut count = 2u64; // Container metadata LOAD and PHDR.
         let mut minimum = u64::MAX;
+        let mut maximum = 0;
         for (index, object) in self.objects.iter().enumerate() {
             count = add(count, 1)?; // Keep each member's native metadata LOAD.
             for header in 0..object.image.count {
@@ -33,8 +36,9 @@ impl Scope<'_, '_> {
                     count = add(count, 1)?;
                 }
             }
-            for (start, _) in ranges(object)? {
+            for (start, end) in ranges(object)? {
                 minimum = minimum.min(start);
+                maximum = maximum.max(end);
             }
         }
         // 0xffff denotes extended numbering, which this container does not use.
@@ -45,7 +49,10 @@ impl Scope<'_, '_> {
         let base = minimum
             .checked_sub(metadata)
             .filter(|base| *base >= USER_MIN)
-            .ok_or(Error::Invalid)?;
+            .unwrap_or(maximum);
+        if add(base, metadata)? > USER_END {
+            return Err(Error::Invalid);
+        }
         let mut length = metadata;
         for &index in self.order {
             length = add(
