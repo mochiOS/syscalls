@@ -1,5 +1,7 @@
 //! ELF static TLS policy for x86-64 (Variant II). No kernel TLS ABI is involved.
 
+#[path = "static_tls/dtv.rs"]
+pub mod dtv;
 #[path = "static_tls/image.rs"]
 pub mod image;
 #[path = "static_tls/modules.rs"]
@@ -172,13 +174,19 @@ impl Layout {
     }
 
     fn from_extent(distance: usize, alignment: usize, page_size: usize) -> Option<Self> {
+        Self::with_tail(
+            distance,
+            alignment,
+            page_size,
+            core::mem::size_of::<usize>(),
+        )
+    }
+    fn with_tail(distance: usize, alignment: usize, page_size: usize, tail: usize) -> Option<Self> {
         if !page_size.is_power_of_two() || !alignment.is_power_of_two() {
             return None;
         }
         let alignment = alignment.max(core::mem::size_of::<usize>());
-        let size = distance
-            .checked_add(alignment - 1)?
-            .checked_add(core::mem::size_of::<usize>())?;
+        let size = distance.checked_add(alignment - 1)?.checked_add(tail)?;
         let mapping_size = size.checked_add(page_size - 1)? & !(page_size - 1);
         Some(Self {
             mapping_size,
@@ -205,7 +213,7 @@ impl Layout {
 
 // Place the next module before all preceding blocks, preserving the root's
 // linker-computed TP offset even when dependencies require stronger alignment.
-fn distance_after(preceding: usize, template: Template) -> Option<usize> {
+pub(crate) fn distance_after(preceding: usize, template: Template) -> Option<usize> {
     if !template.alignment.is_power_of_two()
         || template.residue >= template.alignment
         || template.file_size > template.memory_size

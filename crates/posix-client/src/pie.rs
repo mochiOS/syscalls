@@ -12,13 +12,14 @@ enum Value {
     Relative(u64),
     Absolute(u64),
     Symbol { index: u32, addend: u64 },
+    Tls { index: u32, kind: u32, addend: u64 },
 }
 impl Value {
     fn at(self, bias: u64) -> Result<u64, Error> {
         Ok(match self {
             Self::Relative(value) => bias.wrapping_add(value),
             Self::Absolute(value) => value,
-            Self::Symbol { .. } => return Err(Error::Unsupported),
+            Self::Symbol { .. } | Self::Tls { .. } => return Err(Error::Unsupported),
         })
     }
 }
@@ -255,7 +256,7 @@ impl<'a> Pie<'a> {
         result.lifecycle = lifecycle::Metadata::parse(&result)?;
         // Reuse the runtime's TLS validation, reading the source PHDR bytes.
         // Only the initialized template must be file-backed; .tbss may extend
-        // beyond LOAD memory. Symbol-bearing TLS relocations remain rejected.
+        // beyond LOAD memory. TLS relocations require an explicit link scope.
         result.tls_template(0)?;
         let mut seen = 0usize;
         let mut highest_end = 0;
@@ -508,8 +509,8 @@ impl<'a> Pie<'a> {
         }
         Ok(())
     }
-    /// Relative and single-image symbol bindings. Symbol version scopes,
-    /// dependencies, TLS and IFUNC are not approximated by local lookup.
+    /// TLS bindings require an explicit scope. Symbol version scopes and
+    /// IFUNC execution remain unsupported rather than using local guesses.
     fn relocation(&self, o: usize) -> Result<(u64, Option<Value>), Error> {
         let target = u64_at(self.bytes, o)?;
         let info = u64_at(self.bytes, o + 8)?;
@@ -522,6 +523,9 @@ impl<'a> Pie<'a> {
             1 | 6 | 7 => {
                 let table = self.symbols.as_ref().ok_or(Error::Unsupported)?;
                 let reference = table.entry(symbol)?;
+                if reference.is_tls {
+                    return Err(Error::Unsupported);
+                }
                 if let Some(definition) = reference.definition {
                     self.definition_value(definition)?;
                 }
@@ -531,6 +535,28 @@ impl<'a> Pie<'a> {
                 Value::Symbol {
                     index: symbol,
                     addend: if kind == 1 { addend } else { 0 },
+                }
+            }
+            16..=18 if self.linkable => {
+                if symbol == 0 {
+                    self.tls_template(0)?.ok_or(Error::Invalid)?;
+                } else {
+                    let reference = self
+                        .symbols
+                        .as_ref()
+                        .ok_or(Error::Unsupported)?
+                        .entry(symbol)?;
+                    if !reference.is_tls {
+                        return Err(Error::Invalid);
+                    }
+                    if let Some(definition) = reference.definition {
+                        self.tls_definition(definition)?;
+                    }
+                }
+                Value::Tls {
+                    index: symbol,
+                    kind,
+                    addend: if kind == 16 { 0 } else { addend },
                 }
             }
             _ => return Err(Error::Unsupported),
@@ -547,7 +573,26 @@ impl<'a> Pie<'a> {
                 }
                 Ok(Value::Relative(value))
             }
+            symbols::Definition::Tls { .. } => Err(Error::Unsupported),
         }
+    }
+    fn tls_definition(&self, definition: symbols::Definition) -> Result<u64, Error> {
+        let symbols::Definition::Tls { value, size } = definition else {
+            return Err(Error::Invalid);
+        };
+        let template = self.tls_template(0)?.ok_or(Error::Invalid)?;
+        if add(value, size)? > template.memory_size as u64 {
+            return Err(Error::Invalid);
+        }
+        Ok(value)
+    }
+    pub fn requires_tls_scope(&self) -> Result<bool, Error> {
+        let mut needed = false;
+        self.relocations(|_, value| {
+            needed |= matches!(value, Value::Tls { .. });
+            Ok(())
+        })?;
+        Ok(needed)
     }
     /// Enumerate DT_NEEDED names in source order. This never opens a pathname.
     pub fn dependencies(
@@ -807,7 +852,10 @@ impl<'a> Pie<'a> {
     /// read-only LOAD owns its program headers, independent of source offsets.
     pub fn write(&self, bias: u64, output: &mut [u8]) -> Result<usize, Error> {
         self.dependencies(|_| Err(Error::Unsupported))?;
-        self.write_resolved(bias, output, |index| {
+        self.write_resolved(bias, output, |index, kind| {
+            if kind != 0 {
+                return Err(Error::Unsupported);
+            }
             let definition = self
                 .symbols
                 .as_ref()
@@ -820,7 +868,7 @@ impl<'a> Pie<'a> {
         &self,
         bias: u64,
         output: &mut [u8],
-        mut resolve: impl FnMut(u32) -> Result<u64, Error>,
+        mut resolve: impl FnMut(u32, u32) -> Result<u64, Error>,
     ) -> Result<usize, Error> {
         if bias % self.alignment() != 0 {
             return Err(Error::Invalid);
@@ -917,7 +965,12 @@ impl<'a> Pie<'a> {
                 if s.contains(target, 8) {
                     // ELF64 B + A is modular data, not an authorized range.
                     let value = match value {
-                        Value::Symbol { index, addend } => resolve(index)?.wrapping_add(addend),
+                        Value::Symbol { index, addend } => resolve(index, 0)?.wrapping_add(addend),
+                        Value::Tls {
+                            index,
+                            kind,
+                            addend,
+                        } => resolve(index, kind)?.wrapping_add(addend),
                         value => value.at(bias)?,
                     };
                     let offset = add(destination, target - s.address)? as usize;

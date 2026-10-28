@@ -174,6 +174,7 @@ impl Preparation {
         let runtime = candidate.has_lifecycle_runtime().map_err(|_| ENOEXEC)?;
         let length = if candidate.is_fixed()
             || dependent
+            || candidate.requires_tls_scope().map_err(|_| ENOEXEC)?
             || (runtime && candidate.validate_direct_scope_startup().is_err())
         {
             self.executable = Some(self.dependencies.build(

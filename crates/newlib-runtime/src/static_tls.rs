@@ -53,6 +53,9 @@ impl Drop for Mapping {
 /// fallible copies. The child never starts with an uninitialized template.
 pub(super) fn allocate(control: &ThreadControl) -> Result<(), c_int> {
     core::hint::black_box(__mochios_static_tls_v1 as extern "C" fn() -> u64);
+    core::hint::black_box(
+        __tls_get_addr as unsafe extern "C" fn(*const TlsIndex) -> *mut core::ffi::c_void,
+    );
     if let Some(vector) = auxiliary::vector() {
         match vector.lookup(mochios_posix_client::process_image::AT_TLS_IMAGE as usize) {
             Ok(base) => {
@@ -123,4 +126,39 @@ pub(super) fn allocate_templates(
 pub(super) fn activate(control: &ThreadControl) -> Result<(), c_int> {
     syscall::thread_local::set_base(control.thread_local_base.load(Ordering::Acquire))
         .map_err(|error| super::map_kernel_errno(error.raw()))
+}
+
+#[repr(C)]
+pub struct TlsIndex {
+    pub module: usize,
+    pub offset: usize,
+}
+
+pub(super) fn resolve(control: &ThreadControl, index: TlsIndex) -> Option<usize> {
+    let base = control.tls_mapping_base.load(Ordering::Acquire);
+    let size = control.tls_mapping_size.load(Ordering::Relaxed);
+    let tp = control.thread_local_base.load(Ordering::Acquire) as usize;
+    if base == 0 || tp == 0 || size > isize::MAX as usize || base.checked_add(size).is_none() {
+        return None;
+    }
+    // SAFETY: the calling thread's registered control owns this mapping until
+    // native thread retirement. It was initialized before the TP was published.
+    // DTV reads are bounded; a C caller must preserve its runtime TLS mapping.
+    let mapping = unsafe { core::slice::from_raw_parts(base as *const u8, size) };
+    policy::dtv::address(mapping, base, tp, index.module, index.offset)
+}
+
+/// ELF TLS ABI: index must point to a readable module/offset pair supplied by
+/// compiler-generated code. The runtime owns the current thread's TLS mapping.
+#[cfg_attr(target_os = "mochios", unsafe(no_mangle))]
+pub unsafe extern "C" fn __tls_get_addr(index: *const TlsIndex) -> *mut core::ffi::c_void {
+    if index.is_null() {
+        return core::ptr::null_mut();
+    }
+    let index = unsafe { index.read_unaligned() };
+    super::current_thread_control()
+        .and_then(|(_, control)| resolve(control, index))
+        .map_or(core::ptr::null_mut(), |address| {
+            address as *mut core::ffi::c_void
+        })
 }

@@ -1,6 +1,6 @@
 //! Initial static TLS modules, in root-first object order. No allocation,
 //! path lookup, native VM operations or ELF symbol resolution happens here.
-use super::{Layout, Template, distance_after};
+use super::{Layout, Template, distance_after, dtv};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Module {
@@ -36,7 +36,14 @@ impl<'a> Plan<'a> {
         }
         Some(Self {
             templates,
-            layout: Layout::from_extent(distance, alignment, page_size)?,
+            layout: Layout::with_tail(
+                distance,
+                alignment,
+                page_size,
+                dtv::TCB_BYTES
+                    .checked_add(dtv::HEADER_BYTES)?
+                    .checked_add(templates.len().checked_mul(dtv::MODULE_BYTES)?)?,
+            )?,
         })
     }
 
@@ -93,6 +100,19 @@ impl<'a> Plan<'a> {
                 offset += size;
             }
         }
+        let table = placed.thread_pointer + dtv::TCB_BYTES;
+        write(table, &self.templates.len().to_le_bytes()).map_err(InitializeError::Write)?;
+        for module in self.modules() {
+            let mut entry = [0u8; dtv::MODULE_BYTES];
+            entry[..8].copy_from_slice(&(placed.thread_pointer - module.distance).to_le_bytes());
+            entry[8..].copy_from_slice(&module.template.memory_size.to_le_bytes());
+            write(
+                table + dtv::HEADER_BYTES + module.index * dtv::MODULE_BYTES,
+                &entry,
+            )
+            .map_err(InitializeError::Write)?;
+        }
+        write(placed.thread_pointer + 8, &table.to_le_bytes()).map_err(InitializeError::Write)?;
         write(placed.thread_pointer, &placed.thread_pointer.to_ne_bytes())
             .map_err(InitializeError::Write)?;
         Ok(placed.thread_pointer)

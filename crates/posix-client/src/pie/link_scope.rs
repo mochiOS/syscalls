@@ -37,19 +37,6 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             {
                 return Err(Error::Invalid);
             }
-            // The root's static TLS is described by its startup metadata.
-            // A dependency TLS module needs the not-yet-implemented aggregate
-            // layout/module allocator; never silently reuse the root's offsets.
-            if index != 0
-                && (0..object.image.count).any(|i| {
-                    object
-                        .image
-                        .segment(i)
-                        .is_ok_and(|s| s.kind == 7 && s.memory != 0)
-                })
-            {
-                return Err(Error::Unsupported);
-            }
             if object.bias % object.image.alignment() != 0 {
                 return Err(Error::Invalid);
             }
@@ -99,39 +86,78 @@ impl<'scope, 'image> Scope<'scope, 'image> {
         self.order
     }
 
-    fn resolve(&self, origin: usize, index: u32) -> Result<u64, Error> {
+    fn definition(
+        &self,
+        origin: usize,
+        index: u32,
+    ) -> Result<Option<(usize, super::symbols::Definition)>, Error> {
         let object = self.objects.get(origin).ok_or(Error::Invalid)?;
         let table = object.image.symbols.as_ref().ok_or(Error::Unsupported)?;
         let reference = table.entry(index)?;
         if reference.binding == 0 || reference.visibility != 0 || object.image.symbolic {
             if let Some(definition) = reference.definition {
-                return object.image.definition_value(definition)?.at(object.bias);
+                return Ok(Some((origin, definition)));
             }
             if reference.visibility != 0 || reference.binding == 0 {
                 return if reference.binding == 2 {
-                    Ok(0)
+                    Ok(None)
                 } else {
                     Err(Error::Unsupported)
                 };
             }
         }
         for &candidate in self.order {
-            let candidate = &self.objects[candidate];
-            if let Some(table) = &candidate.image.symbols {
+            if let Some(table) = &self.objects[candidate].image.symbols {
                 if let Some(symbol) = table.find(reference.name)? {
                     if let Some(definition) = symbol.definition {
-                        return candidate
-                            .image
-                            .definition_value(definition)?
-                            .at(candidate.bias);
+                        return Ok(Some((candidate, definition)));
                     }
                 }
             }
         }
         if reference.binding == 2 {
-            Ok(0)
+            Ok(None)
         } else {
             Err(Error::Unsupported)
+        }
+    }
+    fn resolve(&self, origin: usize, index: u32, kind: u32) -> Result<u64, Error> {
+        if kind == 0 {
+            return self
+                .definition(origin, index)?
+                .map_or(Ok(0), |(index, definition)| {
+                    let object = &self.objects[index];
+                    object.image.definition_value(definition)?.at(object.bias)
+                });
+        }
+        let (object, offset) = if index == 0 {
+            (origin, 0)
+        } else {
+            let (object, definition) = self.definition(origin, index)?.ok_or(Error::Unsupported)?;
+            (
+                object,
+                self.objects[object].image.tls_definition(definition)?,
+            )
+        };
+        self.objects[object]
+            .image
+            .tls_template(0)?
+            .ok_or(Error::Invalid)?;
+        match kind {
+            16 => Ok((object + 1) as u64),
+            17 => Ok(offset),
+            18 => {
+                let mut distance = 0;
+                for member in &self.objects[..=object] {
+                    if let Some(template) = member.image.tls_template(0)? {
+                        distance = crate::static_tls::distance_after(distance, template)
+                            .ok_or(Error::Overflow)?;
+                    }
+                }
+                i64::try_from(distance).map_err(|_| Error::Overflow)?;
+                Ok(offset.wrapping_sub(distance as u64))
+            }
+            _ => Err(Error::Unsupported),
         }
     }
 
@@ -141,7 +167,9 @@ impl<'scope, 'image> Scope<'scope, 'image> {
         let object = self.objects.get(index).ok_or(Error::Invalid)?;
         object
             .image
-            .write_resolved(object.bias, output, |symbol| self.resolve(index, symbol))
+            .write_resolved(object.bias, output, |symbol, kind| {
+                self.resolve(index, symbol, kind)
+            })
     }
 }
 
