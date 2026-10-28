@@ -7,15 +7,25 @@ pub(super) fn with_startup(
     execfn: &[u8],
     fds: &FdTable<FdObject>,
     image: Option<mochios_posix_client::process_image::Executable>,
+    identity: mochios_posix_client::process_image::Identity,
     operation: impl FnOnce(&[u8]) -> Result<(), c_int>,
 ) -> Result<(), c_int> {
     let mut arguments = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
     let mut environment = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
-    let (mut argument_count, environment_count) = inputs.vectors(&mut arguments, &mut environment);
+    let (mut argument_count, mut environment_count) =
+        inputs.vectors(&mut arguments, &mut environment);
     if argument_count == 0 {
         arguments[0] = execfn;
         argument_count = 1;
     }
+    let mut retained = 0;
+    for index in 0..environment_count {
+        if identity.allows_environment(environment[index]) {
+            environment[retained] = environment[index];
+            retained += 1;
+        }
+    }
+    environment_count = retained;
     let mut random = [0; 16];
     let count = syscall_errno(syscall::raw_syscall2(
         syscall::SyscallNumber::RandomFill,
@@ -31,13 +41,13 @@ pub(super) fn with_startup(
         || image_startup::Plan::new(random),
         |plan| {
             let mut startup = [0; MAX_STARTUP_IMAGE_BYTES];
-            let length = mochios_posix_client::process_image::encode_initial_stack_for_image(
+            let length = mochios_posix_client::process_image::encode_initial_stack_for_process(
                 &arguments[..argument_count],
                 &environment[..environment_count],
                 execfn,
                 random,
                 &plan.auxiliary(),
-                image,
+                mochios_posix_client::process_image::Process { image, identity },
                 &mut startup,
             )
             .map_err(|error| match error {
@@ -142,8 +152,14 @@ fn replace_image(
     fds: &FdTable<FdObject>,
     ceiling: u64,
 ) -> Result<(), c_int> {
-    exec_image::with_image(image, inputs, |image, auxiliary| {
-        with_startup(inputs, execfn, fds, auxiliary, |startup| {
+    let credentials = mochios_posix_client::process_image::Identity::from(
+        posix_client()
+            .map_err(map_posix_client_error)?
+            .session_info()
+            .map_err(map_posix_client_error)?,
+    );
+    exec_image::with_image(image, inputs, credentials, |image, auxiliary| {
+        with_startup(inputs, execfn, fds, auxiliary, credentials, |startup| {
             let digest = digest(image)?;
             authorize(image, identity, &digest)?;
             match syscall::image::replace_bounded(image, identity, startup, ceiling) {

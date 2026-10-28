@@ -314,6 +314,7 @@ impl Dependencies {
         root: &[u8],
         output: &mut Buffer,
         inputs: &exec_inputs::Inputs,
+        identity: mochios_posix_client::process_image::Identity,
     ) -> Result<mochios_posix_client::process_image::Executable, c_int> {
         let path = inputs
             .environment(b"LD_LIBRARY_PATH")
@@ -324,23 +325,13 @@ impl Dependencies {
         let audit = inputs
             .environment(b"LD_AUDIT")
             .filter(|value| !value.is_empty());
-        let environment = if path.is_some() || preload.is_some() || audit.is_some() {
-            let identity = posix_client()
-                .map_err(map_posix_client_error)?
-                .session_info()
-                .map_err(map_posix_client_error)?;
-            if identity.real_uid == identity.effective_uid
-                && identity.real_gid == identity.effective_gid
-            {
-                if preload.is_some() || audit.is_some() {
-                    return Err(ENOEXEC);
-                }
-                path
-            } else {
-                None
-            }
-        } else {
+        let environment = if identity.is_secure() {
             None
+        } else {
+            if preload.is_some() || audit.is_some() {
+                return Err(ENOEXEC);
+            }
+            path
         };
         let mut total = root.len();
         let mut cursor = 0;

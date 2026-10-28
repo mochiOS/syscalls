@@ -21,16 +21,13 @@ pub(super) struct Vector {
 
 pub(super) fn vector() -> Option<Vector> {
     let base = BASE.load(Ordering::Acquire);
-    (base != 0).then(|| Vector { base, count: COUNT.load(Ordering::Relaxed) })
+    (base != 0).then(|| Vector {
+        base,
+        count: COUNT.load(Ordering::Relaxed),
+    })
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct Identity {
-    pub real_uid: u32,
-    pub effective_uid: u32,
-    pub real_gid: u32,
-    pub effective_gid: u32,
-}
+pub(super) use mochios_posix_client::process_image::Identity;
 
 impl Vector {
     fn extent(self) -> Result<usize, c_int> {
@@ -56,10 +53,7 @@ impl Vector {
                 12 => identity.effective_uid as usize,
                 13 => identity.real_gid as usize,
                 14 => identity.effective_gid as usize,
-                23 => usize::from(
-                    identity.real_uid != identity.effective_uid
-                        || identity.real_gid != identity.effective_gid,
-                ),
+                23 => usize::from(identity.is_secure()),
                 _ => continue,
             };
             user_copy::write((address + width / 2) as *mut u8, &value.to_ne_bytes())?;

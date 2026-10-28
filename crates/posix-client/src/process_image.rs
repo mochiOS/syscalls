@@ -144,6 +144,72 @@ pub fn encode_initial_stack_for_image(
     image: Option<Executable>,
     output: &mut [u8],
 ) -> Result<usize, EncodeError> {
+    encode_initial_stack_for_process(
+        argv,
+        envp,
+        execfn,
+        random,
+        auxiliary,
+        Process {
+            image,
+            identity: Identity::default(),
+        },
+        output,
+    )
+}
+
+/// POSIX process-entry metadata. This data is opaque to the native kernel and
+/// must never be used by a service as a substitute for authenticated identity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Identity {
+    pub real_uid: u32,
+    pub effective_uid: u32,
+    pub real_gid: u32,
+    pub effective_gid: u32,
+}
+impl From<mochios_posix_protocol::SessionInfo> for Identity {
+    fn from(session: mochios_posix_protocol::SessionInfo) -> Self {
+        Self {
+            real_uid: session.real_uid,
+            effective_uid: session.effective_uid,
+            real_gid: session.real_gid,
+            effective_gid: session.effective_gid,
+        }
+    }
+}
+impl Identity {
+    pub fn is_secure(self) -> bool {
+        self.real_uid != self.effective_uid || self.real_gid != self.effective_gid
+    }
+    /// Remove the environment controls consumed by this loader when identity
+    /// differs. Other runtime-specific secure-environment policy is separate.
+    pub fn allows_environment(self, entry: &[u8]) -> bool {
+        !self.is_secure()
+            || ![b"LD_LIBRARY_PATH".as_slice(), b"LD_PRELOAD", b"LD_AUDIT"]
+                .iter()
+                .any(|name| {
+                    entry
+                        .strip_prefix(*name)
+                        .is_some_and(|tail| tail.starts_with(b"="))
+                })
+    }
+}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Process {
+    pub image: Option<Executable>,
+    pub identity: Identity,
+}
+
+pub fn encode_initial_stack_for_process(
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    execfn: &[u8],
+    random: [u8; 16],
+    auxiliary: &[(u64, u64)],
+    process: Process,
+    output: &mut [u8],
+) -> Result<usize, EncodeError> {
+    let image = process.image;
     for (index, &(key, _)) in auxiliary.iter().enumerate() {
         if key <= AT_EXECFN
             || key == AT_IMAGE_LOAD_BIAS
@@ -239,13 +305,13 @@ pub fn encode_initial_stack_for_image(
         (AT_BASE, 0, None),
         (AT_FLAGS, 0, None),
         (AT_ENTRY, 0, Some(RelocationKind::ElfEntry)),
-        (AT_UID, 0, None),
-        (AT_EUID, 0, None),
-        (AT_GID, 0, None),
-        (AT_EGID, 0, None),
+        (AT_UID, u64::from(process.identity.real_uid), None),
+        (AT_EUID, u64::from(process.identity.effective_uid), None),
+        (AT_GID, u64::from(process.identity.real_gid), None),
+        (AT_EGID, u64::from(process.identity.effective_gid), None),
         (AT_HWCAP, 0, None),
         (AT_CLKTCK, crate::accounting::CLOCK_TICKS_PER_SECOND, None),
-        (AT_SECURE, 0, None),
+        (AT_SECURE, u64::from(process.identity.is_secure()), None),
         (
             AT_RANDOM,
             random_offset as u64,
