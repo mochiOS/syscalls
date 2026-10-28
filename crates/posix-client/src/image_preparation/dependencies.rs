@@ -53,104 +53,109 @@ impl Paths {
     }
 }
 
-#[derive(Default)]
-struct Node {
-    name: Buffer,
-    source: Buffer,
+struct Node<B: Backend> {
+    name: Buffer<B>,
+    source: Buffer<B>,
     handle: u32,
     parent: usize,
     paths: Paths,
 }
-impl Drop for Node {
-    fn drop(&mut self) {
-        if self.handle != 0 {
-            let _delivery = defer_native_delivery();
-            close_object_handle(self.handle);
+impl<B: Backend> Default for Node<B> {
+    fn default() -> Self {
+        Self {
+            name: Buffer::default(),
+            source: Buffer::default(),
+            handle: 0,
+            parent: 0,
+            paths: Paths::default(),
         }
     }
 }
-#[derive(Default)]
-pub(super) struct Dependencies {
-    nodes: Buffer,
-    images: Buffer,
-    objects: Buffer,
-    order: Buffer,
-    lifecycle_order: Buffer,
-    tls_templates: Buffer,
+impl<B: Backend> Drop for Node<B> {
+    fn drop(&mut self) {
+        if self.handle != 0 {
+            B::critical(|| B::close(self.handle));
+        }
+    }
 }
-impl Drop for Dependencies {
+pub(super) struct Dependencies<B: Backend> {
+    nodes: Buffer<B>,
+    images: Buffer<B>,
+    objects: Buffer<B>,
+    order: Buffer<B>,
+    lifecycle_order: Buffer<B>,
+    tls_templates: Buffer<B>,
+}
+impl<B: Backend> Default for Dependencies<B> {
+    fn default() -> Self {
+        Self {
+            nodes: Buffer::default(),
+            images: Buffer::default(),
+            objects: Buffer::default(),
+            order: Buffer::default(),
+            lifecycle_order: Buffer::default(),
+            tls_templates: Buffer::default(),
+        }
+    }
+}
+impl<B: Backend> Drop for Dependencies<B> {
     fn drop(&mut self) {
         // The initialized prefix owns each Node. Buffer growth moves its bits
         // without dropping the old allocation; no pointer to a Node escapes.
         for index in 0..self.count() {
-            unsafe { ptr::drop_in_place(self.nodes.pointer.cast::<Node>().add(index)) };
+            unsafe { ptr::drop_in_place(self.nodes.pointer.cast::<Node<B>>().add(index)) };
         }
     }
 }
-impl Dependencies {
+impl<B: Backend> Dependencies<B> {
     fn count(&self) -> usize {
-        self.nodes.length / core::mem::size_of::<Node>()
+        self.nodes.length / core::mem::size_of::<Node<B>>()
     }
-    fn node(&self, index: usize) -> &Node {
+    fn node(&self, index: usize) -> &Node<B> {
         assert!(index < self.count());
-        unsafe { &*self.nodes.pointer.cast::<Node>().add(index) }
+        unsafe { &*self.nodes.pointer.cast::<Node<B>>().add(index) }
     }
-    fn node_mut(&mut self, index: usize) -> &mut Node {
+    fn node_mut(&mut self, index: usize) -> &mut Node<B> {
         assert!(index < self.count());
-        unsafe { &mut *self.nodes.pointer.cast::<Node>().add(index) }
+        unsafe { &mut *self.nodes.pointer.cast::<Node<B>>().add(index) }
     }
     fn append(&mut self, name: &[u8], parent: usize) -> Result<usize, c_int> {
-        let _delivery = defer_native_delivery();
-        let index = self.count();
-        let length = self
-            .nodes
-            .length
-            .checked_add(core::mem::size_of::<Node>())
-            .ok_or(ENOMEM)?;
-        self.nodes.reserve(length)?;
-        unsafe {
-            self.nodes
-                .pointer
-                .cast::<Node>()
-                .add(index)
-                .write(Node::default())
-        };
-        self.nodes.length = length; // Publish ownership before any further allocation/RPC.
-        let node = self.node_mut(index);
-        node.parent = parent;
-        node.name.reserve(name.len())?;
-        unsafe { ptr::copy_nonoverlapping(name.as_ptr(), node.name.pointer, name.len()) };
-        node.name.length = name.len();
-        Ok(index)
+        B::critical(|| {
+            let index = self.count();
+            let length = self
+                .nodes
+                .length
+                .checked_add(core::mem::size_of::<Node<B>>())
+                .ok_or(ENOMEM)?;
+            self.nodes.reserve(length)?;
+            unsafe {
+                self.nodes
+                    .pointer
+                    .cast::<Node<B>>()
+                    .add(index)
+                    .write(Node::default())
+            };
+            self.nodes.length = length; // Publish ownership before any further allocation/RPC.
+            let node = self.node_mut(index);
+            node.parent = parent;
+            node.name.reserve(name.len())?;
+            unsafe { ptr::copy_nonoverlapping(name.as_ptr(), node.name.pointer, name.len()) };
+            node.name.length = name.len();
+            Ok(index)
+        })
     }
-    fn open_path(&mut self, index: usize, path: &[u8]) -> Result<(), c_int> {
-        let client = posix_client().map_err(map_posix_client_error)?;
-        // DSOs require read permissions, not a POSIX executable mode bit.
-        // Nonblocking open prevents a FIFO from hanging before fstat.
-        let _delivery = defer_native_delivery();
-        let file = client
-            .open_at(
-                if path.first() == Some(&b'/') {
-                    OpenAtBase::ProcessRoot
-                } else {
-                    OpenAtBase::ProcessCwd
-                },
-                posix_protocol::OPEN_READ | posix_protocol::OPEN_NONBLOCK,
-                0,
-                path,
-            )
-            .map_err(map_posix_client_error)?;
-        self.node_mut(index).handle = file.handle;
-        if file.rights & posix_protocol::CHECK_EXECUTABLE_RIGHTS
-            != posix_protocol::CHECK_EXECUTABLE_RIGHTS
-        {
-            return Err(EACCES);
-        }
-        let status = client.fstat(file).map_err(map_posix_client_error)?;
-        if status.mode & 0o170000 != 0o100000 {
-            return Err(ENOEXEC);
-        }
-        Ok(())
+    fn open_path(&mut self, backend: &B, index: usize, path: &[u8]) -> Result<(), c_int> {
+        B::critical(|| {
+            let file = backend.open_library(path)?;
+            self.node_mut(index).handle = file.handle;
+            if file.handle == 0
+                || file.rights & posix_protocol::CHECK_EXECUTABLE_RIGHTS
+                    != posix_protocol::CHECK_EXECUTABLE_RIGHTS
+            {
+                return Err(EACCES);
+            }
+            backend.validate_library(file)
+        })
     }
     fn source<'a>(&'a self, root: &'a [u8], index: usize) -> &'a [u8] {
         if index == 0 {
@@ -161,6 +166,7 @@ impl Dependencies {
     }
     fn search_list(
         &mut self,
+        backend: &B,
         index: usize,
         list: &[u8],
         environment: bool,
@@ -193,7 +199,7 @@ impl Dependencies {
                 candidate[directory.len()] = b'/';
             }
             candidate[prefix..length].copy_from_slice(name);
-            match self.open_path(index, &candidate[..length]) {
+            match self.open_path(backend, index, &candidate[..length]) {
                 Ok(()) => return Ok(true),
                 Err(ENOENT | ENOTDIR) if self.node(index).handle == 0 => {}
                 Err(EACCES) if self.node(index).handle == 0 => *denied = true,
@@ -204,6 +210,7 @@ impl Dependencies {
     }
     fn open(
         &mut self,
+        backend: &B,
         index: usize,
         root: &[u8],
         environment: Option<&[u8]>,
@@ -218,7 +225,7 @@ impl Dependencies {
         }
         let name = unsafe { core::slice::from_raw_parts(name.as_ptr(), name.len()) };
         if name.contains(&b'/') {
-            return self.open_path(index, name);
+            return self.open_path(backend, index, name);
         }
         let requester = self.node(index).parent;
         let bytes = self.source(root, requester);
@@ -245,7 +252,7 @@ impl Dependencies {
                 let paths = fields.view(bytes)?;
                 if paths.runpath.is_none() {
                     if let Some(list) = paths.rpath {
-                        if self.search_list(index, list, false, &mut denied)? {
+                        if self.search_list(backend, index, list, false, &mut denied)? {
                             return Ok(());
                         }
                     }
@@ -261,17 +268,18 @@ impl Dependencies {
             }
         }
         if let Some(list) = environment {
-            if self.search_list(index, list, true, &mut denied)? {
+            if self.search_list(backend, index, list, true, &mut denied)? {
                 return Ok(());
             }
         }
         if let Some(list) = paths.runpath {
-            if self.search_list(index, list, false, &mut denied)? {
+            if self.search_list(backend, index, list, false, &mut denied)? {
                 return Ok(());
             }
         }
         if !paths.no_default_library_path
             && self.search_list(
+                backend,
                 index,
                 mochios_posix_client::configuration::DEFAULT_SHARED_LIBRARY_PATH,
                 false,
@@ -282,11 +290,11 @@ impl Dependencies {
         }
         Err(if denied { EACCES } else { ENOENT })
     }
-    fn capture(&mut self, index: usize, total: &mut usize) -> Result<(), c_int> {
+    fn capture(&mut self, backend: &B, index: usize, total: &mut usize) -> Result<(), c_int> {
         let mut chunk = [0; mnu_abi::provider::MAX_DATA_LEN];
         loop {
             let node = self.node_mut(index);
-            let n = read_at(node.handle, &mut chunk, node.source.length)?;
+            let n = read_at(backend, node.handle, &mut chunk, node.source.length)?;
             if n == 0 {
                 break;
             }
@@ -305,31 +313,27 @@ impl Dependencies {
             };
             node.source.length = length;
         }
-        let _delivery = defer_native_delivery();
-        let node = self.node_mut(index);
-        close_object_handle(node.handle);
-        node.handle = 0;
+        B::critical(|| {
+            let node = self.node_mut(index);
+            B::close(node.handle);
+            node.handle = 0;
+        });
         Ok(())
     }
     pub(super) fn build(
         &mut self,
         root: &[u8],
-        output: &mut Buffer,
-        lifecycle: &mut Buffer,
-        tls: &mut Buffer,
-        inputs: &exec_inputs::Inputs,
+        output: &mut Buffer<B>,
+        lifecycle: &mut Buffer<B>,
+        tls: &mut Buffer<B>,
+        backend: &B,
+        variables: Environment<'_>,
         identity: mochios_posix_client::process_image::Identity,
         runtime: bool,
     ) -> Result<mochios_posix_client::process_image::Executable, c_int> {
-        let path = inputs
-            .environment(b"LD_LIBRARY_PATH")
-            .filter(|value| !value.is_empty());
-        let preload = inputs
-            .environment(b"LD_PRELOAD")
-            .filter(|value| !value.is_empty());
-        let audit = inputs
-            .environment(b"LD_AUDIT")
-            .filter(|value| !value.is_empty());
+        let path = variables.library_path.filter(|value| !value.is_empty());
+        let preload = variables.preload.filter(|value| !value.is_empty());
+        let audit = variables.audit.filter(|value| !value.is_empty());
         let environment = if identity.is_secure() {
             None
         } else {
@@ -376,12 +380,12 @@ impl Dependencies {
             if cursor == self.count() {
                 break;
             }
-            self.open(cursor, root, environment, root_paths)?;
-            self.capture(cursor, &mut total)?;
+            self.open(backend, cursor, root, environment, root_paths)?;
+            self.capture(backend, cursor, &mut total)?;
             cursor += 1;
         }
         let count = self.count().checked_add(1).ok_or(ENOMEM)?;
-        // malloc provides alignment for these pointer/integer-only view types.
+        // Backend storage provides alignment for these pointer/integer views.
         // No view owns a resource or has Drop; the callback owner reclaims the
         // backing buffers even when a C handler abandons this frame.
         let images = self
@@ -401,14 +405,7 @@ impl Dependencies {
             .objects
             .slots::<core::mem::MaybeUninit<Object<'_, '_>>>(count)?;
         let mut entropy = [0u8; 8];
-        if syscall_errno(syscall::raw_syscall2(
-            syscall::SyscallNumber::RandomFill,
-            entropy.as_mut_ptr() as u64,
-            8,
-        ))? != 8
-        {
-            return Err(EIO);
-        }
+        backend.entropy(&mut entropy)?;
         let mut address = 0x20000000
             + (u64::from_le_bytes(entropy) % (64 * 1024 * 1024 / PAGE_SIZE as u64))
                 * PAGE_SIZE as u64;
