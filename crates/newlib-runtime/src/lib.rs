@@ -93,6 +93,7 @@ mod cancellation;
 mod thread_clock;
 mod process_clock;
 mod thread_stack;
+mod thread_join;
 mod pthread_attr;
 mod pthread_concurrency;
 mod credentials;
@@ -3205,6 +3206,15 @@ fn clone_registered_process_owned(
                 discard_fork_thread_control(other);
             }
         }
+        // A foreign joiner did not survive this fork. Its claim on the
+        // calling pthread must not remain in the child's private registry.
+        thread_control.join_waiter.store(0, Ordering::Release);
+        let _ = thread_control.joinability.compare_exchange(
+            THREAD_JOIN_CLAIMED,
+            THREAD_JOINABLE,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
         let old_stack = thread_control.signal_upcall_stack.load(Ordering::Relaxed);
         let old_size = thread_control
             .signal_upcall_stack_size
@@ -3222,6 +3232,9 @@ fn clone_registered_process_owned(
                 old_size as u64,
             );
         }
+        // Invalidate wait predicates captured before a handler forked. This
+        // also closes the callback-to-WaitOnAddress admission window.
+        notify_thread_waiter(thread_control);
         startup.ready();
         return Ok((0, inherited_fds, None));
     }
@@ -8681,105 +8694,7 @@ pub unsafe extern "C" fn pthread_create(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_join(thread: Pthread, value: *mut *mut c_void) -> c_int {
-    pthread_testcancel();
-    let Some(control) = thread_control(thread) else {
-        return ESRCH;
-    };
-    let Some((current, waiter)) = register_current_thread() else {
-        return EAGAIN;
-    };
-    if current == thread {
-        return EDEADLK;
-    }
-    if control
-        .joinability
-        .compare_exchange(
-            THREAD_JOINABLE,
-            THREAD_JOIN_CLAIMED,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        )
-        .is_err()
-    {
-        return EINVAL;
-    }
-    // The join claim permits exactly one waiter. Publish its generation-tagged
-    // process-local token before inspecting target state, never an IPC pointer.
-    control.join_waiter.store(current, Ordering::Release);
-    loop {
-        let wake = waiter.wait_generation.load(Ordering::Acquire);
-        join_cancel_point(control);
-        let state = control.state.load(Ordering::Acquire);
-        if state == THREAD_EXITED {
-            if control.creation_pending.load(Ordering::Acquire) != 0 {
-                let _ = syscall::raw_syscall0(syscall::SyscallNumber::ThreadYield);
-                continue;
-            }
-            match native_thread_retired(control) {
-                Ok(true) => {
-                    join_cancel_point(control);
-                    break;
-                }
-                Ok(false) => {
-                    let _ = syscall::raw_syscall0(syscall::SyscallNumber::ThreadYield);
-                    continue;
-                }
-                Err(error) => {
-                    release_join_claim(control);
-                    return error;
-                }
-            }
-        }
-        if !matches!(state, THREAD_STARTING | THREAD_RUNNING) {
-            release_join_claim(control);
-            return ESRCH;
-        }
-        if let Err(error) = mochios_posix_client::synchronization::wait_u32(
-            &waiter.wait_generation,
-            wake,
-            syscall::ADDRESS_WAIT_INFINITE,
-        ) {
-            release_join_claim(control);
-            return map_kernel_errno(error.raw());
-        }
-    }
-    if !value.is_null() {
-        unsafe { value.write(control.result.load(Ordering::Acquire) as *mut c_void) };
-    }
-    if control
-        .state
-        .compare_exchange(
-            THREAD_EXITED,
-            THREAD_REAPING,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        )
-        .is_err()
-    {
-        release_join_claim(control);
-        return ESRCH;
-    }
-    release_thread_control(control);
-    0
-}
-
-fn release_join_claim(control: &ThreadControl) {
-    control.join_waiter.store(0, Ordering::Release);
-    control.joinability.store(THREAD_JOINABLE, Ordering::Release);
-}
-
-fn join_cancel_point(target: &ThreadControl) {
-    let Some((_, caller)) = current_thread_control() else {
-        return;
-    };
-    if caller.cancel_state.load(Ordering::Acquire) == PTHREAD_CANCEL_ENABLE
-        && caller.cancel_pending.load(Ordering::Acquire) != 0
-    {
-        // ThreadExit does not unwind Rust guards. Undo the internal join claim
-        // explicitly before running application cleanup (which may join again).
-        release_join_claim(target);
-        finish_thread(caller, usize::MAX as *mut c_void);
-    }
+    thread_join::join(thread, value)
 }
 
 fn notify_join_waiter(target: &ThreadControl) {
