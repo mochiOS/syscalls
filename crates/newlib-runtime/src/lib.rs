@@ -339,6 +339,9 @@ const _: [(); 8] = [(); core::mem::align_of::<PthreadAttr>()];
 struct ThreadControl {
     state: AtomicU32,
     generation: AtomicU32,
+    // A fast-exiting child cannot retire this slot while its creator still
+    // publishes the native identity. This is runtime-local, not a kernel state.
+    creation_pending: AtomicU32,
     native_id: AtomicU64,
     // Private newlib locks retain their calling thread's identity across fork.
     // This is never an identity for process-shared pthread synchronization.
@@ -390,6 +393,7 @@ impl ThreadControl {
         Self {
             state: AtomicU32::new(THREAD_FREE),
             generation: AtomicU32::new(0),
+            creation_pending: AtomicU32::new(0),
             native_id: AtomicU64::new(0),
             newlib_lock_identity: AtomicU64::new(0),
             native_handle: AtomicU32::new(0),
@@ -1224,6 +1228,7 @@ fn reserve_thread_control()
         // retired slot; its new owner has not been published or started yet.
         unsafe { control.ptsname_buffer.reset() };
         control.generation.store(generation, Ordering::Release);
+        control.creation_pending.store(0, Ordering::Relaxed);
         control.native_id.store(0, Ordering::Relaxed);
         control.newlib_lock_identity.store(0, Ordering::Relaxed);
         control.native_handle.store(0, Ordering::Relaxed);
@@ -1379,6 +1384,7 @@ fn reclaim_thread_control(control: &ThreadControl, reason: ThreadReclamation) {
     }
     control.native_id.store(0, Ordering::Relaxed);
     control.newlib_lock_identity.store(0, Ordering::Relaxed);
+    control.creation_pending.store(0, Ordering::Relaxed);
     control.thread_local_base.store(0, Ordering::Relaxed);
     control.start.store(0, Ordering::Relaxed);
     control.argument.store(0, Ordering::Relaxed);
@@ -1428,6 +1434,7 @@ fn allocate_thread_reent(control: &ThreadControl) -> Result<(), c_int> {
 fn reap_detached_threads() {
     for control in &THREADS {
         if control.state.load(Ordering::Acquire) == THREAD_EXITED
+            && control.creation_pending.load(Ordering::Acquire) == 0
             && control
                 .joinability
                 .compare_exchange(
@@ -1438,7 +1445,13 @@ fn reap_detached_threads() {
                 )
                 .is_ok()
         {
-            if native_thread_retired(control) == Ok(true) {
+            // The pre-claim observation may span retirement and reuse of a
+            // slot. Once claimed, revalidate this generation before freeing
+            // its mappings or the creator's still-pinned TCB.
+            if control.state.load(Ordering::Acquire) == THREAD_EXITED
+                && control.creation_pending.load(Ordering::Acquire) == 0
+                && native_thread_retired(control) == Ok(true)
+            {
                 control.state.store(THREAD_REAPING, Ordering::Release);
                 release_thread_control(control);
             } else {
@@ -8585,6 +8598,7 @@ pub unsafe extern "C" fn pthread_create(
         }
         return EAGAIN;
     };
+    control.creation_pending.store(1, Ordering::Release);
     control.start.store(
         start.map(|function| function as usize).unwrap_or(0),
         Ordering::Relaxed,
@@ -8637,6 +8651,13 @@ pub unsafe extern "C" fn pthread_create(
         reserved: [0; 3],
         registers: syscall::ThreadInitialRegisters::default(),
     };
+    // Complete the only faultable publication before a child can run. On a
+    // later native admission failure POSIX leaves *thread unspecified.
+    if let Err(error) = user_copy::write(thread.cast(), &token.to_ne_bytes()) {
+        control.state.store(THREAD_REAPING, Ordering::Relaxed);
+        release_thread_control(control);
+        return error;
+    }
     let native_id = match syscall_errno(syscall::raw_syscall2(
         syscall::SyscallNumber::ThreadCreate,
         (&context as *const syscall::ThreadCreateContext) as u64,
@@ -8652,7 +8673,9 @@ pub unsafe extern "C" fn pthread_create(
     let _ = control
         .native_id
         .compare_exchange(0, native_id, Ordering::Release, Ordering::Relaxed);
-    unsafe { thread.write(token) };
+    // Last TCB mutation by the creator. Reapers and successful joiners may
+    // reclaim this generation as soon as the pin is released.
+    control.creation_pending.store(0, Ordering::Release);
     0
 }
 
@@ -8688,6 +8711,10 @@ pub unsafe extern "C" fn pthread_join(thread: Pthread, value: *mut *mut c_void) 
         join_cancel_point(control);
         let state = control.state.load(Ordering::Acquire);
         if state == THREAD_EXITED {
+            if control.creation_pending.load(Ordering::Acquire) != 0 {
+                let _ = syscall::raw_syscall0(syscall::SyscallNumber::ThreadYield);
+                continue;
+            }
             match native_thread_retired(control) {
                 Ok(true) => {
                     join_cancel_point(control);
