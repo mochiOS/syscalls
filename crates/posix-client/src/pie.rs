@@ -338,7 +338,7 @@ impl<'a> Pie<'a> {
         let mut relr_size = None;
         let mut relr_entry = None;
         let mut symbol_tags = [None; 6];
-        let mut versioned = false;
+        let mut version_tags = [None; 5];
         let mut terminated = false;
         for o in extent(self.bytes, d.offset, d.file)?.step_by(16) {
             let tag = u64_at(self.bytes, o)?;
@@ -361,8 +361,15 @@ impl<'a> Pie<'a> {
                     return Err(Error::Invalid);
                 }
             }
-            if matches!(tag, 0x6ffffff0 | 0x6ffffffc..=0x6fffffff) {
-                versioned = true;
+            let version_index = match tag {
+                0x6ffffff0 => Some(0),
+                0x6ffffffc..=0x6fffffff => Some((tag - 0x6ffffffc) as usize + 1),
+                _ => None,
+            };
+            if let Some(index) = version_index {
+                if version_tags[index].replace(value).is_some() {
+                    return Err(Error::Invalid);
+                }
             }
             match tag {
                 // Dependency loading and external audit/filter scopes require
@@ -429,9 +436,17 @@ impl<'a> Pie<'a> {
         if symbol_tags.iter().any(Option::is_some) {
             self.symbols = Some(symbols::Table::parse(
                 symbol_tags,
-                versioned,
+                version_tags,
                 |address, length| Ok(&self.bytes[self.file_range(address, length)?]),
             )?);
+            if !self.linkable {
+                self.symbols
+                    .as_ref()
+                    .ok_or(Error::Invalid)?
+                    .requirements(|_, _, _, _| Err(Error::Unsupported))?;
+            }
+        } else if version_tags.iter().any(Option::is_some) {
+            return Err(Error::Invalid);
         }
         let size = size.unwrap_or(0);
         if size != 0 {
@@ -520,8 +535,8 @@ impl<'a> Pie<'a> {
         }
         Ok(())
     }
-    /// TLS bindings require an explicit scope. Symbol version scopes and
-    /// IFUNC execution remain unsupported rather than using local guesses.
+    /// TLS bindings require an explicit scope. IFUNC execution remains
+    /// unsupported rather than executing a resolver in the preparing process.
     fn relocation(&self, o: usize) -> Result<(u64, Option<Value>), Error> {
         let target = u64_at(self.bytes, o)?;
         let info = u64_at(self.bytes, o + 8)?;
@@ -627,6 +642,25 @@ impl<'a> Pie<'a> {
             }
         }
         Ok(())
+    }
+    fn soname(&self) -> Result<Option<&[u8]>, Error> {
+        let mut name = None;
+        if let Some(dynamic) = self.dynamic_segment {
+            for offset in extent(self.bytes, dynamic.offset, dynamic.file)?.step_by(16) {
+                match u64_at(self.bytes, offset)? {
+                    0 => break,
+                    14 => {
+                        let table = self.symbols.as_ref().ok_or(Error::Invalid)?;
+                        let value = table.string(u64_at(self.bytes, offset + 8)?)?;
+                        if value.is_empty() || name.replace(value).is_some() {
+                            return Err(Error::Invalid);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(name)
     }
     /// Retain the source program's PHDR view, not the native wrapper's table.
     /// A runtime linker/self-relocator interprets these with the program bias.

@@ -1,11 +1,13 @@
 //! Bounded dynamic symbol metadata. This layer never reads section headers or
 //! guesses the symbol table length from adjacent tables.
 use super::{Error, add, u16_at, u32_at, u64_at};
+mod versions;
+pub(super) use versions::Version;
 
 pub(super) struct Table<'a> {
     entries: &'a [u8],
     strings: &'a [u8],
-    versioned: bool,
+    versions: versions::Versions<'a>,
     lookup: Lookup<'a>,
 }
 
@@ -20,7 +22,7 @@ impl<'a> Table<'a> {
     // HASH, STRTAB, SYMTAB, STRSZ, SYMENT, GNU_HASH.
     pub(super) fn parse(
         tags: [Option<u64>; 6],
-        versioned: bool,
+        version_tags: [Option<u64>; 5],
         read: impl Fn(u64, u64) -> Result<&'a [u8], Error>,
     ) -> Result<Self, Error> {
         let [hash, strings, entries, string_size, entry_size, gnu_hash] = tags;
@@ -110,28 +112,20 @@ impl<'a> Table<'a> {
         {
             return Err(Error::Invalid);
         }
+        let versions = versions::Versions::parse(version_tags, entries, strings, &read)?;
         Ok(Self {
             entries,
             strings,
-            versioned,
+            versions,
             lookup: lookup.ok_or(Error::Unsupported)?,
         })
     }
 
     pub(super) fn string(&self, offset: u64) -> Result<&'a [u8], Error> {
-        let offset = usize::try_from(offset).map_err(|_| Error::Overflow)?;
-        let tail = self.strings.get(offset..).ok_or(Error::Invalid)?;
-        let end = tail
-            .iter()
-            .position(|byte| *byte == 0)
-            .ok_or(Error::Invalid)?;
-        Ok(&tail[..end])
+        string(self.strings, offset)
     }
 
     pub(super) fn entry(&self, index: u32) -> Result<Entry<'a>, Error> {
-        if self.versioned {
-            return Err(Error::Unsupported);
-        }
         let offset = (index as usize).checked_mul(24).ok_or(Error::Overflow)?;
         let entry = self
             .entries
@@ -165,6 +159,7 @@ impl<'a> Table<'a> {
             visibility: entry[5],
             definition,
             is_tls: kind == 6,
+            version: self.versions.at(index)?,
         })
     }
 
@@ -176,7 +171,12 @@ impl<'a> Table<'a> {
             .ok_or(Error::Unsupported)
     }
 
-    fn matching(&self, index: u32, name: &[u8]) -> Result<Option<Entry<'a>>, Error> {
+    fn matching(
+        &self,
+        index: u32,
+        name: &[u8],
+        required: Version<'_>,
+    ) -> Result<Option<(Entry<'a>, bool)>, Error> {
         let offset = (index as usize).checked_mul(24).ok_or(Error::Overflow)?;
         let raw = self
             .entries
@@ -190,31 +190,76 @@ impl<'a> Table<'a> {
         if raw[4] >> 4 == 0 || matches!(raw[5] & 3, 1 | 2) || u16_at(raw, 6)? == 0 {
             return Ok(None);
         }
+        let version = self.versions.at(index)?;
+        let fallback = match (required, version) {
+            (_, Version::Local) | (Version::Local, _) => return Ok(None),
+            (
+                Version::Named { name, hash, .. },
+                Version::Named {
+                    name: other,
+                    hash: digest,
+                    ..
+                },
+            ) => {
+                if name != other || hash != digest {
+                    return Ok(None);
+                }
+                false
+            }
+            (Version::Named { strict, .. }, Version::Global) => {
+                if strict {
+                    return Ok(None);
+                }
+                true
+            }
+            (Version::Named { .. }, Version::Unversioned) => false,
+            (_, Version::Named { index: 2, .. }) => false,
+            (_, Version::Named { hidden: true, .. }) => return Ok(None),
+            (_, Version::Named { .. }) => true,
+            _ => false,
+        };
         let entry = self.entry(index)?;
         if entry.binding != 0 && !matches!(entry.visibility, 1 | 2) && entry.definition.is_some() {
-            Ok(Some(entry))
+            Ok(Some((entry, fallback)))
         } else {
             Ok(None)
         }
     }
 
     pub(super) fn find(&self, name: &[u8]) -> Result<Option<Entry<'a>>, Error> {
+        self.find_versioned(name, Version::Global)
+    }
+
+    pub(super) fn find_versioned(
+        &self,
+        name: &[u8],
+        required: Version<'_>,
+    ) -> Result<Option<Entry<'a>>, Error> {
+        let mut fallback = None;
+        let mut matches = 0usize;
+        let consider = |index,
+                        matches: &mut usize,
+                        fallback: &mut Option<Entry<'a>>|
+         -> Result<Option<Entry<'a>>, Error> {
+            if let Some((entry, deferred)) = self.matching(index, name, required)? {
+                if !deferred {
+                    return Ok(Some(entry));
+                }
+                *matches += 1;
+                *fallback = Some(entry);
+            }
+            Ok(None)
+        };
         match self.lookup {
             Lookup::Sysv { buckets, chains } => {
-                let mut hash = 0u32;
-                for &byte in name {
-                    hash = hash.wrapping_shl(4).wrapping_add(byte as u32);
-                    let high = hash & 0xf0000000;
-                    hash ^= high >> 24;
-                    hash &= !high;
-                }
+                let hash = versions::hash(name);
                 let mut index = u32_at(buckets, hash as usize % (buckets.len() / 4) * 4)?;
                 // Corrupt chain cycles must terminate with an error, not hang.
                 for _ in 0..self.entries.len() / 24 {
                     if index == 0 {
-                        return Ok(None);
+                        return Ok(if matches == 1 { fallback } else { None });
                     }
-                    if let Some(entry) = self.matching(index, name)? {
+                    if let Some(entry) = consider(index, &mut matches, &mut fallback)? {
                         return Ok(Some(entry));
                     }
                     index = u32_at(chains, index as usize * 4)?;
@@ -237,18 +282,46 @@ impl<'a> Table<'a> {
                     let within = index.checked_sub(first).ok_or(Error::Invalid)?;
                     let chain = u32_at(chains, within as usize * 4)?;
                     if chain | 1 == hash | 1 {
-                        if let Some(entry) = self.matching(index, name)? {
+                        if let Some(entry) = consider(index, &mut matches, &mut fallback)? {
                             return Ok(Some(entry));
                         }
                     }
                     if chain & 1 != 0 {
-                        return Ok(None);
+                        return Ok(if matches == 1 { fallback } else { None });
                     }
                     index = index.checked_add(1).ok_or(Error::Overflow)?;
                 }
             }
         }
     }
+
+    pub(super) fn requirements(
+        &self,
+        mut visit: impl FnMut(&[u8], &[u8], u32, bool) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        self.versions.requirements(|node| {
+            visit(
+                node.file.ok_or(Error::Invalid)?,
+                node.name,
+                node.hash,
+                node.weak,
+            )
+        })
+    }
+
+    pub(super) fn provides(&self, name: &[u8], hash: u32) -> Result<bool, Error> {
+        self.versions.provides(name, hash)
+    }
+}
+
+fn string(strings: &[u8], offset: u64) -> Result<&[u8], Error> {
+    let offset = usize::try_from(offset).map_err(|_| Error::Overflow)?;
+    let tail = strings.get(offset..).ok_or(Error::Invalid)?;
+    let end = tail
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or(Error::Invalid)?;
+    Ok(&tail[..end])
 }
 
 pub(super) struct Entry<'a> {
@@ -257,6 +330,7 @@ pub(super) struct Entry<'a> {
     pub visibility: u8,
     pub definition: Option<Definition>,
     pub is_tls: bool,
+    pub version: Version<'a>,
 }
 
 #[derive(Clone, Copy)]

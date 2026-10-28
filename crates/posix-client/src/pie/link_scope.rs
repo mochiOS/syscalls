@@ -76,6 +76,28 @@ impl<'scope, 'image> Scope<'scope, 'image> {
         if length != objects.len() {
             return Err(Error::Invalid);
         }
+        // Check all recorded ABI requirements, including nodes not referenced
+        // by an eager relocation. No image is emitted before this succeeds.
+        for object in objects {
+            if let Some(table) = &object.image.symbols {
+                table.requirements(|file, name, hash, weak| {
+                    let mut provider = None;
+                    for &index in &scratch[..length] {
+                        let candidate = &objects[index];
+                        if candidate.name == file || candidate.image.soname()? == Some(file) {
+                            provider = Some(candidate);
+                            break;
+                        }
+                    }
+                    let provider = provider.ok_or(Error::Invalid)?;
+                    let available = provider.image.symbols.as_ref().ok_or(Error::Invalid)?;
+                    if !available.provides(name, hash)? && !weak {
+                        return Err(Error::Unsupported);
+                    }
+                    Ok(())
+                })?;
+            }
+        }
         Ok(Self {
             objects,
             order: &scratch[..length],
@@ -94,11 +116,18 @@ impl<'scope, 'image> Scope<'scope, 'image> {
         let object = self.objects.get(origin).ok_or(Error::Invalid)?;
         let table = object.image.symbols.as_ref().ok_or(Error::Unsupported)?;
         let reference = table.entry(index)?;
-        if reference.binding == 0 || reference.visibility != 0 || object.image.symbolic {
+        if reference.binding == 0
+            || reference.visibility != 0
+            || matches!(reference.version, super::symbols::Version::Local)
+            || object.image.symbolic
+        {
             if let Some(definition) = reference.definition {
                 return Ok(Some((origin, definition)));
             }
-            if reference.visibility != 0 || reference.binding == 0 {
+            if reference.visibility != 0
+                || reference.binding == 0
+                || matches!(reference.version, super::symbols::Version::Local)
+            {
                 return if reference.binding == 2 {
                     Ok(None)
                 } else {
@@ -108,7 +137,7 @@ impl<'scope, 'image> Scope<'scope, 'image> {
         }
         for &candidate in self.order {
             if let Some(table) = &self.objects[candidate].image.symbols {
-                if let Some(symbol) = table.find(reference.name)? {
+                if let Some(symbol) = table.find_versioned(reference.name, reference.version)? {
                     if let Some(definition) = symbol.definition {
                         return Ok(Some((candidate, definition)));
                     }
