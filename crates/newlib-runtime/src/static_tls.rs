@@ -3,7 +3,10 @@ use super::{
     ENOENT, ENOEXEC, EOVERFLOW, NATIVE_READ_WRITE, Ordering, PAGE_SIZE, ThreadControl,
     address_space, auxiliary, c_int, syscall, user_copy,
 };
-use mochios_posix_client::static_tls::{self as policy, Layout};
+use mochios_posix_client::static_tls::{
+    self as policy,
+    modules::{InitializeError, Plan},
+};
 
 fn image() -> Result<Option<policy::Template>, c_int> {
     let Some(vector) = auxiliary::vector() else {
@@ -49,8 +52,15 @@ impl Drop for Mapping {
 /// Prepare before native ThreadCreate, including all AS-limit admission and
 /// fallible copies. The child never starts with an uninitialized template.
 pub(super) fn allocate(control: &ThreadControl) -> Result<(), c_int> {
-    let template = image()?;
-    let layout = Layout::new(template, PAGE_SIZE).ok_or(EOVERFLOW)?;
+    allocate_templates(control, &[image()?])
+}
+
+pub(super) fn allocate_templates(
+    control: &ThreadControl,
+    templates: &[Option<policy::Template>],
+) -> Result<(), c_int> {
+    let plan = Plan::new(templates, PAGE_SIZE).ok_or(EOVERFLOW)?;
+    let layout = plan.layout();
     let base =
         address_space::current()?.map(0, layout.mapping_size as u64, NATIVE_READ_WRITE, 0, 0, 0)?
             as usize;
@@ -58,22 +68,17 @@ pub(super) fn allocate(control: &ThreadControl) -> Result<(), c_int> {
         base,
         size: layout.mapping_size,
     };
-    let placed = layout.place(base).ok_or(EOVERFLOW)?;
-    // Native anonymous mappings are zero-filled, including all .tbss bytes.
-    if let Some(template) = template {
-        let mut offset = 0;
-        let mut bytes = [0u8; 512];
-        while offset < template.file_size {
-            let size = bytes.len().min(template.file_size - offset);
-            user_copy::read((template.source + offset) as *const u8, &mut bytes[..size])?;
-            user_copy::write((placed.data + offset) as *mut u8, &bytes[..size])?;
-            offset += size;
-        }
-    }
-    user_copy::write(
-        placed.thread_pointer as *mut u8,
-        &placed.thread_pointer.to_ne_bytes(),
-    )?;
+    let thread_pointer = plan
+        .initialize_zeroed(
+            base,
+            mapping.size,
+            |address, bytes| user_copy::read(address as *const u8, bytes),
+            |address, bytes| user_copy::write(address as *mut u8, bytes),
+        )
+        .map_err(|error| match error {
+            InitializeError::InvalidMapping => EOVERFLOW,
+            InitializeError::Read(error) | InitializeError::Write(error) => error,
+        })?;
     control
         .tls_mapping_size
         .store(mapping.size, Ordering::Relaxed);
@@ -82,7 +87,7 @@ pub(super) fn allocate(control: &ThreadControl) -> Result<(), c_int> {
         .store(mapping.base, Ordering::Relaxed);
     control
         .thread_local_base
-        .store(placed.thread_pointer as u64, Ordering::Release);
+        .store(thread_pointer as u64, Ordering::Release);
     core::mem::forget(mapping);
     Ok(())
 }

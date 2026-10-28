@@ -1,5 +1,8 @@
 //! ELF static TLS policy for x86-64 (Variant II). No kernel TLS ABI is involved.
 
+#[path = "static_tls/modules.rs"]
+pub mod modules;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error<E> {
     InvalidImage,
@@ -159,22 +162,17 @@ impl Layout {
     /// The first TCB word is its own address, as expected by x86-64 codegen.
     /// Match lld/ELF/InputSection.cpp:getTlsTpOffset, including p_vaddr residue.
     pub fn new(template: Option<Template>, page_size: usize) -> Option<Self> {
-        if !page_size.is_power_of_two() {
+        let (distance, alignment) = match template {
+            Some(t) => (distance_after(0, t)?, t.alignment),
+            None => (0, 1),
+        };
+        Self::from_extent(distance, alignment, page_size)
+    }
+
+    fn from_extent(distance: usize, alignment: usize, page_size: usize) -> Option<Self> {
+        if !page_size.is_power_of_two() || !alignment.is_power_of_two() {
             return None;
         }
-        let (memory, alignment, residue) = match template {
-            Some(t)
-                if t.alignment.is_power_of_two()
-                    && t.residue < t.alignment
-                    && t.file_size <= t.memory_size =>
-            {
-                (t.memory_size, t.alignment, t.residue)
-            }
-            Some(_) => return None,
-            None => (0, 1, 0),
-        };
-        let padding = residue.wrapping_add(memory).wrapping_neg() & (alignment - 1);
-        let distance = memory.checked_add(padding)?;
         let alignment = alignment.max(core::mem::size_of::<usize>());
         let size = distance
             .checked_add(alignment - 1)?
@@ -201,4 +199,18 @@ impl Layout {
             thread_pointer,
         })
     }
+}
+
+// Place the next module before all preceding blocks, preserving the root's
+// linker-computed TP offset even when dependencies require stronger alignment.
+fn distance_after(preceding: usize, template: Template) -> Option<usize> {
+    if !template.alignment.is_power_of_two()
+        || template.residue >= template.alignment
+        || template.file_size > template.memory_size
+    {
+        return None;
+    }
+    let end = preceding.checked_add(template.memory_size)?;
+    let padding = template.residue.wrapping_add(end).wrapping_neg() & (template.alignment - 1);
+    end.checked_add(padding)
 }
