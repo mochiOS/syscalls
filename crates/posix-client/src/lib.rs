@@ -58,6 +58,7 @@ pub mod named_semaphore;
 pub mod shared_memory;
 pub mod socket;
 pub mod network;
+pub mod internet;
 pub mod account;
 pub mod socket_control;
 pub mod socket_record;
