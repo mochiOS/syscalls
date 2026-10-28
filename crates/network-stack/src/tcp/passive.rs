@@ -14,7 +14,7 @@ pub struct TcpListenConfig {
 pub(super) struct Listener {
     pub(super) handle: u64,
     owner: u64,
-    address: [u8; 4],
+    pub(super) address: [u8; 4],
     pub(super) port: u16,
     config: TcpListenConfig,
     pending: Vec<u64>,

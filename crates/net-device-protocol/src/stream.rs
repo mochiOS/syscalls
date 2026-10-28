@@ -11,6 +11,8 @@ pub const LISTEN_SCOPE: u32 = 2;
 pub const ALL_SCOPES: u32 = CONNECT_SCOPE | LISTEN_SCOPE;
 pub const REPLY_LEN: usize = 16;
 pub const LIMITS_LEN: usize = 12;
+pub const ROUTE_LOOPBACK: u16 = 1;
+pub const ROUTE_INTERFACE: u16 = 2;
 pub const STATUS_LEN: usize = 8;
 pub const QUERY_LIMITS: u64 = u64::from_le_bytes(*b"NTCPLIM1");
 pub const LOCAL: u64 = u64::from_le_bytes(*b"NTCPLOC1");
@@ -89,6 +91,7 @@ pub fn status(operation: u16, bytes: &[u8]) -> Result<i32, Error> {
 pub struct Limits {
     pub scopes: u32,
     pub minimum_port: u16,
+    pub routes: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,23 +128,27 @@ impl Limits {
         if self.scopes == 0
             || self.scopes & !ALL_SCOPES != 0
             || self.minimum_port == 0
+            || self.routes & ROUTE_LOOPBACK == 0
+            || self.routes & !(ROUTE_LOOPBACK | ROUTE_INTERFACE) != 0
             || out.len() < LIMITS_LEN
         {
             return Err(Error::Invalid);
         }
         out[..LIMITS_LEN].fill(0);
-        out[..4].copy_from_slice(&[1, 0, 1, 0]); // version, IPv4 loopback backend
+        out[..2].copy_from_slice(&1u16.to_le_bytes());
+        out[2..4].copy_from_slice(&self.routes.to_le_bytes());
         out[4..8].copy_from_slice(&self.scopes.to_le_bytes());
         out[8..10].copy_from_slice(&self.minimum_port.to_le_bytes());
         Ok(LIMITS_LEN)
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.len() != LIMITS_LEN || bytes[..4] != [1, 0, 1, 0] || bytes[10..] != [0; 2] {
+        if bytes.len() != LIMITS_LEN || bytes[..2] != [1, 0] || bytes[10..] != [0; 2] {
             return Err(Error::Invalid);
         }
         let value = Self {
             scopes: u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
             minimum_port: u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
+            routes: u16::from_le_bytes(bytes[2..4].try_into().unwrap()),
         };
         let mut checked = [0; LIMITS_LEN];
         value.encode(&mut checked)?;

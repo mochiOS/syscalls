@@ -887,9 +887,30 @@ impl TcpConnectionTable {
     }
 
     pub fn remove_closed(&mut self) {
-        self.connections
-            .retain(|connection| !matches!(connection.state, TcpState::Closed | TcpState::Reset));
+        self.remove_closed_if(|_| true);
+    }
+
+    /// Reap only the owners whose terminal observations are no longer held.
+    /// A resource service may retain closed TCBs until its final native close.
+    pub fn remove_closed_if(&mut self, mut owner: impl FnMut(u64) -> bool) {
+        self.connections.retain(|connection| {
+            !matches!(connection.state, TcpState::Closed | TcpState::Reset) || !owner(connection.owner)
+        });
         self.prune_pending();
+    }
+
+    /// Existing TCP bindings, independent of resource references that may
+    /// reserve a port before installing a connection or listener here.
+    pub fn local_port_in_use(&self, address: [u8; 4], port: u16) -> bool {
+        let overlaps = |other| address == [0; 4] || other == [0; 4] || address == other;
+        self.listeners
+            .iter()
+            .any(|listener| listener.port == port && overlaps(listener.address))
+            || self.connections.iter().any(|connection| {
+                connection.tuple.local_port == port
+                    && !matches!(connection.state, TcpState::Closed | TcpState::Reset)
+                    && overlaps(connection.tuple.local_address)
+            })
     }
 
     /// Retained connection TCBs, excluding the separate listener rows.
