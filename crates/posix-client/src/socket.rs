@@ -538,13 +538,34 @@ impl<T: ObjectTransport> Client<T> {
         &self,
         create: wire::Create,
         factory: ObjectHandleAttachment<T::Handle>,
+        close: impl FnMut(T::Handle),
+    ) -> Result<ObjectHandleAttachment<T::Handle>, ClientError<T::Error>> {
+        if create.kind != wire::Kind::Datagram || !matches!(create.protocol, 0 | 17) {
+            return Err(ClientError::Remote(-22));
+        }
+        self.open_inet_socket(create, factory, close)
+    }
+
+    /// TCP creation delegates a scoped factory acquired by the caller itself.
+    pub fn open_inet_stream(
+        &self,
+        create: wire::Create,
+        factory: ObjectHandleAttachment<T::Handle>,
+        close: impl FnMut(T::Handle),
+    ) -> Result<ObjectHandleAttachment<T::Handle>, ClientError<T::Error>> {
+        if create.kind != wire::Kind::Stream || !matches!(create.protocol, 0 | 6) {
+            return Err(ClientError::Remote(-22));
+        }
+        self.open_inet_socket(create, factory, close)
+    }
+
+    fn open_inet_socket(
+        &self,
+        create: wire::Create,
+        factory: ObjectHandleAttachment<T::Handle>,
         mut close: impl FnMut(T::Handle),
     ) -> Result<ObjectHandleAttachment<T::Handle>, ClientError<T::Error>> {
-        if create.domain != wire::Domain::Ipv4
-            || create.kind != wire::Kind::Datagram
-            || !matches!(create.protocol, 0 | 17)
-            || create.options & !wire::NONBLOCKING != 0
-        {
+        if create.domain != wire::Domain::Ipv4 || create.options & !wire::NONBLOCKING != 0 {
             return Err(ClientError::Remote(-22));
         }
         let rights = wire::inet_factory_rights();

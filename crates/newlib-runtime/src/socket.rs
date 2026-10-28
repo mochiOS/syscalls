@@ -546,26 +546,61 @@ pub extern "C" fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int {
                 let pending =
                     PendingFdReservation(state().fds.reserve_from(0, limit).map_err(|_| EMFILE)?);
                 let client = posix_client().map_err(map_posix_client_error)?;
-                let opened =
-                    if create.domain == wire::Domain::Ipv4 && create.kind == wire::Kind::Datagram {
-                        let endpoint = client
-                            .network_endpoint(close_object_handle)
-                            .map_err(map_posix_client_error)?;
-                        let _endpoint = PendingSocketJob(endpoint.handle);
-                        let factory = mochios_posix_client::network::acquire_factory(
-                            &SyscallEndpointTransport::new(endpoint.handle),
+                let opened = if create.domain == wire::Domain::Ipv4
+                    && matches!(create.kind, wire::Kind::Datagram | wire::Kind::Stream)
+                {
+                    let endpoint = client
+                        .network_endpoint(close_object_handle)
+                        .map_err(map_posix_client_error)?;
+                    let _endpoint = PendingSocketJob(endpoint.handle);
+                    let transport = SyscallEndpointTransport::new(endpoint.handle);
+                    let factory = if create.kind == wire::Kind::Stream {
+                        let mut scopes = 0;
+                        for (name, scope) in [
+                            ("net.connect", mochios_posix_client::network::CONNECT_SCOPE),
+                            ("net.listen", mochios_posix_client::network::LISTEN_SCOPE),
+                        ] {
+                            let allowed = syscall::call2(
+                                syscall::SyscallNumber::CapQuery,
+                                name.as_ptr() as u64,
+                                name.len() as u64,
+                            )
+                            .map_err(|error| {
+                                mochios_posix_client::newlib_errno::from_status(error.raw())
+                            })?;
+                            if allowed != 0 {
+                                scopes |= scope;
+                            }
+                        }
+                        if scopes == 0 {
+                            return Err(EACCES);
+                        }
+                        // Network authenticates the caller again at acquisition;
+                        // this query merely chooses the requested scope subset.
+                        mochios_posix_client::network::acquire_stream_factory(
+                            &transport,
+                            scopes,
                             close_object_handle,
                         )
-                        .map_err(map_posix_client_error)?;
-                        let _factory = PendingSocketJob(factory.handle);
-                        client
-                            .open_inet_datagram(create, factory, close_object_handle)
-                            .map_err(map_posix_client_error)?
                     } else {
-                        client
-                            .open_socket(create, close_object_handle)
-                            .map_err(map_posix_client_error)?
-                    };
+                        mochios_posix_client::network::acquire_factory(
+                            &transport,
+                            close_object_handle,
+                        )
+                    }
+                    .map_err(map_posix_client_error)?;
+                    let _factory = PendingSocketJob(factory.handle);
+                    if create.kind == wire::Kind::Stream {
+                        client.open_inet_stream(create, factory, close_object_handle)
+                    } else {
+                        client.open_inet_datagram(create, factory, close_object_handle)
+                    }
+                    .map_err(map_posix_client_error)?
+                } else {
+                    client
+                        .open_socket(create, close_object_handle)
+                        .map_err(map_posix_client_error)?
+                };
                 Ok((
                     pending,
                     PendingHandles {

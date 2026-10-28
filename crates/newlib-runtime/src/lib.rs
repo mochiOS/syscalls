@@ -112,6 +112,7 @@ mod shared_memory;
 mod fd_options;
 mod file_description_flags;
 mod socket;
+mod network_byte_order;
 mod socket_record;
 mod socket_message;
 mod stdio_cancellation;

@@ -102,3 +102,47 @@ pub fn acquire_factory<T: ObjectTransport>(
     }
     checked
 }
+
+/// Scope bits describe delegated resource authority, not POSIX uid privileges.
+pub use mochios_net_device_protocol::stream::{CONNECT_SCOPE, LISTEN_SCOPE};
+
+pub fn acquire_stream_factory<T: ObjectTransport>(
+    transport: &T,
+    scopes: u32,
+    mut close: impl FnMut(T::Handle),
+) -> Result<ObjectHandleAttachment<T::Handle>, ClientError<T::Error>> {
+    use mochios_net_device_protocol::stream as wire;
+    let request = wire::scoped(wire::ACQUIRE, scopes).map_err(|_| ClientError::Remote(-22))?;
+    let mut response = [0; wire::REPLY_LEN];
+    let mut handles = ObjectHandles::new();
+    let borrowed = handles.clone();
+    let outcome = transport
+        .call_with_handles(&request, &mut response, &mut handles)
+        .map_err(ClientError::Transport);
+    let result = (|| {
+        let n = outcome?;
+        let status = wire::status(
+            wire::ACQUIRE,
+            response.get(..n).ok_or(ClientError::MismatchedResponse)?,
+        )
+        .map_err(|_| ClientError::MismatchedResponse)?;
+        if status != 0 {
+            return Err(ClientError::Remote(status));
+        }
+        if handles.len() != 1 {
+            return Err(ClientError::MismatchedResponse);
+        }
+        let object = handles.get(0).unwrap();
+        let rights = mnu_abi::HANDLE_RIGHT_CONTROL
+            | mnu_abi::HANDLE_RIGHT_DUPLICATE
+            | mnu_abi::HANDLE_RIGHT_TRANSFER;
+        if object.handle == T::Handle::default() || object.rights != rights {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(object)
+    })();
+    if result.is_err() {
+        crate::drain_received_handles(&mut handles, &borrowed, &mut close);
+    }
+    result
+}

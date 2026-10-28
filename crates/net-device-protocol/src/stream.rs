@@ -21,6 +21,9 @@ pub const BIND: u64 = u64::from_le_bytes(*b"NTCPBND1");
 pub const CONNECT: u64 = u64::from_le_bytes(*b"NTCPCON1");
 pub const LISTEN: u64 = u64::from_le_bytes(*b"NTCPLSN1");
 pub const SHUTDOWN: u64 = u64::from_le_bytes(*b"NTCPSHT1");
+/// Empty input, u32 result: 0 aborted an uncommitted open; 1 the
+/// connection already committed and was preserved. Errors retain their cause.
+pub const CANCEL_CONNECT: u64 = u64::from_le_bytes(*b"NTCPCAN1");
 pub const READABLE: u32 = 1;
 pub const WRITABLE: u32 = 2;
 pub const PEER_CLOSED: u32 = 4;
