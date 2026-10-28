@@ -15,6 +15,13 @@ enum Value {
     Tls { index: u32, kind: u32, addend: u64 },
 }
 impl Value {
+    fn width(self) -> u64 {
+        if matches!(self, Self::Tls { kind: 36, .. }) {
+            16
+        } else {
+            8
+        }
+    }
     fn at(self, bias: u64) -> Result<u64, Error> {
         Ok(match self {
             Self::Relative(value) => bias.wrapping_add(value),
@@ -260,17 +267,21 @@ impl<'a> Pie<'a> {
         result.tls_template(0)?;
         let mut seen = 0usize;
         let mut highest_end = 0;
-        result.relocations(|target, _| {
-            let end = add(target, 8)?;
-            if !(0..count).any(|n| result.segment(n).is_ok_and(|s| s.contains(target, 8))) {
+        result.relocations(|target, value| {
+            let end = add(target, value.width())?;
+            if !(0..count).any(|n| {
+                result
+                    .segment(n)
+                    .is_ok_and(|s| s.contains(target, value.width()))
+            }) {
                 return Err(Error::Invalid);
             }
             // Linkers normally emit sorted targets. Validate these in one pass;
             // unsorted tables are allowed but must still have disjoint writes.
             if target < highest_end {
                 let mut index = 0;
-                result.relocations(|old, _| {
-                    if index < seen && target < add(old, 8)? && old < end {
+                result.relocations(|old, value| {
+                    if index < seen && target < add(old, value.width())? && old < end {
                         return Err(Error::Invalid);
                     }
                     index += 1;
@@ -537,7 +548,7 @@ impl<'a> Pie<'a> {
                     addend: if kind == 1 { addend } else { 0 },
                 }
             }
-            16..=18 if self.linkable => {
+            16..=18 | 36 if self.linkable => {
                 if symbol == 0 {
                     self.tls_template(0)?.ok_or(Error::Invalid)?;
                 } else {
@@ -762,20 +773,24 @@ impl<'a> Pie<'a> {
         self.has_runtime_marker(b"__mochios_static_tls_v1")
     }
     fn has_runtime_marker(&self, name: &[u8]) -> Result<bool, Error> {
+        Ok(self.runtime_function(name)?.is_some())
+    }
+    fn runtime_function(&self, name: &[u8]) -> Result<Option<u64>, Error> {
         let Some(table) = &self.symbols else {
-            return Ok(false);
+            return Ok(None);
         };
         let Some(symbol) = table.find(name)? else {
-            return Ok(false);
+            return Ok(None);
         };
         let Some(symbols::Definition::Image { value, .. }) = symbol.definition else {
-            return Ok(false);
+            return Ok(None);
         };
-        Ok(symbol.binding == 1
+        Ok((symbol.binding == 1
             && (0..self.count).any(|index| {
                 self.segment(index)
                     .is_ok_and(|segment| segment.flags & 1 != 0 && segment.contains(value, 1))
             }))
+        .then_some(value))
     }
     /// Template addresses refer to the prepared child at `bias`. .tbss need
     /// not lie inside a LOAD; only initialized bytes need file-backed storage.
@@ -804,9 +819,9 @@ impl<'a> Pie<'a> {
     }
     fn materialized(&self, s: Segment) -> Result<u64, Error> {
         let mut length = s.file;
-        self.relocations(|target, _| {
-            if s.contains(target, 8) {
-                length = length.max(add(target - s.address, 8)?);
+        self.relocations(|target, value| {
+            if s.contains(target, value.width()) {
+                length = length.max(add(target - s.address, value.width())?);
             }
             Ok(())
         })?;
@@ -852,23 +867,29 @@ impl<'a> Pie<'a> {
     /// read-only LOAD owns its program headers, independent of source offsets.
     pub fn write(&self, bias: u64, output: &mut [u8]) -> Result<usize, Error> {
         self.dependencies(|_| Err(Error::Unsupported))?;
-        self.write_resolved(bias, output, |index, kind| {
-            if kind != 0 {
-                return Err(Error::Unsupported);
-            }
-            let definition = self
-                .symbols
-                .as_ref()
-                .ok_or(Error::Unsupported)?
-                .definition(index)?;
-            self.definition_value(definition)?.at(bias)
-        })
+        self.write_resolved(
+            bias,
+            output,
+            |index, kind| {
+                if kind != 0 {
+                    return Err(Error::Unsupported);
+                }
+                let definition = self
+                    .symbols
+                    .as_ref()
+                    .ok_or(Error::Unsupported)?
+                    .definition(index)?;
+                self.definition_value(definition)?.at(bias)
+            },
+            |_, _| Err(Error::Unsupported),
+        )
     }
     fn write_resolved(
         &self,
         bias: u64,
         output: &mut [u8],
         mut resolve: impl FnMut(u32, u32) -> Result<u64, Error>,
+        mut descriptor: impl FnMut(u32, u64) -> Result<(u64, u64), Error>,
     ) -> Result<usize, Error> {
         if bias % self.alignment() != 0 {
             return Err(Error::Invalid);
@@ -962,7 +983,19 @@ impl<'a> Pie<'a> {
             // for every individual word in a dense RELR bitmap.
             let destination = self.load_offset(j)?;
             self.relocations(|target, value| {
-                if s.contains(target, 8) {
+                if s.contains(target, value.width()) {
+                    let offset = add(destination, target - s.address)? as usize;
+                    if let Value::Tls {
+                        index,
+                        kind: 36,
+                        addend,
+                    } = value
+                    {
+                        let (function, argument) = descriptor(index, addend)?;
+                        output[offset..offset + 8].copy_from_slice(&function.to_le_bytes());
+                        output[offset + 8..offset + 16].copy_from_slice(&argument.to_le_bytes());
+                        return Ok(());
+                    }
                     // ELF64 B + A is modular data, not an authorized range.
                     let value = match value {
                         Value::Symbol { index, addend } => resolve(index, 0)?.wrapping_add(addend),
@@ -973,7 +1006,6 @@ impl<'a> Pie<'a> {
                         } => resolve(index, kind)?.wrapping_add(addend),
                         value => value.at(bias)?,
                     };
-                    let offset = add(destination, target - s.address)? as usize;
                     output[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
                 }
                 Ok(())

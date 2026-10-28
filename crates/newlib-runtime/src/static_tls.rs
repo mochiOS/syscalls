@@ -7,6 +7,8 @@ use mochios_posix_client::static_tls::{
     self as policy,
     modules::{InitializeError, Plan},
 };
+#[path = "tlsdesc.rs"]
+mod tlsdesc;
 
 fn image() -> Result<Option<policy::Template>, c_int> {
     let Some(vector) = auxiliary::vector() else {
@@ -52,6 +54,7 @@ impl Drop for Mapping {
 /// Prepare before native ThreadCreate, including all AS-limit admission and
 /// fallible copies. The child never starts with an uninitialized template.
 pub(super) fn allocate(control: &ThreadControl) -> Result<(), c_int> {
+    tlsdesc::retain();
     core::hint::black_box(__mochios_static_tls_v1 as extern "C" fn() -> u64);
     core::hint::black_box(
         __tls_get_addr as unsafe extern "C" fn(*const TlsIndex) -> *mut core::ffi::c_void,

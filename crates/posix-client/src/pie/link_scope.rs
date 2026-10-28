@@ -160,16 +160,36 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             _ => Err(Error::Unsupported),
         }
     }
+    fn descriptor(&self, origin: usize, index: u32, addend: u64) -> Result<(u64, u64), Error> {
+        let missing = index != 0 && self.definition(origin, index)?.is_none();
+        let name = if missing {
+            b"__mochios_tlsdesc_weak".as_slice()
+        } else {
+            b"__mochios_tlsdesc_static".as_slice()
+        };
+        let root = &self.objects[0];
+        let function = root
+            .image
+            .runtime_function(name)?
+            .ok_or(Error::Unsupported)?;
+        let argument = if missing {
+            addend
+        } else {
+            self.resolve(origin, index, 18)?.wrapping_add(addend)
+        };
+        Ok((add(root.bias, function)?, argument))
+    }
 
     /// Prepare one object using the complete scope. The caller must install
     /// all members together; this does not itself map or execute any member.
     pub fn write(&self, index: usize, output: &mut [u8]) -> Result<usize, Error> {
         let object = self.objects.get(index).ok_or(Error::Invalid)?;
-        object
-            .image
-            .write_resolved(object.bias, output, |symbol, kind| {
-                self.resolve(index, symbol, kind)
-            })
+        object.image.write_resolved(
+            object.bias,
+            output,
+            |symbol, kind| self.resolve(index, symbol, kind),
+            |symbol, addend| self.descriptor(index, symbol, addend),
+        )
     }
 }
 
