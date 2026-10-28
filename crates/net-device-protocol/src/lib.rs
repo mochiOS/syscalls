@@ -4,6 +4,7 @@ use core::fmt;
 
 pub mod datagram;
 pub mod datagram_authority;
+pub mod stream;
 mod http;
 mod tls;
 
