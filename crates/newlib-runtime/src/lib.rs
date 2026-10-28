@@ -77,6 +77,7 @@ mod pty_master;
 mod vector_metadata;
 use vector_metadata::VectorMetadata;
 mod image_startup;
+mod image_lifecycle;
 mod handle_capture;
 mod fork_policy;
 mod resource_policy;
@@ -2004,15 +2005,6 @@ unsafe fn parse_stack(sp: *const usize) -> StackView {
     }
 }
 
-unsafe fn call_init_array(start: *const InitFn, end: *const InitFn) {
-    let mut current = start;
-    while current < end {
-        let init = unsafe { current.read() };
-        unsafe { init() };
-        current = unsafe { current.add(1) };
-    }
-}
-
 unsafe fn c_strlen(mut ptr_value: *const c_char) -> usize {
     let mut len = 0usize;
     while unsafe { ptr_value.read() } != 0 {
@@ -2590,7 +2582,7 @@ fn attach_fd_launch_context(
 
 extern "C" fn run_fini_array() {
     unsafe {
-        call_init_array(
+        image_lifecycle::finalize(
             ptr::addr_of!(__fini_array_start),
             ptr::addr_of!(__fini_array_end),
         );
@@ -4286,13 +4278,13 @@ pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
     }
     unsafe { __sinit(_impure_ptr) };
     unsafe {
-        call_init_array(
+        image_lifecycle::initialize(
             ptr::addr_of!(__preinit_array_start),
             ptr::addr_of!(__preinit_array_end),
         )
     };
     unsafe {
-        call_init_array(
+        image_lifecycle::initialize(
             ptr::addr_of!(__init_array_start),
             ptr::addr_of!(__init_array_end),
         )
