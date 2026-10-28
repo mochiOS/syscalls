@@ -159,6 +159,7 @@ impl<'a> Table<'a> {
             visibility: entry[5],
             definition,
             is_tls: kind == 6,
+            kind,
             version: self.versions.at(index)?,
         })
     }
@@ -169,6 +170,29 @@ impl<'a> Table<'a> {
             .definition
             .or_else(|| (entry.binding == 2).then_some(Definition::Absolute(0)))
             .ok_or(Error::Unsupported)
+    }
+
+    pub(super) fn validate_imported_definitions(
+        &self,
+        mut copied: impl FnMut(u64, u64) -> Result<bool, Error>,
+    ) -> Result<(), Error> {
+        for (index, raw) in self.entries.chunks_exact(24).enumerate() {
+            if u16_at(raw, 6)? != 0
+                && matches!(
+                    self.versions.at(index as u32)?,
+                    Version::Named { imported: true, .. }
+                )
+            {
+                let entry = self.entry(index as u32)?;
+                let Some(Definition::Image { value, size }) = entry.definition else {
+                    return Err(Error::Invalid);
+                };
+                if !matches!(entry.kind, 0 | 1) || !copied(value, size)? {
+                    return Err(Error::Invalid);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn matching(
@@ -330,6 +354,7 @@ pub(super) struct Entry<'a> {
     pub visibility: u8,
     pub definition: Option<Definition>,
     pub is_tls: bool,
+    pub kind: u8,
     pub version: Version<'a>,
 }
 

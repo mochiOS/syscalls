@@ -28,6 +28,9 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             return Err(Error::BufferTooSmall);
         }
         for (index, object) in objects.iter().enumerate() {
+            if index != 0 && object.image.has_copies()? {
+                return Err(Error::Invalid);
+            }
             if object.image.is_fixed() && (index != 0 || object.bias != 0) {
                 return Err(Error::Invalid);
             }
@@ -98,10 +101,17 @@ impl<'scope, 'image> Scope<'scope, 'image> {
                 })?;
             }
         }
-        Ok(Self {
+        let scope = Self {
             objects,
             order: &scratch[..length],
-        })
+        };
+        objects[0].image.relocations(|_, value| {
+            if let super::Value::Copy { index, .. } = value {
+                scope.copy_source(index)?;
+            }
+            Ok(())
+        })?;
+        Ok(scope)
     }
 
     pub fn order(&self) -> &[usize] {
@@ -209,6 +219,64 @@ impl<'scope, 'image> Scope<'scope, 'image> {
         Ok((add(root.bias, function)?, argument))
     }
 
+    fn copy_source(&self, index: u32) -> Result<Option<(usize, u64, u64)>, Error> {
+        let root = self.objects[0]
+            .image
+            .symbols
+            .as_ref()
+            .ok_or(Error::Invalid)?;
+        let reference = root.entry(index)?;
+        let Some(super::symbols::Definition::Image {
+            size: destination_size,
+            ..
+        }) = reference.definition
+        else {
+            return Err(Error::Invalid);
+        };
+        // COPY locates the external initializer, while all ordinary references
+        // still resolve to the root's canonical destination.
+        for &candidate in &self.order[1..] {
+            if let Some(table) = &self.objects[candidate].image.symbols {
+                if let Some(symbol) = table.find_versioned(reference.name, reference.version)? {
+                    let Some(super::symbols::Definition::Image { value, size }) = symbol.definition
+                    else {
+                        return Err(Error::Invalid);
+                    };
+                    if !matches!(symbol.kind, 0 | 1) || symbol.visibility != 0 {
+                        return Err(Error::Unsupported);
+                    }
+                    self.objects[candidate]
+                        .image
+                        .definition_value(super::symbols::Definition::Image { value, size })?;
+                    return Ok(Some((candidate, value, size.min(destination_size))));
+                }
+            }
+        }
+        if reference.binding == 2 {
+            Ok(None)
+        } else {
+            Err(Error::Unsupported)
+        }
+    }
+
+    fn copy(&self, origin: usize, index: u32, output: &mut [u8]) -> Result<(), Error> {
+        if origin != 0 {
+            return Err(Error::Invalid);
+        }
+        let Some((provider, address, length)) = self.copy_source(index)? else {
+            return Ok(());
+        };
+        let object = &self.objects[provider];
+        let length = usize::try_from(length).map_err(|_| Error::Overflow)?;
+        object.image.read_relocated(
+            address,
+            output.get_mut(..length).ok_or(Error::BufferTooSmall)?,
+            object.bias,
+            |symbol, kind| self.resolve(provider, symbol, kind),
+            |symbol, addend| self.descriptor(provider, symbol, addend),
+        )
+    }
+
     /// Prepare one object using the complete scope. The caller must install
     /// all members together; this does not itself map or execute any member.
     pub fn write(&self, index: usize, output: &mut [u8]) -> Result<usize, Error> {
@@ -218,6 +286,7 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             output,
             |symbol, kind| self.resolve(index, symbol, kind),
             |symbol, addend| self.descriptor(index, symbol, addend),
+            |symbol, output| self.copy(index, symbol, output),
         )
     }
 }

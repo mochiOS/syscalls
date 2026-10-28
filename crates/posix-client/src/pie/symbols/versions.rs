@@ -24,6 +24,7 @@ pub(in super::super) enum Version<'a> {
         index: u16,
         hidden: bool,
         strict: bool,
+        imported: bool,
     },
 }
 
@@ -226,8 +227,7 @@ impl<'a> Versions<'a> {
                     return Err(Error::Invalid);
                 }
                 let has_definition = u16_at(entries, index * 24 + 6)? != 0;
-                if has_definition != (defined[slot] & mask != 0) {
-                    // COPY symbols require a separate relocation policy.
+                if !has_definition && defined[slot] & mask != 0 {
                     return Err(Error::Unsupported);
                 }
             }
@@ -255,6 +255,7 @@ impl<'a> Versions<'a> {
                                 index: id,
                                 hidden: raw & 0x8000 != 0,
                                 strict: node.strict,
+                                imported: node.file.is_some(),
                             });
                         }
                         Ok(())

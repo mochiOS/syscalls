@@ -3,6 +3,7 @@
 //! Explicit captured object sets can use link_scope for inter-object binding.
 //! Standalone exec rejects dependencies, interpreters and resolver execution;
 //! acquiring, mapping and initializing a complete object set remains user-space policy.
+mod copy;
 mod lifecycle;
 pub mod link_scope;
 mod symbols;
@@ -13,21 +14,54 @@ enum Value {
     Absolute(u64),
     Symbol { index: u32, addend: u64 },
     Tls { index: u32, kind: u32, addend: u64 },
+    Copy { index: u32, size: u64 },
 }
 impl Value {
     fn width(self) -> u64 {
-        if matches!(self, Self::Tls { kind: 36, .. }) {
-            16
-        } else {
-            8
+        match self {
+            Self::Copy { size, .. } => size,
+            Self::Tls { kind: 36, .. } => 16,
+            _ => 8,
         }
     }
     fn at(self, bias: u64) -> Result<u64, Error> {
         Ok(match self {
             Self::Relative(value) => bias.wrapping_add(value),
             Self::Absolute(value) => value,
-            Self::Symbol { .. } | Self::Tls { .. } => return Err(Error::Unsupported),
+            Self::Symbol { .. } | Self::Tls { .. } | Self::Copy { .. } => {
+                return Err(Error::Unsupported);
+            }
         })
+    }
+    fn encode(
+        self,
+        bias: u64,
+        resolve: &mut impl FnMut(u32, u32) -> Result<u64, Error>,
+        descriptor: &mut impl FnMut(u32, u64) -> Result<(u64, u64), Error>,
+    ) -> Result<([u8; 16], usize), Error> {
+        let mut bytes = [0; 16];
+        let value = match self {
+            Self::Copy { .. } => return Err(Error::Unsupported),
+            Self::Tls {
+                index,
+                kind: 36,
+                addend,
+            } => {
+                let (function, argument) = descriptor(index, addend)?;
+                bytes[..8].copy_from_slice(&function.to_le_bytes());
+                bytes[8..].copy_from_slice(&argument.to_le_bytes());
+                return Ok((bytes, 16));
+            }
+            Self::Symbol { index, addend } => resolve(index, 0)?.wrapping_add(addend),
+            Self::Tls {
+                index,
+                kind,
+                addend,
+            } => resolve(index, kind)?.wrapping_add(addend),
+            value => value.at(bias)?,
+        };
+        bytes[..8].copy_from_slice(&value.to_le_bytes());
+        Ok((bytes, 8))
     }
 }
 
@@ -276,12 +310,20 @@ impl<'a> Pie<'a> {
             }) {
                 return Err(Error::Invalid);
             }
+            if value.width() == 0 {
+                seen += 1;
+                return Ok(());
+            }
             // Linkers normally emit sorted targets. Validate these in one pass;
             // unsorted tables are allowed but must still have disjoint writes.
             if target < highest_end {
                 let mut index = 0;
                 result.relocations(|old, value| {
-                    if index < seen && target < add(old, value.width())? && old < end {
+                    if index < seen
+                        && value.width() != 0
+                        && target < add(old, value.width())?
+                        && old < end
+                    {
                         return Err(Error::Invalid);
                     }
                     index += 1;
@@ -292,6 +334,18 @@ impl<'a> Pie<'a> {
             seen += 1;
             Ok(())
         })?;
+        if let Some(table) = &result.symbols {
+            table.validate_imported_definitions(|address, size| {
+                let mut covered = false;
+                result.relocations(|target, value| {
+                    if let Value::Copy { size: length, .. } = value {
+                        covered |= address >= target && add(address, size)? <= add(target, length)?;
+                    }
+                    Ok(())
+                })?;
+                Ok(covered)
+            })?;
+        }
         Ok(result)
     }
     fn segment(&self, index: usize) -> Result<Segment, Error> {
@@ -546,6 +600,31 @@ impl<'a> Pie<'a> {
         let value = match kind {
             0 => return Ok((target, None)),
             8 if symbol == 0 => Value::Relative(addend),
+            5 if self.linkable => {
+                let reference = self.symbols.as_ref().ok_or(Error::Invalid)?.entry(symbol)?;
+                let symbols::Definition::Image { value, size } =
+                    reference.definition.ok_or(Error::Invalid)?
+                else {
+                    return Err(Error::Invalid);
+                };
+                if !matches!(reference.kind, 0 | 1)
+                    || reference.binding == 0
+                    || reference.visibility != 0
+                    || reference.name.is_empty()
+                    || value != target
+                    || !(0..self.count).any(|index| {
+                        self.segment(index).is_ok_and(|segment| {
+                            segment.flags & 2 != 0 && segment.contains(target, size)
+                        })
+                    })
+                {
+                    return Err(Error::Invalid);
+                }
+                Value::Copy {
+                    index: symbol,
+                    size,
+                }
+            }
             1 | 6 | 7 => {
                 let table = self.symbols.as_ref().ok_or(Error::Unsupported)?;
                 let reference = table.entry(symbol)?;
@@ -916,6 +995,7 @@ impl<'a> Pie<'a> {
                 self.definition_value(definition)?.at(bias)
             },
             |_, _| Err(Error::Unsupported),
+            |_, _| Err(Error::Unsupported),
         )
     }
     fn write_resolved(
@@ -924,6 +1004,7 @@ impl<'a> Pie<'a> {
         output: &mut [u8],
         mut resolve: impl FnMut(u32, u32) -> Result<u64, Error>,
         mut descriptor: impl FnMut(u32, u64) -> Result<(u64, u64), Error>,
+        mut copy: impl FnMut(u32, &mut [u8]) -> Result<(), Error>,
     ) -> Result<usize, Error> {
         if bias % self.alignment() != 0 {
             return Err(Error::Invalid);
@@ -1019,28 +1100,17 @@ impl<'a> Pie<'a> {
             self.relocations(|target, value| {
                 if s.contains(target, value.width()) {
                     let offset = add(destination, target - s.address)? as usize;
-                    if let Value::Tls {
-                        index,
-                        kind: 36,
-                        addend,
-                    } = value
-                    {
-                        let (function, argument) = descriptor(index, addend)?;
-                        output[offset..offset + 8].copy_from_slice(&function.to_le_bytes());
-                        output[offset + 8..offset + 16].copy_from_slice(&argument.to_le_bytes());
+                    if let Value::Copy { index, size } = value {
+                        let end = usize::try_from(add(offset as u64, size)?)
+                            .map_err(|_| Error::Overflow)?;
+                        copy(
+                            index,
+                            output.get_mut(offset..end).ok_or(Error::BufferTooSmall)?,
+                        )?;
                         return Ok(());
                     }
-                    // ELF64 B + A is modular data, not an authorized range.
-                    let value = match value {
-                        Value::Symbol { index, addend } => resolve(index, 0)?.wrapping_add(addend),
-                        Value::Tls {
-                            index,
-                            kind,
-                            addend,
-                        } => resolve(index, kind)?.wrapping_add(addend),
-                        value => value.at(bias)?,
-                    };
-                    output[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+                    let (bytes, length) = value.encode(bias, &mut resolve, &mut descriptor)?;
+                    output[offset..offset + length].copy_from_slice(&bytes[..length]);
                 }
                 Ok(())
             })?;
