@@ -23,6 +23,7 @@ impl<'a> Table<'a> {
     pub(super) fn parse(
         tags: [Option<u64>; 6],
         version_tags: [Option<u64>; 5],
+        required_symbols: u64,
         read: impl Fn(u64, u64) -> Result<&'a [u8], Error>,
     ) -> Result<Self, Error> {
         let [hash, strings, entries, string_size, entry_size, gnu_hash] = tags;
@@ -82,7 +83,13 @@ impl<'a> Table<'a> {
                     }
                 }
             }
-            if count.is_some_and(|count| count != end) {
+            if count.is_some_and(|count| {
+                if highest == 0 {
+                    first > count
+                } else {
+                    count != end
+                }
+            }) {
                 return Err(Error::Invalid);
             }
             let chain_address = add(address, prefix.len() as u64)?;
@@ -95,9 +102,19 @@ impl<'a> Table<'a> {
                 chains,
                 first: first as u32,
             });
-            count = Some(end);
+            // An empty GNU hash has no hashed suffix. Some linkers use
+            // symoffset=1 even when imports follow the null symbol. Retain
+            // an exact SysV count, or capture the prefix addressed by RELA.
+            count = Some(if highest == 0 {
+                count.unwrap_or(first.max(required_symbols))
+            } else {
+                end
+            });
         }
         let count = count.ok_or(Error::Unsupported)?;
+        if count < required_symbols {
+            return Err(Error::Invalid);
+        }
         let entries = read(
             entries.ok_or(Error::Invalid)?,
             count.checked_mul(24).ok_or(Error::Overflow)?,

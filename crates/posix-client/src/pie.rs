@@ -487,21 +487,6 @@ impl<'a> Pie<'a> {
         if !terminated {
             return Err(Error::Invalid);
         }
-        if symbol_tags.iter().any(Option::is_some) {
-            self.symbols = Some(symbols::Table::parse(
-                symbol_tags,
-                version_tags,
-                |address, length| Ok(&self.bytes[self.file_range(address, length)?]),
-            )?);
-            if !self.linkable {
-                self.symbols
-                    .as_ref()
-                    .ok_or(Error::Invalid)?
-                    .requirements(|_, _, _, _| Err(Error::Unsupported))?;
-            }
-        } else if version_tags.iter().any(Option::is_some) {
-            return Err(Error::Invalid);
-        }
         let size = size.unwrap_or(0);
         if size != 0 {
             if size % 24 != 0 || entry != Some(24) {
@@ -531,6 +516,36 @@ impl<'a> Pie<'a> {
             let range = self.file_range(relr.ok_or(Error::Invalid)?, size)?;
             self.relr_offset = range.start;
             self.relr_count = range.len() / 8;
+        }
+        if symbol_tags.iter().any(Option::is_some) {
+            let mut required_symbols = 1;
+            // Validate the complete RELA/PLT extents before deriving a symbol
+            // prefix. RELR has no symbol indices; R_NONE addresses no symbol.
+            for (offset, count) in [
+                (self.rela_offset, self.rela_count),
+                (self.plt_offset, self.plt_count),
+            ] {
+                for index in 0..count {
+                    let info = u64_at(self.bytes, offset + index * 24 + 8)?;
+                    if info as u32 != 0 {
+                        required_symbols = required_symbols.max((info >> 32) + 1);
+                    }
+                }
+            }
+            self.symbols = Some(symbols::Table::parse(
+                symbol_tags,
+                version_tags,
+                required_symbols,
+                |address, length| Ok(&self.bytes[self.file_range(address, length)?]),
+            )?);
+            if !self.linkable {
+                self.symbols
+                    .as_ref()
+                    .ok_or(Error::Invalid)?
+                    .requirements(|_, _, _, _| Err(Error::Unsupported))?;
+            }
+        } else if version_tags.iter().any(Option::is_some) {
+            return Err(Error::Invalid);
         }
         Ok(())
     }
