@@ -1,12 +1,14 @@
-use alloc::collections::VecDeque;
-use alloc::string::{String, ToString};
+use alloc::string::String;
+
+#[path = "dns/records.rs"]
+mod records;
+pub use records::*;
 
 pub const DNS_PORT: u16 = 53;
 pub const DNS_MAX_MESSAGE_LEN: usize = 512;
 pub const DNS_MAX_NAME_LEN: usize = 253;
 pub const DNS_MAX_LABEL_LEN: usize = 63;
 const DNS_HEADER_LEN: usize = 12;
-const DNS_MAX_POINTERS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DnsResponseCode {
@@ -38,6 +40,11 @@ pub enum DnsError {
     InvalidRecordLength,
     PointerOutOfBounds,
     PointerLoop,
+    InvalidPointer,
+    TruncatedResponse,
+    AliasLoop,
+    AliasDepth,
+    ConflictingAlias,
     CacheCapacity,
     Timeout,
     RetryLimit,
@@ -48,6 +55,7 @@ pub struct DnsName(String);
 
 impl DnsName {
     pub fn parse(input: &str) -> Result<Self, DnsError> {
+        let input = input.strip_suffix('.').unwrap_or(input);
         if input.is_empty() {
             return Err(DnsError::EmptyName);
         }
@@ -134,28 +142,12 @@ pub fn encode_dns_query(
     name: &DnsName,
     out: &mut [u8],
 ) -> Result<usize, DnsError> {
-    if out.len() < DNS_HEADER_LEN {
-        return Err(DnsError::BufferTooSmall);
-    }
-    out[..DNS_HEADER_LEN].fill(0);
-    out[0..2].copy_from_slice(&transaction_id.to_be_bytes());
-    out[2..4].copy_from_slice(&0x0100u16.to_be_bytes());
-    out[4..6].copy_from_slice(&1u16.to_be_bytes());
-    let name_length = name.encode(&mut out[DNS_HEADER_LEN..])?;
-    let length = DNS_HEADER_LEN
-        .checked_add(name_length)
-        .and_then(|value| value.checked_add(4))
-        .ok_or(DnsError::MessageTooLarge)?;
-    if length > DNS_MAX_MESSAGE_LEN {
-        return Err(DnsError::MessageTooLarge);
-    }
-    if out.len() < length {
-        return Err(DnsError::BufferTooSmall);
-    }
-    let question = DNS_HEADER_LEN + name_length;
-    out[question..question + 2].copy_from_slice(&1u16.to_be_bytes());
-    out[question + 2..question + 4].copy_from_slice(&1u16.to_be_bytes());
-    Ok(length)
+    encode_dns_record_query(
+        transaction_id,
+        &DnsRecordName::from(name),
+        DnsRecordType::A,
+        out,
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,80 +164,19 @@ pub fn decode_dns_response(
     if packet.len() > DNS_MAX_MESSAGE_LEN {
         return Err(DnsError::MessageTooLarge);
     }
-    if packet.len() < DNS_HEADER_LEN {
-        return Err(DnsError::Truncated);
+    let records = decode_dns_records(
+        packet,
+        transaction_id,
+        &DnsRecordName::from(expected_name),
+        DnsRecordType::A,
+    )?;
+    match records.values().first() {
+        Some(DnsRecordValue::Ipv4(address)) => Ok(DnsAnswer {
+            address: *address,
+            ttl_seconds: records.ttl_seconds(),
+        }),
+        _ => Err(DnsError::UnsupportedRecord),
     }
-    if read_u16(packet, 0)? != transaction_id {
-        return Err(DnsError::TransactionMismatch);
-    }
-    let flags = read_u16(packet, 2)?;
-    if flags & 0x8000 == 0 || flags & 0x7800 != 0 || flags & 0x0200 != 0 {
-        return Err(DnsError::InvalidHeader);
-    }
-    let response_code = decode_response_code((flags & 0x000f) as u8)?;
-    if response_code != DnsResponseCode::NoError {
-        return Err(DnsError::Response(response_code));
-    }
-    if read_u16(packet, 4)? != 1 {
-        return Err(DnsError::QuestionMismatch);
-    }
-    let answer_count = read_u16(packet, 6)?;
-    if answer_count == 0 {
-        return Err(DnsError::UnsupportedRecord);
-    }
-    let authority_count = read_u16(packet, 8)?;
-    let additional_count = read_u16(packet, 10)?;
-    let (question_name, mut offset) = decode_name(packet, DNS_HEADER_LEN)?;
-    if question_name != expected_name.as_str() {
-        return Err(DnsError::QuestionMismatch);
-    }
-    let question_type = read_u16(packet, offset)?;
-    let question_class = read_u16(packet, offset + 2)?;
-    offset = offset.checked_add(4).ok_or(DnsError::Truncated)?;
-    if question_type != 1 || question_class != 1 {
-        return Err(DnsError::QuestionMismatch);
-    }
-    let record_count = usize::from(answer_count)
-        .checked_add(usize::from(authority_count))
-        .and_then(|count| count.checked_add(usize::from(additional_count)))
-        .ok_or(DnsError::MessageTooLarge)?;
-    let mut answer = None;
-    for index in 0..record_count {
-        let (record_name, next) = decode_name(packet, offset)?;
-        let record_type = read_u16(packet, next)?;
-        let class = read_u16(packet, next + 2)?;
-        let ttl = read_u32(packet, next + 4)?;
-        let data_length = usize::from(read_u16(packet, next + 8)?);
-        let data = next.checked_add(10).ok_or(DnsError::Truncated)?;
-        let end = data.checked_add(data_length).ok_or(DnsError::Truncated)?;
-        if end > packet.len() {
-            return Err(DnsError::Truncated);
-        }
-        if record_type == 1 && class == 1 {
-            if data_length != 4 {
-                return Err(DnsError::InvalidRecordLength);
-            }
-            if index < usize::from(answer_count)
-                && record_name == expected_name.as_str()
-                && answer.is_none()
-            {
-                answer = Some(DnsAnswer {
-                    address: [
-                        packet[data],
-                        packet[data + 1],
-                        packet[data + 2],
-                        packet[data + 3],
-                    ],
-                    ttl_seconds: ttl,
-                });
-            }
-        }
-        offset = end;
-    }
-    if offset != packet.len() {
-        return Err(DnsError::InvalidHeader);
-    }
-    answer.ok_or(DnsError::UnsupportedRecord)
 }
 
 fn decode_response_code(code: u8) -> Result<DnsResponseCode, DnsError> {
@@ -260,69 +191,6 @@ fn decode_response_code(code: u8) -> Result<DnsResponseCode, DnsError> {
     })
 }
 
-fn decode_name(packet: &[u8], start: usize) -> Result<(String, usize), DnsError> {
-    let mut name = String::new();
-    let mut offset = start;
-    let mut next_offset = None;
-    let mut pointers = [usize::MAX; DNS_MAX_POINTERS];
-    let mut pointer_count = 0usize;
-    loop {
-        let length = *packet.get(offset).ok_or(DnsError::Truncated)?;
-        if length & 0xc0 == 0xc0 {
-            let low = *packet.get(offset + 1).ok_or(DnsError::Truncated)?;
-            let pointer = (usize::from(length & 0x3f) << 8) | usize::from(low);
-            if pointer >= packet.len() {
-                return Err(DnsError::PointerOutOfBounds);
-            }
-            if pointer_count >= DNS_MAX_POINTERS || pointers[..pointer_count].contains(&pointer) {
-                return Err(DnsError::PointerLoop);
-            }
-            pointers[pointer_count] = pointer;
-            pointer_count += 1;
-            if next_offset.is_none() {
-                next_offset = Some(offset + 2);
-            }
-            offset = pointer;
-            continue;
-        }
-        if length & 0xc0 != 0 {
-            return Err(DnsError::InvalidHeader);
-        }
-        offset += 1;
-        if length == 0 {
-            let consumed = next_offset.unwrap_or(offset);
-            if name.is_empty() || name.len() > DNS_MAX_NAME_LEN {
-                return Err(DnsError::InvalidHeader);
-            }
-            return Ok((name, consumed));
-        }
-        let length = usize::from(length);
-        if length > DNS_MAX_LABEL_LEN {
-            return Err(DnsError::LabelTooLong);
-        }
-        let end = offset.checked_add(length).ok_or(DnsError::Truncated)?;
-        let label = packet.get(offset..end).ok_or(DnsError::Truncated)?;
-        if label
-            .iter()
-            .any(|byte| !byte.is_ascii_alphanumeric() && *byte != b'-')
-            || label.first() == Some(&b'-')
-            || label.last() == Some(&b'-')
-        {
-            return Err(DnsError::InvalidCharacter);
-        }
-        if !name.is_empty() {
-            name.push('.');
-        }
-        if name.len().saturating_add(length) > DNS_MAX_NAME_LEN {
-            return Err(DnsError::NameTooLong);
-        }
-        for byte in label {
-            name.push(char::from(byte.to_ascii_lowercase()));
-        }
-        offset = end;
-    }
-}
-
 fn read_u16(packet: &[u8], offset: usize) -> Result<u16, DnsError> {
     let bytes = packet.get(offset..offset + 2).ok_or(DnsError::Truncated)?;
     Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
@@ -331,68 +199,6 @@ fn read_u16(packet: &[u8], offset: usize) -> Result<u16, DnsError> {
 fn read_u32(packet: &[u8], offset: usize) -> Result<u32, DnsError> {
     let bytes = packet.get(offset..offset + 4).ok_or(DnsError::Truncated)?;
     Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DnsCacheEntry {
-    pub hostname: String,
-    pub address: [u8; 4],
-    pub expires_at: u64,
-}
-
-pub struct DnsCache {
-    entries: VecDeque<DnsCacheEntry>,
-    capacity: usize,
-}
-
-impl DnsCache {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            entries: VecDeque::with_capacity(capacity),
-            capacity,
-        }
-    }
-
-    pub fn lookup(&mut self, name: &DnsName, now: u64) -> Option<[u8; 4]> {
-        self.entries.retain(|entry| entry.expires_at > now);
-        self.entries
-            .iter()
-            .find(|entry| entry.hostname == name.as_str())
-            .map(|entry| entry.address)
-    }
-
-    pub fn insert(
-        &mut self,
-        name: &DnsName,
-        address: [u8; 4],
-        ttl_seconds: u32,
-        now: u64,
-    ) -> Result<(), DnsError> {
-        self.entries.retain(|entry| entry.hostname != name.as_str());
-        if ttl_seconds == 0 {
-            return Ok(());
-        }
-        if self.capacity == 0 {
-            return Err(DnsError::CacheCapacity);
-        }
-        while self.entries.len() >= self.capacity {
-            self.entries.pop_front();
-        }
-        self.entries.push_back(DnsCacheEntry {
-            hostname: name.as_str().to_string(),
-            address,
-            expires_at: now.saturating_add(u64::from(ttl_seconds).saturating_mul(1_000)),
-        });
-        Ok(())
-    }
-
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
