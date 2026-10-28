@@ -2,6 +2,7 @@
 //! Plans describe relocated arrays; they do not call code or install mappings.
 use super::super::{Error, add, lifecycle::Array};
 use super::Scope;
+mod image;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {

@@ -663,6 +663,25 @@ impl<'a> Pie<'a> {
         }
         Ok(())
     }
+
+    /// Compatibility marker exported by a CRT which consumes lifecycle_image.
+    /// This is not executable authorization or an identity claim.
+    pub fn has_lifecycle_runtime(&self) -> Result<bool, Error> {
+        let Some(table) = &self.symbols else {
+            return Ok(false);
+        };
+        let Some(symbol) = table.find(b"__mochios_lifecycle_v1")? else {
+            return Ok(false);
+        };
+        let Some(symbols::Definition::Image { value, .. }) = symbol.definition else {
+            return Ok(false);
+        };
+        Ok(symbol.binding == 1
+            && (0..self.count).any(|index| {
+                self.segment(index)
+                    .is_ok_and(|segment| segment.flags & 1 != 0 && segment.contains(value, 1))
+            }))
+    }
     pub fn alignment(&self) -> u64 {
         (0..self.count)
             .filter_map(|i| self.segment(i).ok())

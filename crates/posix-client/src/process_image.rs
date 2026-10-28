@@ -24,6 +24,8 @@ pub const AT_INITIAL_HEAP: u64 = 0x6d00_0003;
 /// Bias of the program described by AT_PHDR. AT_BASE remains the interpreter's
 /// base. This userspace-owned entry is opaque data to the native kernel.
 pub const AT_IMAGE_LOAD_BIAS: u64 = 0x6d00_0004;
+/// Userspace lifecycle codec embedded in the initial stack; opaque to mnu.
+pub const AT_LIFECYCLE_IMAGE: u64 = 0x6d00_0005;
 pub const INITIAL_HEAP_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +155,7 @@ pub fn encode_initial_stack_for_image(
         Process {
             image,
             identity: Identity::default(),
+            lifecycle: &[],
         },
         output,
     )
@@ -195,9 +198,10 @@ impl Identity {
     }
 }
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Process {
+pub struct Process<'a> {
     pub image: Option<Executable>,
     pub identity: Identity,
+    pub lifecycle: &'a [u8],
 }
 
 pub fn encode_initial_stack_for_process(
@@ -206,13 +210,14 @@ pub fn encode_initial_stack_for_process(
     execfn: &[u8],
     random: [u8; 16],
     auxiliary: &[(u64, u64)],
-    process: Process,
+    process: Process<'_>,
     output: &mut [u8],
 ) -> Result<usize, EncodeError> {
     let image = process.image;
     for (index, &(key, _)) in auxiliary.iter().enumerate() {
         if key <= AT_EXECFN
             || key == AT_IMAGE_LOAD_BIAS
+            || key == AT_LIFECYCLE_IMAGE
             || auxiliary[..index].iter().any(|&(other, _)| other == key)
         {
             return Err(EncodeError::InvalidText);
@@ -235,6 +240,7 @@ pub fn encode_initial_stack_for_process(
             auxiliary
                 .len()
                 .checked_add(AUXILIARY_VECTOR_ENTRIES)
+                .and_then(|count| count.checked_add(usize::from(!process.lifecycle.is_empty())))
                 .and_then(|count| count.checked_mul(2))
                 .and_then(|count| value.checked_add(count))
         })
@@ -249,7 +255,18 @@ pub fn encode_initial_stack_for_process(
         .and_then(|value| value.checked_add(execfn.len()))
         .and_then(|value| value.checked_add(1))
         .ok_or(EncodeError::ImageTooLarge)?;
-    let stack_length = unaligned_length
+    let lifecycle_offset = unaligned_length
+        .checked_add(7)
+        .map(|value| value & !7)
+        .ok_or(EncodeError::ImageTooLarge)?;
+    let payload_length = if process.lifecycle.is_empty() {
+        unaligned_length
+    } else {
+        lifecycle_offset
+            .checked_add(process.lifecycle.len())
+            .ok_or(EncodeError::ImageTooLarge)?
+    };
+    let stack_length = payload_length
         .checked_add(15)
         .map(|value| value & !15)
         .ok_or(EncodeError::ImageTooLarge)?;
@@ -296,6 +313,10 @@ pub fn encode_initial_stack_for_process(
     stack[random_offset..random_offset + random.len()].copy_from_slice(&random);
     text_cursor += random.len();
     let execfn_offset = copy_text(&mut stack, &mut text_cursor, execfn)?;
+    if !process.lifecycle.is_empty() {
+        stack[lifecycle_offset..lifecycle_offset + process.lifecycle.len()]
+            .copy_from_slice(process.lifecycle);
+    }
 
     for (key, value, relocation) in [
         (AT_PHDR, 0, Some(RelocationKind::ElfProgramHeaders)),
@@ -323,6 +344,11 @@ pub fn encode_initial_stack_for_process(
     ]
     .into_iter()
     .filter(|&(key, _, _)| key != AT_NULL)
+    .chain((!process.lifecycle.is_empty()).then_some((
+        AT_LIFECYCLE_IMAGE,
+        lifecycle_offset as u64,
+        Some(RelocationKind::StackAddress),
+    )))
     .chain(auxiliary.iter().map(|&(key, value)| (key, value, None)))
     .chain(core::iter::once((AT_NULL, 0, None)))
     {

@@ -78,6 +78,7 @@ mod vector_metadata;
 use vector_metadata::VectorMetadata;
 mod image_startup;
 mod image_lifecycle;
+mod dynamic_lifecycle;
 mod handle_capture;
 mod fork_policy;
 mod resource_policy;
@@ -2581,6 +2582,11 @@ fn attach_fd_launch_context(
 }
 
 extern "C" fn run_fini_array() {
+    match dynamic_lifecycle::finalize() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => startup_failure(b"newlib: dynamic finalization failed: ", error),
+    }
     unsafe {
         image_lifecycle::finalize(
             ptr::addr_of!(__fini_array_start),
@@ -2647,7 +2653,9 @@ unsafe fn initialize_runtime(stack: StackView) {
         __env = stack.envp;
     }
 
-    let _ = unsafe { atexit(run_fini_array) };
+    if unsafe { atexit(run_fini_array) } != 0 {
+        startup_failure(b"newlib: finalizer registration failed: ", ENOMEM);
+    }
 }
 
 unsafe fn init_file_actions_list(value: *mut PosixSpawnFileActions) {
@@ -4236,6 +4244,7 @@ fn startup_failure(stage: &[u8], error: c_int) -> ! {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
+    core::hint::black_box(dynamic_lifecycle::__mochios_lifecycle_v1 as extern "C" fn() -> u64);
     let stack = unsafe { parse_stack(initial_sp) };
     if let Err(error) = resource_policy::adopt_initial(stack.resource_policy) {
         startup_failure(b"newlib: initial resource policy failed: ", error);
@@ -4277,18 +4286,22 @@ pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
         startup_failure(b"newlib: signal startup failed: ", error);
     }
     unsafe { __sinit(_impure_ptr) };
-    unsafe {
-        image_lifecycle::initialize(
-            ptr::addr_of!(__preinit_array_start),
-            ptr::addr_of!(__preinit_array_end),
-        )
-    };
-    unsafe {
-        image_lifecycle::initialize(
-            ptr::addr_of!(__init_array_start),
-            ptr::addr_of!(__init_array_end),
-        )
-    };
+    let dynamic = dynamic_lifecycle::initialize()
+        .unwrap_or_else(|error| startup_failure(b"newlib: dynamic initialization failed: ", error));
+    if !dynamic {
+        unsafe {
+            image_lifecycle::initialize(
+                ptr::addr_of!(__preinit_array_start),
+                ptr::addr_of!(__preinit_array_end),
+            )
+        };
+        unsafe {
+            image_lifecycle::initialize(
+                ptr::addr_of!(__init_array_start),
+                ptr::addr_of!(__init_array_end),
+            )
+        };
+    }
     let code = unsafe { main(stack.argc as c_int, stack.argv, stack.envp) };
     unsafe { exit(code) }
 }

@@ -75,6 +75,7 @@ pub(super) struct Dependencies {
     images: Buffer,
     objects: Buffer,
     order: Buffer,
+    lifecycle_order: Buffer,
 }
 impl Drop for Dependencies {
     fn drop(&mut self) {
@@ -313,8 +314,10 @@ impl Dependencies {
         &mut self,
         root: &[u8],
         output: &mut Buffer,
+        lifecycle: &mut Buffer,
         inputs: &exec_inputs::Inputs,
         identity: mochios_posix_client::process_image::Identity,
+        runtime: bool,
     ) -> Result<mochios_posix_client::process_image::Executable, c_int> {
         let path = inputs
             .environment(b"LD_LIBRARY_PATH")
@@ -347,7 +350,9 @@ impl Dependencies {
             };
             let source = unsafe { core::slice::from_raw_parts(source.as_ptr(), source.len()) };
             let image = Pie::parse_object(source).map_err(|_| ENOEXEC)?;
-            image.validate_direct_scope_startup().map_err(|_| ENOEXEC)?;
+            if !runtime {
+                image.validate_direct_scope_startup().map_err(|_| ENOEXEC)?;
+            }
             let paths = Paths::capture(source, image.search_paths().map_err(|_| ENOEXEC)?)?;
             if cursor == 0 {
                 root_paths = paths;
@@ -430,6 +435,24 @@ impl Dependencies {
         let bytes = unsafe { core::slice::from_raw_parts_mut(output.pointer, length) };
         if scope.write_bundle(bytes).map_err(|_| ENOEXEC)? != length {
             return Err(EIO);
+        }
+        let words = scope.lifecycle_scratch_len().map_err(|_| ENOEXEC)?;
+        let scratch = self.lifecycle_order.slots::<usize>(words)?;
+        let scratch = unsafe { core::slice::from_raw_parts_mut(scratch, words) };
+        let plan = scope.lifecycle(scratch).map_err(|_| ENOEXEC)?;
+        let plan_length = plan.encoded_length().map_err(|_| ENOEXEC)?;
+        if plan_length > mnu_abi::process_image::MAX_STACK_BYTES {
+            return Err(E2BIG);
+        }
+        if plan_length != 0 {
+            if !runtime {
+                return Err(ENOEXEC);
+            }
+            lifecycle.reserve(plan_length)?;
+            let payload =
+                unsafe { core::slice::from_raw_parts_mut(lifecycle.pointer, plan_length) };
+            plan.encode_prepared(bytes, payload).map_err(|_| ENOEXEC)?;
+            lifecycle.length = plan_length;
         }
         images[0].executable(objects[0].bias).map_err(|_| ENOEXEC)
     }

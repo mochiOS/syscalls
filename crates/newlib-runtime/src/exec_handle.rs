@@ -6,8 +6,7 @@ pub(super) fn with_startup(
     inputs: &exec_inputs::Inputs,
     execfn: &[u8],
     fds: &FdTable<FdObject>,
-    image: Option<mochios_posix_client::process_image::Executable>,
-    identity: mochios_posix_client::process_image::Identity,
+    process: mochios_posix_client::process_image::Process<'_>,
     operation: impl FnOnce(&[u8]) -> Result<(), c_int>,
 ) -> Result<(), c_int> {
     let mut arguments = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
@@ -20,7 +19,7 @@ pub(super) fn with_startup(
     }
     let mut retained = 0;
     for index in 0..environment_count {
-        if identity.allows_environment(environment[index]) {
+        if process.identity.allows_environment(environment[index]) {
             environment[retained] = environment[index];
             retained += 1;
         }
@@ -47,7 +46,7 @@ pub(super) fn with_startup(
                 execfn,
                 random,
                 &plan.auxiliary(),
-                mochios_posix_client::process_image::Process { image, identity },
+                process,
                 &mut startup,
             )
             .map_err(|error| match error {
@@ -158,15 +157,25 @@ fn replace_image(
             .session_info()
             .map_err(map_posix_client_error)?,
     );
-    exec_image::with_image(image, inputs, credentials, |image, auxiliary| {
-        with_startup(inputs, execfn, fds, auxiliary, credentials, |startup| {
-            let digest = digest(image)?;
-            authorize(image, identity, &digest)?;
-            match syscall::image::replace_bounded(image, identity, startup, ceiling) {
-                Ok(never) => match never {},
-                Err(error) => Err(mochios_posix_client::image_error::errno(error.raw())),
-            }
-        })
+    exec_image::with_image(image, inputs, credentials, |image, auxiliary, lifecycle| {
+        with_startup(
+            inputs,
+            execfn,
+            fds,
+            mochios_posix_client::process_image::Process {
+                image: auxiliary,
+                identity: credentials,
+                lifecycle,
+            },
+            |startup| {
+                let digest = digest(image)?;
+                authorize(image, identity, &digest)?;
+                match syscall::image::replace_bounded(image, identity, startup, ceiling) {
+                    Ok(never) => match never {},
+                    Err(error) => Err(mochios_posix_client::image_error::errno(error.raw())),
+                }
+            },
+        )
     })
 }
 

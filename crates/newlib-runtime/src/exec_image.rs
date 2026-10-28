@@ -67,6 +67,7 @@ struct Preparation {
     dependencies: dependencies::Dependencies,
     handle: u32,
     executable: Option<mochios_posix_client::process_image::Executable>,
+    lifecycle: Buffer,
 }
 impl Drop for Preparation {
     fn drop(&mut self) {
@@ -136,12 +137,16 @@ impl Preparation {
                 Ok(())
             })
             .map_err(|_| ENOEXEC)?;
-        let length = if dependent {
+        let runtime = candidate.has_lifecycle_runtime().map_err(|_| ENOEXEC)?;
+        let length = if dependent || (runtime && candidate.validate_direct_scope_startup().is_err())
+        {
             self.executable = Some(self.dependencies.build(
                 self.source.bytes(),
                 &mut self.output,
+                &mut self.lifecycle,
                 inputs,
                 identity,
+                runtime,
             )?);
             self.output.length
         } else {
@@ -221,16 +226,21 @@ pub(super) fn with_image(
     operation: impl FnOnce(
         u32,
         Option<mochios_posix_client::process_image::Executable>,
+        &[u8],
     ) -> Result<(), c_int>,
 ) -> Result<(), c_int> {
     if !is_pie(image)? {
-        return operation(image, None);
+        return operation(image, None, &[]);
     }
     io_resources::with(
         || Ok(Preparation::default()),
         |preparation| {
             preparation.build(image, inputs, identity)?;
-            operation(preparation.handle, preparation.executable)
+            operation(
+                preparation.handle,
+                preparation.executable,
+                preparation.lifecycle.bytes(),
+            )
         },
     )
 }
