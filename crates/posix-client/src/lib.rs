@@ -8,6 +8,7 @@ pub mod configuration;
 pub mod system_identity;
 mod path_limits;
 mod volume_status;
+mod read_scope;
 pub mod file_size_limit;
 pub mod file_admission;
 pub mod fifo;
@@ -2178,6 +2179,9 @@ impl<T: ObjectTransport> Client<T> {
                 | protocol::OP_VOLUME_STATUS_AT
                 | protocol::OP_VOLUME_STATUS_HANDLE
                 | protocol::OP_CHECK_EXECUTABLE
+                | protocol::read_scope::OP_CREATE
+                | protocol::read_scope::OP_INFO
+                | protocol::read_scope::OP_OPEN
         ) && header.flags != 0
         {
             return Err(ClientError::MismatchedResponse);
