@@ -272,6 +272,36 @@ pub struct PackageFile {
     pub mode: u32,
 }
 
+/// An explicit trust edge for the native libraries exported by another package.
+/// Version updates may change file digests, but not this publisher, key or ABI.
+#[derive(Clone, Debug, Default)]
+pub struct LibraryDependency {
+    pub package: String,
+    pub developer: String,
+    pub subject_key_id: String,
+    pub provenance: String,
+    pub abi: String,
+}
+
+impl LibraryDependency {
+    fn valid(&self) -> bool {
+        is_valid_package_id(&self.package)
+            && !self.developer.is_empty()
+            && !self.developer.bytes().any(|byte| byte.is_ascii_control())
+            && self.subject_key_id.len() == 64
+            && self
+                .subject_key_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            && matches!(
+                self.provenance.as_str(),
+                "built-in" | "verified-package" | "development"
+            )
+            && !self.abi.is_empty()
+            && !self.abi.bytes().any(|byte| byte.is_ascii_control())
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct LinuxApplication {
     pub entrypoint: String,
@@ -301,6 +331,7 @@ pub struct PackageManifest {
     pub package_architecture: Option<String>,
     pub package_abi: Option<String>,
     pub files: Vec<PackageFile>,
+    pub library_dependencies: Vec<LibraryDependency>,
     pub binaries: Vec<PackageBinary>,
     pub application: Option<ApplicationMetadata>,
     pub linux: Option<LinuxApplication>,
@@ -432,6 +463,7 @@ enum Section {
     Package,
     Binary,
     File,
+    LibraryDependency,
     LegacyPackage,
     LegacyCapabilities,
     Application,
@@ -443,6 +475,7 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
     let mut package = PackageManifest::default();
     let mut current_binary: Option<PackageBinary> = None;
     let mut current_file: Option<PackageFile> = None;
+    let mut current_dependency: Option<LibraryDependency> = None;
     let mut legacy_entry: Option<String> = None;
     let mut legacy_requires: Vec<String> = Vec::new();
     let mut pending_array: Option<(Section, String, String)> = None;
@@ -503,6 +536,9 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
         }
 
         if line == "[[binary]]" {
+            if let Some(dependency) = current_dependency.take() {
+                package.library_dependencies.push(dependency);
+            }
             push_binary(&mut current_binary, &mut package.binaries);
             push_file(&mut current_file, &mut package.files);
             current_binary = Some(PackageBinary::default());
@@ -510,13 +546,29 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
             continue;
         }
         if line == "[[file]]" {
+            if let Some(dependency) = current_dependency.take() {
+                package.library_dependencies.push(dependency);
+            }
             push_binary(&mut current_binary, &mut package.binaries);
             push_file(&mut current_file, &mut package.files);
             current_file = Some(PackageFile::default());
             section = Section::File;
             continue;
         }
+        if line == "[[library_dependency]]" {
+            push_binary(&mut current_binary, &mut package.binaries);
+            push_file(&mut current_file, &mut package.files);
+            if let Some(dependency) = current_dependency.take() {
+                package.library_dependencies.push(dependency);
+            }
+            current_dependency = Some(LibraryDependency::default());
+            section = Section::LibraryDependency;
+            continue;
+        }
         if line.starts_with('[') && line.ends_with(']') {
+            if let Some(dependency) = current_dependency.take() {
+                package.library_dependencies.push(dependency);
+            }
             push_binary(&mut current_binary, &mut package.binaries);
             push_file(&mut current_file, &mut package.files);
             section = match &line[1..line.len() - 1] {
@@ -541,6 +593,26 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
         };
 
         match section {
+            Section::LibraryDependency => {
+                let dependency = current_dependency.as_mut()?;
+                let field = match key {
+                    "package" => &mut dependency.package,
+                    "developer" => &mut dependency.developer,
+                    "subject_key_id" => &mut dependency.subject_key_id,
+                    "provenance" => &mut dependency.provenance,
+                    "abi" => &mut dependency.abi,
+                    _ => return None,
+                };
+                // Repeated or unquoted trust fields must not silently select
+                // a different policy from a TOML parser used by signing tools.
+                if !field.is_empty() {
+                    return None;
+                }
+                *field = unquote(value)?;
+                if field.is_empty() {
+                    return None;
+                }
+            }
             Section::Package | Section::LegacyPackage => match key {
                 "id" => package.package_id = unquote(value).unwrap_or_else(|| value.to_string()),
                 "provenance" => {
@@ -701,6 +773,9 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
 
     push_binary(&mut current_binary, &mut package.binaries);
     push_file(&mut current_file, &mut package.files);
+    if let Some(dependency) = current_dependency.take() {
+        package.library_dependencies.push(dependency);
+    }
 
     if package.package_id.is_empty()
         || package.package_name.is_empty()
@@ -765,6 +840,15 @@ pub fn parse_manifest(text: &str) -> Option<PackageManifest> {
 
     for file in &package.files {
         if file.id.is_empty() || file.path.is_empty() || file.digest.is_empty() || file.mode == 0 {
+            return None;
+        }
+    }
+    for (index, dependency) in package.library_dependencies.iter().enumerate() {
+        if !dependency.valid()
+            || package.library_dependencies[index + 1..]
+                .iter()
+                .any(|other| dependency.package == other.package)
+        {
             return None;
         }
     }
