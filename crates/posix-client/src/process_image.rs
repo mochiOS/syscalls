@@ -26,6 +26,8 @@ pub const AT_INITIAL_HEAP: u64 = 0x6d00_0003;
 pub const AT_IMAGE_LOAD_BIAS: u64 = 0x6d00_0004;
 /// Userspace lifecycle codec embedded in the initial stack; opaque to mnu.
 pub const AT_LIFECYCLE_IMAGE: u64 = 0x6d00_0005;
+/// Userspace TLS templates for the complete initial object set; opaque to mnu.
+pub const AT_TLS_IMAGE: u64 = 0x6d00_0006;
 pub const INITIAL_HEAP_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,6 +158,7 @@ pub fn encode_initial_stack_for_image(
             image,
             identity: Identity::default(),
             lifecycle: &[],
+            tls: &[],
         },
         output,
     )
@@ -202,6 +205,7 @@ pub struct Process<'a> {
     pub image: Option<Executable>,
     pub identity: Identity,
     pub lifecycle: &'a [u8],
+    pub tls: &'a [u8],
 }
 
 pub fn encode_initial_stack_for_process(
@@ -218,6 +222,7 @@ pub fn encode_initial_stack_for_process(
         if key <= AT_EXECFN
             || key == AT_IMAGE_LOAD_BIAS
             || key == AT_LIFECYCLE_IMAGE
+            || key == AT_TLS_IMAGE
             || auxiliary[..index].iter().any(|&(other, _)| other == key)
         {
             return Err(EncodeError::InvalidText);
@@ -241,6 +246,7 @@ pub fn encode_initial_stack_for_process(
                 .len()
                 .checked_add(AUXILIARY_VECTOR_ENTRIES)
                 .and_then(|count| count.checked_add(usize::from(!process.lifecycle.is_empty())))
+                .and_then(|count| count.checked_add(usize::from(!process.tls.is_empty())))
                 .and_then(|count| count.checked_mul(2))
                 .and_then(|count| value.checked_add(count))
         })
@@ -259,11 +265,22 @@ pub fn encode_initial_stack_for_process(
         .checked_add(7)
         .map(|value| value & !7)
         .ok_or(EncodeError::ImageTooLarge)?;
-    let payload_length = if process.lifecycle.is_empty() {
+    let lifecycle_end = if process.lifecycle.is_empty() {
         unaligned_length
     } else {
         lifecycle_offset
             .checked_add(process.lifecycle.len())
+            .ok_or(EncodeError::ImageTooLarge)?
+    };
+    let tls_offset = lifecycle_end
+        .checked_add(7)
+        .map(|value| value & !7)
+        .ok_or(EncodeError::ImageTooLarge)?;
+    let payload_length = if process.tls.is_empty() {
+        lifecycle_end
+    } else {
+        tls_offset
+            .checked_add(process.tls.len())
             .ok_or(EncodeError::ImageTooLarge)?
     };
     let stack_length = payload_length
@@ -317,6 +334,9 @@ pub fn encode_initial_stack_for_process(
         stack[lifecycle_offset..lifecycle_offset + process.lifecycle.len()]
             .copy_from_slice(process.lifecycle);
     }
+    if !process.tls.is_empty() {
+        stack[tls_offset..tls_offset + process.tls.len()].copy_from_slice(process.tls);
+    }
 
     for (key, value, relocation) in [
         (AT_PHDR, 0, Some(RelocationKind::ElfProgramHeaders)),
@@ -347,6 +367,11 @@ pub fn encode_initial_stack_for_process(
     .chain((!process.lifecycle.is_empty()).then_some((
         AT_LIFECYCLE_IMAGE,
         lifecycle_offset as u64,
+        Some(RelocationKind::StackAddress),
+    )))
+    .chain((!process.tls.is_empty()).then_some((
+        AT_TLS_IMAGE,
+        tls_offset as u64,
         Some(RelocationKind::StackAddress),
     )))
     .chain(auxiliary.iter().map(|&(key, value)| (key, value, None)))

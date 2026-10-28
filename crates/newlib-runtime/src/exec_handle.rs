@@ -157,26 +157,32 @@ fn replace_image(
             .session_info()
             .map_err(map_posix_client_error)?,
     );
-    exec_image::with_image(image, inputs, credentials, |image, auxiliary, lifecycle| {
-        with_startup(
-            inputs,
-            execfn,
-            fds,
-            mochios_posix_client::process_image::Process {
-                image: auxiliary,
-                identity: credentials,
-                lifecycle,
-            },
-            |startup| {
-                let digest = digest(image)?;
-                authorize(image, identity, &digest)?;
-                match syscall::image::replace_bounded(image, identity, startup, ceiling) {
-                    Ok(never) => match never {},
-                    Err(error) => Err(mochios_posix_client::image_error::errno(error.raw())),
-                }
-            },
-        )
-    })
+    exec_image::with_image(
+        image,
+        inputs,
+        credentials,
+        |image, auxiliary, lifecycle, tls| {
+            with_startup(
+                inputs,
+                execfn,
+                fds,
+                mochios_posix_client::process_image::Process {
+                    image: auxiliary,
+                    identity: credentials,
+                    lifecycle,
+                    tls,
+                },
+                |startup| {
+                    let digest = digest(image)?;
+                    authorize(image, identity, &digest)?;
+                    match syscall::image::replace_bounded(image, identity, startup, ceiling) {
+                        Ok(never) => match never {},
+                        Err(error) => Err(mochios_posix_client::image_error::errno(error.raw())),
+                    }
+                },
+            )
+        },
+    )
 }
 
 fn digest(image: u32) -> Result<[u8; 32], c_int> {

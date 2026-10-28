@@ -52,7 +52,35 @@ impl Drop for Mapping {
 /// Prepare before native ThreadCreate, including all AS-limit admission and
 /// fallible copies. The child never starts with an uninitialized template.
 pub(super) fn allocate(control: &ThreadControl) -> Result<(), c_int> {
+    core::hint::black_box(__mochios_static_tls_v1 as extern "C" fn() -> u64);
+    if let Some(vector) = auxiliary::vector() {
+        match vector.lookup(mochios_posix_client::process_image::AT_TLS_IMAGE as usize) {
+            Ok(base) => {
+                use policy::image::{self, Error};
+                const MAXIMUM: usize = mnu_abi::process_image::MAX_STACK_BYTES;
+                let mut templates = [None; (MAXIMUM - image::HEADER_BYTES) / image::MODULE_BYTES];
+                let count = image::decode(base, MAXIMUM, &mut templates, |address, bytes| {
+                    user_copy::read(address as *const u8, bytes)
+                })
+                .map_err(|error| match error {
+                    Error::Invalid => ENOEXEC,
+                    Error::TooLarge => super::E2BIG,
+                    Error::Read(error) => error,
+                })?;
+                return allocate_templates(control, &templates[..count]);
+            }
+            Err(ENOENT) => {}
+            Err(error) => return Err(error),
+        }
+    }
     allocate_templates(control, &[image()?])
+}
+
+/// Startup-contract marker; never an execution or capability authorization.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn __mochios_static_tls_v1() -> u64 {
+    1
 }
 
 pub(super) fn allocate_templates(

@@ -76,6 +76,7 @@ pub(super) struct Dependencies {
     objects: Buffer,
     order: Buffer,
     lifecycle_order: Buffer,
+    tls_templates: Buffer,
 }
 impl Drop for Dependencies {
     fn drop(&mut self) {
@@ -315,6 +316,7 @@ impl Dependencies {
         root: &[u8],
         output: &mut Buffer,
         lifecycle: &mut Buffer,
+        tls: &mut Buffer,
         inputs: &exec_inputs::Inputs,
         identity: mochios_posix_client::process_image::Identity,
         runtime: bool,
@@ -429,6 +431,32 @@ impl Dependencies {
         let order = self.order.slots::<usize>(count)?;
         let order = unsafe { core::slice::from_raw_parts_mut(order, count) };
         let scope = Scope::new(objects, order).map_err(|_| ENOEXEC)?;
+        let templates = self
+            .tls_templates
+            .slots::<Option<mochios_posix_client::static_tls::Template>>(count)?;
+        for (index, object) in objects.iter().enumerate() {
+            let template = object
+                .image
+                .tls_template(object.bias)
+                .map_err(|_| ENOEXEC)?;
+            unsafe { templates.add(index).write(template) };
+        }
+        let templates = unsafe { core::slice::from_raw_parts(templates, count) };
+        let tls_runtime = images[0].has_static_tls_runtime().map_err(|_| ENOEXEC)?;
+        if templates[1..].iter().any(Option::is_some) && !tls_runtime {
+            return Err(ENOEXEC);
+        }
+        if tls_runtime && templates.iter().any(Option::is_some) {
+            use mochios_posix_client::static_tls::image;
+            let length = image::encoded_length(count).ok_or(E2BIG)?;
+            if length > mnu_abi::process_image::MAX_STACK_BYTES {
+                return Err(E2BIG);
+            }
+            tls.reserve(length)?;
+            let payload = unsafe { core::slice::from_raw_parts_mut(tls.pointer, length) };
+            image::encode(templates, payload).map_err(|_| ENOEXEC)?;
+            tls.length = length;
+        }
         let length = scope.bundle_length().map_err(|_| ENOEXEC)?;
         output.reserve(length)?;
         output.length = length;

@@ -1,5 +1,7 @@
 //! ELF static TLS policy for x86-64 (Variant II). No kernel TLS ABI is involved.
 
+#[path = "static_tls/image.rs"]
+pub mod image;
 #[path = "static_tls/modules.rs"]
 pub mod modules;
 

@@ -256,21 +256,7 @@ impl<'a> Pie<'a> {
         // Reuse the runtime's TLS validation, reading the source PHDR bytes.
         // Only the initialized template must be file-backed; .tbss may extend
         // beyond LOAD memory. Symbol-bearing TLS relocations remain rejected.
-        crate::static_tls::template(
-            usize::try_from(u64_at(bytes, 32)?).map_err(|_| Error::Overflow)?,
-            56,
-            count,
-            0,
-            |address, output| {
-                let range = extent(bytes, address as u64, output.len() as u64)?;
-                output.copy_from_slice(&bytes[range]);
-                Ok(())
-            },
-        )
-        .map_err(|error| match error {
-            crate::static_tls::Error::InvalidImage => Error::Invalid,
-            crate::static_tls::Error::Read(error) => error,
-        })?;
+        result.tls_template(0)?;
         let mut seen = 0usize;
         let mut highest_end = 0;
         result.relocations(|target, _| {
@@ -725,10 +711,16 @@ impl<'a> Pie<'a> {
     /// Compatibility marker exported by a CRT which consumes lifecycle_image.
     /// This is not executable authorization or an identity claim.
     pub fn has_lifecycle_runtime(&self) -> Result<bool, Error> {
+        self.has_runtime_marker(b"__mochios_lifecycle_v1")
+    }
+    pub fn has_static_tls_runtime(&self) -> Result<bool, Error> {
+        self.has_runtime_marker(b"__mochios_static_tls_v1")
+    }
+    fn has_runtime_marker(&self, name: &[u8]) -> Result<bool, Error> {
         let Some(table) = &self.symbols else {
             return Ok(false);
         };
-        let Some(symbol) = table.find(b"__mochios_lifecycle_v1")? else {
+        let Some(symbol) = table.find(name)? else {
             return Ok(false);
         };
         let Some(symbols::Definition::Image { value, .. }) = symbol.definition else {
@@ -739,6 +731,25 @@ impl<'a> Pie<'a> {
                 self.segment(index)
                     .is_ok_and(|segment| segment.flags & 1 != 0 && segment.contains(value, 1))
             }))
+    }
+    /// Template addresses refer to the prepared child at `bias`. .tbss need
+    /// not lie inside a LOAD; only initialized bytes need file-backed storage.
+    pub fn tls_template(&self, bias: u64) -> Result<Option<crate::static_tls::Template>, Error> {
+        crate::static_tls::template(
+            usize::try_from(u64_at(self.bytes, 32)?).map_err(|_| Error::Overflow)?,
+            56,
+            self.count,
+            usize::try_from(bias).map_err(|_| Error::Overflow)?,
+            |address, output| {
+                let range = extent(self.bytes, address as u64, output.len() as u64)?;
+                output.copy_from_slice(&self.bytes[range]);
+                Ok(())
+            },
+        )
+        .map_err(|error| match error {
+            crate::static_tls::Error::InvalidImage => Error::Invalid,
+            crate::static_tls::Error::Read(error) => error,
+        })
     }
     pub fn alignment(&self) -> u64 {
         (0..self.count)

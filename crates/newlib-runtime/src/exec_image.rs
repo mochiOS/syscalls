@@ -68,6 +68,7 @@ struct Preparation {
     handle: u32,
     executable: Option<mochios_posix_client::process_image::Executable>,
     lifecycle: Buffer,
+    tls: Buffer,
 }
 impl Drop for Preparation {
     fn drop(&mut self) {
@@ -179,6 +180,7 @@ impl Preparation {
                 self.source.bytes(),
                 &mut self.output,
                 &mut self.lifecycle,
+                &mut self.tls,
                 inputs,
                 identity,
                 runtime,
@@ -262,10 +264,11 @@ pub(super) fn with_image(
         u32,
         Option<mochios_posix_client::process_image::Executable>,
         &[u8],
+        &[u8],
     ) -> Result<(), c_int>,
 ) -> Result<(), c_int> {
     if !needs_preparation(image)? {
-        return operation(image, None, &[]);
+        return operation(image, None, &[], &[]);
     }
     io_resources::with(
         || Ok(Preparation::default()),
@@ -275,6 +278,7 @@ pub(super) fn with_image(
                 preparation.handle,
                 preparation.executable,
                 preparation.lifecycle.bytes(),
+                preparation.tls.bytes(),
             )
         },
     )
