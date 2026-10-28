@@ -318,6 +318,43 @@ impl TcpConnection {
         retransmit_timeout: u64,
         retry_limit: u8,
     ) -> Self {
+        Self::try_connect(
+            handle,
+            owner,
+            tuple,
+            initial_sequence,
+            local_mss,
+            send_capacity,
+            receive_capacity,
+            retransmit_timeout,
+            retry_limit,
+        )
+        .expect("TCP connection storage")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_connect(
+        handle: u64,
+        owner: u64,
+        tuple: TcpTuple,
+        initial_sequence: u32,
+        local_mss: u16,
+        send_capacity: usize,
+        receive_capacity: usize,
+        retransmit_timeout: u64,
+        retry_limit: u8,
+    ) -> Result<Self, TcpConnectionError> {
+        if handle == 0 || tuple.local_port == 0 || tuple.remote_port == 0 || local_mss == 0 {
+            return Err(TcpConnectionError::InvalidState);
+        }
+        let mut send_buffer = VecDeque::new();
+        let mut receive_buffer = VecDeque::new();
+        send_buffer
+            .try_reserve_exact(send_capacity)
+            .map_err(|_| TcpConnectionError::Capacity)?;
+        receive_buffer
+            .try_reserve_exact(receive_capacity)
+            .map_err(|_| TcpConnectionError::Capacity)?;
         let syn = OutstandingSegment {
             sequence: initial_sequence,
             acknowledgment: 0,
@@ -329,9 +366,12 @@ impl TcpConnection {
             sent_at: None,
             retries: 0,
         };
-        let mut outstanding = VecDeque::with_capacity(1);
+        let mut outstanding = VecDeque::new();
+        outstanding
+            .try_reserve_exact(1)
+            .map_err(|_| TcpConnectionError::Capacity)?;
         outstanding.push_back(syn);
-        Self {
+        Ok(Self {
             handle,
             owner,
             tuple,
@@ -344,14 +384,14 @@ impl TcpConnection {
             local_mss,
             send_capacity,
             receive_capacity,
-            send_buffer: VecDeque::with_capacity(send_capacity),
-            receive_buffer: VecDeque::with_capacity(receive_capacity),
+            send_buffer,
+            receive_buffer,
             outstanding,
             close_requested: false,
             retransmit_timeout,
             retry_limit,
             time_wait_until: None,
-        }
+        })
     }
 
     pub fn queue_send(&mut self, bytes: &[u8]) -> Result<(), TcpConnectionError> {
@@ -655,6 +695,30 @@ impl TcpConnection {
         self.send_buffer.len()
     }
 
+    pub fn send_available(&self) -> usize {
+        let in_flight = self
+            .outstanding
+            .iter()
+            .fold(0usize, |n, s| n.saturating_add(s.payload.len()));
+        self.send_capacity
+            .saturating_sub(in_flight.saturating_add(self.send_buffer.len()))
+    }
+
+    pub fn peek(&self, out: &mut [u8]) -> usize {
+        if self.state == TcpState::SynReceived {
+            return 0;
+        }
+        let n = out.len().min(self.receive_buffer.len());
+        for (dst, src) in out[..n].iter_mut().zip(self.receive_buffer.iter()) {
+            *dst = *src;
+        }
+        n
+    }
+
+    pub fn discard_received(&mut self) {
+        self.receive_buffer.clear();
+    }
+
     pub fn has_unacknowledged(&self) -> bool {
         !self.outstanding.is_empty()
     }
@@ -705,6 +769,10 @@ pub struct TcpConnectionTable {
 }
 
 impl TcpConnectionTable {
+    /// Iteration by the trusted transport owner; no per-tick key allocation.
+    pub fn connections_mut(&mut self) -> impl Iterator<Item = &mut TcpConnection> {
+        self.connections.iter_mut()
+    }
     pub fn new(capacity: usize) -> Self {
         Self {
             connections: Vec::with_capacity(capacity),

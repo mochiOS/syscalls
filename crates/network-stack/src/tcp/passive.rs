@@ -389,6 +389,40 @@ impl TcpConnectionTable {
         Ok(Some((handle, connection.tuple)))
     }
 
+    pub fn listener_ready(&mut self, handle: u64, owner: u64) -> Result<bool, TcpConnectionError> {
+        let index = self
+            .listeners
+            .iter()
+            .position(|l| l.handle == handle)
+            .ok_or(TcpConnectionError::NotFound)?;
+        if self.listeners[index].owner != owner {
+            return Err(TcpConnectionError::Ownership);
+        }
+        self.prune_pending();
+        Ok(!self.listeners[index].ready.is_empty())
+    }
+
+    pub fn set_backlog(
+        &mut self,
+        handle: u64,
+        owner: u64,
+        backlog: usize,
+    ) -> Result<(), TcpConnectionError> {
+        let listener = self
+            .listeners
+            .iter_mut()
+            .find(|l| l.handle == handle)
+            .ok_or(TcpConnectionError::NotFound)?;
+        if listener.owner != owner {
+            return Err(TcpConnectionError::Ownership);
+        }
+        if backlog == 0 {
+            return Err(TcpConnectionError::InvalidState);
+        }
+        listener.config.backlog = backlog;
+        Ok(())
+    }
+
     pub fn close_listener(&mut self, handle: u64, owner: u64) -> Result<(), TcpConnectionError> {
         let index = self
             .listeners
