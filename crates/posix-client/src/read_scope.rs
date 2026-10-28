@@ -28,6 +28,35 @@ impl<T: ObjectTransport> Client<T> {
         protocol::decode_session_info(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    /// Register a fresh broker-created image only while its requester's root,
+    /// cwd, credentials and native image still match the loader's scope.
+    /// EAGAIN requires a fresh capture and preparation; no child was registered.
+    /// All inputs are borrowed, and identities are native Process attachments.
+    pub fn register_launched_child_in_scope(
+        &self,
+        scope: ObjectHandleAttachment<T::Handle>,
+        requester: ObjectHandleAttachment<T::Handle>,
+        child: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<(), ClientError<T::Error>> {
+        let mut handles = self.read_scope_attachment(scope)?;
+        for (source, rights) in [
+            (requester, mnu_abi::HANDLE_RIGHT_WAIT),
+            (
+                child,
+                mnu_abi::HANDLE_RIGHT_WAIT | mnu_abi::HANDLE_RIGHT_SIGNAL,
+            ),
+        ] {
+            if source.handle == T::Handle::default() || source.rights & rights != rights {
+                return Err(ClientError::Remote(-13));
+            }
+            handles
+                .push(ObjectHandleAttachment { rights, ..source })
+                .map_err(|_| ClientError::RequestTooLarge)?;
+        }
+        self.request_without_reply_handles(wire::OP_REGISTER_CHILD, &[], &mut [], &mut handles)?;
+        Ok(())
+    }
+
     /// Open using only the captured scope, rather than the receiver's ambient
     /// root/cwd or credentials. Returned files have no WRITE/CONTROL authority.
     pub fn read_scope_open(

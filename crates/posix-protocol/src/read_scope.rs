@@ -5,6 +5,8 @@ use crate::{OpenAtRequest, OpenBase, ProtocolError};
 pub const OP_CREATE: u16 = 136;
 pub const OP_INFO: u16 = 137;
 pub const OP_OPEN: u16 = 138;
+/// Empty payload; scope TRANSFER, requester WAIT and child WAIT|SIGNAL.
+pub const OP_REGISTER_CHILD: u16 = 139;
 pub const TOKEN_RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_DUPLICATE | mnu_abi::HANDLE_RIGHT_TRANSFER;
 pub const ATTACH_RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_TRANSFER;
 pub const FILE_RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_READ | TOKEN_RIGHTS;
