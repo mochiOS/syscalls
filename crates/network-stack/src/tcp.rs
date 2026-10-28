@@ -3,6 +3,10 @@ use alloc::vec::Vec;
 
 use crate::PacketError;
 
+#[path = "tcp/passive.rs"]
+mod passive;
+pub use passive::TcpListenConfig;
+
 pub const TCP_PROTOCOL: u8 = 6;
 pub const TCP_HEADER_LEN: usize = 20;
 pub const TCP_FLAG_FIN: u16 = 0x001;
@@ -200,6 +204,7 @@ fn read_u32(packet: &[u8], offset: usize) -> u32 {
 pub enum TcpState {
     Closed,
     SynSent,
+    SynReceived,
     Established,
     FinWait1,
     FinWait2,
@@ -372,6 +377,9 @@ impl TcpConnection {
     }
 
     pub fn acknowledgment(&self) -> TcpTransmit {
+        if self.state == TcpState::SynReceived {
+            return self.passive_syn_ack();
+        }
         TcpTransmit {
             sequence: self.send_next,
             acknowledgment: self.receive_next,
@@ -401,6 +409,9 @@ impl TcpConnection {
                     return Ok(None);
                 }
                 if segment.retries >= self.retry_limit {
+                    if self.state == TcpState::SynReceived {
+                        self.receive_buffer.clear();
+                    }
                     self.state = TcpState::Reset;
                     return Err(TcpConnectionError::RetryLimit);
                 }
@@ -477,6 +488,9 @@ impl TcpConnection {
         segment: &TcpSegment<'_>,
         now: u64,
     ) -> Result<TcpReceiveResult, TcpConnectionError> {
+        if self.state == TcpState::SynReceived {
+            return self.receive_passive(segment, now);
+        }
         if segment.flags & TCP_FLAG_RST != 0 {
             if (self.state == TcpState::SynSent
                 && (segment.flags & TCP_FLAG_ACK == 0 || segment.acknowledgment != self.send_next))
@@ -516,6 +530,16 @@ impl TcpConnection {
             return Err(TcpConnectionError::InvalidState);
         }
         if segment.flags & TCP_FLAG_SYN != 0 {
+            // The final handshake ACK may have been lost. Re-ACK the same
+            // SYN/ACK without resetting an already established active open.
+            if self.state == TcpState::Established
+                && segment.flags == TCP_FLAG_SYN | TCP_FLAG_ACK
+                && segment.sequence.wrapping_add(1) == self.receive_next
+                && segment.acknowledgment == self.send_unacknowledged
+                && segment.payload.is_empty()
+            {
+                return Ok(TcpReceiveResult::Acknowledge);
+            }
             return Err(TcpConnectionError::InvalidState);
         }
         if segment.flags & TCP_FLAG_ACK == 0 {
@@ -605,6 +629,9 @@ impl TcpConnection {
     }
 
     pub fn receive(&mut self, out: &mut [u8]) -> usize {
+        if self.state == TcpState::SynReceived {
+            return 0;
+        }
         let length = out.len().min(self.receive_buffer.len());
         for byte in out.iter_mut().take(length) {
             if let Some(value) = self.receive_buffer.pop_front() {
@@ -615,7 +642,11 @@ impl TcpConnection {
     }
 
     pub fn received_len(&self) -> usize {
-        self.receive_buffer.len()
+        if self.state == TcpState::SynReceived {
+            0
+        } else {
+            self.receive_buffer.len()
+        }
     }
 
     pub fn queued_send_len(&self) -> usize {
@@ -667,6 +698,7 @@ fn sequence_after(left: u32, right: u32) -> bool {
 
 pub struct TcpConnectionTable {
     connections: Vec<TcpConnection>,
+    listeners: Vec<passive::Listener>,
     capacity: usize,
 }
 
@@ -674,6 +706,7 @@ impl TcpConnectionTable {
     pub fn new(capacity: usize) -> Self {
         Self {
             connections: Vec::with_capacity(capacity),
+            listeners: Vec::new(),
             capacity,
         }
     }
@@ -684,9 +717,11 @@ impl TcpConnectionTable {
         for offset in 0..range {
             let port = TCP_EPHEMERAL_START
                 + ((u32::from(first - TCP_EPHEMERAL_START) + offset) % range) as u16;
-            if !self.connections.iter().any(|connection| {
-                connection.tuple.local_port == port && connection.state != TcpState::Closed
-            }) {
+            if !self.listeners.iter().any(|listener| listener.port == port)
+                && !self.connections.iter().any(|connection| {
+                    connection.tuple.local_port == port && connection.state != TcpState::Closed
+                })
+            {
                 return Ok(port);
             }
         }
@@ -694,12 +729,19 @@ impl TcpConnectionTable {
     }
 
     pub fn insert(&mut self, connection: TcpConnection) -> Result<(), TcpConnectionError> {
-        if self.connections.len() >= self.capacity {
+        if self.connections.len() + self.listeners.len() >= self.capacity {
             return Err(TcpConnectionError::Capacity);
         }
-        if self.connections.iter().any(|existing| {
-            existing.handle == connection.handle || existing.tuple == connection.tuple
-        }) {
+        if self
+            .listeners
+            .iter()
+            .any(|listener| listener.handle == connection.handle)
+            || self.connections.iter().any(|existing| {
+                existing.handle == connection.handle
+                    || (existing.tuple == connection.tuple
+                        && !matches!(existing.state, TcpState::Closed | TcpState::Reset))
+            })
+        {
             return Err(TcpConnectionError::Capacity);
         }
         self.connections.push(connection);
@@ -723,18 +765,22 @@ impl TcpConnectionTable {
     }
 
     pub fn find_tuple_mut(&mut self, tuple: TcpTuple) -> Option<&mut TcpConnection> {
-        self.connections
-            .iter_mut()
-            .find(|connection| connection.tuple == tuple && connection.state != TcpState::Closed)
+        self.connections.iter_mut().find(|connection| {
+            connection.tuple == tuple && !matches!(connection.state, TcpState::Closed | TcpState::Reset)
+        })
     }
 
     pub fn allocate_handle(&self, seed: u64) -> Result<u64, TcpConnectionError> {
         let mut candidate = seed.max(1);
         for _ in 0..=self.capacity {
             if !self
-                .connections
+                .listeners
                 .iter()
-                .any(|connection| connection.handle == candidate)
+                .any(|listener| listener.handle == candidate)
+                && !self
+                    .connections
+                    .iter()
+                    .any(|connection| connection.handle == candidate)
             {
                 return Ok(candidate);
             }
@@ -761,18 +807,22 @@ impl TcpConnectionTable {
 
     pub fn clear(&mut self) {
         self.connections.clear();
+        self.listeners.clear();
     }
 
     pub fn remove(&mut self, handle: u64, owner: u64) {
         self.connections
             .retain(|connection| connection.handle != handle || connection.owner != owner);
+        self.prune_pending();
     }
 
     pub fn remove_closed(&mut self) {
         self.connections
             .retain(|connection| !matches!(connection.state, TcpState::Closed | TcpState::Reset));
+        self.prune_pending();
     }
 
+    /// Retained connection TCBs, excluding the separate listener rows.
     pub fn len(&self) -> usize {
         self.connections.len()
     }
