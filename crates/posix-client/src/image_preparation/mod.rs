@@ -27,6 +27,14 @@ pub struct Prepared<'a> {
     pub tls: &'a [u8],
 }
 
+/// Selection metadata for an immutable input captured by this preparation.
+/// A pathname identifies a search candidate, never authenticates its contents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source<'a> {
+    Root,
+    Dependency { needed: &'a [u8], path: &'a [u8] },
+}
+
 /// Explicit resource access, independent of libc globals and broker policy.
 /// Status values are positive newlib errno values, translated at this boundary.
 /// Library opens use read-only, nonblocking access under the selected context.
@@ -49,6 +57,12 @@ pub unsafe trait Backend {
     fn read_at(&self, image: u32, output: &mut [u8], offset: usize) -> Result<usize, c_int>;
     fn open_library(&self, path: &[u8]) -> Result<crate::ObjectHandleAttachment<u32>, c_int>;
     fn validate_library(&self, file: crate::ObjectHandleAttachment<u32>) -> Result<(), c_int>;
+    /// Check the exact captured input before parsing or emitting an image.
+    /// Replacement within the caller's existing security domain may accept
+    /// its own input. A launcher granting a new identity/capabilities must
+    /// bind every input to its approved package policy here; a later pathname
+    /// read cannot authenticate these bytes. Errors abort preparation intact.
+    fn validate_captured(&self, source: Source<'_>, bytes: &[u8]) -> Result<(), c_int>;
     fn entropy(&self, output: &mut [u8]) -> Result<(), c_int>;
     fn create_image(&self, length: usize) -> Result<u32, c_int>;
     fn write_at(&self, image: u32, bytes: &[u8], offset: usize) -> Result<usize, c_int>;
@@ -250,6 +264,7 @@ impl<B: Backend> Preparation<B> {
             };
             self.source.length = length;
         }
+        backend.validate_captured(Source::Root, self.source.bytes())?;
         let candidate = mochios_posix_client::pie::Pie::parse_object(self.source.bytes())
             .map_err(|_| ENOEXEC)?;
         let mut dependent = false;

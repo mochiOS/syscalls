@@ -55,6 +55,7 @@ impl Paths {
 
 struct Node<B: Backend> {
     name: Buffer<B>,
+    path: Buffer<B>,
     source: Buffer<B>,
     handle: u32,
     parent: usize,
@@ -64,6 +65,7 @@ impl<B: Backend> Default for Node<B> {
     fn default() -> Self {
         Self {
             name: Buffer::default(),
+            path: Buffer::default(),
             source: Buffer::default(),
             handle: 0,
             parent: 0,
@@ -146,6 +148,7 @@ impl<B: Backend> Dependencies<B> {
     }
     fn open_path(&mut self, backend: &B, index: usize, path: &[u8]) -> Result<(), c_int> {
         B::critical(|| {
+            self.node_mut(index).path.reserve(path.len())?;
             let file = backend.open_library(path)?;
             self.node_mut(index).handle = file.handle;
             if file.handle == 0
@@ -154,7 +157,11 @@ impl<B: Backend> Dependencies<B> {
             {
                 return Err(EACCES);
             }
-            backend.validate_library(file)
+            backend.validate_library(file)?;
+            let selected = &mut self.node_mut(index).path;
+            unsafe { ptr::copy_nonoverlapping(path.as_ptr(), selected.pointer, path.len()) };
+            selected.length = path.len();
+            Ok(())
         })
     }
     fn source<'a>(&'a self, root: &'a [u8], index: usize) -> &'a [u8] {
@@ -313,6 +320,14 @@ impl<B: Backend> Dependencies<B> {
             };
             node.source.length = length;
         }
+        let node = self.node(index);
+        backend.validate_captured(
+            Source::Dependency {
+                needed: node.name.bytes(),
+                path: node.path.bytes(),
+            },
+            node.source.bytes(),
+        )?;
         B::critical(|| {
             let node = self.node_mut(index);
             B::close(node.handle);

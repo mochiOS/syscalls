@@ -76,6 +76,9 @@ unsafe impl<T: ObjectTransport<Handle = u32>, B: Backend> Backend for Scoped<'_,
         }
         Ok(())
     }
+    fn validate_captured(&self, source: Source<'_>, bytes: &[u8]) -> Result<(), c_int> {
+        self.mechanisms.validate_captured(source, bytes)
+    }
     fn entropy(&self, output: &mut [u8]) -> Result<(), c_int> {
         self.mechanisms.entropy(output)
     }

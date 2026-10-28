@@ -56,6 +56,11 @@ unsafe impl Backend for Runtime {
         }
         Ok(())
     }
+    fn validate_captured(&self, _: shared::Source<'_>, _: &[u8]) -> Result<(), c_int> {
+        // exec replaces an image inside the caller's current security domain;
+        // it cannot adopt a package identity or add application capabilities.
+        Ok(())
+    }
     fn entropy(&self, output: &mut [u8]) -> Result<(), c_int> {
         let count = syscall_errno(syscall::raw_syscall2(
             syscall::SyscallNumber::RandomFill,
