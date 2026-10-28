@@ -11,20 +11,11 @@ pub(super) fn with_startup(
 ) -> Result<(), c_int> {
     let mut arguments = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
     let mut environment = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
-    let (mut argument_count, mut environment_count) =
-        inputs.vectors(&mut arguments, &mut environment);
+    let (mut argument_count, environment_count) = inputs.vectors(&mut arguments, &mut environment);
     if argument_count == 0 {
         arguments[0] = execfn;
         argument_count = 1;
     }
-    let mut retained = 0;
-    for index in 0..environment_count {
-        if process.identity.allows_environment(environment[index]) {
-            environment[retained] = environment[index];
-            retained += 1;
-        }
-    }
-    environment_count = retained;
     let mut random = [0; 16];
     let count = syscall_errno(syscall::raw_syscall2(
         syscall::SyscallNumber::RandomFill,

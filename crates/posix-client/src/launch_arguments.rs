@@ -34,6 +34,25 @@ pub fn encode_native_launch(
     items: &[String],
     random: [u8; 16],
 ) -> Result<Vec<u8>, EncodeError> {
+    encode_native_launch_for_process(
+        identity,
+        argument_zero,
+        items,
+        random,
+        crate::process_image::Process::default(),
+    )
+}
+
+/// Install userspace-prepared entry metadata through the same startup encoder
+/// as exec. `process` is trusted local loader output, never launcher argv or
+/// authenticated credentials supplied by a remote request.
+pub fn encode_native_launch_for_process(
+    identity: &str,
+    argument_zero: &str,
+    items: &[String],
+    random: [u8; 16],
+    process: crate::process_image::Process<'_>,
+) -> Result<Vec<u8>, EncodeError> {
     use mnu_abi::process_create::{self, HandleGrant, Value};
 
     if argument_zero.is_empty() || argument_zero.as_bytes().contains(&0) {
@@ -96,11 +115,13 @@ pub fn encode_native_launch(
         }
     }
     let mut startup = vec![0; process_create::MAX_REQUEST_BYTES];
-    let length = crate::process_image::encode_initial_stack(
+    let length = crate::process_image::encode_initial_stack_for_process(
         &arguments,
         &environment,
         identity.as_bytes(),
         random,
+        &[],
+        process,
         &mut startup,
     )
     .map_err(EncodeError::Startup)?;

@@ -235,11 +235,24 @@ pub fn encode_initial_stack_for_process(
         return Err(EncodeError::InvalidText);
     }
     let argument_bytes = checked_text_size(argv)?;
-    let environment_bytes = checked_text_size(envp)?;
+    let mut environment_count = 0;
+    let mut environment_bytes = 0usize;
+    for entry in envp {
+        if entry.contains(&0) {
+            return Err(EncodeError::InvalidText);
+        }
+        if process.identity.allows_environment(entry) {
+            environment_count += 1;
+            environment_bytes = environment_bytes
+                .checked_add(entry.len())
+                .and_then(|bytes| bytes.checked_add(1))
+                .ok_or(EncodeError::ImageTooLarge)?;
+        }
+    }
     let pointer_words = 1usize
         .checked_add(argv.len())
         .and_then(|value| value.checked_add(1))
-        .and_then(|value| value.checked_add(envp.len()))
+        .and_then(|value| value.checked_add(environment_count))
         .and_then(|value| value.checked_add(1))
         .and_then(|value| {
             auxiliary
@@ -313,7 +326,10 @@ pub fn encode_initial_stack_for_process(
         )?;
     }
     put_word(&mut stack, &mut cursor, 0)?;
-    for environment in envp {
+    for environment in envp
+        .iter()
+        .filter(|entry| process.identity.allows_environment(entry))
+    {
         let offset = copy_text(&mut stack, &mut text_cursor, environment)?;
         put_relocated_word(
             &mut stack,
