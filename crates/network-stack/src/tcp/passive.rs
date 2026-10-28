@@ -168,7 +168,10 @@ fn validate_syn(tuple: TcpTuple, segment: &TcpSegment<'_>) -> Result<(), TcpConn
     }
 }
 
-fn validate_segment(tuple: TcpTuple, segment: &TcpSegment<'_>) -> Result<(), TcpConnectionError> {
+pub(super) fn validate_segment(
+    tuple: TcpTuple,
+    segment: &TcpSegment<'_>,
+) -> Result<(), TcpConnectionError> {
     let header = TCP_HEADER_LEN
         + if segment.options.maximum_segment_size.is_some() {
             4
@@ -189,7 +192,7 @@ fn validate_segment(tuple: TcpTuple, segment: &TcpSegment<'_>) -> Result<(), Tcp
     }
 }
 
-fn acceptable_sequence(next: u32, window: u16, segment: &TcpSegment<'_>) -> bool {
+pub(super) fn acceptable_sequence(next: u32, window: u16, segment: &TcpSegment<'_>) -> bool {
     let Some(length) = u32::try_from(segment.payload.len())
         .ok()
         .and_then(|length| length.checked_add(u32::from(segment.flags & TCP_FLAG_FIN != 0)))
@@ -204,6 +207,32 @@ fn acceptable_sequence(next: u32, window: u16, segment: &TcpSegment<'_>) -> bool
 }
 
 impl TcpConnectionTable {
+    pub(super) fn matching_listener(&self, tuple: TcpTuple) -> Option<&Listener> {
+        self.listeners.iter().find(|l| {
+            l.port == tuple.local_port && (l.address == tuple.local_address || l.address == [0; 4])
+        })
+    }
+
+    pub(super) fn admit_syn(
+        &mut self,
+        tuple: TcpTuple,
+        payload_length: usize,
+    ) -> Result<(), TcpConnectionError> {
+        self.prune_pending();
+        let listener = self
+            .matching_listener(tuple)
+            .ok_or(TcpConnectionError::NotFound)?;
+        if listener.pending.len() >= listener.config.backlog
+            || self.connections.len() + self.listeners.len() >= self.capacity
+        {
+            return Err(TcpConnectionError::Capacity);
+        }
+        if payload_length > listener.config.receive_capacity {
+            return Err(TcpConnectionError::ReceiveBufferFull);
+        }
+        Ok(())
+    }
+
     /// Reserve a transport listener. The owner is an opaque caller-supplied
     /// namespace selected by the service, never a claimed IPC sender identity.
     pub fn listen(
@@ -254,11 +283,11 @@ impl TcpConnectionTable {
         initial_sequence: u32,
     ) -> Result<u64, TcpConnectionError> {
         validate_syn(tuple, segment)?;
-        self.prune_pending();
         if let Some(connection) = self.find_tuple_mut(tuple) {
             connection.on_segment(segment, 0)?;
             return Ok(connection.handle);
         }
+        self.admit_syn(tuple, segment.payload.len())?;
         let listener = self
             .listeners
             .iter_mut()
@@ -267,9 +296,6 @@ impl TcpConnectionTable {
                     && (l.address == tuple.local_address || l.address == [0; 4])
             })
             .ok_or(TcpConnectionError::NotFound)?;
-        if listener.pending.len() >= listener.config.backlog {
-            return Err(TcpConnectionError::Capacity);
-        }
         listener
             .pending
             .try_reserve(1)

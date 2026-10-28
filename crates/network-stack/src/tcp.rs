@@ -6,6 +6,9 @@ use crate::PacketError;
 #[path = "tcp/passive.rs"]
 mod passive;
 pub use passive::TcpListenConfig;
+#[path = "tcp/dispatch.rs"]
+mod dispatch;
+pub use dispatch::TcpDispatch;
 
 pub const TCP_PROTOCOL: u8 = 6;
 pub const TCP_HEADER_LEN: usize = 20;
@@ -255,6 +258,7 @@ pub enum TcpConnectionError {
     ConnectionReset,
     Capacity,
     PortUnavailable,
+    EntropyUnavailable,
     Ownership,
     NotFound,
 }
@@ -498,9 +502,7 @@ impl TcpConnection {
             {
                 return Err(TcpConnectionError::InvalidAcknowledgment);
             }
-            self.state = TcpState::Reset;
-            self.outstanding.clear();
-            self.send_buffer.clear();
+            self.abort();
             return Ok(TcpReceiveResult::Reset);
         }
         if self.state == TcpState::SynSent {
