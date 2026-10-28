@@ -139,6 +139,7 @@ pub struct DnsRecordSet {
     kind: DnsRecordType,
     canonical_name: DnsRecordName,
     values: Vec<DnsRecordValue>,
+    aliases: Vec<DnsRecordName>,
     ttl_seconds: u32,
 }
 
@@ -155,6 +156,9 @@ impl DnsRecordSet {
     pub fn values(&self) -> &[DnsRecordValue] {
         &self.values
     }
+    pub fn aliases(&self) -> &[DnsRecordName] {
+        &self.aliases
+    }
     /// Minimum TTL of every traversed alias and every member of the RRset.
     pub fn ttl_seconds(&self) -> u32 {
         self.ttl_seconds
@@ -167,8 +171,39 @@ impl DnsRecordSet {
             question,
             kind: DnsRecordType::A,
             values: alloc::vec![DnsRecordValue::Ipv4(address)],
+            aliases: Vec::new(),
             ttl_seconds: normalize_ttl(ttl),
         }
+    }
+
+    /// Join a CNAME-only response to the next response, aging the previous
+    /// aliases' TTL while that next query was outstanding.
+    pub fn follow_answer(&self, mut answer: Self, elapsed_ms: u64) -> Result<Self, DnsError> {
+        if !self.values.is_empty()
+            || self.canonical_name == self.question
+            || self.canonical_name != answer.question
+            || self.kind != answer.kind
+        {
+            return Err(DnsError::QuestionMismatch);
+        }
+        let mut aliases = self.aliases.clone();
+        for name in &answer.aliases {
+            if aliases.contains(name) {
+                return Err(DnsError::AliasLoop);
+            }
+            aliases.push(name.clone());
+        }
+        if aliases.contains(&answer.canonical_name) {
+            return Err(DnsError::AliasLoop);
+        }
+        if aliases.len() > DNS_MAX_ALIAS_DEPTH {
+            return Err(DnsError::AliasDepth);
+        }
+        let remaining = (u64::from(self.ttl_seconds) * 1000).saturating_sub(elapsed_ms) / 1000;
+        answer.ttl_seconds = answer.ttl_seconds.min(remaining as u32);
+        answer.question = self.question.clone();
+        answer.aliases = aliases;
+        Ok(answer)
     }
 }
 
@@ -355,11 +390,13 @@ pub fn decode_dns_records(
             }
         }
     }
+    visited.pop(); // The terminal canonical name is not an alias.
     Ok(DnsRecordSet {
         question,
         kind,
         canonical_name: canonical,
         values,
+        aliases: visited,
         ttl_seconds: ttl.unwrap_or(0),
     })
 }
@@ -508,6 +545,9 @@ impl DnsCache {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+    pub fn clear(&mut self) {
+        self.entries.clear();
     }
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
