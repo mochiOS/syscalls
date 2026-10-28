@@ -28,6 +28,24 @@ impl<T: ObjectTransport> Client<T> {
         protocol::decode_session_info(&response[..length]).map_err(ClientError::Protocol)
     }
 
+    /// Read the captured source identity from the authenticated scope object.
+    /// No caller-selected process is queried. A broker compares process_id to
+    /// its native IPC sender before applying this scope's user-grant policy.
+    pub fn read_scope_source_info(
+        &self,
+        scope: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<wire::SourceInfo, ClientError<T::Error>> {
+        let mut handles = self.read_scope_attachment(scope)?;
+        let mut response = [0; wire::SOURCE_INFO_LEN];
+        let length = self.request_without_reply_handles(
+            wire::OP_SOURCE_INFO,
+            &[],
+            &mut response,
+            &mut handles,
+        )?;
+        wire::decode_source_info(&response[..length]).map_err(ClientError::Protocol)
+    }
+
     /// Register a fresh broker-created image only while its requester's root,
     /// cwd, credentials and native image still match the loader's scope.
     /// EAGAIN requires a fresh capture and preparation; no child was registered.
@@ -65,6 +83,27 @@ impl<T: ObjectTransport> Client<T> {
         from_root: bool,
         path: impl AsRef<[u8]>,
     ) -> Result<ObjectHandleAttachment<T::Handle>, ClientError<T::Error>> {
+        self.read_scope_open_options(scope, from_root, path.as_ref(), false)
+    }
+
+    /// Also enforce executable-file permission using the scope's credentials.
+    /// This adds no Handle rights and grants no native execution permit.
+    pub fn read_scope_open_executable(
+        &self,
+        scope: ObjectHandleAttachment<T::Handle>,
+        from_root: bool,
+        path: impl AsRef<[u8]>,
+    ) -> Result<ObjectHandleAttachment<T::Handle>, ClientError<T::Error>> {
+        self.read_scope_open_options(scope, from_root, path.as_ref(), true)
+    }
+
+    fn read_scope_open_options(
+        &self,
+        scope: ObjectHandleAttachment<T::Handle>,
+        from_root: bool,
+        path: &[u8],
+        executable: bool,
+    ) -> Result<ObjectHandleAttachment<T::Handle>, ClientError<T::Error>> {
         let handles = self.read_scope_attachment(scope)?;
         let mut payload = [0; protocol::OPEN_AT_HEADER_LEN + protocol::MAX_PATH_LEN];
         let length = protocol::encode_open_at(
@@ -74,9 +113,15 @@ impl<T: ObjectTransport> Client<T> {
                 } else {
                     protocol::OpenBase::ProcessCwd
                 },
-                options: protocol::OPEN_READ | protocol::OPEN_NONBLOCK,
+                options: protocol::OPEN_READ
+                    | protocol::OPEN_NONBLOCK
+                    | if executable {
+                        protocol::OPEN_EXECUTE
+                    } else {
+                        0
+                    },
                 mode: 0,
-                path: path.as_ref(),
+                path,
             },
             &mut payload,
         )

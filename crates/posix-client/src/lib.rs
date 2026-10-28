@@ -2184,6 +2184,7 @@ impl<T: ObjectTransport> Client<T> {
                 | protocol::read_scope::OP_INFO
                 | protocol::read_scope::OP_OPEN
                 | protocol::read_scope::OP_REGISTER_CHILD
+                | protocol::read_scope::OP_SOURCE_INFO
         ) && header.flags != 0
         {
             return Err(ClientError::MismatchedResponse);

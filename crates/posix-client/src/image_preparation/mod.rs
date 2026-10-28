@@ -22,6 +22,8 @@ pub struct Environment<'a> {
 /// the caller; this module never grants execution rights or changes a process.
 pub struct Prepared<'a> {
     pub image: u32,
+    /// Exact output bytes retained by the owner, for execution authorization.
+    pub bytes: &'a [u8],
     pub executable: Option<crate::process_image::Executable>,
     pub lifecycle: &'a [u8],
     pub tls: &'a [u8],
@@ -188,10 +190,25 @@ fn read_at<B: Backend>(
     })
 }
 pub fn needs_preparation<B: Backend>(backend: &B, image: u32) -> Result<bool, c_int> {
+    needs_preparation_from(|output, offset| read_at(backend, image, output, offset))
+}
+
+pub fn needs_preparation_bytes(bytes: &[u8]) -> Result<bool, c_int> {
+    needs_preparation_from(|output, offset| {
+        let remaining = bytes.get(offset..).unwrap_or(&[]);
+        let length = remaining.len().min(output.len());
+        output[..length].copy_from_slice(&remaining[..length]);
+        Ok(length)
+    })
+}
+
+fn needs_preparation_from(
+    mut read_at: impl FnMut(&mut [u8], usize) -> Result<usize, c_int>,
+) -> Result<bool, c_int> {
     let mut header = [0u8; 64];
     let mut read = 0;
     while read < header.len() {
-        let n = read_at(backend, image, &mut header[read..], read)?;
+        let n = read_at(&mut header[read..], read)?;
         if n == 0 {
             break;
         }
@@ -222,12 +239,7 @@ pub fn needs_preparation<B: Backend>(backend: &B, image: u32) -> Result<bool, c_
         let mut entry = [0; 56];
         let mut done = 0;
         while done < entry.len() {
-            let amount = read_at(
-                backend,
-                image,
-                &mut entry[done..],
-                offset + index * stride + done,
-            )?;
+            let amount = read_at(&mut entry[done..], offset + index * stride + done)?;
             if amount == 0 {
                 return Err(ENOEXEC);
             }
@@ -357,6 +369,7 @@ impl<B: Backend> Preparation<B> {
         self.build(backend, image, environment, identity)?;
         Ok(Prepared {
             image: self.handle,
+            bytes: self.output.bytes(),
             executable: self.executable,
             lifecycle: self.lifecycle.bytes(),
             tls: self.tls.bytes(),
