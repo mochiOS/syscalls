@@ -16,6 +16,11 @@ pub(super) enum Definition {
     Absolute(u64),
     Image { value: u64, size: u64 },
     Tls { value: u64, size: u64 },
+    Indirect {
+        value: u64,
+        size: u64,
+        absolute: bool,
+    },
 }
 
 impl<'a> Table<'a> {
@@ -151,7 +156,7 @@ impl<'a> Table<'a> {
         let name = self.string(u32_at(entry, 0)? as u64)?;
         let binding = entry[4] >> 4;
         let kind = entry[4] & 15;
-        if binding > 2 || !matches!(kind, 0..=3 | 6) || entry[5] & !3 != 0 {
+        if binding > 2 || !matches!(kind, 0..=3 | 6 | 10) || entry[5] & !3 != 0 {
             return Err(Error::Unsupported);
         }
         let section = u16_at(entry, 6)?;
@@ -159,11 +164,21 @@ impl<'a> Table<'a> {
         let definition = match section {
             0 if index == 0 => Some(Definition::Absolute(0)),
             0 => None,
+            0xfff1 if kind == 10 => Some(Definition::Indirect {
+                value,
+                size: u64_at(entry, 16)?,
+                absolute: true,
+            }),
             0xfff1 if kind != 6 => Some(Definition::Absolute(value)),
             0xff00..=0xffff => return Err(Error::Unsupported),
             _ if kind == 6 => Some(Definition::Tls {
                 value,
                 size: u64_at(entry, 16)?,
+            }),
+            _ if kind == 10 => Some(Definition::Indirect {
+                value,
+                size: u64_at(entry, 16)?,
+                absolute: false,
             }),
             _ => Some(Definition::Image {
                 value,

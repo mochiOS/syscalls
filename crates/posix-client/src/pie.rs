@@ -12,6 +12,7 @@ mod symbols;
 enum Value {
     Relative(u64),
     Absolute(u64),
+    Indirect(u64),
     Symbol { index: u32, addend: u64 },
     Size { index: u32, addend: u64, width: u8 },
     Tls { index: u32, kind: u32, addend: u64 },
@@ -30,7 +31,11 @@ impl Value {
         Ok(match self {
             Self::Relative(value) => bias.wrapping_add(value),
             Self::Absolute(value) => value,
-            Self::Symbol { .. } | Self::Size { .. } | Self::Tls { .. } | Self::Copy { .. } => {
+            Self::Indirect(_)
+            | Self::Symbol { .. }
+            | Self::Size { .. }
+            | Self::Tls { .. }
+            | Self::Copy { .. } => {
                 return Err(Error::Unsupported);
             }
         })
@@ -619,8 +624,8 @@ impl<'a> Pie<'a> {
         }
         Ok(())
     }
-    /// TLS bindings require an explicit scope. IFUNC execution remains
-    /// unsupported rather than executing a resolver in the preparing process.
+    /// TLS and deferred resolver records require an explicit scope. Parsing
+    /// never calls a resolver, including a locally defined IFUNC.
     fn relocation(&self, o: usize) -> Result<(u64, Option<Value>), Error> {
         let target = u64_at(self.bytes, o)?;
         let info = u64_at(self.bytes, o + 8)?;
@@ -630,6 +635,10 @@ impl<'a> Pie<'a> {
         let value = match kind {
             0 => return Ok((target, None)),
             8 if symbol == 0 => Value::Relative(addend),
+            37 if symbol == 0 && self.linkable => {
+                self.resolver_source(addend, 0)?;
+                Value::Indirect(addend)
+            }
             32 | 33 => {
                 let reference = self.symbols.as_ref().ok_or(Error::Invalid)?.entry(symbol)?;
                 if let Some(definition) = reference.definition {
@@ -675,7 +684,18 @@ impl<'a> Pie<'a> {
                     return Err(Error::Unsupported);
                 }
                 if let Some(definition) = reference.definition {
-                    self.definition_value(definition)?;
+                    if let symbols::Definition::Indirect {
+                        value, size, absolute,
+                    } = definition {
+                        if !self.linkable {
+                            return Err(Error::Unsupported);
+                        }
+                        if !absolute {
+                            self.resolver_source(value, size)?;
+                        }
+                    } else {
+                        self.definition_value(definition)?;
+                    }
                 }
                 if !self.linkable {
                     table.definition(symbol)?;
@@ -721,7 +741,9 @@ impl<'a> Pie<'a> {
                 }
                 Ok(Value::Relative(value))
             }
-            symbols::Definition::Tls { .. } => Err(Error::Unsupported),
+            symbols::Definition::Tls { .. } | symbols::Definition::Indirect { .. } => {
+                Err(Error::Unsupported)
+            }
         }
     }
     fn definition_size(&self, definition: symbols::Definition, size: u64) -> Result<u64, Error> {
@@ -729,11 +751,42 @@ impl<'a> Pie<'a> {
             symbols::Definition::Tls { .. } => {
                 self.tls_definition(definition)?;
             }
+            symbols::Definition::Indirect {
+                value, size, absolute,
+            } => {
+                if !absolute {
+                    self.resolver_source(value, size)?;
+                }
+            }
             _ => {
                 self.definition_value(definition)?;
             }
         }
         Ok(size)
+    }
+    fn resolver_source(&self, value: u64, size: u64) -> Result<(), Error> {
+        if (0..self.count).any(|i| {
+            self.segment(i)
+                .is_ok_and(|s| s.flags & 1 != 0 && s.contains(value, size.max(1)))
+        }) {
+            Ok(())
+        } else {
+            Err(Error::Invalid)
+        }
+    }
+    fn resolver_address(&self, definition: symbols::Definition, bias: u64) -> Result<u64, Error> {
+        let symbols::Definition::Indirect {
+            value, size, absolute,
+        } = definition else {
+            return Err(Error::Invalid);
+        };
+        let address = if absolute { value } else { add(bias, value)? };
+        let relative = address.checked_sub(bias).ok_or(Error::Invalid)?;
+        self.resolver_source(relative, size)?;
+        if address < USER_MIN || add(address, size.max(1))? > USER_END {
+            return Err(Error::Invalid);
+        }
+        Ok(address)
     }
     fn tls_definition(&self, definition: symbols::Definition) -> Result<u64, Error> {
         let symbols::Definition::Tls { value, size } = definition else {
@@ -1062,6 +1115,7 @@ impl<'a> Pie<'a> {
             },
             |_, _| Err(Error::Unsupported),
             |_, _| Err(Error::Unsupported),
+            |_, _| Ok(false),
         )
     }
     fn write_resolved(
@@ -1071,6 +1125,7 @@ impl<'a> Pie<'a> {
         mut resolve: impl FnMut(u32, u32) -> Result<u64, Error>,
         mut descriptor: impl FnMut(u32, u64) -> Result<(u64, u64), Error>,
         mut copy: impl FnMut(u32, &mut [u8]) -> Result<(), Error>,
+        mut deferred: impl FnMut(u64, Value) -> Result<bool, Error>,
     ) -> Result<usize, Error> {
         if bias % self.alignment() != 0 {
             return Err(Error::Invalid);
@@ -1166,6 +1221,9 @@ impl<'a> Pie<'a> {
             self.relocations(|target, value| {
                 if s.contains(target, value.width()) {
                     let offset = add(destination, target - s.address)? as usize;
+                    if deferred(target, value)? {
+                        return Ok(());
+                    }
                     if let Value::Copy { index, size } = value {
                         let end = usize::try_from(add(offset as u64, size)?)
                             .map_err(|_| Error::Overflow)?;

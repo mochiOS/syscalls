@@ -4,7 +4,9 @@ use super::{Error, LOAD, PAGE, Pie, USER_END, USER_MIN, add, page};
 
 mod bundle;
 mod lifecycle;
+mod indirect;
 pub use lifecycle::{Lifecycle, Step};
+pub use indirect::Deferred;
 
 pub struct Object<'scope, 'image> {
     /// Name by which this already-captured object satisfies DT_NEEDED.
@@ -290,6 +292,14 @@ impl<'scope, 'image> Scope<'scope, 'image> {
     /// Prepare one object using the complete scope. The caller must install
     /// all members together; this does not itself map or execute any member.
     pub fn write(&self, index: usize, output: &mut [u8]) -> Result<usize, Error> {
+        self.write_with_deferred(index, output, false)
+    }
+    fn write_with_deferred(
+        &self,
+        index: usize,
+        output: &mut [u8],
+        deferred: bool,
+    ) -> Result<usize, Error> {
         let object = self.objects.get(index).ok_or(Error::Invalid)?;
         object.image.write_resolved(
             object.bias,
@@ -297,6 +307,13 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             |symbol, kind| self.resolve(index, symbol, kind),
             |symbol, addend| self.descriptor(index, symbol, addend),
             |symbol, output| self.copy(index, symbol, output),
+            |target, value| {
+                if deferred {
+                    Ok(self.indirect_fixup(index, target, value)?.is_some())
+                } else {
+                    Ok(false)
+                }
+            },
         )
     }
 }
