@@ -803,3 +803,5 @@ mod tests {
         assert_eq!(decode_metadata(&bytes).unwrap(), metadata);
     }
 }
+
+pub mod storage_region;
