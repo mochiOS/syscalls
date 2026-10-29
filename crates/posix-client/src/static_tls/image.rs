@@ -21,6 +21,39 @@ pub fn encoded_length(count: usize) -> Option<usize> {
     count.checked_mul(MODULE_BYTES)?.checked_add(HEADER_BYTES)
 }
 
+/// Allocation preflight; decode repeats every header/bounds check before use.
+pub fn workspace<E>(
+    base: usize,
+    maximum: usize,
+    mut read: impl FnMut(usize, &mut [u8]) -> Result<(), E>,
+) -> Result<(usize, usize), Error<E>> {
+    if base == 0
+        || base % 8 != 0
+        || maximum < HEADER_BYTES
+        || base.checked_add(HEADER_BYTES).is_none()
+    {
+        return Err(Error::Invalid);
+    }
+    let mut b = [0; HEADER_BYTES];
+    read(base, &mut b).map_err(Error::Read)?;
+    let word = |at| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+    let format = word(8);
+    let count = (format >> 32) as usize;
+    let length = usize::try_from(word(16)).map_err(|_| Error::TooLarge)?;
+    if word(0) != MAGIC
+        || format as u32 != VERSION
+        || word(24) != 0
+        || encoded_length(count) != Some(length)
+    {
+        return Err(Error::Invalid);
+    }
+    if length > maximum {
+        return Err(Error::TooLarge);
+    }
+    base.checked_add(length).ok_or(Error::Invalid)?;
+    Ok((count, length))
+}
+
 pub fn encode(
     templates: &[Option<Template>],
     output: &mut [u8],

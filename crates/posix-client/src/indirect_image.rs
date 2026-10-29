@@ -217,6 +217,41 @@ fn word(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
 }
 
+/// Bounded allocation preflight only. capture validates the full header again
+/// and rejects any changed counts which no longer fit the supplied storage.
+pub fn workspace<E>(
+    base: u64,
+    maximum: usize,
+    mut read: impl FnMut(u64, &mut [u8]) -> Result<(), E>,
+) -> Result<(usize, usize, usize), Error<E>> {
+    if base < USER_MIN
+        || base % 8 != 0
+        || maximum < HEADER_BYTES
+        || base
+            .checked_add(HEADER_BYTES as u64)
+            .is_none_or(|n| n > USER_END)
+    {
+        return Err(Error::Invalid);
+    }
+    let mut b = [0; HEADER_BYTES];
+    read(base, &mut b).map_err(Error::Read)?;
+    let format = word(&b, 8);
+    if word(&b, 0) != MAGIC || !matches!(format as u32, VERSION | COPY_VERSION) || word(&b, 32) != 0
+    {
+        return Err(Error::Invalid);
+    }
+    let regions = (format >> 32) as usize;
+    let fixups = usize::try_from(word(&b, 16)).map_err(|_| Error::TooLarge)?;
+    let size = length(regions, fixups)?;
+    if size > maximum {
+        return Err(Error::TooLarge);
+    }
+    if word(&b, 24) != size as u64 || base.checked_add(size as u64).is_none_or(|n| n > USER_END) {
+        return Err(Error::Invalid);
+    }
+    Ok((regions, fixups, size))
+}
+
 /// A complete private snapshot. No reference to the input metadata survives
 /// capture, so a resolver cannot redirect later fixups by changing that input.
 pub struct Captured<'a> {

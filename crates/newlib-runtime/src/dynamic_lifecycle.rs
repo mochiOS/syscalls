@@ -12,6 +12,10 @@ const FAILED: u8 = 5;
 const ABSENT: u8 = 6;
 static PHASE: AtomicU8 = AtomicU8::new(EMPTY);
 static LENGTH: AtomicUsize = AtomicUsize::new(0);
+static ADDRESS: AtomicUsize = AtomicUsize::new(0);
+static CAPACITY: AtomicUsize = AtomicUsize::new(0);
+static OUTPUT: AtomicUsize = AtomicUsize::new(0);
+static OUTPUT_CAPACITY: AtomicUsize = AtomicUsize::new(0);
 static LIFECYCLE: State = State::new();
 #[repr(align(8))]
 struct Snapshot(UnsafeCell<[u8; MAXIMUM]>);
@@ -77,14 +81,58 @@ pub(super) fn prepare() -> Result<bool, c_int> {
             .map_err(|_| ENOEXEC)?;
         return Ok(false);
     };
+    let size = deferred::encoded_length(
+        address as u64,
+        mochios_posix_client::startup_metadata::MAX_BYTES,
+        read,
+    )
+    .map_err(error)?;
     let mut bytes = [0; MAXIMUM];
-    let length = deferred::capture(address as u64, MAXIMUM, &mut bytes, read).map_err(error)?;
+    let mut large = if size > MAXIMUM {
+        Some(startup_storage::Buffer::new(size)?)
+    } else {
+        None
+    };
+    let target = large.as_mut().map(|b| b.bytes_mut()).unwrap_or(&mut bytes);
+    let length = deferred::capture(
+        address as u64,
+        mochios_posix_client::startup_metadata::MAX_BYTES,
+        target,
+        read,
+    )
+    .map_err(error)?;
+    // Allocate all output storage before the first resolver. Nothing acquired
+    // after a resolver installs callbacks can be lost to a nonlocal exit.
+    let flat = if u32::from_le_bytes(target[8..12].try_into().unwrap()) == deferred::VERSION {
+        deferred::Plan::parse::<c_int>(&target[..length])
+            .map_err(error)?
+            .flat_length()
+    } else {
+        0
+    };
+    let output = if flat > MAXIMUM {
+        Some(startup_storage::Buffer::new(flat)?)
+    } else {
+        None
+    };
     PHASE
         .compare_exchange(EMPTY, WRITING, Ordering::AcqRel, Ordering::Acquire)
         .map_err(|_| ENOEXEC)?;
     // SAFETY: the winning writer exclusively owns the internal buffer; bounds
     // were checked by capture, and source stack and static storage are disjoint.
-    unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), SNAPSHOT.0.get().cast::<u8>(), length) };
+    let (base, capacity) = if let Some(storage) = large {
+        storage.into_raw()
+    } else {
+        unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), SNAPSHOT.0.get().cast::<u8>(), length) };
+        (SNAPSHOT.0.get() as usize, 0)
+    };
+    if let Some(output) = output {
+        let (base, capacity) = output.into_raw();
+        OUTPUT.store(base, Ordering::Relaxed);
+        OUTPUT_CAPACITY.store(capacity, Ordering::Relaxed);
+    }
+    ADDRESS.store(base, Ordering::Relaxed);
+    CAPACITY.store(capacity, Ordering::Relaxed);
     LENGTH.store(length, Ordering::Relaxed);
     PHASE.store(PREPARED, Ordering::Release);
     Ok(true)
@@ -109,14 +157,23 @@ fn resolve() -> Result<(), c_int> {
     let resolved = {
         // SAFETY: only the resolving winner reads this bounded prepared plan.
         // No callbacks execute and no writable reference is outstanding.
-        let bytes = unsafe { core::slice::from_raw_parts(SNAPSHOT.0.get().cast::<u8>(), length) };
+        let bytes = unsafe {
+            core::slice::from_raw_parts(ADDRESS.load(Ordering::Relaxed) as *const u8, length)
+        };
         if u32::from_le_bytes(bytes[8..12].try_into().unwrap()) == deferred::VERSION {
-            Some(
-                deferred::Plan::parse::<c_int>(bytes)
-                    .map_err(error)?
-                    .resolve(&mut output, read)
-                    .map_err(error)?,
-            )
+            let plan = deferred::Plan::parse::<c_int>(bytes).map_err(error)?;
+            let address = OUTPUT.load(Ordering::Relaxed);
+            let target = if plan.flat_length() > MAXIMUM {
+                if address == 0 || OUTPUT_CAPACITY.load(Ordering::Relaxed) < plan.flat_length() {
+                    return Err(ENOEXEC);
+                }
+                // SAFETY: prepare retained this private, fully bounded output
+                // mapping. It is disjoint from the immutable plan mapping.
+                unsafe { core::slice::from_raw_parts_mut(address as *mut u8, plan.flat_length()) }
+            } else {
+                &mut output[..]
+            };
+            Some(plan.resolve(target, read).map_err(error)?)
         } else {
             None
         }
@@ -124,8 +181,25 @@ fn resolve() -> Result<(), c_int> {
     if let Some(length) = resolved {
         // SAFETY: the plan borrow ended; this winner still has exclusive write
         // access. From READY onward all callers only read the resulting image.
-        unsafe { ptr::copy_nonoverlapping(output.as_ptr(), SNAPSHOT.0.get().cast::<u8>(), length) };
+        let old = ADDRESS.load(Ordering::Relaxed);
+        let old_capacity = CAPACITY.load(Ordering::Relaxed);
+        let (base, capacity) = if length > MAXIMUM {
+            (
+                OUTPUT.swap(0, Ordering::Relaxed),
+                OUTPUT_CAPACITY.swap(0, Ordering::Relaxed),
+            )
+        } else {
+            unsafe {
+                ptr::copy_nonoverlapping(output.as_ptr(), SNAPSHOT.0.get().cast::<u8>(), length)
+            };
+            (SNAPSHOT.0.get() as usize, 0)
+        };
+        ADDRESS.store(base, Ordering::Relaxed);
+        CAPACITY.store(capacity, Ordering::Relaxed);
         LENGTH.store(length, Ordering::Relaxed);
+        if old_capacity != 0 {
+            unsafe { startup_storage::Buffer::release(old, old_capacity) };
+        }
     }
     PHASE.store(READY, Ordering::Release);
     core::mem::forget(attempt);
@@ -133,7 +207,7 @@ fn resolve() -> Result<(), c_int> {
 }
 fn image() -> Result<Image, c_int> {
     Image::read(
-        SNAPSHOT.0.get() as u64,
+        ADDRESS.load(Ordering::Acquire) as u64,
         LENGTH.load(Ordering::Acquire),
         read,
     )

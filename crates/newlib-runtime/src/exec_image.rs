@@ -104,6 +104,14 @@ unsafe impl Backend for Runtime {
             .filter(|handle| *handle != 0)
             .ok_or(EIO)
     }
+    fn readonly_metadata(&self, image: u32) -> Result<u32, c_int> {
+        let raw = syscall_errno(syscall::raw_syscall2(
+            syscall::SyscallNumber::HandleDuplicate,
+            image as u64,
+            mochios_posix_client::startup_metadata::READER_RIGHTS,
+        ))?;
+        u32::try_from(raw).ok().filter(|h| *h != 0).ok_or(EIO)
+    }
 }
 
 pub(super) fn with_image(

@@ -6,6 +6,16 @@ use mochios_posix_client::pie::{
     link_scope::{Object, Scope, Step},
 };
 
+fn metadata_size(root: &Pie<'_>, length: usize) -> Result<(), c_int> {
+    if length > crate::startup_metadata::MAX_BYTES
+        || (length > mnu_abi::process_image::MAX_STACK_BYTES
+            && !root.has_large_metadata_runtime().map_err(|_| ENOEXEC)?)
+    {
+        return Err(E2BIG);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Default)]
 struct Paths {
     rpath: Option<(usize, usize)>,
@@ -461,9 +471,7 @@ impl<B: Backend> Dependencies<B> {
         let indirect_length = if fixup_count != 0 {
             let size = crate::indirect_image::encoded_length(region_count, fixup_count)
                 .map_err(|_| E2BIG)?;
-            if size > mnu_abi::process_image::MAX_STACK_BYTES {
-                return Err(E2BIG);
-            }
+            metadata_size(&images[0], size)?;
             size
         } else {
             0
@@ -486,9 +494,7 @@ impl<B: Backend> Dependencies<B> {
         if tls_runtime && templates.iter().any(Option::is_some) {
             use mochios_posix_client::static_tls::image;
             let length = image::encoded_length(count).ok_or(E2BIG)?;
-            if length > mnu_abi::process_image::MAX_STACK_BYTES {
-                return Err(E2BIG);
-            }
+            metadata_size(&images[0], length)?;
             tls.reserve(length)?;
             let payload = unsafe { core::slice::from_raw_parts_mut(tls.pointer, length) };
             image::encode(templates, payload).map_err(|_| ENOEXEC)?;
@@ -576,9 +582,7 @@ impl<B: Backend> Dependencies<B> {
             plan.encoded_length()
         }
         .map_err(|_| ENOEXEC)?;
-        if plan_length > mnu_abi::process_image::MAX_STACK_BYTES {
-            return Err(E2BIG);
-        }
+        metadata_size(&images[0], plan_length)?;
         if plan_length != 0 {
             if !runtime {
                 return Err(ENOEXEC);

@@ -30,6 +30,7 @@ pub mod newlib_errno;
 pub mod image_error;
 pub mod pie;
 pub mod image_preparation;
+pub mod startup_metadata;
 pub mod process_image;
 pub mod lifecycle_image;
 pub mod indirect_image;

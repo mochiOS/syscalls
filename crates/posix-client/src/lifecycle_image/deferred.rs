@@ -190,6 +190,37 @@ impl<'a> Plan<'a> {
     }
 }
 
+/// Allocation preflight only; capture repeats every header and bounds check
+/// before copying the complete metadata into the supplied private storage.
+pub fn encoded_length<E>(
+    base: u64,
+    maximum: usize,
+    mut read: impl FnMut(u64, &mut [u8]) -> Result<(), E>,
+) -> Result<usize, Error<E>> {
+    if base < USER_MIN
+        || base % 8 != 0
+        || maximum < super::HEADER_BYTES
+        || base
+            .checked_add(super::HEADER_BYTES as u64)
+            .is_none_or(|n| n > USER_END)
+    {
+        return Err(Error::Invalid);
+    }
+    let mut header = [0; super::HEADER_BYTES];
+    read(base, &mut header).map_err(Error::Read)?;
+    if word(&header, 0) != MAGIC || !matches!(word(&header, 8) as u32, super::VERSION | VERSION) {
+        return Err(Error::Invalid);
+    }
+    let length = usize::try_from(word(&header, 16)).map_err(|_| Error::TooLarge)?;
+    if length > maximum {
+        return Err(Error::TooLarge);
+    }
+    if length < super::HEADER_BYTES || base.checked_add(length as u64).is_none_or(|n| n > USER_END)
+    {
+        return Err(Error::Invalid);
+    }
+    Ok(length)
+}
 /// Copy the complete metadata before resolvers or constructors. The common
 /// header is read once, so changing its length later cannot enlarge capture.
 /// Version 2 validation reads recipes only, never final array element values.

@@ -2,6 +2,22 @@
 use super::*;
 use mochios_posix_client::indirect_image::{self as policy, Captured, Error, Fixup, Region, State};
 static RESOLVERS: State = State::new();
+// Per-image ownership remains discoverable if a resolver abandons its frame.
+// It is never overwritten by reentry; process teardown owns any abandoned VM.
+static LARGE_BASE: AtomicUsize = AtomicUsize::new(0);
+static LARGE_CAPACITY: AtomicUsize = AtomicUsize::new(0);
+struct LargeWorkspace {
+    base: usize,
+    capacity: usize,
+}
+impl Drop for LargeWorkspace {
+    fn drop(&mut self) {
+        LARGE_CAPACITY.store(0, Ordering::Relaxed);
+        LARGE_BASE.store(0, Ordering::Release);
+        // SAFETY: the constructor moved this exact fresh mapping into this owner.
+        unsafe { startup_storage::Buffer::release(self.base, self.capacity) };
+    }
+}
 
 /// Startup contract only. The producer separately authenticates every input
 /// and obtains execution authority before the kernel installs the image.
@@ -35,6 +51,59 @@ pub(super) fn initialize() -> Result<bool, c_int> {
             Err(error) => return Err(error),
         };
     const MAXIMUM: usize = mnu_abi::process_image::MAX_STACK_BYTES;
+    let (region_count, fixup_count, size) = policy::workspace(
+        address as u64,
+        mochios_posix_client::startup_metadata::MAX_BYTES,
+        |a, b| user_copy::read(a as *const u8, b),
+    )
+    .map_err(error)?;
+    if size > MAXIMUM {
+        let region_bytes = region_count
+            .checked_mul(core::mem::size_of::<Region>())
+            .ok_or(E2BIG)?;
+        let alignment = core::mem::align_of::<Fixup>();
+        let fixup_offset = region_bytes
+            .checked_add(alignment - 1)
+            .map(|n| n & !(alignment - 1))
+            .ok_or(E2BIG)?;
+        let bytes = fixup_count
+            .checked_mul(core::mem::size_of::<Fixup>())
+            .and_then(|n| fixup_offset.checked_add(n))
+            .ok_or(E2BIG)?;
+        let mut storage = startup_storage::Buffer::new(bytes.max(1))?;
+        let pointer = storage.bytes_mut().as_mut_ptr();
+        LARGE_BASE
+            .compare_exchange(0, pointer as usize, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| ENOEXEC)?;
+        LARGE_CAPACITY.store(storage.capacity(), Ordering::Relaxed);
+        let (base, capacity) = storage.into_raw();
+        let _owner = LargeWorkspace { base, capacity };
+        // SAFETY: disjoint, aligned views into the fresh private mapping. Every
+        // enum/bool is initialized before creating a typed Rust reference.
+        let (regions, fixups) = unsafe {
+            let regions = pointer.cast::<Region>();
+            let fixups = pointer.add(fixup_offset).cast::<Fixup>();
+            for i in 0..region_count {
+                regions.add(i).write(Region::EMPTY);
+            }
+            for i in 0..fixup_count {
+                fixups.add(i).write(Fixup::EMPTY);
+            }
+            (
+                core::slice::from_raw_parts_mut(regions, region_count),
+                core::slice::from_raw_parts_mut(fixups, fixup_count),
+            )
+        };
+        let image = Captured::capture(
+            address as u64,
+            mochios_posix_client::startup_metadata::MAX_BYTES,
+            regions,
+            fixups,
+            |a, b| user_copy::read(a as *const u8, b),
+        )
+        .map_err(error)?;
+        return apply(&image);
+    }
     // The bounded startup payload fits in the existing native entry stack.
     // Both workspaces are private; no allocation/Handle survives a resolver
     // which exits or abandons this frame with a C nonlocal jump.
@@ -48,9 +117,12 @@ pub(super) fn initialize() -> Result<bool, c_int> {
         |address, bytes| user_copy::read(address as *const u8, bytes),
     )
     .map_err(error)?;
+    apply(&image)
+}
+fn apply(image: &Captured<'_>) -> Result<bool, c_int> {
     RESOLVERS
         .apply_with_copies(
-            &image,
+            image,
             |address, bytes| user_copy::read(address as *const u8, bytes),
             |address| -> Result<u64, c_int> {
                 // SAFETY: capture checked every resolver against the authorized

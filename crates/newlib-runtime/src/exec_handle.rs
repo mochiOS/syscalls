@@ -30,27 +30,29 @@ pub(super) fn with_startup(
     io_resources::with(
         || image_startup::Plan::new(random),
         |plan| {
-            let mut startup = [0; MAX_STARTUP_IMAGE_BYTES];
-            let length = mochios_posix_client::process_image::encode_initial_stack_for_process(
-                &arguments[..argument_count],
-                &environment[..environment_count],
-                execfn,
-                random,
-                &plan.auxiliary(),
-                process,
-                &mut startup,
+            io_resources::with(
+                || {
+                    Ok(mochios_posix_client::startup_metadata::Owner::<
+                        exec_image::Runtime,
+                    >::default())
+                },
+                |metadata| {
+                    let mut startup = [0; MAX_STARTUP_IMAGE_BYTES];
+                    let length = metadata.encode(
+                        &exec_image::Runtime,
+                        &arguments[..argument_count],
+                        &environment[..environment_count],
+                        execfn,
+                        random,
+                        &plan.auxiliary(),
+                        process,
+                        &mut startup,
+                    )?;
+                    let length = metadata.attach(&mut startup, length, &plan.mappings())?;
+                    let length = attach_fd_launch_context(fds, &mut startup, length)?;
+                    operation(&startup[..length])
+                },
             )
-            .map_err(|error| match error {
-                mochios_posix_client::process_image::EncodeError::ImageTooLarge
-                | mochios_posix_client::process_image::EncodeError::EmptyArgumentVector => E2BIG,
-                mochios_posix_client::process_image::EncodeError::InvalidText => EINVAL,
-                mochios_posix_client::process_image::EncodeError::Codec(_) => EIO,
-            })?;
-            let length =
-                mnu_abi::process_image::attach_mappings(&mut startup, length, &plan.mappings())
-                    .map_err(|_| EIO)?;
-            let length = attach_fd_launch_context(fds, &mut startup, length)?;
-            operation(&startup[..length])
         },
     )
 }

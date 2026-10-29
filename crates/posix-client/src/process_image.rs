@@ -222,6 +222,37 @@ pub fn encode_initial_stack_for_process(
     process: Process<'_>,
     output: &mut [u8],
 ) -> Result<usize, EncodeError> {
+    encode_process(argv, envp, execfn, random, auxiliary, process, None, output)
+}
+
+pub fn encode_initial_stack_with_metadata(
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    execfn: &[u8],
+    random: [u8; 16],
+    auxiliary: &[(u64, u64)],
+    process: Process<'_>,
+    mapped: crate::startup_metadata::Layout,
+    output: &mut [u8],
+) -> Result<usize, EncodeError> {
+    if !mapped.matches(process) {
+        return Err(EncodeError::InvalidText);
+    }
+    encode_process(
+        argv, envp, execfn, random, auxiliary, process, Some(mapped), output,
+    )
+}
+
+fn encode_process(
+    argv: &[&[u8]],
+    envp: &[&[u8]],
+    execfn: &[u8],
+    random: [u8; 16],
+    auxiliary: &[(u64, u64)],
+    process: Process<'_>,
+    mapped: Option<crate::startup_metadata::Layout>,
+    output: &mut [u8],
+) -> Result<usize, EncodeError> {
     let image = process.image;
     for (index, &(key, _)) in auxiliary.iter().enumerate() {
         if key <= AT_EXECFN
@@ -285,7 +316,7 @@ pub fn encode_initial_stack_for_process(
         .checked_add(7)
         .map(|value| value & !7)
         .ok_or(EncodeError::ImageTooLarge)?;
-    let lifecycle_end = if process.lifecycle.is_empty() {
+    let lifecycle_end = if process.lifecycle.is_empty() || mapped.is_some() {
         unaligned_length
     } else {
         lifecycle_offset
@@ -296,7 +327,7 @@ pub fn encode_initial_stack_for_process(
         .checked_add(7)
         .map(|value| value & !7)
         .ok_or(EncodeError::ImageTooLarge)?;
-    let tls_end = if process.tls.is_empty() {
+    let tls_end = if process.tls.is_empty() || mapped.is_some() {
         lifecycle_end
     } else {
         tls_offset
@@ -307,7 +338,7 @@ pub fn encode_initial_stack_for_process(
         .checked_add(7)
         .map(|value| value & !7)
         .ok_or(EncodeError::ImageTooLarge)?;
-    let payload_length = if process.indirect.is_empty() {
+    let payload_length = if process.indirect.is_empty() || mapped.is_some() {
         tls_end
     } else {
         indirect_offset
@@ -364,14 +395,14 @@ pub fn encode_initial_stack_for_process(
     stack[random_offset..random_offset + random.len()].copy_from_slice(&random);
     text_cursor += random.len();
     let execfn_offset = copy_text(&mut stack, &mut text_cursor, execfn)?;
-    if !process.lifecycle.is_empty() {
+    if !process.lifecycle.is_empty() && mapped.is_none() {
         stack[lifecycle_offset..lifecycle_offset + process.lifecycle.len()]
             .copy_from_slice(process.lifecycle);
     }
-    if !process.tls.is_empty() {
+    if !process.tls.is_empty() && mapped.is_none() {
         stack[tls_offset..tls_offset + process.tls.len()].copy_from_slice(process.tls);
     }
-    if !process.indirect.is_empty() {
+    if !process.indirect.is_empty() && mapped.is_none() {
         stack[indirect_offset..indirect_offset + process.indirect.len()]
             .copy_from_slice(process.indirect);
     }
@@ -404,18 +435,22 @@ pub fn encode_initial_stack_for_process(
     .filter(|&(key, _, _)| key != AT_NULL)
     .chain((!process.lifecycle.is_empty()).then_some((
         AT_LIFECYCLE_IMAGE,
-        lifecycle_offset as u64,
-        Some(RelocationKind::StackAddress),
+        mapped
+            .and_then(|m| m.address(0))
+            .unwrap_or(lifecycle_offset as u64),
+        mapped.is_none().then_some(RelocationKind::StackAddress),
     )))
     .chain((!process.tls.is_empty()).then_some((
         AT_TLS_IMAGE,
-        tls_offset as u64,
-        Some(RelocationKind::StackAddress),
+        mapped.and_then(|m| m.address(1)).unwrap_or(tls_offset as u64),
+        mapped.is_none().then_some(RelocationKind::StackAddress),
     )))
     .chain((!process.indirect.is_empty()).then_some((
         AT_INDIRECT_IMAGE,
-        indirect_offset as u64,
-        Some(RelocationKind::StackAddress),
+        mapped
+            .and_then(|m| m.address(2))
+            .unwrap_or(indirect_offset as u64),
+        mapped.is_none().then_some(RelocationKind::StackAddress),
     )))
     .chain(auxiliary.iter().map(|&(key, value)| (key, value, None)))
     .chain(core::iter::once((AT_NULL, 0, None)))

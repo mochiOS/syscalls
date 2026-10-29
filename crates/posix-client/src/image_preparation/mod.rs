@@ -70,6 +70,11 @@ pub unsafe trait Backend {
     fn create_image(&self, length: usize) -> Result<u32, c_int>;
     fn write_at(&self, image: u32, bytes: &[u8], offset: usize) -> Result<usize, c_int>;
     fn readonly_image(&self, image: u32) -> Result<u32, c_int>;
+    /// Fresh READ|MAP reference for initial RAM mappings, with no write,
+    /// resize, duplicate or transfer authority. The producer closes its writer.
+    fn readonly_metadata(&self, _: u32) -> Result<u32, c_int> {
+        Err(ENOSYS)
+    }
 }
 
 const MAX_IMAGE: usize = mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES;

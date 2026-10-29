@@ -91,4 +91,7 @@ unsafe impl<T: ObjectTransport<Handle = u32>, B: Backend> Backend for Scoped<'_,
     fn readonly_image(&self, image: u32) -> Result<u32, c_int> {
         self.mechanisms.readonly_image(image)
     }
+    fn readonly_metadata(&self, image: u32) -> Result<u32, c_int> {
+        self.mechanisms.readonly_metadata(image)
+    }
 }

@@ -64,6 +64,43 @@ pub(super) fn allocate(control: &ThreadControl) -> Result<(), c_int> {
             Ok(base) => {
                 use policy::image::{self, Error};
                 const MAXIMUM: usize = mnu_abi::process_image::MAX_STACK_BYTES;
+                let metadata_error = |error| match error {
+                    Error::Invalid => ENOEXEC,
+                    Error::TooLarge => super::E2BIG,
+                    Error::Read(e) => e,
+                };
+                let (count, size) = image::workspace(
+                    base,
+                    mochios_posix_client::startup_metadata::MAX_BYTES,
+                    |a, b| user_copy::read(a as *const u8, b),
+                )
+                .map_err(metadata_error)?;
+                if size > MAXIMUM {
+                    let length = count
+                        .checked_mul(core::mem::size_of::<Option<policy::Template>>())
+                        .ok_or(super::E2BIG)?;
+                    let mut storage = super::startup_storage::Buffer::new(length)?;
+                    let pointer = storage
+                        .bytes_mut()
+                        .as_mut_ptr()
+                        .cast::<Option<policy::Template>>();
+                    // SAFETY: aligned, fresh private VM storage is initialized
+                    // before any typed reference. No template pointer escapes.
+                    let templates = unsafe {
+                        for i in 0..count {
+                            pointer.add(i).write(None);
+                        }
+                        core::slice::from_raw_parts_mut(pointer, count)
+                    };
+                    let count = image::decode(
+                        base,
+                        mochios_posix_client::startup_metadata::MAX_BYTES,
+                        templates,
+                        |a, b| user_copy::read(a as *const u8, b),
+                    )
+                    .map_err(metadata_error)?;
+                    return allocate_templates(control, &templates[..count]);
+                }
                 let mut templates = [None; (MAXIMUM - image::HEADER_BYTES) / image::MODULE_BYTES];
                 let count = image::decode(base, MAXIMUM, &mut templates, |address, bytes| {
                     user_copy::read(address as *const u8, bytes)
