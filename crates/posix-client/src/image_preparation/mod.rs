@@ -7,6 +7,7 @@ use crate::newlib_errno::*;
 use crate::protocol as posix_protocol;
 use core::{ffi::c_int, marker::PhantomData, ptr};
 mod dependencies;
+mod interpreter;
 pub mod scoped;
 
 const PAGE_SIZE: usize = 4096;
@@ -36,6 +37,7 @@ pub struct Prepared<'a> {
 pub enum Source<'a> {
     Root,
     Dependency { needed: &'a [u8], path: &'a [u8] },
+    Interpreter { path: &'a [u8] },
 }
 
 /// Explicit resource access, independent of libc globals and broker policy.
@@ -154,6 +156,7 @@ pub struct Preparation<B: Backend> {
     source: Buffer<B>,
     output: Buffer<B>,
     dependencies: dependencies::Dependencies<B>,
+    interpreter: interpreter::Interpreter<B>,
     handle: u32,
     executable: Option<crate::process_image::Executable>,
     lifecycle: Buffer<B>,
@@ -167,6 +170,7 @@ impl<B: Backend> Default for Preparation<B> {
             source: Buffer::default(),
             output: Buffer::default(),
             dependencies: dependencies::Dependencies::default(),
+            interpreter: interpreter::Interpreter::default(),
             handle: 0,
             executable: None,
             lifecycle: Buffer::default(),
@@ -288,57 +292,71 @@ impl<B: Backend> Preparation<B> {
             self.source.length = length;
         }
         backend.validate_captured(Source::Root, self.source.bytes())?;
-        let candidate = mochios_posix_client::pie::Pie::parse_object(self.source.bytes())
-            .map_err(|_| ENOEXEC)?;
-        let mut dependent = false;
-        candidate
-            .dependencies(|_| {
-                dependent = true;
-                Ok(())
-            })
-            .map_err(|_| ENOEXEC)?;
-        let runtime = candidate.has_lifecycle_runtime().map_err(|_| ENOEXEC)?;
-        let length = if candidate.is_fixed()
-            || dependent
-            || candidate.has_relro().map_err(|_| ENOEXEC)?
-            || candidate.requires_tls_scope().map_err(|_| ENOEXEC)?
-            || candidate.requires_indirect_scope().map_err(|_| ENOEXEC)?
-            || (runtime && candidate.validate_direct_scope_startup().is_err())
+        let length = if crate::elf_launch::interpreter(self.source.bytes())
+            .map_err(|_| ENOEXEC)?
+            .is_some()
         {
-            self.executable = Some(self.dependencies.build(
+            self.executable = Some(self.interpreter.build(
                 self.source.bytes(),
                 &mut self.output,
-                &mut self.lifecycle,
-                &mut self.tls,
-                &mut self.indirect,
                 backend,
-                environment,
-                identity,
-                runtime,
             )?);
             self.output.length
         } else {
-            let pie =
-                mochios_posix_client::pie::Pie::parse(self.source.bytes()).map_err(|_| ENOEXEC)?;
-            let length = pie.output_length().map_err(|_| ENOEXEC)?;
-            self.output.reserve(length)?;
-            self.output.length = length;
-            let mut entropy = [0u8; 8];
-            backend.entropy(&mut entropy)?;
-            let alignment = pie.alignment();
-            let base = 0x2000_0000u64
-                .checked_add(alignment - 1)
-                .map(|base| base & !(alignment - 1))
-                .ok_or(ENOEXEC)?;
-            let slots = (64 * 1024 * 1024 / alignment).max(1);
-            let bias = base
-                .checked_add((u64::from_le_bytes(entropy) % slots) * alignment)
-                .ok_or(ENOEXEC)?;
-            self.executable = Some(pie.executable(bias).map_err(|_| ENOEXEC)?);
-            let output = unsafe { core::slice::from_raw_parts_mut(self.output.pointer, length) };
-            if pie.write(bias, output).map_err(|_| ENOEXEC)? != length {
-                return Err(EIO);
-            }
+            let candidate = mochios_posix_client::pie::Pie::parse_object(self.source.bytes())
+                .map_err(|_| ENOEXEC)?;
+            let mut dependent = false;
+            candidate
+                .dependencies(|_| {
+                    dependent = true;
+                    Ok(())
+                })
+                .map_err(|_| ENOEXEC)?;
+            let runtime = candidate.has_lifecycle_runtime().map_err(|_| ENOEXEC)?;
+            let length = if candidate.is_fixed()
+                || dependent
+                || candidate.has_relro().map_err(|_| ENOEXEC)?
+                || candidate.requires_tls_scope().map_err(|_| ENOEXEC)?
+                || candidate.requires_indirect_scope().map_err(|_| ENOEXEC)?
+                || (runtime && candidate.validate_direct_scope_startup().is_err())
+            {
+                self.executable = Some(self.dependencies.build(
+                    self.source.bytes(),
+                    &mut self.output,
+                    &mut self.lifecycle,
+                    &mut self.tls,
+                    &mut self.indirect,
+                    backend,
+                    environment,
+                    identity,
+                    runtime,
+                )?);
+                self.output.length
+            } else {
+                let pie = mochios_posix_client::pie::Pie::parse(self.source.bytes())
+                    .map_err(|_| ENOEXEC)?;
+                let length = pie.output_length().map_err(|_| ENOEXEC)?;
+                self.output.reserve(length)?;
+                self.output.length = length;
+                let mut entropy = [0u8; 8];
+                backend.entropy(&mut entropy)?;
+                let alignment = pie.alignment();
+                let base = 0x2000_0000u64
+                    .checked_add(alignment - 1)
+                    .map(|base| base & !(alignment - 1))
+                    .ok_or(ENOEXEC)?;
+                let slots = (64 * 1024 * 1024 / alignment).max(1);
+                let bias = base
+                    .checked_add((u64::from_le_bytes(entropy) % slots) * alignment)
+                    .ok_or(ENOEXEC)?;
+                self.executable = Some(pie.executable(bias).map_err(|_| ENOEXEC)?);
+                let output =
+                    unsafe { core::slice::from_raw_parts_mut(self.output.pointer, length) };
+                if pie.write(bias, output).map_err(|_| ENOEXEC)? != length {
+                    return Err(EIO);
+                }
+                length
+            };
             length
         };
         B::critical(|| {

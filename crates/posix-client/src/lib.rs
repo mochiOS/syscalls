@@ -28,6 +28,7 @@ pub mod memory;
 pub mod multiplex;
 pub mod newlib_errno;
 pub mod image_error;
+pub mod elf_launch;
 pub mod pie;
 pub mod image_preparation;
 pub mod startup_metadata;
