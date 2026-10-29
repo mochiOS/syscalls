@@ -5,6 +5,7 @@ use super::{Error, LOAD, PAGE, Pie, USER_END, USER_MIN, add, page};
 mod bundle;
 mod lifecycle;
 mod indirect;
+mod writable;
 pub use lifecycle::{Lifecycle, Step};
 pub use indirect::Deferred;
 

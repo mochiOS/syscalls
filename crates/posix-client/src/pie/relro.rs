@@ -73,4 +73,7 @@ impl Pie<'_> {
     pub fn has_relro_runtime(&self) -> Result<bool, Error> {
         self.has_runtime_marker(b"__mochios_relro_v1")
     }
+    pub fn has_writable_relocation_runtime(&self) -> Result<bool, Error> {
+        self.has_runtime_marker(b"__mochios_relro_v2")
+    }
 }

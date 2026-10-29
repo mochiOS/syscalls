@@ -100,6 +100,7 @@ pub(super) struct Dependencies<B: Backend> {
     indirect_regions: Buffer<B>,
     indirect_fixups: Buffer<B>,
     protection_ranges: Buffer<B>,
+    writable_ranges: Buffer<B>,
 }
 impl<B: Backend> Default for Dependencies<B> {
     fn default() -> Self {
@@ -113,6 +114,7 @@ impl<B: Backend> Default for Dependencies<B> {
             indirect_regions: Buffer::default(),
             indirect_fixups: Buffer::default(),
             protection_ranges: Buffer::default(),
+            writable_ranges: Buffer::default(),
         }
     }
 }
@@ -470,7 +472,35 @@ impl<B: Backend> Dependencies<B> {
         {
             return Err(ENOEXEC);
         }
-        let mut protection_count = 0usize;
+        let mut writable_count = 0usize;
+        scope
+            .readonly_writes(|_| {
+                writable_count = writable_count
+                    .checked_add(1)
+                    .ok_or(mochios_posix_client::pie::Error::Overflow)?;
+                Ok(())
+            })
+            .map_err(|_| ENOEXEC)?;
+        let writable = self
+            .writable_ranges
+            .slots::<crate::relocation_protection::Range>(writable_count)?;
+        let mut next = 0;
+        scope
+            .readonly_writes(|range| {
+                unsafe { writable.add(next).write(range) };
+                next += 1;
+                Ok(())
+            })
+            .map_err(|_| ENOEXEC)?;
+        let writable = if writable_count == 0 {
+            &mut [][..]
+        } else {
+            // SAFETY: every retained slot was initialized above, with no view
+            // created for the null, zero-capacity storage of an empty plan.
+            unsafe { core::slice::from_raw_parts_mut(writable, writable_count) }
+        };
+        writable.sort_unstable_by_key(|r| r.address);
+        let mut protection_count = writable_count;
         for object in objects {
             object
                 .image
@@ -482,7 +512,12 @@ impl<B: Backend> Dependencies<B> {
                 })
                 .map_err(|_| ENOEXEC)?;
         }
-        if protection_count != 0 && !images[0].has_relro_runtime().map_err(|_| ENOEXEC)? {
+        let v2 = images[0]
+            .has_writable_relocation_runtime()
+            .map_err(|_| ENOEXEC)?;
+        if (writable_count != 0 && !v2)
+            || (protection_count != 0 && !v2 && !images[0].has_relro_runtime().map_err(|_| ENOEXEC)?)
+        {
             return Err(ENOEXEC);
         }
         let indirect_length = if fixup_count != 0 {
@@ -493,18 +528,10 @@ impl<B: Backend> Dependencies<B> {
         } else {
             0
         };
-        let protection_length = if protection_count != 0 {
-            let n = crate::relocation_protection::encoded_length(protection_count, indirect_length)
-                .map_err(|_| E2BIG)?;
-            metadata_size(&images[0], n)?;
-            n
-        } else {
-            0
-        };
         let ranges = self
             .protection_ranges
             .slots::<crate::relocation_protection::Range>(protection_count)?;
-        let mut next = 0;
+        next = 0;
         for object in objects {
             object
                 .image
@@ -515,13 +542,30 @@ impl<B: Backend> Dependencies<B> {
                 })
                 .map_err(|_| ENOEXEC)?;
         }
+        for range in writable.iter() {
+            unsafe { ranges.add(next).write(*range) };
+            next += 1;
+        }
         let ranges = if protection_count == 0 {
             &mut [][..]
         } else {
-            // SAFETY: each slot was initialized above in retained backend storage.
+            // SAFETY: RELRO and temporary-write ranges fill the exact prefix.
             unsafe { core::slice::from_raw_parts_mut(ranges, protection_count) }
         };
-        ranges.sort_unstable_by_key(|range| range.address);
+        let protection_count = crate::relocation_protection::merge(ranges).map_err(|_| ENOEXEC)?;
+        let ranges = &ranges[..protection_count];
+        let protection_length = if protection_count != 0 {
+            let n = crate::relocation_protection::encoded_length_with_writable(
+                protection_count,
+                writable_count,
+                indirect_length,
+            )
+            .map_err(|_| E2BIG)?;
+            metadata_size(&images[0], n)?;
+            n
+        } else {
+            0
+        };
         let templates = self
             .tls_templates
             .slots::<Option<mochios_posix_client::static_tls::Template>>(count)?;
@@ -587,7 +631,7 @@ impl<B: Backend> Dependencies<B> {
             indirect.reserve(protection_length)?;
             let payload =
                 unsafe { core::slice::from_raw_parts_mut(indirect.pointer, protection_length) };
-            indirect.length = crate::relocation_protection::wrap(indirect_length, ranges, payload)
+            indirect.length = crate::relocation_protection::wrap_with_writable(indirect_length, ranges, writable, payload)
                 .map_err(|_| ENOEXEC)?;
         }
         let plan = scope.lifecycle(scratch).map_err(|_| ENOEXEC)?;

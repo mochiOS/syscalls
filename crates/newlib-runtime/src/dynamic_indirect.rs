@@ -34,6 +34,11 @@ pub extern "C" fn __mochios_indirect_v1() -> u64 {
 pub extern "C" fn __mochios_indirect_v2() -> u64 {
     2
 }
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn __mochios_relro_v2() -> u64 {
+    2
+}
 
 fn error(error: Error<c_int>) -> c_int {
     match error {
@@ -68,8 +73,15 @@ pub(super) fn initialize() -> Result<bool, c_int> {
 }
 fn initialize_at(
     address: usize,
-    mut read: impl FnMut(u64, &mut [u8]) -> Result<(), c_int>,
+    read: impl FnMut(u64, &mut [u8]) -> Result<(), c_int>,
 ) -> Result<bool, c_int> {
+    with_captured(address, read, apply)
+}
+fn with_captured<T>(
+    address: usize,
+    mut read: impl FnMut(u64, &mut [u8]) -> Result<(), c_int>,
+    operation: impl FnOnce(&Captured<'_>) -> Result<T, c_int>,
+) -> Result<T, c_int> {
     const MAXIMUM: usize = mnu_abi::process_image::MAX_STACK_BYTES;
     let (region_count, fixup_count, size) = policy::workspace(
         address as u64,
@@ -122,7 +134,7 @@ fn initialize_at(
             &mut read,
         )
         .map_err(error)?;
-        return apply(&image);
+        return operation(&image);
     }
     // The bounded startup payload fits in the existing native entry stack.
     // Both workspaces are private; no allocation/Handle survives a resolver
@@ -137,7 +149,7 @@ fn initialize_at(
         &mut read,
     )
     .map_err(error)?;
-    apply(&image)
+    operation(&image)
 }
 fn apply(image: &Captured<'_>) -> Result<bool, c_int> {
     RESOLVERS

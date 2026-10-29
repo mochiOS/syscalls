@@ -31,6 +31,28 @@ fn error(e: Error<c_int>) -> c_int {
 pub(super) fn status() -> Result<bool, c_int> {
     PROTECTIONS.status().map_err(error)
 }
+fn protect(range: policy::Range, access: u64) -> Result<(), c_int> {
+    syscall_errno(syscall::raw_syscall3(
+        syscall::SyscallNumber::MemoryProtect,
+        range.address,
+        range.length,
+        access,
+    ))
+    .map(|_| ())
+}
+struct Writable<'a, 'b> {
+    image: &'a Image<'b>,
+    started: usize,
+}
+impl Drop for Writable<'_, '_> {
+    fn drop(&mut self) {
+        // A failed native edit may be partial. Include the attempted range,
+        // restore every earlier one, and retain the original startup error.
+        for range in self.image.writable_ranges().take(self.started) {
+            let _ = protect(range, mnu_abi::MEMORY_ACCESS_READ);
+        }
+    }
+}
 pub(super) fn initialize(address: usize) -> Result<bool, c_int> {
     let maximum = mochios_posix_client::startup_metadata::MAX_BYTES;
     let length = policy::length(address as u64, maximum, |a, b| {
@@ -59,31 +81,44 @@ pub(super) fn initialize(address: usize) -> Result<bool, c_int> {
     // transaction returns. Its address stays recorded if C abandons the frame.
     let bytes = unsafe { core::slice::from_raw_parts(base as *const u8, length) };
     let image = Image::parse(bytes).map_err(error)?;
+    let mut writable = Writable {
+        image: &image,
+        started: 0,
+    };
     PROTECTIONS
-        .apply(
+        .apply_with_writable(
             &image,
-            |captured| {
-                initialize_at(inner, |a, b| {
-                    let at = usize::try_from(a)
-                        .ok()
-                        .and_then(|n| n.checked_sub(inner))
-                        .ok_or(EFAULT)?;
-                    let end = at.checked_add(b.len()).ok_or(EFAULT)?;
-                    b.copy_from_slice(captured.get(at..end).ok_or(EFAULT)?);
-                    Ok(())
-                })
+            |plan| {
+                let captured = plan.indirect();
+                with_captured(
+                    inner,
+                    |a, b| {
+                        let at = usize::try_from(a)
+                            .ok()
+                            .and_then(|n| n.checked_sub(inner))
+                            .ok_or(EFAULT)?;
+                        let end = at.checked_add(b.len()).ok_or(EFAULT)?;
+                        b.copy_from_slice(captured.get(at..end).ok_or(EFAULT)?);
+                        Ok(())
+                    },
+                    |captured| {
+                        // Every fixup is captured and validated before the first
+                        // permission change; no executable page is promoted.
+                        for range in plan.writable_ranges() {
+                            writable.started += 1;
+                            protect(
+                                range,
+                                mnu_abi::MEMORY_ACCESS_READ | mnu_abi::MEMORY_ACCESS_WRITE,
+                            )?;
+                        }
+                        apply(captured)
+                    },
+                )
                 .map(|_| ())
             },
-            |range| {
-                syscall_errno(syscall::raw_syscall3(
-                    syscall::SyscallNumber::MemoryProtect,
-                    range.address,
-                    range.length,
-                    mnu_abi::MEMORY_ACCESS_READ,
-                ))
-                .map(|_| ())
-            },
+            |range| protect(range, mnu_abi::MEMORY_ACCESS_READ),
         )
         .map_err(error)?;
+    writable.started = 0;
     Ok(true)
 }

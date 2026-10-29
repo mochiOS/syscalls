@@ -668,7 +668,8 @@ impl<'a> Pie<'a> {
                     || value != target
                     || !(0..self.count).any(|index| {
                         self.segment(index).is_ok_and(|segment| {
-                            segment.flags & 2 != 0 && segment.contains(target, size)
+                            (segment.flags & 2 != 0 || segment.flags == 4)
+                                && segment.contains(target, size)
                         })
                     })
                 {

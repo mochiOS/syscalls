@@ -7,6 +7,8 @@ use crate::indirect_image::{self, Access, Fixup, Region};
 /// the bundle also requires installing and consuming the encoded plan in the
 /// receiving image after ordinary relocations/TLS and before constructors.
 /// Unlike write_bundle, legacy write methods never omit resolver relocations.
+/// When readonly_writes is nonempty, the consumer must also install a v2
+/// protection envelope. This inner plan alone never raises mapping access.
 pub struct Deferred<'plan, 'scope, 'image> {
     scope: &'plan Scope<'scope, 'image>,
     regions: &'plan [Region],
@@ -52,7 +54,7 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             object
                 .image
                 .segment(i)
-                .is_ok_and(|s| s.flags & 2 != 0 && s.contains(target, 8))
+                .is_ok_and(|s| (s.flags & 2 != 0 || s.flags == 4) && s.contains(target, 8))
         }) {
             return Err(Error::Invalid);
         }
@@ -72,7 +74,10 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             let object = &self.objects[index];
             for i in 0..object.image.count {
                 let segment = object.image.segment(i)?;
-                if segment.kind == super::LOAD && segment.memory != 0 && segment.flags & 3 != 0 {
+                if segment.kind == super::LOAD
+                    && segment.memory != 0
+                    && (segment.flags & 3 != 0 || self.readonly_write(index, segment, false)?)
+                {
                     regions = regions.checked_add(1).ok_or(Error::Overflow)?;
                 }
             }
@@ -159,9 +164,10 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             let object = &self.objects[index];
             for i in 0..object.image.count {
                 let s = object.image.segment(i)?;
+                let temporary = self.readonly_write(index, s, copies)?;
                 if s.kind == super::LOAD
                     && s.memory != 0
-                    && s.flags & (if copies { 7 } else { 3 }) != 0
+                    && (s.flags & (if copies { 7 } else { 3 }) != 0 || temporary)
                 {
                     regions[r] = Region {
                         address: add(object.bias, s.address)?,
@@ -170,6 +176,7 @@ impl<'scope, 'image> Scope<'scope, 'image> {
                             match s.flags & 7 {
                                 1 => Access::Executable,
                                 2 => Access::Writable,
+                                4 if temporary => Access::ReadWrite,
                                 4 => Access::Readable,
                                 5 => Access::ReadExecute,
                                 6 => Access::ReadWrite,
