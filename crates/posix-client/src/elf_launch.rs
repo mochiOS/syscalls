@@ -32,13 +32,13 @@ fn word(b: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(b[at..at + 8].try_into().unwrap())
 }
 #[derive(Clone, Copy)]
-struct Segment {
-    kind: u32,
-    flags: u32,
-    offset: u64,
-    address: u64,
-    file: u64,
-    memory: u64,
+pub(crate) struct Segment {
+    pub(crate) kind: u32,
+    pub(crate) flags: u32,
+    pub(crate) offset: u64,
+    pub(crate) address: u64,
+    pub(crate) file: u64,
+    pub(crate) memory: u64,
     alignment: u64,
 }
 impl Segment {
@@ -74,6 +74,14 @@ pub struct Image<'a> {
 }
 impl<'a> Image<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
+        Self::parse_impl(bytes, true)
+    }
+    // A DSO need not have an executable entry. LOAD validation is identical;
+    // installing bytes does not authorize entry or perform dynamic linking.
+    pub(crate) fn parse_mapping(bytes: &'a [u8]) -> Result<Self, Error> {
+        Self::parse_impl(bytes, false)
+    }
+    fn parse_impl(bytes: &'a [u8], require_entry: bool) -> Result<Self, Error> {
         if bytes.len() < 64
             || bytes[..7] != [0x7f, b'E', b'L', b'F', 2, 1, 1]
             || !matches!(u16::from_le_bytes(bytes[16..18].try_into().unwrap()), 2 | 3)
@@ -152,7 +160,10 @@ impl<'a> Image<'a> {
             image.loads += 1;
             executable |= s.flags & 1 != 0 && s.address <= image.entry && image.entry < end;
         }
-        if !executable || image.loads == 0 || (image.fixed && image.minimum < USER_MIN) {
+        if (require_entry && !executable)
+            || image.loads == 0
+            || (image.fixed && image.minimum < USER_MIN)
+        {
             return Err(Error::Invalid);
         }
         if let Some(p) = phdr {
@@ -167,7 +178,7 @@ impl<'a> Image<'a> {
         image.interpreter()?;
         Ok(image)
     }
-    fn segment(self, i: usize) -> Segment {
+    pub(crate) fn segment(self, i: usize) -> Segment {
         let b = &self.bytes[self.phoff + i * 56..self.phoff + (i + 1) * 56];
         Segment {
             kind: u32::from_le_bytes(b[..4].try_into().unwrap()),
@@ -178,6 +189,23 @@ impl<'a> Image<'a> {
             memory: word(b, 40),
             alignment: word(b, 48),
         }
+    }
+    pub(crate) fn count(self) -> usize {
+        self.count
+    }
+    pub(crate) fn bytes(self, segment: Segment) -> &'a [u8] {
+        &self.bytes[segment.offset as usize..(segment.offset + segment.file) as usize]
+    }
+    pub(crate) fn mapping_range(self, bias: u64) -> Result<(u64, u64), Error> {
+        if (self.fixed && bias != 0) || bias % self.alignment != 0 {
+            return Err(Error::Invalid);
+        }
+        let start = add(bias, self.minimum)?;
+        let end = add(bias, self.maximum)?;
+        if start < USER_MIN || end > USER_END {
+            return Err(Error::Invalid);
+        }
+        Ok((start, end))
     }
     pub fn interpreter(self) -> Result<Option<&'a [u8]>, Error> {
         let mut path = None;
