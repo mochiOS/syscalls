@@ -27,6 +27,7 @@ pub struct Prepared<'a> {
     pub executable: Option<crate::process_image::Executable>,
     pub lifecycle: &'a [u8],
     pub tls: &'a [u8],
+    pub indirect: &'a [u8],
 }
 
 /// Selection metadata for an immutable input captured by this preparation.
@@ -152,6 +153,7 @@ pub struct Preparation<B: Backend> {
     executable: Option<crate::process_image::Executable>,
     lifecycle: Buffer<B>,
     tls: Buffer<B>,
+    indirect: Buffer<B>,
     started: bool,
 }
 impl<B: Backend> Default for Preparation<B> {
@@ -164,6 +166,7 @@ impl<B: Backend> Default for Preparation<B> {
             executable: None,
             lifecycle: Buffer::default(),
             tls: Buffer::default(),
+            indirect: Buffer::default(),
             started: false,
         }
     }
@@ -290,6 +293,7 @@ impl<B: Backend> Preparation<B> {
         let length = if candidate.is_fixed()
             || dependent
             || candidate.requires_tls_scope().map_err(|_| ENOEXEC)?
+            || candidate.requires_indirect_scope().map_err(|_| ENOEXEC)?
             || (runtime && candidate.validate_direct_scope_startup().is_err())
         {
             self.executable = Some(self.dependencies.build(
@@ -297,6 +301,7 @@ impl<B: Backend> Preparation<B> {
                 &mut self.output,
                 &mut self.lifecycle,
                 &mut self.tls,
+                &mut self.indirect,
                 backend,
                 environment,
                 identity,
@@ -373,6 +378,7 @@ impl<B: Backend> Preparation<B> {
             executable: self.executable,
             lifecycle: self.lifecycle.bytes(),
             tls: self.tls.bytes(),
+            indirect: self.indirect.bytes(),
         })
     }
 }

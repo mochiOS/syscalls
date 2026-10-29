@@ -3,7 +3,7 @@
 use super::*;
 use mochios_posix_client::pie::{
     Pie,
-    link_scope::{Object, Scope},
+    link_scope::{Object, Scope, Step},
 };
 
 #[derive(Clone, Copy, Default)]
@@ -87,6 +87,8 @@ pub(super) struct Dependencies<B: Backend> {
     order: Buffer<B>,
     lifecycle_order: Buffer<B>,
     tls_templates: Buffer<B>,
+    indirect_regions: Buffer<B>,
+    indirect_fixups: Buffer<B>,
 }
 impl<B: Backend> Default for Dependencies<B> {
     fn default() -> Self {
@@ -97,6 +99,8 @@ impl<B: Backend> Default for Dependencies<B> {
             order: Buffer::default(),
             lifecycle_order: Buffer::default(),
             tls_templates: Buffer::default(),
+            indirect_regions: Buffer::default(),
+            indirect_fixups: Buffer::default(),
         }
     }
 }
@@ -341,6 +345,7 @@ impl<B: Backend> Dependencies<B> {
         output: &mut Buffer<B>,
         lifecycle: &mut Buffer<B>,
         tls: &mut Buffer<B>,
+        indirect: &mut Buffer<B>,
         backend: &B,
         variables: Environment<'_>,
         identity: mochios_posix_client::process_image::Identity,
@@ -443,6 +448,20 @@ impl<B: Backend> Dependencies<B> {
         let order = self.order.slots::<usize>(count)?;
         let order = unsafe { core::slice::from_raw_parts_mut(order, count) };
         let scope = Scope::new(objects, order).map_err(|_| ENOEXEC)?;
+        let (region_count, fixup_count) = scope.deferred_counts().map_err(|_| ENOEXEC)?;
+        if fixup_count != 0 && !images[0].has_indirect_runtime().map_err(|_| ENOEXEC)? {
+            return Err(ENOEXEC);
+        }
+        let indirect_length = if fixup_count != 0 {
+            let size = crate::indirect_image::encoded_length(region_count, fixup_count)
+                .map_err(|_| E2BIG)?;
+            if size > mnu_abi::process_image::MAX_STACK_BYTES {
+                return Err(E2BIG);
+            }
+            size
+        } else {
+            0
+        };
         let templates = self
             .tls_templates
             .slots::<Option<mochios_posix_client::static_tls::Template>>(count)?;
@@ -473,13 +492,74 @@ impl<B: Backend> Dependencies<B> {
         output.reserve(length)?;
         output.length = length;
         let bytes = unsafe { core::slice::from_raw_parts_mut(output.pointer, length) };
-        if scope.write_bundle(bytes).map_err(|_| ENOEXEC)? != length {
-            return Err(EIO);
-        }
         let words = scope.lifecycle_scratch_len().map_err(|_| ENOEXEC)?;
         let scratch = self.lifecycle_order.slots::<usize>(words)?;
         let scratch = unsafe { core::slice::from_raw_parts_mut(scratch, words) };
+        let written = if fixup_count != 0 {
+            use crate::indirect_image::{Fixup, Region};
+            let regions = self.indirect_regions.slots::<Region>(region_count)?;
+            let fixups = self.indirect_fixups.slots::<Fixup>(fixup_count)?;
+            for i in 0..region_count {
+                unsafe { regions.add(i).write(Region::EMPTY) };
+            }
+            for i in 0..fixup_count {
+                unsafe { fixups.add(i).write(Fixup::EMPTY) };
+            }
+            let regions = unsafe { core::slice::from_raw_parts_mut(regions, region_count) };
+            let fixups = unsafe { core::slice::from_raw_parts_mut(fixups, fixup_count) };
+            let mut pending = scope.deferred(regions, fixups, scratch).map_err(|_| ENOEXEC)?;
+            let size = pending.encoded_length().map_err(|_| ENOEXEC)?;
+            if size != indirect_length {
+                return Err(EIO);
+            }
+            indirect.reserve(size)?;
+            let payload = unsafe { core::slice::from_raw_parts_mut(indirect.pointer, size) };
+            if pending.encode(payload).map_err(|_| ENOEXEC)? != size {
+                return Err(EIO);
+            }
+            indirect.length = size;
+            pending.write_bundle(bytes).map_err(|_| ENOEXEC)?
+        } else {
+            scope.write_bundle(bytes).map_err(|_| ENOEXEC)?
+        };
+        if written != length {
+            return Err(EIO);
+        }
         let plan = scope.lifecycle(scratch).map_err(|_| ENOEXEC)?;
+        if fixup_count != 0 {
+            // This initialized workspace was just validated by pending.encode.
+            // Never flatten an array element whose future value is deferred,
+            // even if its original bytes happen to name valid executable code.
+            let fixups = unsafe {
+                core::slice::from_raw_parts(
+                    self.indirect_fixups
+                        .pointer
+                        .cast::<crate::indirect_image::Fixup>(),
+                    fixup_count,
+                )
+            };
+            let mut late = false;
+            let mut inspect = |step| {
+                if let Step::Array { address, count, .. } = step {
+                    match count
+                        .checked_mul(8)
+                        .and_then(|size| address.checked_add(size))
+                    {
+                        Some(end) => {
+                            late |= fixups
+                                .iter()
+                                .any(|f| f.target() < end && address < f.target() + 8)
+                        }
+                        None => late = true,
+                    }
+                }
+            };
+            plan.initializers(&mut inspect).map_err(|_| ENOEXEC)?;
+            plan.finalizers(&mut inspect).map_err(|_| ENOEXEC)?;
+            if late {
+                return Err(ENOEXEC);
+            }
+        }
         let plan_length = plan.encoded_length().map_err(|_| ENOEXEC)?;
         if plan_length > mnu_abi::process_image::MAX_STACK_BYTES {
             return Err(E2BIG);

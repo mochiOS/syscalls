@@ -152,7 +152,7 @@ fn replace_image(
         image,
         inputs,
         credentials,
-        |image, auxiliary, lifecycle, tls| {
+        |image, auxiliary, lifecycle, tls, indirect| {
             with_startup(
                 inputs,
                 execfn,
@@ -162,6 +162,7 @@ fn replace_image(
                     identity: credentials,
                     lifecycle,
                     tls,
+                    indirect,
                 },
                 |startup| {
                     let digest = digest(image)?;

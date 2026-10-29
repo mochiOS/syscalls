@@ -115,11 +115,12 @@ pub(super) fn with_image(
         Option<mochios_posix_client::process_image::Executable>,
         &[u8],
         &[u8],
+        &[u8],
     ) -> Result<(), c_int>,
 ) -> Result<(), c_int> {
     let backend = Runtime;
     if !shared::needs_preparation(&backend, image)? {
-        return operation(image, None, &[], &[]);
+        return operation(image, None, &[], &[], &[]);
     }
     io_resources::with(
         || Ok(Preparation::<Runtime>::default()),
@@ -139,6 +140,7 @@ pub(super) fn with_image(
                 prepared.executable,
                 prepared.lifecycle,
                 prepared.tls,
+                prepared.indirect,
             )
         },
     )

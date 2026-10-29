@@ -806,6 +806,20 @@ impl<'a> Pie<'a> {
         })?;
         Ok(needed)
     }
+    pub fn requires_indirect_scope(&self) -> Result<bool, Error> {
+        let mut needed = false;
+        self.relocations(|_, value| {
+            needed |= match value {
+                Value::Indirect(_) => true,
+                Value::Symbol { index, .. } => {
+                    self.symbols.as_ref().ok_or(Error::Invalid)?.entry(index)?.kind == 10
+                }
+                _ => false,
+            };
+            Ok(())
+        })?;
+        Ok(needed)
+    }
     /// Enumerate DT_NEEDED names in source order. This never opens a pathname.
     pub fn dependencies(
         &self,
@@ -991,6 +1005,9 @@ impl<'a> Pie<'a> {
     }
     pub fn has_static_tls_runtime(&self) -> Result<bool, Error> {
         self.has_runtime_marker(b"__mochios_static_tls_v1")
+    }
+    pub fn has_indirect_runtime(&self) -> Result<bool, Error> {
+        self.has_runtime_marker(b"__mochios_indirect_v1")
     }
     fn has_runtime_marker(&self, name: &[u8]) -> Result<bool, Error> {
         Ok(self.runtime_function(name)?.is_some())
