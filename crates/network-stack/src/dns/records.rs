@@ -4,6 +4,10 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+#[path = "negative.rs"]
+mod negative;
+pub use negative::{DnsNegative, DnsNegativeKind, DnsSoa};
+
 pub const DNS_MAX_WIRE_MESSAGE_LEN: usize = u16::MAX as usize;
 pub const DNS_MAX_ALIAS_DEPTH: usize = 16;
 const MAX_NAME_WIRE_LEN: usize = 255;
@@ -131,8 +135,8 @@ pub enum DnsRecordValue {
 }
 
 /// All matching answer-section records, with CNAMEs followed irrespective of
-/// packet order. Empty values mean no terminal record in this message, never a
-/// successful negative-cache entry. DNSSEC validation is not performed here.
+/// packet order. A negative answer carries its own classification and optional
+/// SOA; empty values alone never authorize caching. No DNSSEC validation here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DnsRecordSet {
     question: DnsRecordName,
@@ -141,6 +145,7 @@ pub struct DnsRecordSet {
     values: Vec<DnsRecordValue>,
     aliases: Vec<DnsRecordName>,
     ttl_seconds: u32,
+    negative: Option<DnsNegative>,
 }
 
 impl DnsRecordSet {
@@ -159,9 +164,12 @@ impl DnsRecordSet {
     pub fn aliases(&self) -> &[DnsRecordName] {
         &self.aliases
     }
-    /// Minimum TTL of every traversed alias and every member of the RRset.
+    /// Minimum TTL of the alias path and terminal RRset or negative SOA proof.
     pub fn ttl_seconds(&self) -> u32 {
         self.ttl_seconds
+    }
+    pub fn negative(&self) -> Option<&DnsNegative> {
+        self.negative.as_ref()
     }
 
     pub(super) fn ipv4(name: &DnsName, address: [u8; 4], ttl: u32) -> Self {
@@ -173,6 +181,7 @@ impl DnsRecordSet {
             values: alloc::vec![DnsRecordValue::Ipv4(address)],
             aliases: Vec::new(),
             ttl_seconds: normalize_ttl(ttl),
+            negative: None,
         }
     }
 
@@ -180,6 +189,7 @@ impl DnsRecordSet {
     /// aliases' TTL while that next query was outstanding.
     pub fn follow_answer(&self, mut answer: Self, elapsed_ms: u64) -> Result<Self, DnsError> {
         if !self.values.is_empty()
+            || self.negative.is_some()
             || self.canonical_name == self.question
             || self.canonical_name != answer.question
             || self.kind != answer.kind
@@ -244,6 +254,26 @@ pub fn decode_dns_records(
     expected_name: &DnsRecordName,
     kind: DnsRecordType,
 ) -> Result<DnsRecordSet, DnsError> {
+    let answer = decode_dns_answer(packet, transaction_id, expected_name, kind)?;
+    // Preserve the historical address-decoder contract for its consumers.
+    if answer
+        .negative
+        .as_ref()
+        .is_some_and(|n| n.kind == DnsNegativeKind::NameError)
+    {
+        return Err(DnsError::Response(DnsResponseCode::NameError));
+    }
+    Ok(answer)
+}
+
+/// Decode a complete response including NXDOMAIN/SOA metadata. This is used
+/// by the resolver so cache policy does not have to reparse untrusted bytes.
+pub fn decode_dns_answer(
+    packet: &[u8],
+    transaction_id: u16,
+    expected_name: &DnsRecordName,
+    kind: DnsRecordType,
+) -> Result<DnsRecordSet, DnsError> {
     if packet.len() > DNS_MAX_WIRE_MESSAGE_LEN {
         return Err(DnsError::MessageTooLarge);
     }
@@ -276,27 +306,57 @@ pub fn decode_dns_records(
     }
     let response_code = super::decode_response_code((flags & 15) as u8)?;
     let answers = usize::from(super::read_u16(packet, 6)?);
-    let count = answers
-        + usize::from(super::read_u16(packet, 8)?)
-        + usize::from(super::read_u16(packet, 10)?);
+    let authority_end = answers + usize::from(super::read_u16(packet, 8)?);
+    let count = authority_end + usize::from(super::read_u16(packet, 10)?);
     // Even an empty-data RR needs one root byte and ten fixed bytes.
     if count > packet.len().saturating_sub(offset) / 11 {
         return Err(DnsError::Truncated);
     }
     let mut records = Vec::new();
+    let mut soas = Vec::new();
+    let mut opt_seen = false;
     for index in 0..count {
         let (owner, next) = decode_record_name(packet, offset, packet.len())?;
         let record_type = super::read_u16(packet, next)?;
         let class = super::read_u16(packet, next + 2)?;
-        let ttl = normalize_ttl(super::read_u32(packet, next + 4)?);
+        let raw_ttl = super::read_u32(packet, next + 4)?;
+        let ttl = normalize_ttl(raw_ttl);
         let length = usize::from(super::read_u16(packet, next + 8)?);
         let start = next + 10;
         let end = start.checked_add(length).ok_or(DnsError::Truncated)?;
         let data = packet.get(start..end).ok_or(DnsError::Truncated)?;
+        if record_type == 41 {
+            // OPT's TTL field is metadata, not a resource lifetime. Its upper
+            // byte extends RCODE: BADVERS must never be cached as NODATA.
+            if opt_seen || index < authority_end || owner.wire() != [0] {
+                return Err(DnsError::InvalidHeader);
+            }
+            opt_seen = true;
+            let code = ((raw_ttl >> 24) as u16) << 4 | (flags & 15);
+            if code > 15 {
+                return Err(DnsError::UnsupportedExtendedResponseCode(code));
+            }
+            let mut option = 0usize;
+            while option < data.len() {
+                let length = usize::from(super::read_u16(data, option + 2)?);
+                option = option
+                    .checked_add(4)
+                    .and_then(|n| n.checked_add(length))
+                    .filter(|n| *n <= data.len())
+                    .ok_or(DnsError::InvalidRecordLength)?;
+            }
+        }
         let decoded = if class != 1 {
             RecordData::Other(record_type)
         } else {
             match record_type {
+                6 => {
+                    let soa = DnsSoa::decode(packet, owner.clone(), ttl, start, end)?;
+                    if index >= answers && index < authority_end {
+                        soas.push(soa);
+                    }
+                    RecordData::Other(record_type)
+                }
                 1 => RecordData::Value(
                     DnsRecordType::A,
                     DnsRecordValue::Ipv4(
@@ -337,7 +397,10 @@ pub fn decode_dns_records(
     if offset != packet.len() {
         return Err(DnsError::InvalidHeader);
     }
-    if response_code != DnsResponseCode::NoError {
+    if !matches!(
+        response_code,
+        DnsResponseCode::NoError | DnsResponseCode::NameError
+    ) {
         return Err(DnsError::Response(response_code));
     }
 
@@ -391,6 +454,31 @@ pub fn decode_dns_records(
         }
     }
     visited.pop(); // The terminal canonical name is not an alias.
+    let soa = negative::closest(&soas, &canonical)?;
+    let negative = if response_code == DnsResponseCode::NameError {
+        // A name cannot both not exist and have terminal answer data. A CNAME
+        // before the terminal name is valid and is retained separately.
+        if records.iter().any(|r| {
+            r.owner == canonical && !matches!(r.data, RecordData::Other(24 | 25 | 30 | 46 | 47))
+        }) {
+            return Err(DnsError::InvalidHeader);
+        }
+        Some(DnsNegative {
+            kind: DnsNegativeKind::NameError,
+            soa,
+        })
+    } else if values.is_empty() && (soa.is_some() || visited.is_empty()) {
+        Some(DnsNegative {
+            kind: DnsNegativeKind::NoData,
+            soa,
+        })
+    } else {
+        None
+    };
+    if let Some(negative) = &negative {
+        let lifetime = negative.soa.as_ref().map_or(0, |soa| soa.ttl);
+        ttl = Some(ttl.map_or(lifetime, |alias| alias.min(lifetime)));
+    }
     Ok(DnsRecordSet {
         question,
         kind,
@@ -398,6 +486,7 @@ pub fn decode_dns_records(
         values,
         aliases: visited,
         ttl_seconds: ttl.unwrap_or(0),
+        negative,
     })
 }
 
@@ -469,10 +558,12 @@ fn normalize_ttl(ttl: u32) -> u32 {
 struct CacheEntry {
     records: DnsRecordSet,
     expires_at: u64,
+    soa_expires_at: Option<u64>,
 }
 
-/// Bounded positive cache. A complete result replaces its previous RRset;
-/// members never expire independently or merge with an older response.
+/// Bounded positive/negative cache for IN-class A/AAAA/PTR. NXDOMAIN keys the
+/// terminal name across types; NODATA and alias paths remain type-specific.
+/// Members never expire independently or merge with an older response.
 pub struct DnsCache {
     entries: VecDeque<CacheEntry>,
     capacity: usize,
@@ -493,23 +584,67 @@ impl DnsCache {
         now: u64,
     ) -> Option<DnsRecordSet> {
         self.entries.retain(|entry| entry.expires_at > now);
-        let entry = self
-            .entries
-            .iter()
-            .find(|entry| entry.records.question == *name && entry.records.kind == kind)?;
+        let entry = self.entries.iter().find(|entry| {
+            entry.records.question == *name
+                && (entry.records.kind == kind || name_error(&entry.records))
+        })?;
         let mut records = entry.records.clone();
+        records.kind = kind;
         records.ttl_seconds = ((entry.expires_at - now) / 1000).min(u64::from(u32::MAX)) as u32;
+        if let Some(soa) = records.negative.as_mut().and_then(|n| n.soa.as_mut()) {
+            soa.ttl =
+                (entry.soa_expires_at?.saturating_sub(now) / 1000).min(u64::from(u32::MAX)) as u32;
+        }
         Some(records)
     }
 
     pub fn insert_records(&mut self, records: &DnsRecordSet, now: u64) -> Result<(), DnsError> {
+        if let Some(soa) = records.negative.as_ref().and_then(|n| n.soa.as_ref())
+            && records.canonical_name != records.question
+        {
+            let mut terminal = records.clone();
+            terminal.question = terminal.canonical_name.clone();
+            terminal.aliases.clear();
+            terminal.ttl_seconds = soa.ttl;
+            self.insert_one(&terminal, now)?;
+            // At capacity one retain the terminal proof, rather than evicting
+            // it for a shorter-lived alias path.
+            if self.capacity == 1 {
+                return Ok(());
+            }
+        }
+        self.insert_one(records, now)
+    }
+
+    fn insert_one(&mut self, records: &DnsRecordSet, now: u64) -> Result<(), DnsError> {
         self.entries.retain(|entry| {
-            entry.expires_at > now
-                && (entry.records.question != records.question
-                    || entry.records.kind != records.kind)
+            let old = &entry.records;
+            let same = old.question == records.question;
+            let terminal_negative =
+                records.negative.is_some() && records.question == records.canonical_name;
+            let conflict = (same
+                && (old.kind == records.kind || name_error(old) || name_error(records)))
+                || (terminal_negative
+                    && old.canonical_name == records.question
+                    && (old.kind == records.kind || name_error(records)))
+                || (name_error(old)
+                    && old.question == records.canonical_name
+                    && records
+                        .negative
+                        .as_ref()
+                        .is_none_or(|n| n.kind == DnsNegativeKind::NoData));
+            entry.expires_at > now && !conflict
         });
         let expires_at = now.saturating_add(u64::from(records.ttl_seconds) * 1000);
-        if records.ttl_seconds == 0 || records.values.is_empty() || expires_at <= now {
+        let soa_expires_at = records
+            .negative
+            .as_ref()
+            .and_then(|n| n.soa.as_ref())
+            .map(|soa| now.saturating_add(u64::from(soa.ttl) * 1000));
+        if records.ttl_seconds == 0
+            || (records.values.is_empty() && soa_expires_at.is_none())
+            || expires_at <= now
+        {
             return Ok(());
         }
         if self.capacity == 0 {
@@ -521,6 +656,7 @@ impl DnsCache {
         self.entries.push_back(CacheEntry {
             records: records.clone(),
             expires_at,
+            soa_expires_at,
         });
         Ok(())
     }
@@ -552,4 +688,12 @@ impl DnsCache {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+fn name_error(records: &DnsRecordSet) -> bool {
+    records.aliases.is_empty()
+        && records
+            .negative
+            .as_ref()
+            .is_some_and(|n| n.kind == DnsNegativeKind::NameError)
 }

@@ -36,6 +36,7 @@ pub enum DnsError {
     QuestionMismatch,
     Response(DnsResponseCode),
     UnsupportedResponseCode(u8),
+    UnsupportedExtendedResponseCode(u16),
     UnsupportedRecord,
     InvalidRecordLength,
     PointerOutOfBounds,
@@ -45,6 +46,7 @@ pub enum DnsError {
     AliasLoop,
     AliasDepth,
     ConflictingAlias,
+    NoData,
     CacheCapacity,
     Timeout,
     RetryLimit,
@@ -341,14 +343,17 @@ mod tests {
     fn response_codes_are_distinct() {
         let name = DnsName::parse("example.com").unwrap();
         for (code, expected) in [
-            (1, DnsResponseCode::FormatError),
+            (1u8, DnsResponseCode::FormatError),
             (2, DnsResponseCode::ServerFailure),
             (3, DnsResponseCode::NameError),
             (4, DnsResponseCode::NotImplemented),
             (5, DnsResponseCode::Refused),
         ] {
+            let mut packet = [0; DNS_MAX_MESSAGE_LEN];
+            let length = encode_dns_query(1, &name, &mut packet).unwrap();
+            packet[2..4].copy_from_slice(&(0x8180u16 | u16::from(code)).to_be_bytes());
             assert_eq!(
-                decode_dns_response(&response(&name, 1, code, &[1, 2, 3, 4], 1), 1, &name),
+                decode_dns_response(&packet[..length], 1, &name),
                 Err(DnsError::Response(expected))
             );
         }
