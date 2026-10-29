@@ -4,6 +4,12 @@ use super::{Error, add, u16_at, u32_at, u64_at};
 mod versions;
 pub(super) use versions::Version;
 
+#[derive(Clone, Copy)]
+enum Query<'a> {
+    Reference(Version<'a>),
+    Export(Option<(&'a [u8], u32)>),
+}
+
 pub(super) struct Table<'a> {
     entries: &'a [u8],
     strings: &'a [u8],
@@ -232,7 +238,7 @@ impl<'a> Table<'a> {
         &self,
         index: u32,
         name: &[u8],
-        required: Version<'_>,
+        query: Query<'_>,
     ) -> Result<Option<(Entry<'a>, bool)>, Error> {
         let offset = (index as usize).checked_mul(24).ok_or(Error::Overflow)?;
         let raw = self
@@ -247,33 +253,49 @@ impl<'a> Table<'a> {
         if raw[4] >> 4 == 0 || matches!(raw[5] & 3, 1 | 2) || u16_at(raw, 6)? == 0 {
             return Ok(None);
         }
+        if matches!(query, Query::Export(_)) && matches!(raw[4] & 15, 3 | 4) {
+            return Ok(None);
+        }
         let version = self.versions.at(index)?;
-        let fallback = match (required, version) {
-            (_, Version::Local) | (Version::Local, _) => return Ok(None),
-            (
-                Version::Named { name, hash, .. },
-                Version::Named {
-                    name: other,
-                    hash: digest,
-                    ..
-                },
-            ) => {
-                if name != other || hash != digest {
-                    return Ok(None);
+        let fallback = match query {
+            Query::Export(None) => match version {
+                Version::Local | Version::Named { hidden: true, .. } => return Ok(None),
+                Version::Named { .. } => true,
+                _ => false,
+            },
+            Query::Export(Some((requested, digest))) => match version {
+                Version::Named { name, hash, .. } if name == requested && hash == digest => false,
+                Version::Unversioned => false,
+                Version::Global if requested.is_empty() => false,
+                _ => return Ok(None),
+            },
+            Query::Reference(required) => match (required, version) {
+                (_, Version::Local) | (Version::Local, _) => return Ok(None),
+                (
+                    Version::Named { name, hash, .. },
+                    Version::Named {
+                        name: other,
+                        hash: digest,
+                        ..
+                    },
+                ) => {
+                    if name != other || hash != digest {
+                        return Ok(None);
+                    }
+                    false
                 }
-                false
-            }
-            (Version::Named { strict, .. }, Version::Global) => {
-                if strict {
-                    return Ok(None);
+                (Version::Named { strict, .. }, Version::Global) => {
+                    if strict {
+                        return Ok(None);
+                    }
+                    true
                 }
-                true
-            }
-            (Version::Named { .. }, Version::Unversioned) => false,
-            (_, Version::Named { index: 2, .. }) => false,
-            (_, Version::Named { hidden: true, .. }) => return Ok(None),
-            (_, Version::Named { .. }) => true,
-            _ => false,
+                (Version::Named { .. }, Version::Unversioned) => false,
+                (_, Version::Named { index: 2, .. }) => false,
+                (_, Version::Named { hidden: true, .. }) => return Ok(None),
+                (_, Version::Named { .. }) => true,
+                _ => false,
+            },
         };
         let entry = self.entry(index)?;
         if entry.binding != 0 && !matches!(entry.visibility, 1 | 2) && entry.definition.is_some() {
@@ -292,13 +314,25 @@ impl<'a> Table<'a> {
         name: &[u8],
         required: Version<'_>,
     ) -> Result<Option<Entry<'a>>, Error> {
+        self.find_query(name, Query::Reference(required))
+    }
+
+    pub(super) fn find_export(
+        &self,
+        name: &[u8],
+        version: Option<&[u8]>,
+    ) -> Result<Option<Entry<'a>>, Error> {
+        self.find_query(name, Query::Export(version.map(|v| (v, versions::hash(v)))))
+    }
+
+    fn find_query(&self, name: &[u8], query: Query<'_>) -> Result<Option<Entry<'a>>, Error> {
         let mut fallback = None;
         let mut matches = 0usize;
         let consider = |index,
                         matches: &mut usize,
                         fallback: &mut Option<Entry<'a>>|
          -> Result<Option<Entry<'a>>, Error> {
-            if let Some((entry, deferred)) = self.matching(index, name, required)? {
+            if let Some((entry, deferred)) = self.matching(index, name, query)? {
                 if !deferred {
                     return Ok(Some(entry));
                 }
