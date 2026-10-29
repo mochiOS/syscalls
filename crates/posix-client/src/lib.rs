@@ -32,6 +32,7 @@ pub mod pie;
 pub mod image_preparation;
 pub mod process_image;
 pub mod lifecycle_image;
+pub mod indirect_image;
 pub mod process_creation;
 mod fork;
 mod resource_policy;
