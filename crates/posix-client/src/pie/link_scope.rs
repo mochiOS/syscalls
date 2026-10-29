@@ -122,7 +122,7 @@ impl<'scope, 'image> Scope<'scope, 'image> {
         &self,
         origin: usize,
         index: u32,
-    ) -> Result<Option<(usize, super::symbols::Definition)>, Error> {
+    ) -> Result<Option<(usize, super::symbols::Definition, u64)>, Error> {
         let object = self.objects.get(origin).ok_or(Error::Invalid)?;
         let table = object.image.symbols.as_ref().ok_or(Error::Unsupported)?;
         let reference = table.entry(index)?;
@@ -132,7 +132,7 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             || object.image.symbolic
         {
             if let Some(definition) = reference.definition {
-                return Ok(Some((origin, definition)));
+                return Ok(Some((origin, definition, reference.size)));
             }
             if reference.visibility != 0
                 || reference.binding == 0
@@ -149,7 +149,7 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             if let Some(table) = &self.objects[candidate].image.symbols {
                 if let Some(symbol) = table.find_versioned(reference.name, reference.version)? {
                     if let Some(definition) = symbol.definition {
-                        return Ok(Some((candidate, definition)));
+                        return Ok(Some((candidate, definition, symbol.size)));
                     }
                 }
             }
@@ -161,10 +161,19 @@ impl<'scope, 'image> Scope<'scope, 'image> {
         }
     }
     fn resolve(&self, origin: usize, index: u32, kind: u32) -> Result<u64, Error> {
+        // Z is the selected definition's size, with the same binding/version
+        // rules as addresses. A placement bias is never part of this value.
+        if matches!(kind, 32 | 33) {
+            return self
+                .definition(origin, index)?
+                .map_or(Ok(0), |(object, definition, size)| {
+                    self.objects[object].image.definition_size(definition, size)
+                });
+        }
         if kind == 0 {
             return self
                 .definition(origin, index)?
-                .map_or(Ok(0), |(index, definition)| {
+                .map_or(Ok(0), |(index, definition, _)| {
                     let object = &self.objects[index];
                     object.image.definition_value(definition)?.at(object.bias)
                 });
@@ -172,7 +181,8 @@ impl<'scope, 'image> Scope<'scope, 'image> {
         let (object, offset) = if index == 0 {
             (origin, 0)
         } else {
-            let (object, definition) = self.definition(origin, index)?.ok_or(Error::Unsupported)?;
+            let (object, definition, _) =
+                self.definition(origin, index)?.ok_or(Error::Unsupported)?;
             (
                 object,
                 self.objects[object].image.tls_definition(definition)?,

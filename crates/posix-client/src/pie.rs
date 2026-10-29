@@ -13,6 +13,7 @@ enum Value {
     Relative(u64),
     Absolute(u64),
     Symbol { index: u32, addend: u64 },
+    Size { index: u32, addend: u64, width: u8 },
     Tls { index: u32, kind: u32, addend: u64 },
     Copy { index: u32, size: u64 },
 }
@@ -21,6 +22,7 @@ impl Value {
         match self {
             Self::Copy { size, .. } => size,
             Self::Tls { kind: 36, .. } => 16,
+            Self::Size { width, .. } => u64::from(width),
             _ => 8,
         }
     }
@@ -28,7 +30,7 @@ impl Value {
         Ok(match self {
             Self::Relative(value) => bias.wrapping_add(value),
             Self::Absolute(value) => value,
-            Self::Symbol { .. } | Self::Tls { .. } | Self::Copy { .. } => {
+            Self::Symbol { .. } | Self::Size { .. } | Self::Tls { .. } | Self::Copy { .. } => {
                 return Err(Error::Unsupported);
             }
         })
@@ -53,6 +55,19 @@ impl Value {
                 return Ok((bytes, 16));
             }
             Self::Symbol { index, addend } => resolve(index, 0)?.wrapping_add(addend),
+            Self::Size {
+                index,
+                addend,
+                width,
+            } => {
+                let value = resolve(index, if width == 4 { 32 } else { 33 })?.wrapping_add(addend);
+                if width == 4 {
+                    let value = u32::try_from(value).map_err(|_| Error::Overflow)?;
+                    bytes[..4].copy_from_slice(&value.to_le_bytes());
+                    return Ok((bytes, 4));
+                }
+                value
+            }
             Self::Tls {
                 index,
                 kind,
@@ -615,6 +630,19 @@ impl<'a> Pie<'a> {
         let value = match kind {
             0 => return Ok((target, None)),
             8 if symbol == 0 => Value::Relative(addend),
+            32 | 33 => {
+                let reference = self.symbols.as_ref().ok_or(Error::Invalid)?.entry(symbol)?;
+                if let Some(definition) = reference.definition {
+                    self.definition_size(definition, reference.size)?;
+                } else if !self.linkable && reference.binding != 2 {
+                    return Err(Error::Unsupported);
+                }
+                Value::Size {
+                    index: symbol,
+                    addend,
+                    width: if kind == 32 { 4 } else { 8 },
+                }
+            }
             5 if self.linkable => {
                 let reference = self.symbols.as_ref().ok_or(Error::Invalid)?.entry(symbol)?;
                 let symbols::Definition::Image { value, size } =
@@ -695,6 +723,17 @@ impl<'a> Pie<'a> {
             }
             symbols::Definition::Tls { .. } => Err(Error::Unsupported),
         }
+    }
+    fn definition_size(&self, definition: symbols::Definition, size: u64) -> Result<u64, Error> {
+        match definition {
+            symbols::Definition::Tls { .. } => {
+                self.tls_definition(definition)?;
+            }
+            _ => {
+                self.definition_value(definition)?;
+            }
+        }
+        Ok(size)
     }
     fn tls_definition(&self, definition: symbols::Definition) -> Result<u64, Error> {
         let symbols::Definition::Tls { value, size } = definition else {
@@ -999,6 +1038,18 @@ impl<'a> Pie<'a> {
             bias,
             output,
             |index, kind| {
+                if matches!(kind, 32 | 33) {
+                    let reference = self
+                        .symbols
+                        .as_ref()
+                        .ok_or(Error::Unsupported)?
+                        .entry(index)?;
+                    return match reference.definition {
+                        Some(definition) => self.definition_size(definition, reference.size),
+                        None if reference.binding == 2 => Ok(0),
+                        None => Err(Error::Unsupported),
+                    };
+                }
                 if kind != 0 {
                     return Err(Error::Unsupported);
                 }

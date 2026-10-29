@@ -172,6 +172,7 @@ impl<'a> Table<'a> {
         };
         Ok(Entry {
             name,
+            size: u64_at(entry, 16)?,
             binding,
             visibility: entry[5],
             definition,
@@ -366,6 +367,7 @@ fn string(strings: &[u8], offset: u64) -> Result<&[u8], Error> {
 }
 
 pub(super) struct Entry<'a> {
+    pub size: u64,
     pub name: &'a [u8],
     pub binding: u8,
     pub visibility: u8,
