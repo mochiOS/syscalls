@@ -114,6 +114,8 @@ mod file_description_flags;
 mod socket;
 mod network_byte_order;
 mod internet;
+mod netdb_memory;
+mod netdb_abi;
 mod socket_record;
 mod socket_message;
 mod stdio_cancellation;
