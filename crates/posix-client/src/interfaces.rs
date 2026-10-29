@@ -1,7 +1,7 @@
 //! Interface observations through an explicitly delegated network endpoint.
 use crate::{ClientError, ObjectHandles, ObjectTransport};
 use mochios_net_device_protocol::interfaces as wire;
-pub use mochios_net_device_protocol::interfaces::{MAX_REPLY, Snapshot};
+pub use mochios_net_device_protocol::interfaces::{Address, MAX_REPLY, Snapshot};
 pub fn snapshot<'a, T: ObjectTransport>(
     transport: &T,
     buffer: &'a mut [u8],
