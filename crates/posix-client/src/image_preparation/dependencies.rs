@@ -526,6 +526,7 @@ impl<B: Backend> Dependencies<B> {
             return Err(EIO);
         }
         let plan = scope.lifecycle(scratch).map_err(|_| ENOEXEC)?;
+        let mut late = false;
         if fixup_count != 0 {
             // This initialized workspace was just validated by pending.encode.
             // Never flatten an array element whose future value is deferred,
@@ -538,7 +539,6 @@ impl<B: Backend> Dependencies<B> {
                     fixup_count,
                 )
             };
-            let mut late = false;
             let mut inspect = |step| {
                 if let Step::Array { address, count, .. } = step {
                     match count
@@ -556,11 +556,20 @@ impl<B: Backend> Dependencies<B> {
             };
             plan.initializers(&mut inspect).map_err(|_| ENOEXEC)?;
             plan.finalizers(&mut inspect).map_err(|_| ENOEXEC)?;
-            if late {
-                return Err(ENOEXEC);
-            }
         }
-        let plan_length = plan.encoded_length().map_err(|_| ENOEXEC)?;
+        if late
+            && !images[0]
+                .has_deferred_lifecycle_runtime()
+                .map_err(|_| ENOEXEC)?
+        {
+            return Err(ENOEXEC);
+        }
+        let plan_length = if late {
+            plan.deferred_length()
+        } else {
+            plan.encoded_length()
+        }
+        .map_err(|_| ENOEXEC)?;
         if plan_length > mnu_abi::process_image::MAX_STACK_BYTES {
             return Err(E2BIG);
         }
@@ -569,9 +578,16 @@ impl<B: Backend> Dependencies<B> {
                 return Err(ENOEXEC);
             }
             lifecycle.reserve(plan_length)?;
-            let payload =
-                unsafe { core::slice::from_raw_parts_mut(lifecycle.pointer, plan_length) };
-            plan.encode_prepared(bytes, payload).map_err(|_| ENOEXEC)?;
+            let payload = unsafe { core::slice::from_raw_parts_mut(lifecycle.pointer, plan_length) };
+            let encoded = if late {
+                plan.encode_deferred(payload)
+            } else {
+                plan.encode_prepared(bytes, payload)
+            }
+            .map_err(|_| ENOEXEC)?;
+            if encoded != plan_length {
+                return Err(EIO);
+            }
             lifecycle.length = plan_length;
         }
         images[0].executable(objects[0].bias).map_err(|_| ENOEXEC)

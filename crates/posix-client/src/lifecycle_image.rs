@@ -1,6 +1,7 @@
 //! Userspace-only lifecycle image. No native kernel ABI or pointers to the
 //! producer's address space are involved. Addresses name the prepared child.
 use core::sync::atomic::{AtomicUsize, Ordering};
+pub mod deferred;
 
 pub const MAGIC: u64 = u64::from_le_bytes(*b"MLIFE001");
 pub const VERSION: u32 = 1;

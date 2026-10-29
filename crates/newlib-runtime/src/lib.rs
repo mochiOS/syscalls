@@ -4280,6 +4280,7 @@ fn startup_failure(stage: &[u8], error: c_int) -> ! {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
     core::hint::black_box(dynamic_lifecycle::__mochios_lifecycle_v1 as extern "C" fn() -> u64);
+    core::hint::black_box(dynamic_lifecycle::__mochios_lifecycle_v2 as extern "C" fn() -> u64);
     core::hint::black_box(dynamic_indirect::__mochios_indirect_v1 as extern "C" fn() -> u64);
     let stack = unsafe { parse_stack(initial_sp) };
     if let Err(error) = resource_policy::adopt_initial(stack.resource_policy) {
@@ -4321,6 +4322,8 @@ pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
     if let Err(error) = setup_signal_delivery(initial_thread, prepared_stack) {
         startup_failure(b"newlib: signal startup failed: ", error);
     }
+    dynamic_lifecycle::prepare()
+        .unwrap_or_else(|error| startup_failure(b"newlib: lifecycle capture failed: ", error));
     dynamic_indirect::initialize()
         .unwrap_or_else(|error| startup_failure(b"newlib: indirect relocation failed: ", error));
     unsafe { __sinit(_impure_ptr) };

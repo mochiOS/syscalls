@@ -1001,7 +1001,11 @@ impl<'a> Pie<'a> {
     /// Compatibility marker exported by a CRT which consumes lifecycle_image.
     /// This is not executable authorization or an identity claim.
     pub fn has_lifecycle_runtime(&self) -> Result<bool, Error> {
-        self.has_runtime_marker(b"__mochios_lifecycle_v1")
+        Ok(self.has_runtime_marker(b"__mochios_lifecycle_v1")?
+            || self.has_deferred_lifecycle_runtime()?)
+    }
+    pub fn has_deferred_lifecycle_runtime(&self) -> Result<bool, Error> {
+        self.has_runtime_marker(b"__mochios_lifecycle_v2")
     }
     pub fn has_static_tls_runtime(&self) -> Result<bool, Error> {
         self.has_runtime_marker(b"__mochios_static_tls_v1")

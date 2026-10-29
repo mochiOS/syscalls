@@ -1,13 +1,35 @@
-//! The CRT consumes its userspace startup plan only after runtime setup.
+//! Capture recipes before resolvers and freeze final callbacks before init.
 use super::*;
-use mochios_posix_client::lifecycle_image::{Error, Image, State};
-static BASE: AtomicUsize = AtomicUsize::new(0);
+use core::{cell::UnsafeCell, ptr, sync::atomic::AtomicU8};
+use mochios_posix_client::lifecycle_image::{Error, Image, State, deferred};
+const MAXIMUM: usize = mnu_abi::process_image::MAX_STACK_BYTES;
+const EMPTY: u8 = 0;
+const WRITING: u8 = 1;
+const PREPARED: u8 = 2;
+const RESOLVING: u8 = 3;
+const READY: u8 = 4;
+const FAILED: u8 = 5;
+const ABSENT: u8 = 6;
+static PHASE: AtomicU8 = AtomicU8::new(EMPTY);
+static LENGTH: AtomicUsize = AtomicUsize::new(0);
 static LIFECYCLE: State = State::new();
+#[repr(align(8))]
+struct Snapshot(UnsafeCell<[u8; MAXIMUM]>);
+// Only the thread winning EMPTY->WRITING or PREPARED->RESOLVING writes. READY
+// publishes immutable bytes. No reference or owner escapes this module, and
+// no lock is held while application callbacks run. fork inherits its own COW.
+unsafe impl Sync for Snapshot {}
+static SNAPSHOT: Snapshot = Snapshot(UnsafeCell::new([0; MAXIMUM]));
 
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub extern "C" fn __mochios_lifecycle_v1() -> u64 {
     1
+}
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn __mochios_lifecycle_v2() -> u64 {
+    2
 }
 
 fn read(address: u64, bytes: &mut [u8]) -> Result<(), c_int> {
@@ -23,43 +45,116 @@ fn error(error: Error<c_int>) -> c_int {
 }
 fn call(address: u64) -> Result<(), c_int> {
     let address = usize::try_from(address).map_err(|_| ENOEXEC)?;
-    // SAFETY: the userspace exec producer resolved and validated these code
-    // addresses against the installed scope before encoding the startup plan.
+    // SAFETY: v1 was validated by the exec producer; v2 values were checked
+    // against captured executable LOADs after resolvers and before callbacks.
     let function: unsafe extern "C" fn() = unsafe { core::mem::transmute(address) };
     unsafe { function() };
     Ok(())
 }
-pub(super) fn initialize() -> Result<bool, c_int> {
-    let Some(vector) = auxiliary::vector() else {
+
+/// Must precede every resolver. Even absence is captured so a resolver cannot
+/// introduce different lifecycle metadata through the original aux vector.
+pub(super) fn prepare() -> Result<bool, c_int> {
+    match PHASE.load(Ordering::Acquire) {
+        PREPARED | READY => return Ok(true),
+        ABSENT => return Ok(false),
+        EMPTY => {}
+        _ => return Err(ENOEXEC),
+    }
+    let address = match auxiliary::vector() {
+        None => None,
+        Some(vector) => {
+            match vector.lookup(mochios_posix_client::process_image::AT_LIFECYCLE_IMAGE as usize) {
+                Ok(address) => Some(address),
+                Err(ENOENT) => None,
+                Err(error) => return Err(error),
+            }
+        }
+    };
+    let Some(address) = address else {
+        PHASE
+            .compare_exchange(EMPTY, ABSENT, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| ENOEXEC)?;
         return Ok(false);
     };
-    let address =
-        match vector.lookup(mochios_posix_client::process_image::AT_LIFECYCLE_IMAGE as usize) {
-            Ok(address) => address,
-            Err(ENOENT) => return Ok(false),
-            Err(error) => return Err(error),
-        };
-    let image = Image::read(
-        address as u64,
-        mnu_abi::process_image::MAX_STACK_BYTES,
+    let mut bytes = [0; MAXIMUM];
+    let length = deferred::capture(address as u64, MAXIMUM, &mut bytes, read).map_err(error)?;
+    PHASE
+        .compare_exchange(EMPTY, WRITING, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| ENOEXEC)?;
+    // SAFETY: the winning writer exclusively owns the internal buffer; bounds
+    // were checked by capture, and source stack and static storage are disjoint.
+    unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), SNAPSHOT.0.get().cast::<u8>(), length) };
+    LENGTH.store(length, Ordering::Relaxed);
+    PHASE.store(PREPARED, Ordering::Release);
+    Ok(true)
+}
+
+fn resolve() -> Result<(), c_int> {
+    if PHASE.load(Ordering::Acquire) == READY {
+        return Ok(());
+    }
+    PHASE
+        .compare_exchange(PREPARED, RESOLVING, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| ENOEXEC)?;
+    struct Attempt;
+    impl Drop for Attempt {
+        fn drop(&mut self) {
+            PHASE.store(FAILED, Ordering::Release);
+        }
+    }
+    let attempt = Attempt;
+    let length = LENGTH.load(Ordering::Relaxed);
+    let mut output = [0; MAXIMUM];
+    let resolved = {
+        // SAFETY: only the resolving winner reads this bounded prepared plan.
+        // No callbacks execute and no writable reference is outstanding.
+        let bytes = unsafe { core::slice::from_raw_parts(SNAPSHOT.0.get().cast::<u8>(), length) };
+        if u32::from_le_bytes(bytes[8..12].try_into().unwrap()) == deferred::VERSION {
+            Some(
+                deferred::Plan::parse::<c_int>(bytes)
+                    .map_err(error)?
+                    .resolve(&mut output, read)
+                    .map_err(error)?,
+            )
+        } else {
+            None
+        }
+    };
+    if let Some(length) = resolved {
+        // SAFETY: the plan borrow ended; this winner still has exclusive write
+        // access. From READY onward all callers only read the resulting image.
+        unsafe { ptr::copy_nonoverlapping(output.as_ptr(), SNAPSHOT.0.get().cast::<u8>(), length) };
+        LENGTH.store(length, Ordering::Relaxed);
+    }
+    PHASE.store(READY, Ordering::Release);
+    core::mem::forget(attempt);
+    Ok(())
+}
+fn image() -> Result<Image, c_int> {
+    Image::read(
+        SNAPSHOT.0.get() as u64,
+        LENGTH.load(Ordering::Acquire),
         read,
     )
-    .map_err(error)?;
-    BASE.store(address, Ordering::Release);
+    .map_err(error)
+}
+pub(super) fn initialize() -> Result<bool, c_int> {
+    if PHASE.load(Ordering::Acquire) == ABSENT {
+        return Ok(false);
+    }
+    resolve()?;
+    let image = image()?;
     LIFECYCLE.initialize(&image, read, call).map_err(error)?;
     Ok(true)
 }
 pub(super) fn finalize() -> Result<bool, c_int> {
-    let address = BASE.load(Ordering::Acquire);
-    if address == 0 {
-        return Ok(false);
+    match PHASE.load(Ordering::Acquire) {
+        EMPTY | ABSENT => return Ok(false),
+        WRITING | PREPARED | RESOLVING => return Ok(true), // no initializers have begun
+        READY => {}
+        _ => return Err(ENOEXEC),
     }
-    let image = Image::read(
-        address as u64,
-        mnu_abi::process_image::MAX_STACK_BYTES,
-        read,
-    )
-    .map_err(error)?;
-    LIFECYCLE.finalize(&image, read, call).map_err(error)?;
+    LIFECYCLE.finalize(&image()?, read, call).map_err(error)?;
     Ok(true)
 }
