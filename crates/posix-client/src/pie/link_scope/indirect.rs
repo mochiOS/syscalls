@@ -11,6 +11,7 @@ pub struct Deferred<'plan, 'scope, 'image> {
     scope: &'plan Scope<'scope, 'image>,
     regions: &'plan [Region],
     fixups: &'plan mut [Fixup],
+    copies: bool,
 }
 
 impl<'scope, 'image> Scope<'scope, 'image> {
@@ -82,7 +83,56 @@ impl<'scope, 'image> Scope<'scope, 'image> {
                 Ok(())
             })?;
         }
+        if fixups != 0 {
+            let mut copies = 0usize;
+            self.copies(|_| {
+                copies = copies.checked_add(1).ok_or(Error::Overflow)?;
+                Ok(())
+            })?;
+            if copies != 0 {
+                // COPY may read a read-only LOAD. Preserve exact ELF read bits
+                // in v2 rather than deriving them from write/execute access.
+                regions = 0;
+                for object in self.objects {
+                    for i in 0..object.image.count {
+                        let s = object.image.segment(i)?;
+                        if s.kind == super::LOAD && s.memory != 0 && s.flags & 7 != 0 {
+                            regions = regions.checked_add(1).ok_or(Error::Overflow)?;
+                        }
+                    }
+                }
+                fixups = fixups.checked_add(copies).ok_or(Error::Overflow)?;
+            }
+        }
         Ok((regions, fixups))
+    }
+
+    fn copies(&self, mut emit: impl FnMut(Fixup) -> Result<(), Error>) -> Result<(), Error> {
+        let root = &self.objects[0];
+        root.image.relocations(|target, value| {
+            if let Value::Copy { index, .. } = value {
+                if let Some((provider, source, length)) = self.copy_source(index)? {
+                    if length != 0 {
+                        emit(Fixup::copy(
+                            add(root.bias, target)?,
+                            add(self.objects[provider].bias, source)?,
+                            length,
+                        ))?;
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+    /// Used only after deferred_counts reports nonzero work. A v2 receiving
+    /// CRT is required before publishing any runtime COPY operations.
+    pub fn has_deferred_copies(&self) -> Result<bool, Error> {
+        let mut found = false;
+        self.copies(|_| {
+            found = true;
+            Ok(())
+        })?;
+        Ok(found)
     }
 
     /// Capture exact installed LOAD extents and deferred records. Sorting only
@@ -103,16 +153,29 @@ impl<'scope, 'image> Scope<'scope, 'image> {
         let regions = &mut regions[..region_count];
         let fixups = &mut fixups[..fixup_count];
         let lifecycle = self.lifecycle(order)?;
+        let copies = fixup_count != 0 && self.has_deferred_copies()?;
         let (mut r, mut f) = (0, 0);
         for &index in lifecycle.order() {
             let object = &self.objects[index];
             for i in 0..object.image.count {
                 let s = object.image.segment(i)?;
-                if s.kind == super::LOAD && s.memory != 0 && s.flags & 3 != 0 {
+                if s.kind == super::LOAD
+                    && s.memory != 0
+                    && s.flags & (if copies { 7 } else { 3 }) != 0
+                {
                     regions[r] = Region {
                         address: add(object.bias, s.address)?,
                         length: s.memory,
-                        access: if s.flags & 1 != 0 {
+                        access: if copies {
+                            match s.flags & 7 {
+                                1 => Access::Executable,
+                                2 => Access::Writable,
+                                4 => Access::Readable,
+                                5 => Access::ReadExecute,
+                                6 => Access::ReadWrite,
+                                _ => return Err(Error::Invalid),
+                            }
+                        } else if s.flags & 1 != 0 {
                             Access::Executable
                         } else {
                             Access::Writable
@@ -120,6 +183,15 @@ impl<'scope, 'image> Scope<'scope, 'image> {
                     };
                     r += 1;
                 }
+            }
+            // The root is last in lifecycle postorder. Its COPY initializers
+            // need completed providers and must precede its own resolvers.
+            if copies && index == 0 {
+                self.copies(|record| {
+                    fixups[f] = record;
+                    f += 1;
+                    Ok(())
+                })?;
             }
             for relative in [false, true] {
                 object.image.relocations(|target, value| {
@@ -138,6 +210,7 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             scope: self,
             regions,
             fixups,
+            copies,
         })
     }
 }
@@ -156,9 +229,10 @@ impl Deferred<'_, '_, '_> {
     }
     /// Emit all ordinary relocations. The resulting bundle is not ready to run
     /// until its resolver plan has been consumed in the receiving image.
-    /// COPY of data containing unresolved fixups fails rather than copying a
-    /// resolver address or guessing the future function pointer.
+    /// Runtime COPY uses the provider's final memory, never a resolver address
+    /// or a guessed function pointer, and precedes root resolver execution.
     pub fn write_bundle(&self, out: &mut [u8]) -> Result<usize, Error> {
-        self.scope.write_bundle_with_deferred(out, true)
+        self.scope
+            .write_bundle_with_deferred(out, true, self.copies)
     }
 }

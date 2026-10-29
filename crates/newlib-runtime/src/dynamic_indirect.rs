@@ -10,6 +10,11 @@ static RESOLVERS: State = State::new();
 pub extern "C" fn __mochios_indirect_v1() -> u64 {
     1
 }
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn __mochios_indirect_v2() -> u64 {
+    2
+}
 
 fn error(error: Error<c_int>) -> c_int {
     match error {
@@ -44,8 +49,9 @@ pub(super) fn initialize() -> Result<bool, c_int> {
     )
     .map_err(error)?;
     RESOLVERS
-        .apply(
+        .apply_with_copies(
             &image,
+            |address, bytes| user_copy::read(address as *const u8, bytes),
             |address| -> Result<u64, c_int> {
                 // SAFETY: capture checked every resolver against the authorized
                 // installed executable LOADs before the first function is invoked.

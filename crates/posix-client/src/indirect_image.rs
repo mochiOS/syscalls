@@ -8,6 +8,7 @@ use core::{
 
 pub const MAGIC: u64 = u64::from_le_bytes(*b"MIREL001");
 pub const VERSION: u32 = 1;
+pub const COPY_VERSION: u32 = 2;
 pub const HEADER_BYTES: usize = 40;
 pub const REGION_BYTES: usize = 24;
 pub const FIXUP_BYTES: usize = 32;
@@ -29,6 +30,20 @@ pub enum Error<E = Infallible> {
 pub enum Access {
     Executable,
     Writable,
+    Readable,
+    ReadExecute,
+    ReadWrite,
+}
+impl Access {
+    fn flags(self) -> u64 {
+        match self {
+            Self::Executable => 1,
+            Self::Writable => 2,
+            Self::Readable => 4,
+            Self::ReadExecute => 5,
+            Self::ReadWrite => 6,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Region {
@@ -55,6 +70,7 @@ pub struct Fixup {
     resolver: u64,
     addend: u64,
     order: usize,
+    copy: bool,
 }
 impl Fixup {
     pub const EMPTY: Self = Self::new(0, 0, 0);
@@ -66,7 +82,25 @@ impl Fixup {
             resolver,
             addend,
             order: 0,
+            copy: false,
         }
+    }
+    /// Copy the final bytes only after the preceding resolver records. COPY
+    /// never invokes the resolver again, including partial pointer copies.
+    pub const fn copy(target: u64, source: u64, length: u64) -> Self {
+        Self {
+            target,
+            resolver: source,
+            addend: length,
+            order: 0,
+            copy: true,
+        }
+    }
+    pub fn copy_source(self) -> Option<(u64, u64)> {
+        self.copy.then_some((self.resolver, self.addend))
+    }
+    pub fn width(self) -> u64 {
+        if self.copy { self.addend } else { 8 }
     }
     pub fn target(self) -> u64 {
         self.target
@@ -97,7 +131,7 @@ fn contains(regions: &[Region], address: u64, width: u64, access: Access) -> boo
         return false;
     }
     let r = regions[index - 1];
-    r.access == access
+    r.access.flags() & access.flags() == access.flags()
         && address
             .checked_add(width)
             .is_some_and(|end| end <= r.address + r.length)
@@ -111,9 +145,17 @@ fn validate<E>(regions: &[Region], fixups: &mut [Fixup]) -> Result<(), Error<E>>
         end = r.end()?;
     }
     for (index, f) in fixups.iter_mut().enumerate() {
-        if !contains(regions, f.target, 8, Access::Writable)
-            || !contains(regions, f.resolver, 1, Access::Executable)
-        {
+        let valid = if f.copy {
+            let n = f.width();
+            n != 0
+                && contains(regions, f.target, n, Access::Writable)
+                && contains(regions, f.resolver, n, Access::Readable)
+                && (f.target + n <= f.resolver || f.resolver + n <= f.target)
+        } else {
+            contains(regions, f.target, 8, Access::Writable)
+                && contains(regions, f.resolver, 1, Access::Executable)
+        };
+        if !valid {
             return Err(Error::Invalid);
         }
         f.order = index;
@@ -123,7 +165,7 @@ fn validate<E>(regions: &[Region], fixups: &mut [Fixup]) -> Result<(), Error<E>>
     fixups.sort_unstable_by_key(|f| f.target);
     let overlap = fixups
         .windows(2)
-        .any(|pair| pair[1].target < pair[0].target + 8);
+        .any(|pair| pair[1].target < pair[0].target + pair[0].width());
     fixups.sort_unstable_by_key(|f| f.order);
     if overlap {
         return Err(Error::Invalid);
@@ -146,21 +188,20 @@ pub fn encode(regions: &[Region], fixups: &mut [Fixup], out: &mut [u8]) -> Resul
     let out = &mut out[..size];
     out.fill(0);
     put(out, 0, MAGIC);
-    put(out, 8, u64::from(VERSION) | ((regions.len() as u64) << 32));
+    let version =
+        if fixups.iter().any(|f| f.copy) || regions.iter().any(|r| r.access.flags() & 4 != 0) {
+            COPY_VERSION
+        } else {
+            VERSION
+        };
+    put(out, 8, u64::from(version) | ((regions.len() as u64) << 32));
     put(out, 16, fixups.len() as u64);
     put(out, 24, size as u64);
     for (index, r) in regions.iter().enumerate() {
         let at = HEADER_BYTES + index * REGION_BYTES;
         put(out, at, r.address);
         put(out, at + 8, r.length);
-        put(
-            out,
-            at + 16,
-            match r.access {
-                Access::Executable => 1,
-                Access::Writable => 2,
-            },
-        );
+        put(out, at + 16, r.access.flags());
     }
     let start = HEADER_BYTES + regions.len() * REGION_BYTES;
     for (index, f) in fixups.iter().enumerate() {
@@ -168,6 +209,7 @@ pub fn encode(regions: &[Region], fixups: &mut [Fixup], out: &mut [u8]) -> Resul
         put(out, at, f.target);
         put(out, at + 8, f.resolver);
         put(out, at + 16, f.addend);
+        put(out, at + 24, u64::from(f.copy));
     }
     Ok(size)
 }
@@ -197,7 +239,11 @@ impl<'a> Captured<'a> {
         let mut header = [0; HEADER_BYTES];
         read(base, &mut header).map_err(Error::Read)?;
         let format = word(&header, 8);
-        if word(&header, 0) != MAGIC || format as u32 != VERSION || word(&header, 32) != 0 {
+        let version = format as u32;
+        if word(&header, 0) != MAGIC
+            || !matches!(version, VERSION | COPY_VERSION)
+            || word(&header, 32) != 0
+        {
             return Err(Error::Invalid);
         }
         let regions = (format >> 32) as usize;
@@ -230,6 +276,9 @@ impl<'a> Captured<'a> {
                 access: match word(&bytes, 16) {
                     1 => Access::Executable,
                     2 => Access::Writable,
+                    4 if version == COPY_VERSION => Access::Readable,
+                    5 if version == COPY_VERSION => Access::ReadExecute,
+                    6 if version == COPY_VERSION => Access::ReadWrite,
                     _ => return Err(Error::Invalid),
                 },
             };
@@ -238,10 +287,13 @@ impl<'a> Captured<'a> {
         for (index, f) in fixups.iter_mut().enumerate() {
             let mut bytes = [0; FIXUP_BYTES];
             read(base + (start + index * FIXUP_BYTES) as u64, &mut bytes).map_err(Error::Read)?;
-            if word(&bytes, 24) != 0 {
-                return Err(Error::Invalid);
-            }
-            *f = Fixup::new(word(&bytes, 0), word(&bytes, 8), word(&bytes, 16));
+            *f = match word(&bytes, 24) {
+                0 => Fixup::new(word(&bytes, 0), word(&bytes, 8), word(&bytes, 16)),
+                1 if version == COPY_VERSION => {
+                    Fixup::copy(word(&bytes, 0), word(&bytes, 8), word(&bytes, 16))
+                }
+                _ => return Err(Error::Invalid),
+            };
         }
         validate(regions, fixups)?;
         Ok(Self { fixups })
@@ -276,9 +328,30 @@ impl State {
     pub fn apply<E>(
         &self,
         image: &Captured<'_>,
+        resolve: impl FnMut(u64) -> Result<u64, E>,
+        write: impl FnMut(u64, &[u8]) -> Result<(), E>,
+    ) -> Result<(), Error<E>> {
+        self.execute(image, None, resolve, write)
+    }
+    pub fn apply_with_copies<E>(
+        &self,
+        image: &Captured<'_>,
+        mut read: impl FnMut(u64, &mut [u8]) -> Result<(), E>,
+        resolve: impl FnMut(u64) -> Result<u64, E>,
+        write: impl FnMut(u64, &[u8]) -> Result<(), E>,
+    ) -> Result<(), Error<E>> {
+        self.execute(image, Some(&mut read), resolve, write)
+    }
+    fn execute<E>(
+        &self,
+        image: &Captured<'_>,
+        mut read: Option<&mut dyn FnMut(u64, &mut [u8]) -> Result<(), E>>,
         mut resolve: impl FnMut(u64) -> Result<u64, E>,
         mut write: impl FnMut(u64, &[u8]) -> Result<(), E>,
     ) -> Result<(), Error<E>> {
+        if read.is_none() && image.fixups.iter().any(|f| f.copy) {
+            return Err(Error::Invalid);
+        }
         match self
             .phase
             .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
@@ -295,7 +368,19 @@ impl State {
             }
         }
         let attempt = Attempt(&self.phase);
+        let mut buffer = [0; 256];
         for fixup in image.fixups {
+            if let Some((source, length)) = fixup.copy_source() {
+                let read = read.as_mut().ok_or(Error::Invalid)?;
+                let mut offset = 0;
+                while offset < length {
+                    let size = (length - offset).min(buffer.len() as u64) as usize;
+                    read(source + offset, &mut buffer[..size]).map_err(Error::Read)?;
+                    write(fixup.target + offset, &buffer[..size]).map_err(Error::Write)?;
+                    offset += size as u64;
+                }
+                continue;
+            }
             let value = resolve(fixup.resolver)
                 .map_err(Error::Resolve)?
                 .wrapping_add(fixup.addend);

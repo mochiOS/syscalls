@@ -4282,6 +4282,7 @@ pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
     core::hint::black_box(dynamic_lifecycle::__mochios_lifecycle_v1 as extern "C" fn() -> u64);
     core::hint::black_box(dynamic_lifecycle::__mochios_lifecycle_v2 as extern "C" fn() -> u64);
     core::hint::black_box(dynamic_indirect::__mochios_indirect_v1 as extern "C" fn() -> u64);
+    core::hint::black_box(dynamic_indirect::__mochios_indirect_v2 as extern "C" fn() -> u64);
     let stack = unsafe { parse_stack(initial_sp) };
     if let Err(error) = resource_policy::adopt_initial(stack.resource_policy) {
         startup_failure(b"newlib: initial resource policy failed: ", error);

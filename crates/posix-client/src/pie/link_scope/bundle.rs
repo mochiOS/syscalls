@@ -78,12 +78,13 @@ impl Scope<'_, '_> {
     /// error invalidates the output; the caller must discard it without commit.
     /// This function neither acquires handles nor grants execution authority.
     pub fn write_bundle(&self, output: &mut [u8]) -> Result<usize, Error> {
-        self.write_bundle_with_deferred(output, false)
+        self.write_bundle_with_deferred(output, false, false)
     }
     pub(super) fn write_bundle_with_deferred(
         &self,
         output: &mut [u8],
         deferred: bool,
+        copies: bool,
     ) -> Result<usize, Error> {
         let layout = self.bundle_layout()?;
         if output.len() < layout.length {
@@ -125,7 +126,7 @@ impl Scope<'_, '_> {
             let start = usize::try_from(member_offset).map_err(|_| Error::Overflow)?;
             let (prefix, tail) = output.split_at_mut(start);
             let member = tail.get_mut(..length).ok_or(Error::BufferTooSmall)?;
-            self.write_with_deferred(index, member, deferred)?;
+            self.write_with_deferred(index, member, deferred, copies)?;
             let count = u16_at(member, 56)? as usize;
             for header in 0..count {
                 let offset = 64 + header * 56;

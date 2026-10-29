@@ -292,13 +292,14 @@ impl<'scope, 'image> Scope<'scope, 'image> {
     /// Prepare one object using the complete scope. The caller must install
     /// all members together; this does not itself map or execute any member.
     pub fn write(&self, index: usize, output: &mut [u8]) -> Result<usize, Error> {
-        self.write_with_deferred(index, output, false)
+        self.write_with_deferred(index, output, false, false)
     }
     fn write_with_deferred(
         &self,
         index: usize,
         output: &mut [u8],
         deferred: bool,
+        copies: bool,
     ) -> Result<usize, Error> {
         let object = self.objects.get(index).ok_or(Error::Invalid)?;
         object.image.write_resolved(
@@ -308,6 +309,9 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             |symbol, addend| self.descriptor(index, symbol, addend),
             |symbol, output| self.copy(index, symbol, output),
             |target, value| {
+                if copies && matches!(value, super::Value::Copy { .. }) {
+                    return Ok(true);
+                }
                 if deferred {
                     Ok(self.indirect_fixup(index, target, value)?.is_some())
                 } else {

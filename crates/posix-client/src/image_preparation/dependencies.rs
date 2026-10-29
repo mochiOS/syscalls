@@ -452,6 +452,12 @@ impl<B: Backend> Dependencies<B> {
         if fixup_count != 0 && !images[0].has_indirect_runtime().map_err(|_| ENOEXEC)? {
             return Err(ENOEXEC);
         }
+        if fixup_count != 0
+            && scope.has_deferred_copies().map_err(|_| ENOEXEC)?
+            && !images[0].has_indirect_copy_runtime().map_err(|_| ENOEXEC)?
+        {
+            return Err(ENOEXEC);
+        }
         let indirect_length = if fixup_count != 0 {
             let size = crate::indirect_image::encoded_length(region_count, fixup_count)
                 .map_err(|_| E2BIG)?;
@@ -548,7 +554,7 @@ impl<B: Backend> Dependencies<B> {
                         Some(end) => {
                             late |= fixups
                                 .iter()
-                                .any(|f| f.target() < end && address < f.target() + 8)
+                                .any(|f| f.target() < end && address < f.target() + f.width())
                         }
                         None => late = true,
                     }

@@ -1011,7 +1011,11 @@ impl<'a> Pie<'a> {
         self.has_runtime_marker(b"__mochios_static_tls_v1")
     }
     pub fn has_indirect_runtime(&self) -> Result<bool, Error> {
-        self.has_runtime_marker(b"__mochios_indirect_v1")
+        Ok(self.has_runtime_marker(b"__mochios_indirect_v1")?
+            || self.has_indirect_copy_runtime()?)
+    }
+    pub fn has_indirect_copy_runtime(&self) -> Result<bool, Error> {
+        self.has_runtime_marker(b"__mochios_indirect_v2")
     }
     fn has_runtime_marker(&self, name: &[u8]) -> Result<bool, Error> {
         Ok(self.runtime_function(name)?.is_some())
