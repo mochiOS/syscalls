@@ -1,5 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod consent;
+
 #[cfg(feature = "alloc")]
 extern crate alloc;
 

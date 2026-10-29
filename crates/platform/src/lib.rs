@@ -1671,6 +1671,7 @@ pub mod capability {
     pub use prepared_image::{PreparedExecutionImage, prepare_execution_image};
     use super::syscall::{self, SysResult};
     pub use mochios_capability_protocol::{
+        consent,
         AUTHORIZE_EXEC_OPCODE, CAPABILITY_DECISION_OPCODE, CAPABILITY_PERSISTENT_QUERY_OPCODE,
         CAPABILITY_PROMPT_OPCODE, CAPABILITY_RESPONSE_OPCODE, CapabilityClass, CapabilityDecision,
         CapabilityDecisionRequest, CapabilityRequest, ExecutableIdentity,
