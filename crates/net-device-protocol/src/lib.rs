@@ -6,6 +6,7 @@ pub mod datagram;
 pub mod datagram_authority;
 pub mod stream;
 pub mod resolver;
+pub mod interfaces;
 mod http;
 mod tls;
 
