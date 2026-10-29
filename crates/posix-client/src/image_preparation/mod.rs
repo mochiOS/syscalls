@@ -253,7 +253,10 @@ fn needs_preparation_from(
             }
             done += amount;
         }
-        if matches!(u32::from_le_bytes(entry[..4].try_into().unwrap()), 2 | 3) {
+        if matches!(
+            u32::from_le_bytes(entry[..4].try_into().unwrap()),
+            2 | 3 | 0x6474e552
+        ) {
             return Ok(true);
         }
     }
@@ -297,6 +300,7 @@ impl<B: Backend> Preparation<B> {
         let runtime = candidate.has_lifecycle_runtime().map_err(|_| ENOEXEC)?;
         let length = if candidate.is_fixed()
             || dependent
+            || candidate.has_relro().map_err(|_| ENOEXEC)?
             || candidate.requires_tls_scope().map_err(|_| ENOEXEC)?
             || candidate.requires_indirect_scope().map_err(|_| ENOEXEC)?
             || (runtime && candidate.validate_direct_scope_startup().is_err())

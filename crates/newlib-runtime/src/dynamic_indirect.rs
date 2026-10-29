@@ -2,6 +2,9 @@
 use super::*;
 use mochios_posix_client::indirect_image::{self as policy, Captured, Error, Fixup, Region, State};
 static RESOLVERS: State = State::new();
+#[path = "dynamic_indirect/protection.rs"]
+mod protection;
+pub(super) use protection::__mochios_relro_v1;
 // Per-image ownership remains discoverable if a resolver abandons its frame.
 // It is never overwritten by reentry; process teardown owns any abandoned VM.
 static LARGE_BASE: AtomicUsize = AtomicUsize::new(0);
@@ -41,6 +44,9 @@ fn error(error: Error<c_int>) -> c_int {
 }
 
 pub(super) fn initialize() -> Result<bool, c_int> {
+    if protection::status()? {
+        return Ok(true);
+    }
     let Some(vector) = auxiliary::vector() else {
         return Ok(false);
     };
@@ -50,11 +56,25 @@ pub(super) fn initialize() -> Result<bool, c_int> {
             Err(ENOENT) => return Ok(false),
             Err(error) => return Err(error),
         };
+    if address < 0x400000 || address % 8 != 0 {
+        return Err(ENOEXEC);
+    }
+    let mut magic = [0; 8];
+    user_copy::read(address as *const u8, &mut magic)?;
+    if u64::from_le_bytes(magic) == mochios_posix_client::relocation_protection::MAGIC {
+        return protection::initialize(address);
+    }
+    initialize_at(address, |a, b| user_copy::read(a as *const u8, b))
+}
+fn initialize_at(
+    address: usize,
+    mut read: impl FnMut(u64, &mut [u8]) -> Result<(), c_int>,
+) -> Result<bool, c_int> {
     const MAXIMUM: usize = mnu_abi::process_image::MAX_STACK_BYTES;
     let (region_count, fixup_count, size) = policy::workspace(
         address as u64,
         mochios_posix_client::startup_metadata::MAX_BYTES,
-        |a, b| user_copy::read(a as *const u8, b),
+        &mut read,
     )
     .map_err(error)?;
     if size > MAXIMUM {
@@ -99,7 +119,7 @@ pub(super) fn initialize() -> Result<bool, c_int> {
             mochios_posix_client::startup_metadata::MAX_BYTES,
             regions,
             fixups,
-            |a, b| user_copy::read(a as *const u8, b),
+            &mut read,
         )
         .map_err(error)?;
         return apply(&image);
@@ -114,7 +134,7 @@ pub(super) fn initialize() -> Result<bool, c_int> {
         MAXIMUM,
         &mut regions,
         &mut fixups,
-        |address, bytes| user_copy::read(address as *const u8, bytes),
+        &mut read,
     )
     .map_err(error)?;
     apply(&image)

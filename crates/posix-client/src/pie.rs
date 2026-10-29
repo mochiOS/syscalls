@@ -5,6 +5,7 @@
 //! acquiring, mapping and initializing a complete object set remains user-space policy.
 mod copy;
 mod lifecycle;
+mod relro;
 pub mod link_scope;
 mod symbols;
 
@@ -314,6 +315,7 @@ impl<'a> Pie<'a> {
         }
         result.dependencies(|_| Ok(()))?;
         result.search_paths()?;
+        result.relro(0, |_| Ok(()))?;
         result.lifecycle = lifecycle::Metadata::parse(&result)?;
         // Reuse the runtime's TLS validation, reading the source PHDR bytes.
         // Only the initialized template must be file-backed; .tbss may extend

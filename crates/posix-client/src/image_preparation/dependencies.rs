@@ -99,6 +99,7 @@ pub(super) struct Dependencies<B: Backend> {
     tls_templates: Buffer<B>,
     indirect_regions: Buffer<B>,
     indirect_fixups: Buffer<B>,
+    protection_ranges: Buffer<B>,
 }
 impl<B: Backend> Default for Dependencies<B> {
     fn default() -> Self {
@@ -111,6 +112,7 @@ impl<B: Backend> Default for Dependencies<B> {
             tls_templates: Buffer::default(),
             indirect_regions: Buffer::default(),
             indirect_fixups: Buffer::default(),
+            protection_ranges: Buffer::default(),
         }
     }
 }
@@ -468,14 +470,58 @@ impl<B: Backend> Dependencies<B> {
         {
             return Err(ENOEXEC);
         }
+        let mut protection_count = 0usize;
+        for object in objects {
+            object
+                .image
+                .relro(object.bias, |_| {
+                    protection_count = protection_count
+                        .checked_add(1)
+                        .ok_or(mochios_posix_client::pie::Error::Overflow)?;
+                    Ok(())
+                })
+                .map_err(|_| ENOEXEC)?;
+        }
+        if protection_count != 0 && !images[0].has_relro_runtime().map_err(|_| ENOEXEC)? {
+            return Err(ENOEXEC);
+        }
         let indirect_length = if fixup_count != 0 {
-            let size = crate::indirect_image::encoded_length(region_count, fixup_count)
-                .map_err(|_| E2BIG)?;
+            let size =
+                crate::indirect_image::encoded_length(region_count, fixup_count).map_err(|_| E2BIG)?;
             metadata_size(&images[0], size)?;
             size
         } else {
             0
         };
+        let protection_length = if protection_count != 0 {
+            let n = crate::relocation_protection::encoded_length(protection_count, indirect_length)
+                .map_err(|_| E2BIG)?;
+            metadata_size(&images[0], n)?;
+            n
+        } else {
+            0
+        };
+        let ranges = self
+            .protection_ranges
+            .slots::<crate::relocation_protection::Range>(protection_count)?;
+        let mut next = 0;
+        for object in objects {
+            object
+                .image
+                .relro(object.bias, |range| {
+                    unsafe { ranges.add(next).write(range) };
+                    next += 1;
+                    Ok(())
+                })
+                .map_err(|_| ENOEXEC)?;
+        }
+        let ranges = if protection_count == 0 {
+            &mut [][..]
+        } else {
+            // SAFETY: each slot was initialized above in retained backend storage.
+            unsafe { core::slice::from_raw_parts_mut(ranges, protection_count) }
+        };
+        ranges.sort_unstable_by_key(|range| range.address);
         let templates = self
             .tls_templates
             .slots::<Option<mochios_posix_client::static_tls::Template>>(count)?;
@@ -536,6 +582,13 @@ impl<B: Backend> Dependencies<B> {
         };
         if written != length {
             return Err(EIO);
+        }
+        if protection_length != 0 {
+            indirect.reserve(protection_length)?;
+            let payload =
+                unsafe { core::slice::from_raw_parts_mut(indirect.pointer, protection_length) };
+            indirect.length = crate::relocation_protection::wrap(indirect_length, ranges, payload)
+                .map_err(|_| ENOEXEC)?;
         }
         let plan = scope.lifecycle(scratch).map_err(|_| ENOEXEC)?;
         let mut late = false;
