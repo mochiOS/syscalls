@@ -470,6 +470,11 @@ pub mod process {
         syscall::execution::identity()
     }
 
+    /// Committed image metadata for this caller or an owned WAIT Process Handle.
+    pub fn image_info(handle: Option<u32>) -> SysResult<syscall::ProcessImageInfo> {
+        syscall::execution::image_info(handle)
+    }
+
     pub fn open_handle_for_endpoint(endpoint: u64, rights: u64) -> SysResult<u32> {
         syscall::call2(syscall::SyscallNumber::ProcessHandleOpen, endpoint, rights)
             .and_then(crate::handle_result::decode)

@@ -3,6 +3,32 @@
 use super::{ExecutionIdentity, ProcessExecutionUsage, SysError, SysResult, SyscallNumber};
 use mnu_abi::status::Error;
 
+/// Observe committed ELF bytes and revision together, without process lookup.
+/// This grants no signer trust and does not pin the observed execution.
+pub fn image_info(handle: Option<u32>) -> SysResult<super::ProcessImageInfo> {
+    let raw = match handle {
+        None => 0,
+        Some(0) => return Err(SysError::from_raw(Error::InvalidArgument.into_raw() as i64)),
+        Some(handle) => handle,
+    };
+    let mut info = super::ProcessImageInfo::default();
+    let status = super::call3(
+        SyscallNumber::ProcessImageRead,
+        u64::from(raw),
+        (&mut info as *mut super::ProcessImageInfo) as u64,
+        core::mem::size_of::<super::ProcessImageInfo>() as u64,
+    )?;
+    let valid_digest = match info.digest_kind {
+        mnu_abi::PROCESS_IMAGE_DIGEST_NONE => info.digest == [0; 32],
+        mnu_abi::PROCESS_IMAGE_DIGEST_SHA256 => true,
+        _ => false,
+    };
+    if status != mnu_abi::SUCCESS || info.process_id == 0 || info.reserved != 0 || !valid_digest {
+        return Err(SysError::from_raw(Error::BackingFailure.into_raw() as i64));
+    }
+    Ok(info)
+}
+
 /// No process lookup: only the caller or a retained WAIT Process Handle.
 pub fn memory_usage(handle: Option<u32>) -> SysResult<super::ProcessMemoryUsage> {
     let raw = match handle {
