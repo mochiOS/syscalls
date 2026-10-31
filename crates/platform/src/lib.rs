@@ -9,6 +9,7 @@ pub mod diagnostic;
 pub mod memory_object;
 mod handle_result;
 pub mod workspace;
+pub mod application;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
@@ -1675,6 +1676,7 @@ pub mod performance {
 }
 
 pub mod capability {
+    pub use mochios_capability_protocol::application_launch;
     mod prepared_image;
     pub use prepared_image::{PreparedExecutionImage, prepare_execution_image};
     use super::syscall::{self, SysResult};
