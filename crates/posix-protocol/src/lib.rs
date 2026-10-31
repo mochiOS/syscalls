@@ -30,6 +30,7 @@ pub mod file_time;
 pub mod pty_factory;
 pub mod fifo;
 pub mod read_scope;
+pub mod process_domain;
 
 /// Opaque LaunchContext key under which the POSIX control endpoint is passed.
 ///
@@ -423,7 +424,7 @@ pub const fn is_request_opcode(opcode: u16) -> bool {
             | OP_SIGNAL_THREAD_REGISTER..=OP_SIGNAL_THREAD_SEND
             | OP_WAITED_CHILD_CPU_USAGE..=OP_SIGNAL_THREAD_FAULT
             | OP_SIGNAL_DELIVERY_ORIGIN..=OP_SOCKET_RECORD_ENDPOINT
-            | OP_FORK_PREPARE..=read_scope::OP_SOURCE_INFO
+            | OP_FORK_PREPARE..=process_domain::OP_SPAWN
     )
 }
 pub const THREAD_WAIT_INTERRUPT_RIGHTS: u64 =

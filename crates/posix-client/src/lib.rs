@@ -9,6 +9,7 @@ pub mod system_identity;
 mod path_limits;
 mod volume_status;
 mod read_scope;
+mod process_domain;
 pub mod file_size_limit;
 pub mod file_admission;
 pub mod fifo;
@@ -2194,6 +2195,9 @@ impl<T: ObjectTransport> Client<T> {
                 | protocol::read_scope::OP_OPEN
                 | protocol::read_scope::OP_REGISTER_CHILD
                 | protocol::read_scope::OP_SOURCE_INFO
+                | protocol::process_domain::OP_CREATE
+                | protocol::process_domain::OP_CONTAINS
+                | protocol::process_domain::OP_SPAWN
         ) && header.flags != 0
         {
             return Err(ClientError::MismatchedResponse);
