@@ -11,6 +11,7 @@ mochi-user-platform = { path = "../platform", optional = true, default-features 
 mochi-user-syscall = { path = "../syscall", optional = true }
 mochios-posix-protocol = { path = "../posix-protocol" }
 mochios-filesystem-protocol = { path = "../filesystem-protocol" }
+getrandom02 = { package = "getrandom", version = "0.2", optional = true, features = ["custom"] }
 
 [features]
 default = ["endpoint", "fd-table"]
@@ -18,6 +19,7 @@ endpoint = ["dep:mochi-user-platform"]
 syscall-endpoint = ["dep:mochi-user-syscall"]
 fd-table = []
 launch-arguments = []
+getrandom02 = ["dep:getrandom02", "syscall-endpoint"]
 
 [lib]
 path = "src/lib.rs"

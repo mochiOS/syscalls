@@ -2,6 +2,9 @@ pub const GRND_NONBLOCK: u32 = 1 << 0;
 pub const GRND_RANDOM: u32 = 1 << 1;
 pub const GETRANDOM_FLAGS_ALL: u32 = GRND_NONBLOCK | GRND_RANDOM;
 
+#[cfg(feature = "getrandom02")]
+pub mod getrandom02;
+
 /// Validates POSIX/Linux-compatible getrandom flags before the request reaches
 /// the native mnu random source. mnu exposes no POSIX flag ABI.
 pub const fn flags_are_supported(flags: u32) -> bool {
