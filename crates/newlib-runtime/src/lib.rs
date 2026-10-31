@@ -5756,7 +5756,7 @@ pub extern "C" fn chmod(path: *const c_char, mode: u32) -> c_int {
 }
 
 fn chmod_posix_at(dirfd: c_int, path: *const c_char, mode: u32) -> Result<(), c_int> {
-    path_io::chmod(dirfd, path, mode)
+    path_io::chmod(dirfd, path, mode & 0o7777)
 }
 
 #[unsafe(no_mangle)]
@@ -5794,7 +5794,7 @@ pub extern "C" fn fchmod(fd: c_int, mode: u32) -> c_int {
                         handle: u32::try_from(entry.handle.lower_handle).map_err(|_| EBADF)?,
                         rights: entry.rights,
                     },
-                    mode,
+                    mode & 0o7777,
                 )
                 .map_err(map_posix_client_error)?;
             Ok(0)
