@@ -1677,6 +1677,7 @@ pub mod performance {
 
 pub mod capability {
     pub use mochios_capability_protocol::application_launch;
+    pub use mochios_capability_protocol::input_authority;
     mod prepared_image;
     pub use prepared_image::{PreparedExecutionImage, prepare_execution_image};
     use super::syscall::{self, SysResult};
