@@ -15,6 +15,7 @@ mod record_lock_memory;
 mod record_lock_blocking;
 use fd_creation::PendingFdReservation;
 mod file_handle_import;
+mod file_handle_export;
 mod callback_resources;
 mod file_mutation;
 mod file_metadata;
