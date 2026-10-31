@@ -79,6 +79,25 @@ pub fn command(
     Ok(receipt)
 }
 pub fn session(destination: u32, context: w::Context) -> syscall::SysResult<()> {
+    session_inner(destination, context, None)
+}
+/// Publish a desktop session with an explicitly delegated userspace domain.
+/// The compositor-facing publication continues using `session` without it.
+pub fn session_with_domain(
+    destination: u32,
+    context: w::Context,
+    domain: Option<ipc::IpcObjectHandle>,
+) -> syscall::SysResult<()> {
+    if context.active != domain.is_some() {
+        return Err(invalid());
+    }
+    session_inner(destination, context, domain)
+}
+fn session_inner(
+    destination: u32,
+    context: w::Context,
+    domain: Option<ipc::IpcObjectHandle>,
+) -> syscall::SysResult<()> {
     if destination == 0 {
         return Err(invalid());
     }
@@ -88,6 +107,17 @@ pub fn session(destination: u32, context: w::Context) -> syscall::SysResult<()> 
         handles: Default::default(),
         borrowed: 0,
     };
+    if let Some(domain) = domain {
+        if domain.handle == 0
+            || domain.reserved != 0
+            || domain.rights != handle::HANDLE_RIGHT_TRANSFER
+        {
+            return Err(invalid());
+        }
+        received.handles.count = 1;
+        received.handles.handles[0] = domain;
+        received.borrowed = domain.handle;
+    }
     let message =
         ipc::call_object_handles(destination, &request, &mut reply, &mut received.handles)?;
     if message >> 32 != u64::from(destination)
