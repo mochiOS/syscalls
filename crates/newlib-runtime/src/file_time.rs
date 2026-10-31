@@ -19,6 +19,33 @@ pub(super) fn at(
         0
     };
     let times = input::read(times)?;
+    update_at(dirfd, path, times, flags)
+}
+
+pub(super) fn timeval_at(
+    path: *const c_char,
+    times: *const Timeval,
+    nofollow: bool,
+) -> Result<(), c_int> {
+    let times = input::read_timeval(times)?;
+    update_at(
+        -2,
+        path,
+        times,
+        if nofollow {
+            posix_protocol::STAT_NOFOLLOW
+        } else {
+            0
+        },
+    )
+}
+
+fn update_at(
+    dirfd: c_int,
+    path: *const c_char,
+    times: posix_protocol::file_time::Update,
+    flags: u32,
+) -> Result<(), c_int> {
     path_io::at(dirfd, path, |base, path| {
         posix_client()
             .map_err(map_posix_client_error)?

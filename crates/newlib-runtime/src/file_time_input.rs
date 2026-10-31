@@ -33,3 +33,28 @@ pub(super) fn read(times: *const Timespec) -> Result<Update, c_int> {
         modification: field(modification)?,
     })
 }
+
+pub(super) fn read_timeval(times: *const Timeval) -> Result<Update, c_int> {
+    if times.is_null() {
+        return Ok(Update::now());
+    }
+    let mut bytes = [0; 2 * core::mem::size_of::<Timeval>()];
+    user_copy::read(times.cast(), &mut bytes)?;
+    fn field(bytes: &[u8]) -> Result<Change, c_int> {
+        let seconds = core::mem::offset_of!(Timeval, tv_sec);
+        let micros = core::mem::offset_of!(Timeval, tv_usec);
+        let microseconds = CLong::from_ne_bytes(bytes[micros..micros + 8].try_into().unwrap());
+        if !(0..1_000_000).contains(&microseconds) {
+            return Err(EINVAL);
+        }
+        Ok(Change::Set {
+            seconds: CLong::from_ne_bytes(bytes[seconds..seconds + 8].try_into().unwrap()),
+            nanoseconds: microseconds as u32 * 1000,
+        })
+    }
+    let (access, modification) = bytes.split_at(core::mem::size_of::<Timeval>());
+    Ok(Update {
+        access: field(access)?,
+        modification: field(modification)?,
+    })
+}

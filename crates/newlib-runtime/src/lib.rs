@@ -5902,6 +5902,16 @@ pub extern "C" fn futimens(fd: c_int, times: *const Timespec) -> c_int {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn utimes(path: *const c_char, times: *const Timeval) -> c_int {
+    result_with_errno(file_time::timeval_at(path, times, false).map(|_| 0), -1)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn lutimes(path: *const c_char, times: *const Timeval) -> c_int {
+    result_with_errno(file_time::timeval_at(path, times, true).map(|_| 0), -1)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn setpgid(pid: c_int, pgid: c_int) -> c_int {
     let result = posix_client()
         .map_err(map_posix_client_error)
