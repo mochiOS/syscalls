@@ -11,6 +11,7 @@ mod handle_result;
 pub mod workspace;
 pub mod application;
 pub mod execution_peer;
+pub mod presentation;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
@@ -1679,6 +1680,7 @@ pub mod performance {
 pub mod capability {
     pub use mochios_capability_protocol::application_launch;
     pub use mochios_capability_protocol::input_authority;
+    pub use mochios_capability_protocol::presentation;
     mod prepared_image;
     pub use prepared_image::{PreparedExecutionImage, prepare_execution_image};
     use super::syscall::{self, SysResult};

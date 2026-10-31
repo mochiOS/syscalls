@@ -2,6 +2,7 @@
 
 pub mod consent;
 pub mod input_authority;
+pub mod presentation;
 pub mod application_launch;
 
 #[cfg(feature = "alloc")]
