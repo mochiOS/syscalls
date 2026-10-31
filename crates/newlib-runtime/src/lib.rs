@@ -56,6 +56,7 @@ mod spawn_output;
 mod spawn_attributes;
 mod spawn_file_actions;
 mod spawn_resources;
+mod startup_stream;
 mod wait_output;
 mod wait_id;
 mod wait_usage;
@@ -3381,15 +3382,7 @@ impl CloneStartup {
             }
         }
         let handle = self.read.ok_or(EBADF)?;
-        let result = child_startup::receive(|packet| {
-            syscall_errno(syscall::raw_syscall3(
-                syscall::SyscallNumber::HandleRead,
-                u64::from(handle),
-                packet.as_mut_ptr() as u64,
-                packet.len() as u64,
-            ))
-            .and_then(|count| usize::try_from(count).map_err(|_| EIO))
-        });
+        let result = child_startup::receive(|packet| startup_stream::read(handle, packet));
         let _delivery = defer_native_delivery();
         if let Some(handle) = self.read.take() {
             close_object_handle(handle);
@@ -3436,24 +3429,7 @@ fn report_spawn_error(handle: u32, errno_value: c_int) -> ! {
 }
 
 fn read_spawn_status(handle: u32) -> Result<mochios_posix_client::spawn::ExecStatus, c_int> {
-    let mut packet = [0u8; mochios_posix_client::spawn::EXEC_ERROR_PACKET_LEN];
-    let mut length = 0usize;
-    loop {
-        let read = syscall_errno(syscall::raw_syscall3(
-            syscall::SyscallNumber::HandleRead,
-            u64::from(handle),
-            packet[length..].as_mut_ptr() as u64,
-            (packet.len() - length) as u64,
-        ))
-        .and_then(|read| usize::try_from(read).map_err(|_| EIO))?;
-        let end_of_stream = read == 0;
-        length += read;
-        match mochios_posix_client::spawn::decode_exec_status(&packet[..length], end_of_stream) {
-            Ok(Some(status)) => return Ok(status),
-            Ok(None) => {}
-            Err(_) => return Err(EIO),
-        }
-    }
+    startup_stream::exec_status(handle)
 }
 
 struct FailedChildBackend;
