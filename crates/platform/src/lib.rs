@@ -626,7 +626,7 @@ pub mod process {
 pub mod ipc {
     use super::syscall::{self, SysResult};
 
-    pub use mnu_abi::{IpcObjectHandle, IpcObjectHandles};
+    pub use mnu_abi::{IPC_DELIVERY_ENDPOINT_HANDLE, IpcObjectHandle, IpcObjectHandles};
 
     pub fn create() -> SysResult<u64> {
         syscall::call2(syscall::SyscallNumber::IpcCreate, 0, 0)
@@ -1165,6 +1165,13 @@ pub mod input {
     pub const RAW_KIND_MOUSE_PACKET: u8 = 2;
     pub const RAW_KIND_POINTER_ABSOLUTE: u8 = 3;
 
+    /// Private raw ingress, delegated by the system launcher only to input drivers.
+    pub const RAW_INPUT_HANDLE_KEY: u64 = 0x494e_5055_5452_4157;
+    pub const RAW_ENDPOINT_OPCODE: u32 = u32::from_le_bytes(*b"IRAW");
+    pub const RAW_ENDPOINT_REQUEST: [u8; 8] = [b'I', b'R', b'A', b'W', 1, 0, 0, 0];
+    /// Driver-originated synthetic input remains usable, but is not user presence.
+    pub const RAW_FLAG_SYNTHETIC: u8 = 1;
+
     pub const EVENT_KIND_KEY: u16 = 1;
     pub const EVENT_KIND_POINTER_MOVE: u16 = 2;
     pub const EVENT_KIND_POINTER_BUTTON: u16 = 3;
@@ -1173,6 +1180,7 @@ pub mod input {
 
     pub const FLAG_PRESS: u16 = 1 << 0;
     pub const FLAG_RELEASE: u16 = 1 << 1;
+    pub const FLAG_SYNTHETIC: u16 = 1 << 2;
 
     pub const MOD_SHIFT: u32 = 1 << 0;
     pub const MOD_CTRL: u32 = 1 << 1;
