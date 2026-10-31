@@ -3,6 +3,7 @@
 #![feature(c_variadic)]
 
 mod auxiliary;
+mod executable_name;
 mod wall_clock;
 mod system_identity;
 mod static_tls;
@@ -4306,6 +4307,7 @@ pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
     }
     dynamic_lifecycle::prepare()
         .unwrap_or_else(|error| startup_failure(b"newlib: lifecycle capture failed: ", error));
+    executable_name::initialize(stack.executable);
     dynamic_indirect::initialize()
         .unwrap_or_else(|error| startup_failure(b"newlib: indirect relocation failed: ", error));
     unsafe { __sinit(_impure_ptr) };
