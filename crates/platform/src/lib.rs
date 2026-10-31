@@ -10,6 +10,7 @@ pub mod memory_object;
 mod handle_result;
 pub mod workspace;
 pub mod application;
+pub mod execution_peer;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
