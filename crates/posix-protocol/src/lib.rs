@@ -79,6 +79,25 @@ pub struct InheritedFdMetadata {
     pub descriptor_flags: u8,
 }
 
+/// C ABI for exporting one independently owned native reference from a local
+/// descriptor. This is userspace interoperability data, not a kernel record.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExportedFdHandle {
+    pub handle: u32,
+    pub reserved: u32,
+    pub rights: u64,
+    pub metadata: u64,
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<ExportedFdHandle>() == 24);
+    assert!(core::mem::offset_of!(ExportedFdHandle, handle) == 0);
+    assert!(core::mem::offset_of!(ExportedFdHandle, reserved) == 4);
+    assert!(core::mem::offset_of!(ExportedFdHandle, rights) == 8);
+    assert!(core::mem::offset_of!(ExportedFdHandle, metadata) == 16);
+};
+
 pub const fn fd_handle_key(fd: i32) -> Option<u64> {
     if fd < 0 {
         return None;

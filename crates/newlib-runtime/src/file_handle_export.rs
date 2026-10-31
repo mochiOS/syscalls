@@ -2,22 +2,7 @@
 use super::*;
 use fd_creation::PendingHandles;
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ExportedFdHandle {
-    pub handle: u32,
-    pub reserved: u32,
-    pub rights: u64,
-    pub metadata: u64,
-}
-
-const _: () = {
-    assert!(core::mem::size_of::<ExportedFdHandle>() == 24);
-    assert!(core::mem::offset_of!(ExportedFdHandle, handle) == 0);
-    assert!(core::mem::offset_of!(ExportedFdHandle, reserved) == 4);
-    assert!(core::mem::offset_of!(ExportedFdHandle, rights) == 8);
-    assert!(core::mem::offset_of!(ExportedFdHandle, metadata) == 16);
-};
+pub use posix_protocol::ExportedFdHandle;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn mochi_fd_export(
