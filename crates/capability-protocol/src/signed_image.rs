@@ -1,9 +1,12 @@
-//! Integrity-checked replacement within the authenticated sender's domain.
+//! Integrity-checked standalone replacement with a separate execution identity.
 //! Exactly one READ | MAP RAM object accompanies the request through IPC.
 //! No caller-supplied digest, PID, FD, signer trust or requested grants appear.
-use super::{PROTOCOL_VERSION, ProtocolError, validate_executable_identity};
+use super::{ProtocolError, validate_executable_identity};
 
 pub const AUTHORIZE_OPCODE: u32 = 0x4341_5349;
+/// Version 2 replaces inherited authority with standalone declaration policy.
+/// Version 1's same-domain behavior is deliberately rejected.
+pub const VERSION: u32 = 2;
 pub const PREFIX_LEN: usize = 24;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -26,7 +29,7 @@ pub fn encode(request: &Request<'_>, output: &mut [u8]) -> Result<usize, Protoco
         return Err(ProtocolError::InvalidLength);
     }
     output[..4].copy_from_slice(&AUTHORIZE_OPCODE.to_le_bytes());
-    output[4..8].copy_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+    output[4..8].copy_from_slice(&VERSION.to_le_bytes());
     output[8..16].copy_from_slice(&request.source_length.to_le_bytes());
     output[16..20].copy_from_slice(&u32::from(request.public_key.is_some()).to_le_bytes());
     output[20..24].fill(0);
@@ -44,7 +47,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request<'_>, ProtocolError> {
     if u32::from_le_bytes(bytes[..4].try_into().unwrap()) != AUTHORIZE_OPCODE {
         return Err(ProtocolError::UnknownOpcode);
     }
-    if u32::from_le_bytes(bytes[4..8].try_into().unwrap()) != PROTOCOL_VERSION {
+    if u32::from_le_bytes(bytes[4..8].try_into().unwrap()) != VERSION {
         return Err(ProtocolError::UnsupportedVersion);
     }
     let source_length = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
