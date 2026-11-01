@@ -3,6 +3,10 @@ use anyhow::{Context, Result, bail};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 
+#[path = "manifest.rs"]
+mod manifest;
+pub use manifest::{MAX_MANIFEST_LEN, embed_manifest};
+
 const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
 const ELF64_HEADER_LEN: usize = 64;
 const ELF64_SECTION_HEADER_LEN: usize = 64;
@@ -77,6 +81,7 @@ pub struct VerifiedImage<'a> {
     bytes: &'a [u8],
     signature: VerifiedSignature,
     source_digest: [u8; 32],
+    manifest: Option<&'a str>,
 }
 
 impl<'a> VerifiedImage<'a> {
@@ -92,6 +97,12 @@ impl<'a> VerifiedImage<'a> {
     /// this measurement, rather than the normalized digest, for native exec.
     pub fn source_digest(&self) -> &[u8; 32] {
         &self.source_digest
+    }
+
+    /// Exact embedded declaration covered by this image's integrity check.
+    /// Its contents are untrusted policy requests, never identity or grants.
+    pub fn manifest(&self) -> Option<&'a str> {
+        self.manifest
     }
 }
 
@@ -232,9 +243,17 @@ pub fn verify_with_limits(
     limits: &VerificationLimits,
 ) -> Result<VerifiedSignature> {
     let elf = parse_elf_with_limits(bytes, limits)?;
+    manifest::locate(&elf)?;
+    verify_parsed(&elf, resolver)
+}
+
+fn verify_parsed(
+    elf: &Elf<'_>,
+    resolver: Option<&dyn PublicKeyResolver>,
+) -> Result<VerifiedSignature> {
     let record = locate_record_in(&elf)?.context("ELF is not signed")?;
     validate_record(&record)?;
-    let actual = normalized_digest(bytes, &record)?;
+    let actual = normalized_digest(elf.bytes, &record)?;
     if actual != record.digest {
         bail!("ELF digest mismatch");
     }
@@ -281,11 +300,14 @@ pub fn verify_image<'a>(
     resolver: Option<&dyn PublicKeyResolver>,
     limits: &VerificationLimits,
 ) -> Result<VerifiedImage<'a>> {
-    let signature = verify_with_limits(bytes, resolver, limits)?;
+    let elf = parse_elf_with_limits(bytes, limits)?;
+    let manifest = manifest::locate(&elf)?;
+    let signature = verify_parsed(&elf, resolver)?;
     Ok(VerifiedImage {
         bytes,
         signature,
         source_digest: Sha256::digest(bytes).into(),
+        manifest,
     })
 }
 
@@ -384,30 +406,7 @@ fn embed_empty_record(bytes: &[u8], kind: SignatureKind, key_id: [u8; 32]) -> Re
     ) {
         bail!("ELF already contains the reserved signature section");
     }
-    let new_count = elf
-        .sections
-        .len()
-        .checked_add(2)
-        .context("section count overflow")?;
-    let new_count_u16 = u16::try_from(new_count).context("ELF has too many sections")?;
-    let old_shstr = elf.shstr;
-    let mut shstr = Vec::new();
-    shstr
-        .try_reserve_exact(
-            old_shstr
-                .len()
-                .checked_add(SIGNATURE_SECTION.len() + 2)
-                .context("section string table size overflow")?,
-        )
-        .context("unable to allocate section string table")?;
-    shstr.extend_from_slice(old_shstr);
-    if shstr.last() != Some(&0) {
-        shstr.push(0);
-    }
-    let signature_name = u32::try_from(shstr.len()).context("section string table is too large")?;
-    shstr.extend_from_slice(SIGNATURE_SECTION);
-    shstr.push(0);
-
+    manifest::locate(&elf)?;
     let mut descriptor = [0u8; DESCRIPTOR_LEN];
     descriptor[..8].copy_from_slice(DESCRIPTOR_MAGIC);
     descriptor[8..10].copy_from_slice(&VERSION.to_le_bytes());
@@ -432,24 +431,60 @@ fn embed_empty_record(bytes: &[u8], kind: SignatureKind, key_id: [u8; 32]) -> Re
     note.extend_from_slice(&descriptor);
     note.resize(align4(note.len())?, 0);
 
+    let output = append_section(&elf, SIGNATURE_SECTION, SHT_NOTE, &note)?;
+    let reparsed = parse_elf(&output)?;
+    locate_record_in(&reparsed)?.context("generated ELF signature NOTE is not discoverable")?;
+    Ok(output)
+}
+
+/// Append non-loadable metadata without changing any program mapping or input
+/// section. Both encoders use the same section/string-table construction.
+fn append_section(elf: &Elf<'_>, name: &[u8], kind: u32, data: &[u8]) -> Result<Vec<u8>> {
+    let bytes = elf.bytes;
+    let new_count = elf
+        .sections
+        .len()
+        .checked_add(2)
+        .context("section count overflow")?;
+    let new_count_u16 = u16::try_from(new_count).context("ELF has too many sections")?;
+    let mut shstr = Vec::new();
+    shstr
+        .try_reserve_exact(
+            elf.shstr
+                .len()
+                .checked_add(name.len() + 2)
+                .context("section string table size overflow")?,
+        )
+        .context("unable to allocate section string table")?;
+    shstr.extend_from_slice(elf.shstr);
+    if shstr.last() != Some(&0) {
+        shstr.push(0);
+    }
+    let section_name = u32::try_from(shstr.len()).context("section string table is too large")?;
+    shstr.extend_from_slice(name);
+    shstr.push(0);
+
     let section_headers_size = new_count
         .checked_mul(ELF64_SECTION_HEADER_LEN)
         .context("section header table size overflow")?;
     let output_capacity = bytes
         .len()
-        .checked_add(note.len())
+        .checked_add(data.len())
         .and_then(|size| size.checked_add(shstr.len()))
         .and_then(|size| size.checked_add(section_headers_size))
         .and_then(|size| size.checked_add(16))
         .context("signed ELF size overflow")?;
+    if output_capacity > MAX_ELF_LEN {
+        bail!("appended ELF exceeds the v1 size limit");
+    }
     let mut output = Vec::new();
     output
         .try_reserve_exact(output_capacity)
         .context("unable to allocate signed ELF")?;
     output.extend_from_slice(bytes);
     pad_to(&mut output, 4)?;
-    let note_offset = output.len();
-    output.extend_from_slice(&note);
+    let data_offset = output.len();
+    output.extend_from_slice(data);
     let shstr_offset = output.len();
     output.extend_from_slice(&shstr);
     pad_to(&mut output, 8)?;
@@ -459,13 +494,13 @@ fn embed_empty_record(bytes: &[u8], kind: SignatureKind, key_id: [u8; 32]) -> Re
             &bytes[section.raw_offset..section.raw_offset + ELF64_SECTION_HEADER_LEN],
         );
     }
-    let mut note_header = [0u8; ELF64_SECTION_HEADER_LEN];
-    put_u32(&mut note_header, 0, signature_name);
-    put_u32(&mut note_header, 4, SHT_NOTE);
-    put_u64(&mut note_header, 24, note_offset as u64);
-    put_u64(&mut note_header, 32, note.len() as u64);
-    put_u64(&mut note_header, 48, 4);
-    output.extend_from_slice(&note_header);
+    let mut header = [0u8; ELF64_SECTION_HEADER_LEN];
+    put_u32(&mut header, 0, section_name);
+    put_u32(&mut header, 4, kind);
+    put_u64(&mut header, 24, data_offset as u64);
+    put_u64(&mut header, 32, data.len() as u64);
+    put_u64(&mut header, 48, 4);
+    output.extend_from_slice(&header);
     let old_shstr_section = elf.sections[elf.shstr_index];
     let mut shstr_header = [0u8; ELF64_SECTION_HEADER_LEN];
     put_u32(&mut shstr_header, 0, old_shstr_section.name);
@@ -480,9 +515,6 @@ fn embed_empty_record(bytes: &[u8], kind: SignatureKind, key_id: [u8; 32]) -> Re
         .checked_sub(1)
         .context("section string table index underflow")?;
     put_u16(&mut output, 62, new_shstr_index);
-    // Reparse the completed ELF before any hash or signature is produced.
-    let reparsed = parse_elf(&output)?;
-    locate_record_in(&reparsed)?.context("generated ELF signature NOTE is not discoverable")?;
     Ok(output)
 }
 
