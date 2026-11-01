@@ -44,7 +44,11 @@ fn strings(table: &Table, key: &str, limit: usize) -> Option<Vec<String>> {
 }
 
 fn requirements(table: &Table) -> Option<Vec<String>> {
-    let requires = strings(table, "requires", MAX_REQUIREMENTS)?;
+    capability_list(table, "requires")
+}
+
+fn capability_list(table: &Table, key: &str) -> Option<Vec<String>> {
+    let requires = strings(table, key, MAX_REQUIREMENTS)?;
     for (index, requirement) in requires.iter().enumerate() {
         if requirement.is_empty()
             || requirement.len() > 128
@@ -114,6 +118,10 @@ pub(super) fn manifest(root: &Table) -> Option<(PackageManifest, Option<String>,
         package_kind: optional_string(package, "kind")?,
         package_architecture: optional_string(package, "architecture")?,
         package_abi: optional_string(package, "abi")?,
+        interactive_capabilities: match root.get("prompt") {
+            None => Vec::new(),
+            Some(value) => capability_list(value.as_table()?, "interactive_capabilities")?,
+        },
         ..PackageManifest::default()
     };
     for table in tables(root, "binary", MAX_ENTRIES)? {

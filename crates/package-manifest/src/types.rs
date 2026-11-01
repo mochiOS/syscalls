@@ -88,6 +88,9 @@ pub struct PackageManifest {
     pub binaries: Vec<PackageBinary>,
     pub application: Option<ApplicationMetadata>,
     pub linux: Option<LinuxApplication>,
+    /// Declared prompt configuration; authenticity and capability class are
+    /// enforced by its consumer, never by parsing alone.
+    pub interactive_capabilities: Vec<String>,
 }
 
 impl PackageManifest {
