@@ -1678,6 +1678,7 @@ pub mod performance {
 }
 
 pub mod capability {
+    pub use mochios_capability_protocol::signed_image;
     pub use mochios_capability_protocol::application_launch;
     pub use mochios_capability_protocol::input_authority;
     pub use mochios_capability_protocol::presentation;

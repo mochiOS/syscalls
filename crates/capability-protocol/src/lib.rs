@@ -4,6 +4,7 @@ pub mod consent;
 pub mod input_authority;
 pub mod presentation;
 pub mod application_launch;
+pub mod signed_image;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
