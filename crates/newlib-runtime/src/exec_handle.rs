@@ -179,30 +179,38 @@ fn replace_image(
     )
 }
 
-fn digest(image: u32) -> Result<[u8; 32], c_int> {
-    let mut hash = Sha256::new();
-    let mut bytes = [0; mnu_abi::provider::MAX_DATA_LEN];
-    let mut offset = 0u64;
-    loop {
-        let count = syscall_errno(syscall::raw_syscall4(
-            syscall::SyscallNumber::HandleReadAt,
-            u64::from(image),
-            bytes.as_mut_ptr() as u64,
-            bytes.len() as u64,
-            offset,
-        ))?;
-        if count > bytes.len() as u64 {
-            return Err(EIO);
-        }
-        if count == 0 {
-            return Ok(hash.finalize().into());
-        }
-        offset = offset
-            .checked_add(count)
-            .filter(|offset| *offset <= mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES as u64)
-            .ok_or(EFBIG)?;
-        hash.update(&bytes[..count as usize]);
-    }
+fn digest(image: u32) -> Result<[u8; 32], c_int>{
+    // This storage belongs to the registered callback scope. A signal handler
+    // may abandon exec without unwinding this Rust frame; no frame-owned heap
+    // allocation or large entry-stack scratch may survive that boundary.
+    io_resources::with(
+        || VectorBuffer::new(mnu_abi::provider::MAX_SHARED_READ_LEN),
+        |buffer| {
+            let mut hash = Sha256::new();
+            let bytes = buffer.bytes();
+            let mut offset = 0u64;
+            loop {
+                let count = syscall_errno(syscall::raw_syscall4(
+                    syscall::SyscallNumber::HandleReadAt,
+                    u64::from(image),
+                    bytes.as_mut_ptr() as u64,
+                    bytes.len() as u64,
+                    offset,
+                ))?;
+                if count > bytes.len() as u64 {
+                    return Err(EIO);
+                }
+                if count == 0 {
+                    return Ok(hash.finalize().into());
+                }
+                offset = offset
+                    .checked_add(count)
+                    .filter(|offset| *offset <= mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES as u64)
+                    .ok_or(EFBIG)?;
+                hash.update(&bytes[..count as usize]);
+            }
+        },
+    )
 }
 
 fn authorize(image: u32, identity: &str, digest: &[u8; 32]) -> Result<(), c_int> {
