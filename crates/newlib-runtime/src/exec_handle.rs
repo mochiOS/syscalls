@@ -154,61 +154,30 @@ fn replace_image(
         image,
         inputs,
         credentials,
-        |image, auxiliary, lifecycle, tls, indirect| {
+        |prepared| {
             with_startup(
                 inputs,
                 execfn,
                 fds,
                 mochios_posix_client::process_image::Process {
-                    image: auxiliary,
+                    image: prepared.executable,
                     identity: credentials,
-                    lifecycle,
-                    tls,
-                    indirect,
+                    lifecycle: prepared.lifecycle,
+                    tls: prepared.tls,
+                    indirect: prepared.indirect,
                 },
                 |startup| {
-                    let digest = digest(image)?;
-                    authorize(image, identity, &digest)?;
-                    match syscall::image::replace_bounded(image, identity, startup, ceiling) {
+                    // Measure the exact retained output, rather than reading
+                    // either the mutable original or a newly prepared object
+                    // again across callback-capable I/O.
+                    let digest: [u8; 32] = Sha256::digest(prepared.bytes).into();
+                    authorize(prepared.image, identity, &digest)?;
+                    match syscall::image::replace_bounded(prepared.image, identity, startup, ceiling) {
                         Ok(never) => match never {},
                         Err(error) => Err(mochios_posix_client::image_error::errno(error.raw())),
                     }
                 },
             )
-        },
-    )
-}
-
-fn digest(image: u32) -> Result<[u8; 32], c_int>{
-    // This storage belongs to the registered callback scope. A signal handler
-    // may abandon exec without unwinding this Rust frame; no frame-owned heap
-    // allocation or large entry-stack scratch may survive that boundary.
-    io_resources::with(
-        || VectorBuffer::new(mnu_abi::provider::MAX_SHARED_READ_LEN),
-        |buffer| {
-            let mut hash = Sha256::new();
-            let bytes = buffer.bytes();
-            let mut offset = 0u64;
-            loop {
-                let count = syscall_errno(syscall::raw_syscall4(
-                    syscall::SyscallNumber::HandleReadAt,
-                    u64::from(image),
-                    bytes.as_mut_ptr() as u64,
-                    bytes.len() as u64,
-                    offset,
-                ))?;
-                if count > bytes.len() as u64 {
-                    return Err(EIO);
-                }
-                if count == 0 {
-                    return Ok(hash.finalize().into());
-                }
-                offset = offset
-                    .checked_add(count)
-                    .filter(|offset| *offset <= mnu_abi::exec::MAX_CAPTURED_IMAGE_BYTES as u64)
-                    .ok_or(EFBIG)?;
-                hash.update(&bytes[..count as usize]);
-            }
         },
     )
 }

@@ -118,18 +118,9 @@ pub(super) fn with_image(
     image: u32,
     inputs: &exec_inputs::Inputs,
     identity: mochios_posix_client::process_image::Identity,
-    operation: impl FnOnce(
-        u32,
-        Option<mochios_posix_client::process_image::Executable>,
-        &[u8],
-        &[u8],
-        &[u8],
-    ) -> Result<(), c_int>,
+    operation: impl FnOnce(shared::Prepared<'_>) -> Result<(), c_int>,
 ) -> Result<(), c_int> {
     let backend = Runtime;
-    if !shared::needs_preparation(&backend, image)? {
-        return operation(image, None, &[], &[], &[]);
-    }
     io_resources::with(
         || Ok(Preparation::<Runtime>::default()),
         |preparation| {
@@ -143,13 +134,7 @@ pub(super) fn with_image(
                 },
                 identity,
             )?;
-            operation(
-                prepared.image,
-                prepared.executable,
-                prepared.lifecycle,
-                prepared.tls,
-                prepared.indirect,
-            )
+            operation(prepared)
         },
     )
 }

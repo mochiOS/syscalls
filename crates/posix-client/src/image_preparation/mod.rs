@@ -23,6 +23,8 @@ pub struct Environment<'a> {
 /// the caller; this module never grants execution rights or changes a process.
 pub struct Prepared<'a> {
     pub image: u32,
+    /// Exact original root snapshot, retained even when output is transformed.
+    pub source: &'a [u8],
     /// Exact output bytes retained by the owner, for execution authorization.
     pub bytes: &'a [u8],
     pub executable: Option<crate::process_image::Executable>,
@@ -201,6 +203,7 @@ pub struct Preparation<B: Backend> {
     lifecycle: Buffer<B>,
     tls: Buffer<B>,
     indirect: Buffer<B>,
+    original: bool,
     started: bool,
 }
 impl<B: Backend> Default for Preparation<B> {
@@ -215,6 +218,7 @@ impl<B: Backend> Default for Preparation<B> {
             lifecycle: Buffer::default(),
             tls: Buffer::default(),
             indirect: Buffer::default(),
+            original: false,
             started: false,
         }
     }
@@ -315,7 +319,15 @@ impl<B: Backend> Preparation<B> {
     ) -> Result<(), c_int> {
         self.source.capture(backend, image, MAX_IMAGE)?;
         backend.validate_captured(Source::Root, self.source.bytes())?;
-        let length = if crate::elf_launch::interpreter(self.source.bytes())
+        // Classify only the captured bytes. A preliminary read of the mutable
+        // source must not select a different loading or verification path.
+        self.original = !needs_preparation_bytes(self.source.bytes())?;
+        let length = if self.original {
+            if self.source.length == 0 {
+                return Err(ENOEXEC);
+            }
+            self.source.length
+        } else if crate::elf_launch::interpreter(self.source.bytes())
             .map_err(|_| ENOEXEC)?
             .is_some()
         {
@@ -391,8 +403,10 @@ impl<B: Backend> Preparation<B> {
         })?;
         let mut offset = 0;
         while offset < length {
-            let bytes = &self.output.bytes()
-                [offset..length.min(offset + mnu_abi::provider::MAX_DATA_LEN)];
+            // This is our private image object, not an arbitrary source
+            // Provider. The backend may still return a shorter write.
+            let bytes = &self.image_bytes()
+                [offset..length.min(offset + mnu_abi::provider::MAX_SHARED_READ_LEN)];
             let n = backend.write_at(self.handle, bytes, offset)?;
             if n == 0 || n > bytes.len() {
                 return Err(EIO);
@@ -411,6 +425,14 @@ impl<B: Backend> Preparation<B> {
         })
     }
 
+    fn image_bytes(&self) -> &[u8] {
+        if self.original {
+            self.source.bytes()
+        } else {
+            self.output.bytes()
+        }
+    }
+
     pub fn prepare(
         &mut self,
         backend: &B,
@@ -425,7 +447,8 @@ impl<B: Backend> Preparation<B> {
         self.build(backend, image, environment, identity)?;
         Ok(Prepared {
             image: self.handle,
-            bytes: self.output.bytes(),
+            source: self.source.bytes(),
+            bytes: self.image_bytes(),
             executable: self.executable,
             lifecycle: self.lifecycle.bytes(),
             tls: self.tls.bytes(),
