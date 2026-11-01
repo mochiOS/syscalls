@@ -1258,6 +1258,32 @@ pub mod input {
     pub const KEY_DOWN: u16 = 85;
     pub const KEY_PAGE_UP: u16 = 86;
     pub const KEY_PAGE_DOWN: u16 = 87;
+    /// F1 キーの入力識別子。
+    pub const KEY_F1: u16 = 88;
+    /// F2 キーの入力識別子。
+    pub const KEY_F2: u16 = 89;
+    /// F3 キーの入力識別子。
+    pub const KEY_F3: u16 = 90;
+    /// F4 キーの入力識別子。
+    pub const KEY_F4: u16 = 91;
+    /// F5 キーの入力識別子。
+    pub const KEY_F5: u16 = 92;
+    /// F6 キーの入力識別子。
+    pub const KEY_F6: u16 = 93;
+    /// F7 キーの入力識別子。
+    pub const KEY_F7: u16 = 94;
+    /// F8 キーの入力識別子。
+    pub const KEY_F8: u16 = 95;
+    /// F9 キーの入力識別子。
+    pub const KEY_F9: u16 = 96;
+    /// F10 キーの入力識別子。
+    pub const KEY_F10: u16 = 97;
+    /// F11 キーの入力識別子。
+    pub const KEY_F11: u16 = 98;
+    /// F12 キーの入力識別子。
+    pub const KEY_F12: u16 = 99;
+    /// Insert キーの入力識別子。
+    pub const KEY_INSERT: u16 = 100;
 
     pub const POINTER_BUTTON_LEFT: u16 = 1;
     pub const POINTER_BUTTON_RIGHT: u16 = 2;
