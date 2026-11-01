@@ -1,0 +1,9 @@
+[package]
+name = "mochios-elf-signature"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { version = "1", default-features = false }
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.10", default-features = false }
