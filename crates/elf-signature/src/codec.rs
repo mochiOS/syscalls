@@ -31,6 +31,29 @@ const SIGNATURE_OFFSET: usize = 82;
 const SIGNING_CONTEXT: &[u8] = b"mochios-elf-signature-v1\0";
 pub const MAX_ELF_LEN: usize = 1024 * 1024 * 1024;
 
+/// Consumer resource limits, independent of the v1 on-disk format. Scan budgets
+/// count repeated references too, so overlapping tables cannot multiply work.
+#[derive(Clone, Copy, Debug)]
+pub struct VerificationLimits {
+    pub max_image_bytes: usize,
+    pub max_section_headers: usize,
+    pub max_program_headers: usize,
+    pub max_note_scan_bytes: usize,
+    pub max_name_scan_bytes: usize,
+}
+
+impl Default for VerificationLimits {
+    fn default() -> Self {
+        Self {
+            max_image_bytes: MAX_ELF_LEN,
+            max_section_headers: u16::MAX as usize,
+            max_program_headers: u16::MAX as usize,
+            max_note_scan_bytes: MAX_ELF_LEN * 2,
+            max_name_scan_bytes: MAX_ELF_LEN,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignatureKind {
     AdHoc,
@@ -47,14 +70,60 @@ pub struct VerifiedSignature {
     pub digest: [u8; 32],
 }
 
+/// Integrity evidence for exactly these captured bytes. Neither the signature
+/// nor this full-file measurement grants signer trust or execution authority.
+#[derive(Debug)]
+pub struct VerifiedImage<'a> {
+    bytes: &'a [u8],
+    signature: VerifiedSignature,
+    source_digest: [u8; 32],
+}
+
+impl<'a> VerifiedImage<'a> {
+    pub fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    pub fn signature(&self) -> &VerifiedSignature {
+        &self.signature
+    }
+
+    /// SHA-256 of the full original file, including the signature fields. Use
+    /// this measurement, rather than the normalized digest, for native exec.
+    pub fn source_digest(&self) -> &[u8; 32] {
+        &self.source_digest
+    }
+}
+
 /// Resolve verification keys. Certificate trust and revocation are caller policy.
 pub trait PublicKeyResolver {
     fn resolve(&self, key_id: &[u8; 32]) -> Result<Option<VerifyingKey>>;
 }
 
+/// A caller-supplied verification key. Matching a signature proves integrity
+/// under this key only; it does not establish a trusted developer identity.
+pub struct SuppliedPublicKey(VerifyingKey);
+
+impl SuppliedPublicKey {
+    pub fn new(bytes: &[u8; 32]) -> Result<Self> {
+        VerifyingKey::from_bytes(bytes)
+            .map(Self)
+            .map_err(anyhow::Error::msg)
+            .context("invalid supplied ELF public key")
+    }
+}
+
+impl PublicKeyResolver for SuppliedPublicKey {
+    fn resolve(&self, key_id: &[u8; 32]) -> Result<Option<VerifyingKey>> {
+        let own: [u8; 32] = Sha256::digest(self.0.to_bytes()).into();
+        Ok((own == *key_id).then_some(self.0))
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Section {
     name: u32,
+    name_len: usize,
     section_type: u32,
     offset: usize,
     size: usize,
@@ -72,6 +141,7 @@ struct Elf<'a> {
     load_segments: Vec<(usize, usize)>,
     program_header_table: Option<(usize, usize)>,
     section_header_table: Option<(usize, usize)>,
+    note_scan_limit: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,9 +219,20 @@ pub fn sign_ed25519(unsigned: &[u8], key: &SigningKey) -> Result<Vec<u8>> {
 }
 
 /// Verify captured bytes with the supplied key resolver. The result reports
-/// integrity; execution policy and work/allocation budgets belong to callers.
+/// integrity; execution policy belongs to callers. Uses the default limits.
 pub fn verify(bytes: &[u8], resolver: Option<&dyn PublicKeyResolver>) -> Result<VerifiedSignature> {
-    let record = decode_record(bytes)?;
+    verify_with_limits(bytes, resolver, &VerificationLimits::default())
+}
+
+/// Verify with explicit allocation and scan bounds before processing untrusted
+/// headers, names or NOTE areas. A limit failure is never an unsigned fallback.
+pub fn verify_with_limits(
+    bytes: &[u8],
+    resolver: Option<&dyn PublicKeyResolver>,
+    limits: &VerificationLimits,
+) -> Result<VerifiedSignature> {
+    let elf = parse_elf_with_limits(bytes, limits)?;
+    let record = locate_record_in(&elf)?.context("ELF is not signed")?;
     validate_record(&record)?;
     let actual = normalized_digest(bytes, &record)?;
     if actual != record.digest {
@@ -191,6 +272,21 @@ pub fn verify(bytes: &[u8], resolver: Option<&dyn PublicKeyResolver>) -> Result<
             })
         }
     }
+}
+
+/// Verify and measure one caller-owned snapshot. The returned evidence borrows
+/// it so safe code cannot mutate or substitute the verified bytes.
+pub fn verify_image<'a>(
+    bytes: &'a [u8],
+    resolver: Option<&dyn PublicKeyResolver>,
+    limits: &VerificationLimits,
+) -> Result<VerifiedImage<'a>> {
+    let signature = verify_with_limits(bytes, resolver, limits)?;
+    Ok(VerifiedImage {
+        bytes,
+        signature,
+        source_digest: Sha256::digest(bytes).into(),
+    })
 }
 
 /// Parse record metadata. Integrity is established only by `verify`.
@@ -242,17 +338,15 @@ fn signing_message(
     flags: u32,
     key_id: &[u8; 32],
     digest: &[u8; 32],
-) -> Vec<u8> {
+) -> [u8; 96] {
     // Exact v1 message: context bytes including NUL, u8 kind, two u8 algorithm
     // identifiers (digest then signature), u32 little-endian flags, key_id, digest.
-    let mut message = Vec::with_capacity(SIGNING_CONTEXT.len() + 71);
-    message.extend_from_slice(SIGNING_CONTEXT);
-    message.push(kind);
-    message.push(digest_algorithm);
-    message.push(signature_algorithm);
-    message.extend_from_slice(&flags.to_le_bytes());
-    message.extend_from_slice(key_id);
-    message.extend_from_slice(digest);
+    let mut message = [0u8; 96];
+    message[..25].copy_from_slice(SIGNING_CONTEXT);
+    message[25..28].copy_from_slice(&[kind, digest_algorithm, signature_algorithm]);
+    message[28..32].copy_from_slice(&flags.to_le_bytes());
+    message[32..64].copy_from_slice(key_id);
+    message[64..].copy_from_slice(digest);
     message
 }
 
@@ -398,34 +492,42 @@ fn locate_record(bytes: &[u8]) -> Result<Option<Record>> {
 }
 
 fn locate_record_in(elf: &Elf<'_>) -> Result<Option<Record>> {
-    let mut note_areas = Vec::new();
-    let mut signature_sections = Vec::new();
+    let mut signature_section_index = None;
     for (index, section) in elf.sections.iter().enumerate() {
         if section_name(elf, *section)? == SIGNATURE_SECTION {
             if section.section_type != SHT_NOTE {
                 bail!("reserved ELF signature section is not SHT_NOTE");
             }
-            signature_sections.push(index);
+            if signature_section_index.replace(index).is_some() {
+                bail!("ELF contains duplicate reserved signature sections");
+            }
         }
-        if section.section_type == SHT_NOTE {
-            note_areas.push(NoteArea {
+    }
+    let note_areas = elf
+        .sections
+        .iter()
+        .enumerate()
+        .filter_map(|(index, section)| {
+            (section.section_type == SHT_NOTE).then_some(NoteArea {
                 offset: section.offset,
                 size: section.size,
                 origin: NoteOrigin::Section(index),
-            });
-        }
-    }
-    if signature_sections.len() > 1 {
-        bail!("ELF contains duplicate reserved signature sections");
-    }
-    note_areas.extend_from_slice(&elf.program_notes);
-
+            })
+        })
+        .chain(elf.program_notes.iter().copied());
     let mut occurrences = Vec::new();
+    occurrences
+        .try_reserve_exact(2)
+        .context("unable to allocate NOTE references")?;
+    let mut remaining = elf.note_scan_limit;
     for area in note_areas {
+        remaining = remaining
+            .checked_sub(area.size)
+            .context("NOTE scan limit exceeded")?;
         parse_note_area(elf.bytes, area, &mut occurrences)?;
     }
     let occurrence = match occurrences.as_slice() {
-        [] if signature_sections.is_empty() => return Ok(None),
+        [] if signature_section_index.is_none() => return Ok(None),
         [] => bail!("reserved ELF signature section does not contain a signature NOTE"),
         [only] => *only,
         [first, second]
@@ -442,7 +544,7 @@ fn locate_record_in(elf: &Elf<'_>) -> Result<Option<Record>> {
         }
         _ => bail!("ELF contains duplicate or ambiguously referenced mochiOS signature NOTEs"),
     };
-    let Some(signature_section_index) = signature_sections.into_iter().next() else {
+    let Some(signature_section_index) = signature_section_index else {
         bail!("mochiOS signature NOTE is outside the reserved signature section");
     };
     let signature_section = elf.sections[signature_section_index];
@@ -487,6 +589,9 @@ fn parse_note_area(bytes: &[u8], area: NoteArea, found: &mut Vec<NoteOccurrence>
                 || bytes[descriptor_end..next].iter().any(|byte| *byte != 0)
             {
                 bail!("non-zero mochiOS signature NOTE padding");
+            }
+            if found.len() == 2 {
+                bail!("ELF contains duplicate or ambiguously referenced mochiOS signature NOTEs");
             }
             found.push(NoteOccurrence {
                 descriptor_offset,
@@ -590,8 +695,15 @@ fn parse_record(bytes: &[u8], offset: usize) -> Result<Record> {
 }
 
 fn parse_elf(bytes: &[u8]) -> Result<Elf<'_>> {
+    parse_elf_with_limits(bytes, &VerificationLimits::default())
+}
+
+fn parse_elf_with_limits<'a>(bytes: &'a [u8], limits: &VerificationLimits) -> Result<Elf<'a>> {
     if bytes.len() > MAX_ELF_LEN {
         bail!("ELF exceeds the v1 size limit");
+    }
+    if bytes.len() > limits.max_image_bytes {
+        bail!("ELF image byte limit exceeded");
     }
     if bytes.len() < ELF64_HEADER_LEN || &bytes[..4] != ELF_MAGIC {
         bail!("invalid ELF header");
@@ -611,6 +723,9 @@ fn parse_elf(bytes: &[u8]) -> Result<Elf<'_>> {
     let phoff = usize_from_u64(read_u64(bytes, 32)?, "program header offset")?;
     let phentsize = read_u16(bytes, 54)? as usize;
     let phnum = read_u16(bytes, 56)? as usize;
+    if phnum > limits.max_program_headers {
+        bail!("ELF program header limit exceeded");
+    }
     let mut program_notes = Vec::new();
     let mut load_segments = Vec::new();
     let program_header_table;
@@ -625,6 +740,12 @@ fn parse_elf(bytes: &[u8]) -> Result<Elf<'_>> {
             bail!("invalid ELF64 program header size");
         }
         let end = checked_table(phoff, phentsize, phnum, bytes.len(), "program header table")?;
+        program_notes
+            .try_reserve_exact(phnum)
+            .context("unable to allocate program NOTE headers")?;
+        load_segments
+            .try_reserve_exact(phnum)
+            .context("unable to allocate load segment headers")?;
         program_header_table = Some((phoff, end));
         for index in 0..phnum {
             let raw = phoff + index * phentsize;
@@ -666,6 +787,9 @@ fn parse_elf(bytes: &[u8]) -> Result<Elf<'_>> {
     let shoff = usize_from_u64(read_u64(bytes, 40)?, "section header offset")?;
     let shentsize = read_u16(bytes, 58)? as usize;
     let shnum = read_u16(bytes, 60)? as usize;
+    if shnum > limits.max_section_headers {
+        bail!("ELF section header limit exceeded");
+    }
     let shstr_index = read_u16(bytes, 62)? as usize;
     if shnum == 0 {
         bail!(
@@ -683,7 +807,10 @@ fn parse_elf(bytes: &[u8]) -> Result<Elf<'_>> {
     if shstr_index == 0xffff || shstr_index >= shnum {
         bail!("invalid or extended section string table index");
     }
-    let mut sections = Vec::with_capacity(shnum);
+    let mut sections = Vec::new();
+    sections
+        .try_reserve_exact(shnum)
+        .context("unable to allocate section headers")?;
     for index in 0..shnum {
         let raw = shoff + index * shentsize;
         let offset = usize_from_u64(read_u64(bytes, raw + 24)?, "section offset")?;
@@ -694,6 +821,7 @@ fn parse_elf(bytes: &[u8]) -> Result<Elf<'_>> {
         } // SHT_NOBITS has no file bytes.
         sections.push(Section {
             name: read_u32(bytes, raw)?,
+            name_len: 0,
             section_type,
             offset,
             size,
@@ -718,6 +846,20 @@ fn parse_elf(bytes: &[u8]) -> Result<Elf<'_>> {
     if shstr.first() != Some(&0) {
         bail!("invalid section name string table");
     }
+    let mut remaining_names = limits.max_name_scan_bytes;
+    for section in &mut sections {
+        let tail = shstr
+            .get(section.name as usize..)
+            .context("section name is outside string table")?;
+        // Bound the slice before looking for NUL, including when a name is
+        // maliciously unterminated or repeated by many section headers.
+        let scan = &tail[..tail.len().min(remaining_names)];
+        section.name_len = scan
+            .iter()
+            .position(|byte| *byte == 0)
+            .context("unterminated section name or name scan limit exceeded")?;
+        remaining_names -= section.name_len + 1;
+    }
     let elf = Elf {
         bytes,
         sections,
@@ -727,9 +869,9 @@ fn parse_elf(bytes: &[u8]) -> Result<Elf<'_>> {
         load_segments,
         program_header_table,
         section_header_table: Some((shoff, section_table_end)),
+        note_scan_limit: limits.max_note_scan_bytes,
     };
     for section in &elf.sections {
-        let _ = section_name(&elf, *section)?;
         if section.align != 0 && !section.align.is_power_of_two() {
             bail!("invalid section alignment");
         }
@@ -749,15 +891,12 @@ fn parse_elf(bytes: &[u8]) -> Result<Elf<'_>> {
 
 fn section_name<'a>(elf: &'a Elf<'_>, section: Section) -> Result<&'a [u8]> {
     let start = section.name as usize;
-    if start >= elf.shstr.len() {
-        bail!("section name is outside string table");
-    }
-    let tail = &elf.shstr[start..];
-    let end = tail
-        .iter()
-        .position(|byte| *byte == 0)
-        .context("unterminated section name")?;
-    Ok(&tail[..end])
+    let end = start
+        .checked_add(section.name_len)
+        .context("section name range overflow")?;
+    elf.shstr
+        .get(start..end)
+        .context("section name is outside string table")
 }
 
 fn checked_table(
