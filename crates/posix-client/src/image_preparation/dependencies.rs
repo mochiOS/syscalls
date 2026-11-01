@@ -316,28 +316,10 @@ impl<B: Backend> Dependencies<B> {
         Err(if denied { EACCES } else { ENOENT })
     }
     fn capture(&mut self, backend: &B, index: usize, total: &mut usize) -> Result<(), c_int> {
-        let mut chunk = [0; mnu_abi::provider::MAX_DATA_LEN];
-        loop {
-            let node = self.node_mut(index);
-            let n = read_at(backend, node.handle, &mut chunk, node.source.length)?;
-            if n == 0 {
-                break;
-            }
-            *total = total
-                .checked_add(n)
-                .filter(|total| *total <= MAX_IMAGE)
-                .ok_or(EFBIG)?;
-            let length = node.source.length.checked_add(n).ok_or(EFBIG)?;
-            node.source.reserve(length)?;
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    chunk.as_ptr(),
-                    node.source.pointer.add(node.source.length),
-                    n,
-                )
-            };
-            node.source.length = length;
-        }
+        let limit = MAX_IMAGE.checked_sub(*total).ok_or(EFBIG)?;
+        let node = self.node_mut(index);
+        node.source.capture(backend, node.handle, limit)?;
+        *total = total.checked_add(node.source.length).ok_or(EFBIG)?;
         let node = self.node(index);
         backend.validate_captured(
             Source::Dependency {

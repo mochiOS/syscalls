@@ -41,29 +41,11 @@ impl<B: Backend> Interpreter<B> {
             }
             backend.validate_library(file)
         })?;
-        let mut chunk = [0; mnu_abi::provider::MAX_DATA_LEN];
-        let mut total = root.len();
-        loop {
-            let n = read_at(backend, self.handle, &mut chunk, self.source.length)?;
-            if n == 0 {
-                break;
-            }
-            total = total
-                .checked_add(n)
-                .filter(|n| *n <= MAX_IMAGE)
-                .ok_or(EFBIG)?;
-            let length = self.source.length.checked_add(n).ok_or(EFBIG)?;
-            self.source.reserve(length)?;
-            // SAFETY: retained source capacity covers this initialized prefix.
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    chunk.as_ptr(),
-                    self.source.pointer.add(self.source.length),
-                    n,
-                )
-            };
-            self.source.length = length;
-        }
+        self.source.capture(
+            backend,
+            self.handle,
+            MAX_IMAGE.checked_sub(root.len()).ok_or(EFBIG)?,
+        )?;
         backend.validate_captured(Source::Interpreter { path }, self.source.bytes())?;
         let loader = Image::parse(self.source.bytes()).map_err(|_| ENOEXEC)?;
         let mut random = [0; 16];

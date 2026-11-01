@@ -142,6 +142,45 @@ impl<B: Backend> Buffer<B> {
             Ok(())
         })
     }
+
+    /// Capture directly into retained storage, allowing large positioned reads
+    /// without an extra scratch allocation across callback-capable I/O.
+    fn capture(&mut self, backend: &B, image: u32, limit: usize) -> Result<(), c_int> {
+        loop {
+            if self.length == self.capacity || self.length == limit {
+                // Probe EOF before growing a full allocation. At the byte
+                // budget this also distinguishes exact fit from excess input.
+                let mut first = [0];
+                if read_at(backend, image, &mut first, self.length)? == 0 {
+                    return Ok(());
+                }
+                let length = self
+                    .length
+                    .checked_add(1)
+                    .filter(|n| *n <= limit)
+                    .ok_or(EFBIG)?;
+                self.reserve(length.max(PAGE_SIZE.min(limit)))?;
+                // SAFETY: fresh zeroed retained capacity covers this byte.
+                unsafe { self.pointer.add(self.length).write(first[0]) };
+                self.length = length;
+            }
+            let length = (self.capacity - self.length)
+                .min(mnu_abi::provider::MAX_SHARED_READ_LEN)
+                .min(limit - self.length);
+            if length == 0 {
+                continue;
+            }
+            // SAFETY: reserve initializes the full allocation. Only the
+            // returned prefix becomes source data after the blocking call.
+            let output =
+                unsafe { core::slice::from_raw_parts_mut(self.pointer.add(self.length), length) };
+            let count = read_at(backend, image, output, self.length)?;
+            if count == 0 {
+                return Ok(());
+            }
+            self.length += count;
+        }
+    }
 }
 impl<B: Backend> Drop for Buffer<B> {
     fn drop(&mut self) {
@@ -274,23 +313,7 @@ impl<B: Backend> Preparation<B> {
         environment: Environment<'_>,
         identity: mochios_posix_client::process_image::Identity,
     ) -> Result<(), c_int> {
-        let mut chunk = [0u8; mnu_abi::provider::MAX_DATA_LEN];
-        loop {
-            let n = read_at(backend, image, &mut chunk, self.source.length)?;
-            if n == 0 {
-                break;
-            }
-            let length = self.source.length.checked_add(n).ok_or(EFBIG)?;
-            self.source.reserve(length)?;
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    chunk.as_ptr(),
-                    self.source.pointer.add(self.source.length),
-                    n,
-                )
-            };
-            self.source.length = length;
-        }
+        self.source.capture(backend, image, MAX_IMAGE)?;
         backend.validate_captured(Source::Root, self.source.bytes())?;
         let length = if crate::elf_launch::interpreter(self.source.bytes())
             .map_err(|_| ENOEXEC)?
@@ -368,7 +391,8 @@ impl<B: Backend> Preparation<B> {
         })?;
         let mut offset = 0;
         while offset < length {
-            let bytes = &self.output.bytes()[offset..length.min(offset + chunk.len())];
+            let bytes = &self.output.bytes()
+                [offset..length.min(offset + mnu_abi::provider::MAX_DATA_LEN)];
             let n = backend.write_at(self.handle, bytes, offset)?;
             if n == 0 || n > bytes.len() {
                 return Err(EIO);
