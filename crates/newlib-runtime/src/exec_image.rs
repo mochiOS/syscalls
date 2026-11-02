@@ -57,8 +57,9 @@ unsafe impl Backend for Runtime {
         Ok(())
     }
     fn validate_captured(&self, _: shared::Source<'_>, _: &[u8]) -> Result<(), c_int> {
-        // exec replaces an image inside the caller's current security domain;
-        // it cannot adopt a package identity or add application capabilities.
+        // Preparation owns untrusted private input. The common execution
+        // broker authenticates the retained output before native replacement.
+        // Transformed output still needs source/dependency attestation there.
         Ok(())
     }
     fn entropy(&self, output: &mut [u8]) -> Result<(), c_int> {

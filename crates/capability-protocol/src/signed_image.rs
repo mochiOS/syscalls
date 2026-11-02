@@ -1,12 +1,12 @@
-//! Integrity-checked standalone replacement with a separate execution identity.
+//! Authenticated installed or signed standalone source replacement.
 //! Exactly one READ | MAP RAM object accompanies the request through IPC.
 //! No caller-supplied digest, PID, FD, signer trust or requested grants appear.
 use super::{ProtocolError, validate_executable_identity};
 
 pub const AUTHORIZE_OPCODE: u32 = 0x4341_5349;
-/// Version 2 replaces inherited authority with standalone declaration policy.
-/// Version 1's same-domain behavior is deliberately rejected.
-pub const VERSION: u32 = 2;
+/// Version 3 selects authenticated installed code before standalone signatures.
+/// Earlier authorization policies are deliberately rejected.
+pub const VERSION: u32 = 3;
 pub const PREFIX_LEN: usize = 24;
 
 #[derive(Debug, PartialEq, Eq)]
