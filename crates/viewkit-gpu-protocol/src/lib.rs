@@ -56,6 +56,33 @@ pub fn encode_header(
     atlas_data_y: u32,
     atlas_data_height: u32,
 ) -> Result<usize, DecodeError> {
+    encode_header_with_vertex_limit(
+        output,
+        width,
+        height,
+        vertex_count,
+        atlas_width,
+        atlas_height,
+        atlas_data_y,
+        atlas_data_height,
+        MAX_VERTICES,
+    )
+}
+
+/// Encodes the same wire format using a caller-owned, bounded vertex budget.
+/// Native receivers should retain `encode_header`/`decode` and their protocol limit;
+/// a host renderer may select its own budget without expanding native authority.
+pub fn encode_header_with_vertex_limit(
+    output: &mut [u8],
+    width: u32,
+    height: u32,
+    vertex_count: u32,
+    atlas_width: u32,
+    atlas_height: u32,
+    atlas_data_y: u32,
+    atlas_data_height: u32,
+    max_vertices: u32,
+) -> Result<usize, DecodeError> {
     if output.len() < HEADER_LEN {
         return Err(DecodeError::TooShort);
     }
@@ -67,6 +94,7 @@ pub fn encode_header(
         atlas_height,
         atlas_data_y,
         atlas_data_height,
+        max_vertices,
     )?;
     let vertex_bytes = usize::try_from(vertex_count)
         .ok()
@@ -114,6 +142,12 @@ pub fn encode_header(
 }
 
 pub fn decode(bytes: &[u8]) -> Result<Scene<'_>, DecodeError> {
+    decode_with_vertex_limit(bytes, MAX_VERTICES)
+}
+
+/// Validates a complete scene against the caller's vertex budget before exposing
+/// any buffer slices. This does not change the limits of native receivers.
+pub fn decode_with_vertex_limit(bytes: &[u8], max_vertices: u32) -> Result<Scene<'_>, DecodeError> {
     if bytes.len() < HEADER_LEN {
         return Err(DecodeError::TooShort);
     }
@@ -150,6 +184,7 @@ pub fn decode(bytes: &[u8]) -> Result<Scene<'_>, DecodeError> {
         atlas_height,
         atlas_data_y,
         atlas_data_height,
+        max_vertices,
     )?;
     let vertex_bytes = usize::try_from(vertex_count)
         .ok()
@@ -202,6 +237,7 @@ fn validate_dimensions(
     atlas_height: u32,
     atlas_data_y: u32,
     atlas_data_height: u32,
+    max_vertices: u32,
 ) -> Result<(), DecodeError> {
     if width == 0
         || height == 0
@@ -217,7 +253,7 @@ fn validate_dimensions(
     {
         return Err(DecodeError::BadDimensions);
     }
-    if vertices < CLEAR_VERTEX_COUNT || vertices > MAX_VERTICES || vertices % 3 != 0 {
+    if vertices < CLEAR_VERTEX_COUNT || vertices > max_vertices || vertices % 3 != 0 {
         return Err(DecodeError::TooManyVertices);
     }
     Ok(())
@@ -275,9 +311,11 @@ pub mod compositor {
     }
 
     pub fn frame_timing(bytes: &[u8]) -> Option<FrameTiming> {
-        if bytes.len() < HEADER_LEN || read_u32(bytes, 0).ok()? != MAGIC
+        if bytes.len() < HEADER_LEN
+            || read_u32(bytes, 0).ok()? != MAGIC
             || read_u16(bytes, 4).ok()? != TIMED_VERSION
-            || read_u16(bytes, 6).ok()? as usize != HEADER_LEN {
+            || read_u16(bytes, 6).ok()? as usize != HEADER_LEN
+        {
             return None;
         }
         Some(FrameTiming {
@@ -288,8 +326,12 @@ pub mod compositor {
     }
 
     pub fn set_frame_timing(bytes: &mut [u8], timing: FrameTiming) -> Result<(), DecodeError> {
-        if bytes.len() < HEADER_LEN { return Err(DecodeError::TooShort); }
-        if read_u32(bytes, 0)? != MAGIC { return Err(DecodeError::BadMagic); }
+        if bytes.len() < HEADER_LEN {
+            return Err(DecodeError::TooShort);
+        }
+        if read_u32(bytes, 0)? != MAGIC {
+            return Err(DecodeError::BadMagic);
+        }
         if !matches!(read_u16(bytes, 4)?, VERSION | TIMED_VERSION) {
             return Err(DecodeError::BadVersion);
         }
@@ -751,5 +793,33 @@ mod tests {
         assert!(compositor::set_frame_timing(&mut bytes, timing).is_err());
         assert_eq!(compositor::frame_timing(&bytes[..32]), None);
         assert!(compositor::set_frame_timing(&mut bytes[..32], timing).is_err());
+    }
+}
+
+#[cfg(test)]
+mod host_budget_tests {
+    use super::*;
+    #[test]
+    fn host_can_validate_67917_vertices_without_raising_native_limits() {
+        let count = 67917;
+        let limit = 262144;
+        let mut bytes = std::vec![0;HEADER_LEN+count as usize*VERTEX_STRIDE];
+        encode_header_with_vertex_limit(&mut bytes, 1920, 1031, count, 1, 1, 0, 0, limit).unwrap();
+        assert_eq!(
+            decode_with_vertex_limit(&bytes, limit)
+                .unwrap()
+                .vertex_count(),
+            count
+        );
+        assert_eq!(decode(&bytes), Err(DecodeError::TooManyVertices));
+        assert_eq!(
+            decode_with_vertex_limit(&bytes, count - 1),
+            Err(DecodeError::TooManyVertices)
+        );
+        bytes.pop();
+        assert_eq!(
+            decode_with_vertex_limit(&bytes, limit),
+            Err(DecodeError::LengthMismatch)
+        );
     }
 }
