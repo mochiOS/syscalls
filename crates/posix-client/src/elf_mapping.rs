@@ -268,7 +268,7 @@ impl<B: Backend> Mapping<B> {
     }
     /// Apply a parser-validated readable RELRO range within this reservation.
     /// A partial failure invalidates export access immediately.
-    pub(crate) fn relro(&mut self, range: Range) -> Result<(), Error<B::Error>> {
+    pub(crate) fn relro(&mut self, range: Range, executable: bool) -> Result<(), Error<B::Error>> {
         let owned = self.range.ok_or(Error::State)?;
         if !self.ready
             || range.length == 0
@@ -286,7 +286,15 @@ impl<B: Backend> Mapping<B> {
         }
         self.ready = false;
         self.backend
-            .protect(range, mnu_abi::MEMORY_ACCESS_READ)
+            .protect(
+                range,
+                mnu_abi::MEMORY_ACCESS_READ
+                    | if executable {
+                        mnu_abi::MEMORY_ACCESS_EXECUTE
+                    } else {
+                        0
+                    },
+            )
             .map_err(Error::Native)?;
         self.ready = true;
         Ok(())

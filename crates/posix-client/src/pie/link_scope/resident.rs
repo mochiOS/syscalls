@@ -173,14 +173,30 @@ impl<'owner, 'scope, 'image, B: Backend> Resident<'owner, 'scope, 'image, B> {
         for (index, object) in self.scope.objects.iter().enumerate() {
             let mut memory_error = None;
             let result = object.image.relro(object.bias, |range| {
+                // RELRO removes write access. It must preserve execute on an
+                // originally readable/executable LOAD, rather than faulting
+                // valid code when a linker includes it in a RELRO page.
+                let mut executable = false;
+                for header in 0..object.image.count {
+                    let segment = object.image.segment(header)?;
+                    if segment.kind == super::super::LOAD && segment.flags & 1 != 0 {
+                        let start = (segment.address + object.bias) & !(super::super::PAGE - 1);
+                        let end =
+                            super::super::page(segment.address + object.bias + segment.memory)?;
+                        executable |= start < range.address + range.length && range.address < end;
+                    }
+                }
                 self.members[index]
                     .as_mut()
                     .unwrap()
                     .mapping
-                    .relro(Range {
-                        address: range.address,
-                        length: range.length,
-                    })
+                    .relro(
+                        Range {
+                            address: range.address,
+                            length: range.length,
+                        },
+                        executable,
+                    )
                     .map_err(|error| {
                         memory_error = Some(error);
                         ElfError::Invalid
