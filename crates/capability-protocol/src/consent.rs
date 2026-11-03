@@ -5,6 +5,8 @@
 
 #[path = "consent/prompt.rs"]
 pub mod prompt;
+#[path = "consent/frontend.rs"]
+pub mod frontend;
 
 const MAGIC: [u8; 8] = *b"MCNSNT01";
 pub const FEEDBACK_OPCODE: u32 = u32::from_le_bytes(*b"MCNS");
