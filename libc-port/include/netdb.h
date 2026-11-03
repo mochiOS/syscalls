@@ -31,6 +31,14 @@ struct addrinfo {
 #define NI_MAXHOST      1025
 #define NI_MAXSERV      32
 
+/* Per-thread resolver errors; independent from errno and getaddrinfo codes. */
+#define HOST_NOT_FOUND 1
+#define TRY_AGAIN 2
+#define NO_RECOVERY 3
+#define NO_DATA 4
+#define NO_ADDRESS NO_DATA
+#define h_errno (*__h_errno_location())
+
 #define EAI_BADFLAGS    (-1)
 #define EAI_NONAME      (-2)
 #define EAI_AGAIN       (-3)
@@ -45,6 +53,7 @@ struct addrinfo {
 #ifdef __cplusplus
 extern "C" {
 #endif
+int *__h_errno_location(void);
 int getaddrinfo(const char *, const char *, const struct addrinfo *, struct addrinfo **);
 void freeaddrinfo(struct addrinfo *);
 int getnameinfo(const struct sockaddr *, socklen_t, char *, socklen_t,

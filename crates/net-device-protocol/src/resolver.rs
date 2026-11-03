@@ -22,6 +22,8 @@ pub const SRV_SCOPE: u32 = 1 << 7;
 /// Valid protocol bits, not a default grant to existing callers.
 pub const SUPPORTED_SCOPES: u32 =
     ALL_SCOPES | NS_SCOPE | SOA_SCOPE | MX_SCOPE | TXT_SCOPE | SRV_SCOPE;
+/// A successful DNS exchange with no records of the requested kind (NODATA).
+pub const NO_DATA_STATUS: i32 = -61;
 pub const MAX_TIMEOUT: u32 = 30_000;
 pub const MAX_RESULT_LEN: usize = 2 * 1024 * 1024;
 pub const MAX_RECORDS: usize = 65535 / 11;

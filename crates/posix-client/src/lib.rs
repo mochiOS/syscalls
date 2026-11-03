@@ -66,6 +66,7 @@ pub mod socket;
 pub mod network;
 pub mod internet;
 pub mod resolver;
+pub mod resolver_packet;
 pub mod netdb;
 pub mod interfaces;
 pub mod account;

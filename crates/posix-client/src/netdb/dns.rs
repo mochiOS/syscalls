@@ -8,7 +8,7 @@ use crate::resolver::Name;
 pub fn status(value: i32) -> Result<(), Error> {
     match value {
         0 => Ok(()),
-        -2 => Err(Error::NoName),
+        -2 | crate::resolver::NO_DATA_STATUS => Err(Error::NoName),
         -11 | -110 => Err(Error::Again),
         -12 => Err(Error::Memory),
         -22 | -95 => Err(Error::Fail),

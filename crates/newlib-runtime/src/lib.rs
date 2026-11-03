@@ -124,6 +124,8 @@ mod netdb_memory;
 mod netdb_abi;
 mod netdb_backend;
 mod netdb;
+mod resolver_abi;
+mod resolver_transaction;
 mod vector_buffer;
 use vector_buffer::VectorBuffer;
 mod socket_record;
@@ -374,6 +376,7 @@ struct ThreadControl {
     reent: AtomicUsize,
     reent_mapping_size: AtomicUsize,
     ptsname_buffer: terminal_name::Buffer,
+    resolver_error: AtomicU32,
     joinability: AtomicU32,
     join_waiter: AtomicU32,
     cancel_state: AtomicU32,
@@ -424,6 +427,7 @@ impl ThreadControl {
             reent: AtomicUsize::new(0),
             reent_mapping_size: AtomicUsize::new(0),
             ptsname_buffer: terminal_name::Buffer::new(),
+            resolver_error: AtomicU32::new(0),
             joinability: AtomicU32::new(THREAD_JOINABLE),
             join_waiter: AtomicU32::new(0),
             cancel_state: AtomicU32::new(PTHREAD_CANCEL_ENABLE),
@@ -1246,6 +1250,7 @@ fn reserve_thread_control()
         // SAFETY: The FREE -> STARTING transition exclusively claimed this
         // retired slot; its new owner has not been published or started yet.
         unsafe { control.ptsname_buffer.reset() };
+        control.resolver_error.store(0, Ordering::Relaxed);
         control.generation.store(generation, Ordering::Release);
         control.creation_pending.store(0, Ordering::Relaxed);
         control.native_id.store(0, Ordering::Relaxed);

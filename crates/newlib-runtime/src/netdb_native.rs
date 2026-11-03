@@ -5,10 +5,21 @@ use crate::*;
 
 pub(crate) struct Native {
     caught: Option<u64>,
+    scopes: u32,
 }
 impl Native {
     pub const fn new() -> Self {
-        Self { caught: None }
+        Self {
+            caught: None,
+            scopes: resolver::ALL_SCOPES,
+        }
+    }
+    /// C record lookup requests only the authority for its explicit query kind.
+    pub fn for_kind(kind: resolver::Kind) -> Self {
+        Self {
+            caught: None,
+            scopes: kind.scope(),
+        }
     }
     fn check(&mut self) -> Result<(&'static ThreadControl, u64), Error> {
         let (_, control) = register_current_thread().ok_or(Error::System(-11))?;
@@ -49,7 +60,7 @@ impl Io for Native {
         match resolver::acquire(
             &SyscallEndpointTransport::new(endpoint),
             resolver::Limits {
-                scopes: resolver::ALL_SCOPES,
+                scopes: self.scopes,
                 maximum_timeout: resolver::MAX_TIMEOUT,
             },
         ) {

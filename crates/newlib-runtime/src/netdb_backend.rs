@@ -214,7 +214,7 @@ impl<I: Io> Backend<I> {
         }
         Ok(data.buffer.as_mut().map(|b| &b.bytes()[..data.length]))
     }
-    fn dns(
+    pub(super) fn dns(
         &mut self,
         kind: resolver::Kind,
         name: resolver::Name<'_>,

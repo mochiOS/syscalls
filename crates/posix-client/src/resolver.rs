@@ -3,6 +3,7 @@
 //! POSIX-service RPC is involved in operations on the returned job Handle.
 use crate::{ClientError, ObjectHandleAttachment, ObjectHandles, ObjectTransport};
 use mochios_net_device_protocol::resolver as wire;
+pub use mochios_net_device_protocol::resolver::NO_DATA_STATUS;
 pub use mochios_net_device_protocol::resolver::{
     A_SCOPE, AAAA_SCOPE, ALL_SCOPES, Kind, Limits, MAX_RESULT_LEN, MAX_TIMEOUT, MX_SCOPE, NS_SCOPE,
     Name, Observation, PTR_SCOPE, ResultView, SOA_SCOPE, SRV_SCOPE, SUPPORTED_SCOPES, TXT_SCOPE,
