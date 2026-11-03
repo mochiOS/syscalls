@@ -3,6 +3,9 @@
 //! The controller separately requires kernel-authenticated peers and evidence
 //! from its registered input authority. Ordinary input bytes are not evidence.
 
+#[path = "consent/prompt.rs"]
+pub mod prompt;
+
 const MAGIC: [u8; 8] = *b"MCNSNT01";
 pub const FEEDBACK_OPCODE: u32 = u32::from_le_bytes(*b"MCNS");
 pub const VERSION: u16 = 1;
