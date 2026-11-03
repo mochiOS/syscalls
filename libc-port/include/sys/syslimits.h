@@ -50,6 +50,8 @@
 #endif
 /* Matches system_identity::FIELD_CAPACITY - 1 and sysconf(_SC_HOST_NAME_MAX). */
 #define HOST_NAME_MAX 255
+/* ssize_t is signed long in the x86-64 newlib application ABI. */
+#define SSIZE_MAX __LONG_MAX__
 #define	PATH_MAX		 1024	/* max bytes in pathname */
 #define	PIPE_BUF		  512	/* max bytes for atomic pipe writes */
 #define	IOV_MAX			 1024	/* max elements in i/o vector */

@@ -1,6 +1,7 @@
 //! C resolver packet compatibility over scoped, validated native snapshots.
 //! Replies are reconstructed (not raw server packets), with TTL zero because
 //! snapshot v1 does not expose a remaining per-record lifetime or DNSSEC proof.
+//! RA is also left clear: availability of server recursion is not in a snapshot.
 use crate::resolver::{Kind, ResultView};
 
 /// A malformed message, unsupported result, or insufficient destination space.
@@ -122,7 +123,7 @@ pub fn reply(result: &ResultView<'_>, out: &mut [u8]) -> Result<usize, Error> {
         cursor += bytes.len();
     };
     let mut header = [0; 12];
-    header[2..4].copy_from_slice(&(0x8180u16 | if truncated { 0x0200 } else { 0 }).to_be_bytes());
+    header[2..4].copy_from_slice(&(0x8100u16 | if truncated { 0x0200 } else { 0 }).to_be_bytes());
     header[4..6].copy_from_slice(&1u16.to_be_bytes());
     header[6..8].copy_from_slice(&(count as u16).to_be_bytes());
     write(&header);
