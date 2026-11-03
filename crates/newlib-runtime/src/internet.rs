@@ -63,3 +63,23 @@ pub unsafe extern "C" fn inet_ntop(
     })();
     result_with_errno(result, core::ptr::null())
 }
+
+/// Legacy numbers-and-dots conversion. Does not weaken strict inet_pton or
+/// getaddrinfo parsing; GIO uses this API to reject ambiguous IPv4 spellings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inet_aton(source: *const c_char, destination: *mut c_void) -> c_int {
+    let result = (|| {
+        let mut text = [0; 1024];
+        let length = match user_copy::capture_text(source, &mut text, ENAMETOOLONG) {
+            Ok(n) => n,
+            Err(ENAMETOOLONG) => return Ok(0),
+            Err(error) => return Err(error),
+        };
+        let Some(address) = mochios_posix_client::internet::legacy_ipv4(&text[..length]) else {
+            return Ok(0);
+        };
+        user_copy::write(destination.cast(), &address)?;
+        Ok(1)
+    })();
+    result_with_errno(result, 0)
+}

@@ -82,3 +82,61 @@ impl Write for Buffer<'_> {
         Ok(())
     }
 }
+
+/// Parse the historical inet_aton syntax (one to four decimal/octal/hex parts).
+/// This is deliberately separate from strict inet_pton and hostname lookup:
+/// callers such as GIO use it to *reject* ambiguous numeric hostnames.
+/// Returns network-order octets; overflow and non-whitespace suffixes fail.
+pub fn legacy_ipv4(mut text: &[u8]) -> Option<[u8; 4]> {
+    while text.last().is_some_and(u8::is_ascii_whitespace) {
+        text = &text[..text.len() - 1];
+    }
+    let mut parts = [0u32; 4];
+    let mut count = 0;
+    for part in text.split(|byte| *byte == b'.') {
+        if part.is_empty() || count == 4 {
+            return None;
+        }
+        let (radix, digits) = if part.starts_with(b"0x") || part.starts_with(b"0X") {
+            (16u32, &part[2..])
+        } else if part.len() > 1 && part[0] == b'0' {
+            (8, &part[1..])
+        } else {
+            (10, part)
+        };
+        if digits.is_empty() {
+            return None;
+        }
+        let mut value = 0u32;
+        for &byte in digits {
+            let digit = match byte {
+                b'0'..=b'9' => u32::from(byte - b'0'),
+                b'a'..=b'f' => u32::from(byte - b'a' + 10),
+                b'A'..=b'F' => u32::from(byte - b'A' + 10),
+                _ => return None,
+            };
+            if digit >= radix {
+                return None;
+            }
+            value = value.checked_mul(radix)?.checked_add(digit)?;
+        }
+        parts[count] = value;
+        count += 1;
+    }
+    let mut address = 0u32;
+    for part in &parts[..count - 1] {
+        if *part > 255 {
+            return None;
+        }
+        address = (address << 8) | part;
+    }
+    let remaining = (5 - count) * 8;
+    if u64::from(parts[count - 1]) >= (1u64 << remaining) {
+        return None;
+    }
+    Some(
+        ((u64::from(address) << remaining) | u64::from(parts[count - 1])).to_be_bytes()[4..]
+            .try_into()
+            .unwrap(),
+    )
+}

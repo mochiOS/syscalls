@@ -31,10 +31,36 @@ struct sockaddr_in6 {
   uint32_t sin6_scope_id;
 };
 
+#define IN_MULTICAST(address) ((((uint32_t)(address)) & 0xf0000000U) == 0xe0000000U)
+
 #define IPPROTO_IP 0
 #define IPPROTO_TCP 6
 #define IPPROTO_UDP 17
 #define IPPROTO_IPV6 41
+/* Socket option identifiers follow the existing mochiOS POSIX socket ABI.
+ * A definition is not a support claim: unsupported options return ENOPROTOOPT.
+ * IPv6 address values can be represented even when a transport is unavailable.
+ */
+#define IP_TOS 1
+#define IP_TTL 2
+#define IP_MULTICAST_TTL 33
+#define IP_MULTICAST_LOOP 34
+#define IP_ADD_MEMBERSHIP 35
+#define IP_DROP_MEMBERSHIP 36
+#define IPV6_UNICAST_HOPS 16
+#define IPV6_MULTICAST_HOPS 18
+#define IPV6_MULTICAST_LOOP 19
+#define IPV6_JOIN_GROUP 20
+#define IPV6_LEAVE_GROUP 21
+#define IPV6_TCLASS 67
+struct ip_mreq {
+  struct in_addr imr_multiaddr;
+  struct in_addr imr_interface;
+};
+struct ipv6_mreq {
+  struct in6_addr ipv6mr_multiaddr;
+  unsigned int ipv6mr_interface;
+};
 #define INADDR_ANY ((in_addr_t)0x00000000)
 #define INADDR_LOOPBACK ((in_addr_t)0x7f000001)
 #define INADDR_BROADCAST ((in_addr_t)0xffffffff)

@@ -12,6 +12,13 @@ struct sockaddr {
   char sa_data[14];
 };
 
+/* Application-side storage only; never transmitted as an IPC structure. */
+struct sockaddr_storage {
+  sa_family_t ss_family;
+  unsigned char __ss_padding[118];
+  uint64_t __ss_alignment;
+};
+
 struct msghdr {
   void *msg_name;
   socklen_t msg_namelen;
