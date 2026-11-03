@@ -7,6 +7,7 @@ mod lifecycle;
 mod indirect;
 mod writable;
 pub mod lookup;
+pub mod resident;
 pub use lifecycle::{Lifecycle, Step};
 pub use indirect::Deferred;
 

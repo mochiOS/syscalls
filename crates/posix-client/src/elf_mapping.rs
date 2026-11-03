@@ -207,6 +207,28 @@ impl<'a, B: Backend> Installation<'a, B> {
         });
         Ok(())
     }
+    /// A higher-level loader can retain a failed cleanup independently of its
+    /// scratch ELF buffer. This owner cannot expose executable symbols; its
+    /// only use is an explicit retry of release. Publish before callbacks run.
+    pub fn retain_failed(
+        &mut self,
+        publish: impl FnOnce(Mapping<B>),
+    ) -> Result<(), Error<B::Error>> {
+        if self.phase != Phase::Failed || !self.retained {
+            return Err(Error::State);
+        }
+        B::critical(|| {
+            let mapping = Mapping {
+                backend: self.backend.take().unwrap(),
+                range: Some(self.plan.unwrap().range),
+                ready: false,
+            };
+            self.retained = false;
+            self.phase = Phase::Closed;
+            publish(mapping);
+        });
+        Ok(())
+    }
     /// Release before discarding the owner when cleanup errors must be handled.
     /// Failure retains the range for another explicit cleanup attempt. A used
     /// installation can never be staged again, even after successful release.
@@ -243,6 +265,31 @@ impl<B: Backend> Mapping<B> {
     }
     pub fn is_ready(&self) -> bool {
         self.ready
+    }
+    /// Apply a parser-validated readable RELRO range within this reservation.
+    /// A partial failure invalidates export access immediately.
+    pub(crate) fn relro(&mut self, range: Range) -> Result<(), Error<B::Error>> {
+        let owned = self.range.ok_or(Error::State)?;
+        if !self.ready
+            || range.length == 0
+            || range.address % PAGE != 0
+            || range.length % PAGE != 0
+            || range.address < owned.address
+            || range.address.checked_add(range.length).is_none_or(|end| {
+                owned
+                    .address
+                    .checked_add(owned.length)
+                    .is_none_or(|limit| end > limit)
+            })
+        {
+            return Err(Error::State);
+        }
+        self.ready = false;
+        self.backend
+            .protect(range, mnu_abi::MEMORY_ACCESS_READ)
+            .map_err(Error::Native)?;
+        self.ready = true;
+        Ok(())
     }
     /// A failed native unmap may be partial: revoke ready state and retain the
     /// range for cleanup. Drop is best effort; handle this result explicitly
