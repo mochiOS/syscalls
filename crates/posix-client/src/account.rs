@@ -41,6 +41,26 @@ impl<T: ObjectTransport> Client<T> {
     }
 }
 impl<T: Transport> Client<T> {
+    pub fn lookup_group(
+        &self,
+        query: protocol::public_group::Query<'_>,
+        output: &mut [u8],
+    ) -> Result<usize, ClientError<T::Error>> {
+        use protocol::public_group as wire;
+        let mut request = [0; wire::MAX_QUERY];
+        let length =
+            wire::encode_query(query, &mut request).map_err(|_| ClientError::MismatchedResponse)?;
+        let length = self.request(protocol::OP_GROUP_LOOKUP, 0, &request[..length], output)?;
+        let record =
+            wire::decode_record(&output[..length]).map_err(|_| ClientError::MismatchedResponse)?;
+        if !match query {
+            wire::Query::Gid(gid) => record.gid == gid,
+            wire::Query::Name(name) => record.name == name,
+        } {
+            return Err(ClientError::MismatchedResponse);
+        }
+        Ok(length)
+    }
     pub fn lookup_account(
         &self,
         query: protocol::account::Query<'_>,

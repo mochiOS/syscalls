@@ -2432,6 +2432,8 @@ pub const OP_ACCOUNT_ENDPOINT_INSTALL: u16 = 132;
 pub const OP_ACCOUNT_LOOKUP: u16 = 133;
 pub const OP_SYSTEM_IDENTITY: u16 = 134;
 pub const OP_HOSTNAME_SET: u16 = 135;
+pub const OP_GROUP_LOOKUP: u16 = 144;
+pub use mochios_user_protocol::public_group;
 pub use mochios_user_protocol::public_account as account;
 
 pub const ACCOUNT_ENDPOINT_RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_SEND

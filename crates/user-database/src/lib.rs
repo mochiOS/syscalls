@@ -2,6 +2,8 @@
 
 extern crate alloc;
 
+pub mod groups;
+
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;

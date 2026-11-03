@@ -104,6 +104,7 @@ mod pthread_concurrency;
 mod credentials;
 mod groups;
 mod groups_memory;
+mod group_lookup;
 mod pthread_mutex;
 mod pthread_cond;
 mod pthread_once;
@@ -790,6 +791,7 @@ struct RuntimeState {
     >,
     heap: HeapState,
     passwd: passwd::Cache,
+    group_cache: group_lookup::Cache,
 }
 
 // Safety: raw argv/envp pointers refer to process-wide address-space data.
@@ -811,6 +813,7 @@ impl RuntimeState {
             thread_clocks: mochios_posix_client::thread_clock::Registry::new(),
             heap: HeapState::new(),
             passwd: passwd::Cache::new(),
+            group_cache: group_lookup::Cache::new(),
         }
     }
 }
