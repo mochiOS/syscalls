@@ -789,6 +789,7 @@ struct RuntimeState {
         { mochios_posix_client::thread::MAX_THREADS },
     >,
     heap: HeapState,
+    passwd: passwd::Cache,
 }
 
 // Safety: raw argv/envp pointers refer to process-wide address-space data.
@@ -809,6 +810,7 @@ impl RuntimeState {
             timer_callbacks: timer_callbacks::Book::new(),
             thread_clocks: mochios_posix_client::thread_clock::Registry::new(),
             heap: HeapState::new(),
+            passwd: passwd::Cache::new(),
         }
     }
 }

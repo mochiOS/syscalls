@@ -1,4 +1,4 @@
-//! Reentrant public-account lookup. Caller storage is accessed through MemoryCopy.
+//! Public-account lookup. Caller storage is accessed through MemoryCopy.
 use super::*;
 use posix_protocol::account::{self as wire, Query, Record};
 
@@ -6,8 +6,8 @@ use posix_protocol::account::{self as wire, Query, Record};
 pub(super) struct Passwd {
     name: *mut c_char,
     password: *mut c_char,
-    uid: u32,
-    gid: u32,
+    uid: u16,
+    gid: u16,
     comment: *mut c_char,
     gecos: *mut c_char,
     home: *mut c_char,
@@ -16,8 +16,25 @@ pub(super) struct Passwd {
 const _: () = {
     assert!(core::mem::size_of::<Passwd>() == 56);
     assert!(core::mem::offset_of!(Passwd, uid) == 16);
+    assert!(core::mem::offset_of!(Passwd, gid) == 18);
     assert!(core::mem::offset_of!(Passwd, home) == 40);
 };
+
+// newlib's generic x86_64-elf uid_t/gid_t are unsigned short. The wire uses
+// u32; do not truncate an account that the public C layout cannot represent.
+#[repr(align(8))]
+pub(super) struct Cache {
+    record: [u8; 56],
+    text: [u8; wire::MAX_RECORD + 8],
+}
+impl Cache {
+    pub const fn new() -> Self {
+        Self {
+            record: [0; 56],
+            text: [0; wire::MAX_RECORD + 8],
+        }
+    }
+}
 
 fn publish(
     record: Record<'_>,
@@ -26,6 +43,8 @@ fn publish(
     length: usize,
     result: *mut *mut Passwd,
 ) -> Result<(), c_int> {
+    let uid = u16::try_from(record.uid).map_err(|_| EOVERFLOW)?;
+    let gid = u16::try_from(record.gid).map_err(|_| EOVERFLOW)?;
     let strings = [
         record.name,
         "x",
@@ -63,11 +82,29 @@ fn publish(
     ] {
         bytes[offset..offset + 8].copy_from_slice(&pointer.to_ne_bytes());
     }
-    bytes[16..20].copy_from_slice(&record.uid.to_ne_bytes());
-    bytes[20..24].copy_from_slice(&record.gid.to_ne_bytes());
+    bytes[16..18].copy_from_slice(&uid.to_ne_bytes());
+    bytes[18..20].copy_from_slice(&gid.to_ne_bytes());
     user_copy::write(buffer.cast(), &text[..required])?;
     user_copy::write(output.cast(), &bytes)?;
     user_copy::write(result.cast(), &(output as usize).to_ne_bytes())
+}
+
+fn fetch<'a>(
+    query: Query<'_>,
+    response: &'a mut [u8; wire::MAX_RECORD],
+) -> Result<Option<Record<'a>>, c_int> {
+    let client = posix_client().map_err(map_posix_client_error)?;
+    let n = match client
+        .lookup_account(query, response)
+        .map_err(map_posix_client_error)
+    {
+        Ok(n) => n,
+        Err(ENOENT) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    wire::decode_record(&response[..n])
+        .map(Some)
+        .map_err(|_| EIO)
 }
 
 fn lookup(
@@ -77,23 +114,81 @@ fn lookup(
     length: usize,
     result: *mut *mut Passwd,
 ) -> Result<(), c_int> {
-    let client = posix_client().map_err(map_posix_client_error)?;
-    let mut response = [0; wire::MAX_RECORD];
-    let n = match client
-        .lookup_account(query, &mut response)
-        .map_err(map_posix_client_error)
-    {
+    if let Some(record) = fetch(query, &mut [0; wire::MAX_RECORD])? {
+        publish(record, output, buffer, length, result)?;
+    }
+    Ok(())
+}
+
+fn capture_name<'a>(
+    name: *const c_char,
+    bytes: &'a mut [u8; wire::MAX_NAME],
+) -> Result<Option<&'a str>, c_int> {
+    let n = match user_copy::capture_text(name, bytes, ENOENT) {
         Ok(n) => n,
-        Err(ENOENT) => return Ok(()),
+        Err(ENOENT) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let record = wire::decode_record(&response[..n]).map_err(|_| EIO)?;
-    publish(record, output, buffer, length, result)
+    Ok(core::str::from_utf8(&bytes[..n]).ok().filter(|name| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+    }))
+}
+
+fn cached(query: Query<'_>) -> Result<*mut Passwd, c_int> {
+    // Complete RPC before locking the process-local result. Transport and
+    // error reporting may themselves need STATE. Its existing fork protocol
+    // also protects this cache; do not add a separate inherited mutex.
+    let mut response = [0; wire::MAX_RECORD];
+    let Some(record) = fetch(query, &mut response)? else {
+        return Ok(ptr::null_mut());
+    };
+    let mut state = STATE.lock();
+    let cache = &mut state.passwd;
+    let output = cache.record.as_mut_ptr().cast();
+    let mut result = ptr::null_mut();
+    publish(
+        record,
+        output,
+        cache.text.as_mut_ptr().cast(),
+        cache.text.len(),
+        &mut result,
+    )?;
+    Ok(result)
+}
+
+fn pointer_result(result: Result<*mut Passwd, c_int>) -> *mut Passwd {
+    match result {
+        Ok(pointer) => pointer,
+        Err(error) => {
+            set_errno(error);
+            ptr::null_mut()
+        }
+    }
+}
+
+#[cfg_attr(target_os = "mochios", unsafe(no_mangle))]
+pub(super) unsafe extern "C" fn getpwuid(uid: u16) -> *mut Passwd {
+    pointer_result(cached(Query::Uid(u32::from(uid))))
+}
+
+#[cfg_attr(target_os = "mochios", unsafe(no_mangle))]
+pub(super) unsafe extern "C" fn getpwnam(name: *const c_char) -> *mut Passwd {
+    let result = (|| {
+        let mut bytes = [0; wire::MAX_NAME];
+        match capture_name(name, &mut bytes)? {
+            Some(name) => cached(Query::Name(name)),
+            None => Ok(ptr::null_mut()),
+        }
+    })();
+    pointer_result(result)
 }
 
 #[unsafe(no_mangle)]
 pub(super) unsafe extern "C" fn getpwuid_r(
-    uid: u32,
+    uid: u16,
     output: *mut Passwd,
     buffer: *mut c_char,
     length: usize,
@@ -104,7 +199,7 @@ pub(super) unsafe extern "C" fn getpwuid_r(
             return Err(EFAULT);
         }
         user_copy::write(result.cast(), &0usize.to_ne_bytes())?;
-        lookup(Query::Uid(uid), output, buffer, length, result)
+        lookup(Query::Uid(u32::from(uid)), output, buffer, length, result)
     })();
     operation.err().unwrap_or(0)
 }
@@ -123,21 +218,8 @@ pub(super) unsafe extern "C" fn getpwnam_r(
         }
         user_copy::write(result.cast(), &0usize.to_ne_bytes())?;
         let mut bytes = [0; wire::MAX_NAME];
-        let n = match user_copy::capture_text(name, &mut bytes, ENOENT) {
-            Ok(n) => n,
-            Err(ENOENT) => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        let name = match core::str::from_utf8(&bytes[..n]) {
-            Ok(name)
-                if !name.is_empty()
-                    && name
-                        .bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-')) =>
-            {
-                name
-            }
-            _ => return Ok(()),
+        let Some(name) = capture_name(name, &mut bytes)? else {
+            return Ok(());
         };
         lookup(Query::Name(name), output, buffer, length, result)
     })();
