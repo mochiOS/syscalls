@@ -84,3 +84,8 @@ pub(super) fn fd(fd: c_int, times: *const Timespec) -> Result<(), c_int> {
         },
     )
 }
+
+/// Second-resolution compatibility API over the existing scoped mutation path.
+pub(super) fn seconds_at(path: *const c_char, times: *const c_void) -> Result<(), c_int> {
+    update_at(-2, path, input::read_seconds(times)?, 0)
+}

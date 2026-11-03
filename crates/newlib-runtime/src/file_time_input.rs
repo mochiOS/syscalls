@@ -58,3 +58,23 @@ pub(super) fn read_timeval(times: *const Timeval) -> Result<Update, c_int> {
         modification: field(modification)?,
     })
 }
+
+/// Legacy utimbuf has two signed time_t seconds and no fractional fields.
+/// Snapshot both values before any path lookup or filesystem mutation.
+pub(super) fn read_seconds(times: *const c_void) -> Result<Update, c_int> {
+    if times.is_null() {
+        return Ok(Update::now());
+    }
+    let mut bytes = [0; 16];
+    user_copy::read(times.cast(), &mut bytes)?;
+    Ok(Update {
+        access: Change::Set {
+            seconds: i64::from_ne_bytes(bytes[..8].try_into().unwrap()),
+            nanoseconds: 0,
+        },
+        modification: Change::Set {
+            seconds: i64::from_ne_bytes(bytes[8..].try_into().unwrap()),
+            nanoseconds: 0,
+        },
+    })
+}

@@ -5913,6 +5913,13 @@ pub extern "C" fn futimens(fd: c_int, times: *const Timespec) -> c_int {
     result_with_errno(file_time::fd(fd, times).map(|_| 0), -1)
 }
 
+/// Set second-resolution access/modification times using the caller's native
+/// filesystem authority. NULL selects the service's current wall-clock time.
+#[unsafe(no_mangle)]
+pub extern "C" fn utime(path: *const c_char, times: *const c_void) -> c_int {
+    result_with_errno(file_time::seconds_at(path, times).map(|_| 0), -1)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn utimes(path: *const c_char, times: *const Timeval) -> c_int {
     result_with_errno(file_time::timeval_at(path, times, false).map(|_| 0), -1)
