@@ -4,8 +4,8 @@
 use crate::{ClientError, ObjectHandleAttachment, ObjectHandles, ObjectTransport};
 use mochios_net_device_protocol::resolver as wire;
 pub use mochios_net_device_protocol::resolver::{
-    A_SCOPE, AAAA_SCOPE, ALL_SCOPES, Kind, Limits, MAX_RESULT_LEN, MAX_TIMEOUT, Name, Observation, PTR_SCOPE,
-    ResultView,
+    A_SCOPE, AAAA_SCOPE, ALL_SCOPES, Kind, Limits, MAX_RESULT_LEN, MAX_TIMEOUT, MX_SCOPE, NS_SCOPE,
+    Name, Observation, PTR_SCOPE, ResultView, SOA_SCOPE, SRV_SCOPE, SUPPORTED_SCOPES, TXT_SCOPE,
 };
 pub const FACTORY_RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_CONTROL
     | mnu_abi::HANDLE_RIGHT_DUPLICATE

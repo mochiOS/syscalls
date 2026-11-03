@@ -123,8 +123,13 @@ impl From<&DnsName> for DnsRecordName {
 #[repr(u16)]
 pub enum DnsRecordType {
     A = 1,
+    Ns = 2,
+    Soa = 6,
     Ptr = 12,
+    Mx = 15,
+    Txt = 16,
     Aaaa = 28,
+    Srv = 33,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,6 +137,9 @@ pub enum DnsRecordValue {
     Ipv4([u8; 4]),
     Ipv6([u8; 16]),
     Name(DnsRecordName),
+    /// Validated RFC 1035/2782 RDATA with embedded names decompressed.
+    /// Used for MX, TXT, SOA and SRV; integers retain network byte order.
+    Rdata(Vec<u8>),
 }
 
 /// All matching answer-section records, with CNAMEs followed irrespective of
@@ -353,9 +361,15 @@ pub fn decode_dns_answer(
                 6 => {
                     let soa = DnsSoa::decode(packet, owner.clone(), ttl, start, end)?;
                     if index >= answers && index < authority_end {
-                        soas.push(soa);
+                        soas.push(soa.clone());
                     }
-                    RecordData::Other(record_type)
+                    let mut value = Vec::new();
+                    value.extend_from_slice(soa.primary.wire());
+                    value.extend_from_slice(soa.mailbox.wire());
+                    for number in [soa.serial, soa.refresh, soa.retry, soa.expire, soa.minimum] {
+                        value.extend_from_slice(&number.to_be_bytes());
+                    }
+                    RecordData::Value(DnsRecordType::Soa, DnsRecordValue::Rdata(value))
                 }
                 1 => RecordData::Value(
                     DnsRecordType::A,
@@ -369,7 +383,7 @@ pub fn decode_dns_answer(
                         data.try_into().map_err(|_| DnsError::InvalidRecordLength)?,
                     ),
                 ),
-                5 | 12 => {
+                2 | 5 | 12 => {
                     let (target, consumed) = decode_record_name(packet, start, end)?;
                     if consumed != end {
                         return Err(DnsError::InvalidRecordLength);
@@ -377,8 +391,48 @@ pub fn decode_dns_answer(
                     if record_type == 5 {
                         RecordData::Alias(target)
                     } else {
-                        RecordData::Value(DnsRecordType::Ptr, DnsRecordValue::Name(target))
+                        RecordData::Value(
+                            if record_type == 2 {
+                                DnsRecordType::Ns
+                            } else {
+                                DnsRecordType::Ptr
+                            },
+                            DnsRecordValue::Name(target),
+                        )
                     }
+                }
+                15 | 33 => {
+                    let prefix = if record_type == 15 { 2 } else { 6 };
+                    if data.len() < prefix + 1 {
+                        return Err(DnsError::InvalidRecordLength);
+                    }
+                    let (target, consumed) = decode_record_name(packet, start + prefix, end)?;
+                    if consumed != end {
+                        return Err(DnsError::InvalidRecordLength);
+                    }
+                    let mut value = data[..prefix].to_vec();
+                    value.extend_from_slice(target.wire());
+                    RecordData::Value(
+                        if record_type == 15 {
+                            DnsRecordType::Mx
+                        } else {
+                            DnsRecordType::Srv
+                        },
+                        DnsRecordValue::Rdata(value),
+                    )
+                }
+                16 => {
+                    if data.is_empty() {
+                        return Err(DnsError::InvalidRecordLength);
+                    }
+                    let mut next = 0;
+                    while next < data.len() {
+                        next += 1 + usize::from(data[next]);
+                        if next > data.len() {
+                            return Err(DnsError::InvalidRecordLength);
+                        }
+                    }
+                    RecordData::Value(DnsRecordType::Txt, DnsRecordValue::Rdata(data.to_vec()))
                 }
                 _ => RecordData::Other(record_type),
             }

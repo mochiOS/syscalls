@@ -7,7 +7,21 @@ pub const DERIVE: u16 = 4;
 pub const A_SCOPE: u32 = 1;
 pub const AAAA_SCOPE: u32 = 2;
 pub const PTR_SCOPE: u32 = 4;
+/// Legacy address/reverse-lookup grant. Deliberately excludes newer kinds.
 pub const ALL_SCOPES: u32 = A_SCOPE | AAAA_SCOPE | PTR_SCOPE;
+/// Name-server record authority.
+pub const NS_SCOPE: u32 = 1 << 3;
+/// Zone metadata authority.
+pub const SOA_SCOPE: u32 = 1 << 4;
+/// Mail exchanger authority.
+pub const MX_SCOPE: u32 = 1 << 5;
+/// Text record authority.
+pub const TXT_SCOPE: u32 = 1 << 6;
+/// Service-location record authority.
+pub const SRV_SCOPE: u32 = 1 << 7;
+/// Valid protocol bits, not a default grant to existing callers.
+pub const SUPPORTED_SCOPES: u32 =
+    ALL_SCOPES | NS_SCOPE | SOA_SCOPE | MX_SCOPE | TXT_SCOPE | SRV_SCOPE;
 pub const MAX_TIMEOUT: u32 = 30_000;
 pub const MAX_RESULT_LEN: usize = 2 * 1024 * 1024;
 pub const MAX_RECORDS: usize = 65535 / 11;
@@ -30,13 +44,23 @@ pub enum Error {
 #[repr(u16)]
 pub enum Kind {
     A = 1,
+    Ns = 2,
+    Soa = 6,
     Ptr = 12,
+    Mx = 15,
+    Txt = 16,
     Aaaa = 28,
+    Srv = 33,
 }
 impl Kind {
     pub fn decode(value: u16) -> Result<Self, Error> {
         match value {
             1 => Ok(Self::A),
+            2 => Ok(Self::Ns),
+            6 => Ok(Self::Soa),
+            15 => Ok(Self::Mx),
+            16 => Ok(Self::Txt),
+            33 => Ok(Self::Srv),
             12 => Ok(Self::Ptr),
             28 => Ok(Self::Aaaa),
             _ => Err(Error::Invalid),
@@ -47,6 +71,11 @@ impl Kind {
             Self::A => A_SCOPE,
             Self::Aaaa => AAAA_SCOPE,
             Self::Ptr => PTR_SCOPE,
+            Self::Ns => NS_SCOPE,
+            Self::Soa => SOA_SCOPE,
+            Self::Mx => MX_SCOPE,
+            Self::Txt => TXT_SCOPE,
+            Self::Srv => SRV_SCOPE,
         }
     }
 }
@@ -147,7 +176,7 @@ pub struct Limits {
 impl Limits {
     fn valid(self) -> Result<(), Error> {
         if self.scopes == 0
-            || self.scopes & !ALL_SCOPES != 0
+            || self.scopes & !SUPPORTED_SCOPES != 0
             || self.maximum_timeout == 0
             || self.maximum_timeout > MAX_TIMEOUT
         {
@@ -280,8 +309,51 @@ fn value_valid(kind: Kind, value: &[u8]) -> Result<(), Error> {
     match kind {
         Kind::A if value.len() == 4 => Ok(()),
         Kind::Aaaa if value.len() == 16 => Ok(()),
-        Kind::Ptr => Name::decode(value).map(|_| ()),
+        Kind::Ptr | Kind::Ns => Name::decode(value).map(|_| ()),
+        Kind::Mx | Kind::Srv => {
+            let prefix = if kind == Kind::Mx { 2 } else { 6 };
+            Name::decode(value.get(prefix..).ok_or(Error::Invalid)?).map(|_| ())
+        }
+        Kind::Soa => {
+            let first = name_end(value, 0)?;
+            let second = name_end(value, first)?;
+            if second.checked_add(20) == Some(value.len()) {
+                Ok(())
+            } else {
+                Err(Error::Invalid)
+            }
+        }
+        Kind::Txt => {
+            if value.is_empty() {
+                return Err(Error::Invalid);
+            }
+            let mut end = 0;
+            while end < value.len() {
+                end += 1 + usize::from(value[end]);
+                if end > value.len() {
+                    return Err(Error::Invalid);
+                }
+            }
+            Ok(())
+        }
         _ => Err(Error::Invalid),
+    }
+}
+
+fn name_end(bytes: &[u8], start: usize) -> Result<usize, Error> {
+    let mut offset = start;
+    loop {
+        let length = usize::from(*bytes.get(offset).ok_or(Error::Invalid)?);
+        if length > 63 {
+            return Err(Error::Invalid);
+        }
+        offset = offset.checked_add(1 + length).ok_or(Error::Invalid)?;
+        if offset > bytes.len() || offset - start > 255 {
+            return Err(Error::Invalid);
+        }
+        if length == 0 {
+            return Ok(offset);
+        }
     }
 }
 
