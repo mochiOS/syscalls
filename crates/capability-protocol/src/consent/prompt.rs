@@ -114,6 +114,19 @@ impl<'a> Prompt<'a> {
         })
     }
 
+    /// Decode a proposed text choice, never evidence of physical input. Only
+    /// options explicitly offered by the broker can be selected.
+    pub fn choice_for_shortcut(&self, key: u8) -> Option<Choice> {
+        let choice = match key.to_ascii_lowercase() {
+            b'n' => Choice::Deny,
+            b'y' => Choice::AllowOnce,
+            b'p' => Choice::AllowForProcess,
+            b'a' => Choice::AllowPersistently,
+            _ => return None,
+        };
+        self.choices.contains(choice).then_some(choice)
+    }
+
     /// This never reads stdin or authorizes execution. Positive decisions
     /// still need the controller's independently authenticated input evidence.
     pub fn write_text(&self, output: &mut impl fmt::Write) -> fmt::Result {
@@ -134,7 +147,13 @@ impl<'a> Prompt<'a> {
             Choice::AllowPersistently,
         ] {
             if let Some(label) = self.label(choice) {
-                writeln!(output, "  {label}")?;
+                let key = match choice {
+                    Choice::Deny => 'n',
+                    Choice::AllowOnce => 'y',
+                    Choice::AllowForProcess => 'p',
+                    Choice::AllowPersistently => 'a',
+                };
+                writeln!(output, "  [{key}] {label}")?;
             }
         }
         Ok(())
