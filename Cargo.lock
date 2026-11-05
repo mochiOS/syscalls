@@ -667,6 +667,15 @@ dependencies = [
  "rustls-rustcrypto",
  "webpki-roots",
  "x509-cert",
+ "zeroize",
+]
+
+[[package]]
+name = "mochios-tls-stream-ffi"
+version = "0.1.0"
+dependencies = [
+ "getrandom",
+ "mochios-tls-client",
 ]
 
 [[package]]

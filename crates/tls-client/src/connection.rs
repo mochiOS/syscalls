@@ -92,12 +92,21 @@ impl TlsConnection {
             .map(|suite| suite.suite())
     }
 
+    /// Return the server-selected ALPN bytes after a verified handshake.
+    pub fn negotiated_protocol(&self) -> Option<&[u8]> {
+        if matches!(self.state, TlsState::Established | TlsState::PeerClosed | TlsState::Closing | TlsState::Closed) {
+            self.inner.alpn_protocol()
+        } else {
+            None
+        }
+    }
+
     pub fn peer_certificates(&self) -> Option<&[CertificateDer<'static>]> {
         self.inner.peer_certificates()
     }
 
     pub fn peer_certificate_info(&self) -> Result<PeerCertificateInfo, TlsError> {
-        if self.state != TlsState::Established {
+        if !matches!(self.state, TlsState::Established | TlsState::PeerClosed | TlsState::Closing | TlsState::Closed) {
             return Err(TlsError::InvalidState);
         }
         let end_entity = self

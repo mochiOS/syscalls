@@ -14,6 +14,7 @@ rustls = { version = "0.23.40", default-features = false, features = ["custom-pr
 rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc", "zeroize"] }
 webpki-roots = "1"
 x509-cert = { version = "0.2", default-features = false }
+zeroize = { version = "1", default-features = false, features = ["alloc"] }
 
 [target.'cfg(any(target_os = "mochios", target_os = "none"))'.dependencies]
 mochi-user-platform = { git = "https://github.com/mochiOS/syscalls", package = "mochi-user-platform", default-features = false }

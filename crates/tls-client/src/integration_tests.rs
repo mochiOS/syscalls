@@ -713,3 +713,5 @@ fn oversized_tls_record_header_is_rejected() {
     ));
     assert_eq!(client.state(), TlsState::Failed);
 }
+
+mod buffered_tests;

@@ -12,11 +12,12 @@ mod error;
 mod time;
 mod trust_store;
 mod verifier;
+pub mod stream;
 
 #[cfg(test)]
 mod integration_tests;
 
-pub use config::{build_client_config, crypto_provider};
+pub use config::{build_client_config, crypto_provider, set_client_alpn};
 pub use connection::{PeerCertificateInfo, TlsConnection, TlsEvent, TlsState};
 pub use error::TlsError;
 pub use time::FixedTimeProvider;

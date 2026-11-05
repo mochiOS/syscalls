@@ -18,6 +18,7 @@ members = [
     "crates/posix-protocol",
     "crates/network-stack",
     "crates/tls-client",
+    "crates/tls-stream-ffi",
     "crates/user-database",
     "crates/user-protocol",
     "crates/virtio-gpu-protocol",

@@ -1,0 +1,19 @@
+[package]
+name = "mochios-tls-stream-ffi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+test = false
+doctest = false
+
+[features]
+test-fixtures = ["mochios-tls-client/test-web-pki"]
+
+[dependencies]
+mochios-tls-client = { path = "../tls-client" }
+getrandom = { version = "0.2.17", features = ["custom"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("mochios", "none"))'] }

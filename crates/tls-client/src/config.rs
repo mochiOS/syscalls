@@ -1,4 +1,5 @@
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 use rustls::client::{ClientConfig, Resumption, WebPkiServerVerifier};
 use rustls::time_provider::TimeProvider;
@@ -51,4 +52,19 @@ pub fn build_client_config(
     config.enable_secret_extraction = false;
     config.alpn_protocols.clear();
     Ok(config)
+}
+
+/// Set the ordered ALPN offer without changing certificate verification, TLS
+/// versions, cipher suites, resumption, or early-data policy. Protocol names
+/// are opaque bytes. Reject empty names, duplicates, and unbounded offers.
+pub fn set_client_alpn(config: &mut ClientConfig, protocols: &[Vec<u8>]) -> Result<(), TlsError> {
+    if protocols.len() > 16
+        || protocols.iter().any(|p| p.is_empty() || p.len() > 255)
+        || protocols.iter().map(|p| p.len() + 1).sum::<usize>() > 1024
+        || protocols.iter().enumerate().any(|(i, p)| protocols[..i].contains(p))
+    {
+        return Err(TlsError::InvalidConfiguration);
+    }
+    config.alpn_protocols = protocols.to_vec();
+    Ok(())
 }
