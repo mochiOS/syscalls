@@ -411,6 +411,12 @@ pub const OP_VOLUME_STATUS_HANDLE: u16 = 126;
 pub const OP_CHECK_EXECUTABLE: u16 = 127;
 pub const CHECK_EXECUTABLE_RIGHTS: u64 =
     mnu_abi::HANDLE_RIGHT_READ | mnu_abi::HANDLE_RIGHT_TRANSFER;
+/// Empty body; CONTROL|TRANSFER PTY master and WAIT Process attachments.
+/// Observe whether that live process belongs to this terminal's foreground job.
+pub const OP_TERMINAL_PROCESS_FOREGROUND: u16 = 145;
+/// Empty body and one WAIT Process. Observe controlling-terminal membership;
+/// no terminal ID, file Handle or other authority is returned.
+pub const OP_PROCESS_HAS_TERMINAL: u16 = 146;
 
 /// Recognize assigned requests before operation-specific attachment admission.
 /// Holes are unassigned, not aliases or compatibility operations. OP_STATUS is
@@ -425,6 +431,9 @@ pub const fn is_request_opcode(opcode: u16) -> bool {
             | OP_WAITED_CHILD_CPU_USAGE..=OP_SIGNAL_THREAD_FAULT
             | OP_SIGNAL_DELIVERY_ORIGIN..=OP_SOCKET_RECORD_ENDPOINT
             | OP_FORK_PREPARE..=process_domain::OP_SPAWN
+            | OP_GROUP_LOOKUP
+            | OP_TERMINAL_PROCESS_FOREGROUND
+            | OP_PROCESS_HAS_TERMINAL
     )
 }
 pub const THREAD_WAIT_INTERRUPT_RIGHTS: u64 =

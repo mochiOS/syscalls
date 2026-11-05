@@ -3,9 +3,41 @@
 use super::{Choice, Correlation, Error, Ticket};
 pub const WAIT_OPCODE: u32 = u32::from_le_bytes(*b"MCNW");
 pub const COMMAND_OPCODE: u32 = u32::from_le_bytes(*b"MCNC");
+pub const TEXT_POLL_OPCODE: u32 = u32::from_le_bytes(*b"MCNP");
+pub const TEXT_RELEASE_OPCODE: u32 = u32::from_le_bytes(*b"MCNX");
 pub const WAIT_BYTES: usize = 16;
 pub const COMMAND_BYTES: usize = 64;
 const VERSION: u16 = 1;
+
+/// Nonblocking text registration/offer retrieval. Attach exactly one PTY
+/// master with CONTROL|TRANSFER. An idle success is an eight-byte zero status;
+/// an offer uses the common prompt frame. Release withdraws that same object.
+pub fn encode_text_poll(release: bool) -> [u8; WAIT_BYTES] {
+    let mut bytes = [0; WAIT_BYTES];
+    bytes[..4].copy_from_slice(
+        &if release {
+            TEXT_RELEASE_OPCODE
+        } else {
+            TEXT_POLL_OPCODE
+        }
+        .to_le_bytes(),
+    );
+    bytes[4..6].copy_from_slice(&VERSION.to_le_bytes());
+    bytes
+}
+pub fn decode_text_poll(bytes: &[u8]) -> Result<bool, Error> {
+    if bytes.len() != WAIT_BYTES || bytes[6..] != [0; 10] {
+        return Err(Error::Invalid);
+    }
+    if bytes[4..6] != VERSION.to_le_bytes() {
+        return Err(Error::UnsupportedVersion);
+    }
+    match u32::from_le_bytes(bytes[..4].try_into().unwrap()) {
+        TEXT_POLL_OPCODE => Ok(false),
+        TEXT_RELEASE_OPCODE => Ok(true),
+        _ => Err(Error::UnknownKind),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]

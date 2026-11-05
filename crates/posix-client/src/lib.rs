@@ -1013,6 +1013,60 @@ impl<T: ObjectTransport> Client<T> {
             .ok_or(ClientError::MismatchedResponse)
     }
 
+    /// Match only explicitly delegated terminal/controller and process objects.
+    /// No PID, local FD or terminal number supplies authority.
+    pub fn terminal_process_foreground(
+        &self,
+        master: ObjectHandleAttachment<T::Handle>,
+        process: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<bool, ClientError<T::Error>> {
+        let mut handles = ObjectHandles::new();
+        for (object, rights) in [
+            (
+                master,
+                mnu_abi::HANDLE_RIGHT_CONTROL | mnu_abi::HANDLE_RIGHT_TRANSFER,
+            ),
+            (process, mnu_abi::HANDLE_RIGHT_WAIT),
+        ] {
+            if object.handle == T::Handle::default() || object.rights & rights != rights {
+                return Err(ClientError::Remote(-13));
+            }
+            handles
+                .push(ObjectHandleAttachment { rights, ..object })
+                .map_err(|_| ClientError::RequestTooLarge)?;
+        }
+        let mut response = [0; 1];
+        let length = self.request_without_reply_handles(
+            protocol::OP_TERMINAL_PROCESS_FOREGROUND,
+            &[],
+            &mut response,
+            &mut handles,
+        )?;
+        protocol::process_domain::decode_membership(&response[..length])
+            .map_err(ClientError::Protocol)
+    }
+
+    pub fn process_has_terminal(
+        &self,
+        process: ObjectHandleAttachment<T::Handle>,
+    ) -> Result<bool, ClientError<T::Error>> {
+        if process.handle == T::Handle::default() || process.rights != mnu_abi::HANDLE_RIGHT_WAIT {
+            return Err(ClientError::Remote(-13));
+        }
+        let mut handles = ObjectHandles::new();
+        handles
+            .push(process)
+            .map_err(|_| ClientError::RequestTooLarge)?;
+        let mut reply = [0; 1];
+        let length = self.request_without_reply_handles(
+            protocol::OP_PROCESS_HAS_TERMINAL,
+            &[],
+            &mut reply,
+            &mut handles,
+        )?;
+        protocol::process_domain::decode_membership(&reply[..length]).map_err(ClientError::Protocol)
+    }
+
     pub fn set_terminal_foreground_process_group(
         &self,
         terminal: ObjectHandleAttachment<T::Handle>,
@@ -2191,6 +2245,8 @@ impl<T: ObjectTransport> Client<T> {
                 | protocol::OP_VOLUME_STATUS_AT
                 | protocol::OP_VOLUME_STATUS_HANDLE
                 | protocol::OP_CHECK_EXECUTABLE
+                | protocol::OP_TERMINAL_PROCESS_FOREGROUND
+                | protocol::OP_PROCESS_HAS_TERMINAL
                 | protocol::read_scope::OP_CREATE
                 | protocol::read_scope::OP_INFO
                 | protocol::read_scope::OP_OPEN
