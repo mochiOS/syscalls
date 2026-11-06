@@ -4,6 +4,9 @@
 
 mod auxiliary;
 mod executable_name;
+mod library_source;
+mod library_identity;
+mod dlfcn;
 mod wall_clock;
 mod system_identity;
 mod static_tls;
@@ -377,6 +380,7 @@ struct ThreadControl {
     reent_mapping_size: AtomicUsize,
     ptsname_buffer: terminal_name::Buffer,
     resolver_error: AtomicU32,
+    loader_error: dlfcn::ErrorSlot,
     joinability: AtomicU32,
     join_waiter: AtomicU32,
     cancel_state: AtomicU32,
@@ -428,6 +432,7 @@ impl ThreadControl {
             reent_mapping_size: AtomicUsize::new(0),
             ptsname_buffer: terminal_name::Buffer::new(),
             resolver_error: AtomicU32::new(0),
+            loader_error: dlfcn::ErrorSlot::new(),
             joinability: AtomicU32::new(THREAD_JOINABLE),
             join_waiter: AtomicU32::new(0),
             cancel_state: AtomicU32::new(PTHREAD_CANCEL_ENABLE),
@@ -1251,6 +1256,7 @@ fn reserve_thread_control()
         // retired slot; its new owner has not been published or started yet.
         unsafe { control.ptsname_buffer.reset() };
         control.resolver_error.store(0, Ordering::Relaxed);
+        unsafe { control.loader_error.reset() };
         control.generation.store(generation, Ordering::Release);
         control.creation_pending.store(0, Ordering::Relaxed);
         control.native_id.store(0, Ordering::Relaxed);
@@ -2619,6 +2625,9 @@ fn attach_fd_launch_context(
 }
 
 extern "C" fn run_fini_array() {
+    if let Err(error) = dlfcn::finalize() {
+        startup_failure(b"newlib: library finalization failed: ", error);
+    }
     match dynamic_lifecycle::finalize() {
         Ok(true) => return,
         Ok(false) => {}

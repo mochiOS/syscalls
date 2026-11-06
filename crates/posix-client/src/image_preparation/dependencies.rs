@@ -91,6 +91,7 @@ impl<B: Backend> Drop for Node<B> {
     }
 }
 pub(super) struct Dependencies<B: Backend> {
+    pub(super) retain_files: bool,
     nodes: Buffer<B>,
     images: Buffer<B>,
     objects: Buffer<B>,
@@ -105,6 +106,7 @@ pub(super) struct Dependencies<B: Backend> {
 impl<B: Backend> Default for Dependencies<B> {
     fn default() -> Self {
         Self {
+            retain_files: false,
             nodes: Buffer::default(),
             images: Buffer::default(),
             objects: Buffer::default(),
@@ -128,6 +130,9 @@ impl<B: Backend> Drop for Dependencies<B> {
     }
 }
 impl<B: Backend> Dependencies<B> {
+    pub(super) fn sources(&self) -> impl Iterator<Item = &[u8]> {
+        (0..self.count()).map(|index| self.node(index).source.bytes())
+    }
     fn count(&self) -> usize {
         self.nodes.length / core::mem::size_of::<Node<B>>()
     }
@@ -328,11 +333,13 @@ impl<B: Backend> Dependencies<B> {
             },
             node.source.bytes(),
         )?;
-        B::critical(|| {
-            let node = self.node_mut(index);
-            B::close(node.handle);
-            node.handle = 0;
-        });
+        if !self.retain_files {
+            B::critical(|| {
+                let node = self.node_mut(index);
+                B::close(node.handle);
+                node.handle = 0;
+            });
+        }
         Ok(())
     }
     pub(super) fn discover(

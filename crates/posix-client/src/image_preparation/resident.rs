@@ -65,6 +65,72 @@ impl<B: Backend, M: elf_mapping::Backend, const N: usize> Library<B, M, N> {
         self.source.bytes()
     }
 
+    /// Detect equal captured bytes across groups. Embedding APIs must also
+    /// compare the identities of the opened files, including changed aliases.
+    pub fn intersects(&self, other: &Self) -> bool {
+        core::iter::once(self.source())
+            .chain(self.dependencies.sources())
+            .any(|source| {
+                core::iter::once(other.source())
+                    .chain(other.dependencies.sources())
+                    .any(|candidate| source == candidate)
+            })
+    }
+
+    fn open_path(&mut self, backend: &B, path: &[u8]) -> Result<(), c_int> {
+        B::critical(|| {
+            let file = backend.open_library(path)?;
+            self.file = file.handle;
+            if file.handle == 0
+                || file.rights & posix_protocol::CHECK_EXECUTABLE_RIGHTS
+                    != posix_protocol::CHECK_EXECUTABLE_RIGHTS
+            {
+                return Err(EACCES);
+            }
+            backend.validate_library(file)
+        })
+    }
+
+    fn find_root(&mut self, backend: &B, name: &[u8], search: Option<&[u8]>) -> Result<(), c_int> {
+        if name.contains(&b'/') {
+            return self.open_path(backend, name);
+        }
+        if name.is_empty() {
+            return Err(ENOENT);
+        }
+        if name.contains(&b'$') {
+            return Err(ENOTSUP);
+        }
+        let mut denied = false;
+        let mut path = [0; posix_protocol::MAX_PATH_LEN];
+        for list in search.into_iter().chain(core::iter::once(
+            crate::configuration::DEFAULT_SHARED_LIBRARY_PATH,
+        )) {
+            if list.contains(&b'$') {
+                return Err(ENOTSUP);
+            }
+            for directory in list.split(|b| *b == b':' || *b == b';') {
+                let prefix = directory.len() + usize::from(!directory.is_empty());
+                let length = prefix
+                    .checked_add(name.len())
+                    .filter(|n| *n <= path.len())
+                    .ok_or(ENAMETOOLONG)?;
+                path[..directory.len()].copy_from_slice(directory);
+                if prefix != 0 {
+                    path[prefix - 1] = b'/';
+                }
+                path[prefix..length].copy_from_slice(name);
+                match self.open_path(backend, &path[..length]) {
+                    Ok(()) => return Ok(()),
+                    Err(ENOENT | ENOTDIR) if self.file == 0 => {}
+                    Err(EACCES) if self.file == 0 => denied = true,
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        Err(if denied { EACCES } else { ENOENT })
+    }
+
     /// Call only on a fresh, externally registered resource owner. All Handles
     /// and allocations are published before any blocking call or callback.
     /// Authentication of root and every dependency precedes any VM operation.
@@ -79,19 +145,21 @@ impl<B: Backend, M: elf_mapping::Backend, const N: usize> Library<B, M, N> {
         if self.file != 0 || self.source.length != 0 || self.captured {
             return Err(EINVAL);
         }
-        B::critical(|| {
-            let file = backend.open_library(path)?;
-            self.file = file.handle;
-            if file.handle == 0
-                || file.rights & posix_protocol::CHECK_EXECUTABLE_RIGHTS
-                    != posix_protocol::CHECK_EXECUTABLE_RIGHTS
-            {
-                return Err(EACCES);
-            }
-            backend.validate_library(file)
-        })?;
+        self.find_root(
+            backend,
+            path,
+            if identity.is_secure() {
+                None
+            } else {
+                variables.library_path
+            },
+        )?;
         self.source.capture(backend, self.file, MAX_IMAGE)?;
         backend.validate_captured(Source::Root, self.source.bytes())?;
+        // Anonymous executable copies do not pin filesystem inodes themselves.
+        // Keep the opened references until this owner is retired so unlink and
+        // inode reuse cannot substitute another file for a retained identity.
+        self.dependencies.retain_files = true;
         self.dependencies
             .discover(self.source.bytes(), backend, variables, identity, true)?;
         self.address = address;
@@ -106,8 +174,6 @@ impl<B: Backend, M: elf_mapping::Backend, const N: usize> Library<B, M, N> {
         self.callbacks
             .slots::<usize>(scope.lifecycle_scratch_len().map_err(|_| ENOEXEC)?)?;
         B::critical(|| {
-            B::close(self.file);
-            self.file = 0;
             self.captured = true;
         });
         Ok(())
