@@ -44,40 +44,30 @@ pub struct Member<B: Backend> {
     initialized: bool,
 }
 
-/// Scratch slots belong to the caller; parsing and mapping require no global
-/// allocator. A failed release retains the exact range for explicit retry.
-pub struct Resident<'owner, 'scope, 'image, B: Backend> {
-    scope: &'owner Scope<'scope, 'image>,
-    members: &'owner mut [Option<Member<B>>],
-    phase: Phase,
+enum PhaseSlot<'a> {
+    Local(Phase),
+    Shared(&'a mut Phase),
 }
 
-impl<'owner, 'scope, 'image, B: Backend> Resident<'owner, 'scope, 'image, B> {
-    pub fn new(
-        scope: &'owner Scope<'scope, 'image>,
-        members: &'owner mut [Option<Member<B>>],
-    ) -> Result<Self, ElfError> {
-        if members.len() != scope.objects.len() || members.iter().any(Option::is_some) {
-            return Err(ElfError::Invalid);
-        }
-        // Late TLS allocation and resolver startup need their own runtime
-        // transactions. Reject before mapping, never publish unresolved code.
-        for object in scope.objects {
-            if object.image.is_fixed()
-                || object.image.tls_template(0)?.is_some()
-                || object.image.requires_indirect_scope()?
-                || object.image.has_copies()?
-                || object.image.lifecycle.preinit.count != 0
-            {
-                return Err(ElfError::Unsupported);
-            }
-        }
-        Ok(Self {
-            scope,
-            members,
+/// Persistent mapping ownership without references into parser workspaces.
+/// A later borrowed view must describe exactly the same captured bytes, names,
+/// placement and lookup order. No lifetime erasure or pinned self-reference is
+/// needed. Store this owner before entering abandon-capable C callbacks.
+pub struct State<B: Backend, const N: usize> {
+    members: [Option<Member<B>>; N],
+    phase: Phase,
+    identity: Option<[u8; 32]>,
+}
+impl<B: Backend, const N: usize> Default for State<B, N> {
+    fn default() -> Self {
+        Self {
+            members: [const { None }; N],
             phase: Phase::Empty,
-        })
+            identity: None,
+        }
     }
+}
+impl<B: Backend, const N: usize> State<B, N> {
     pub fn phase(&self) -> Phase {
         self.phase
     }
@@ -88,8 +78,113 @@ impl<'owner, 'scope, 'image, B: Backend> Resident<'owner, 'scope, 'image, B> {
             .filter(|m| m.mapping.retained().is_some())
             .count()
     }
+    /// After a callback abandons its borrowed operation, prevent publication
+    /// and allow explicit finalization/cleanup of the initialized prefix.
+    pub fn abandon(&mut self) {
+        if matches!(
+            self.phase,
+            Phase::Mapping | Phase::Initializing | Phase::Finalizing
+        ) {
+            self.phase = Phase::Failed;
+        }
+    }
+    pub fn bind<'a, 'scope, 'image>(
+        &'a mut self,
+        scope: &'a Scope<'scope, 'image>,
+    ) -> Result<Resident<'a, 'scope, 'image, B>, ElfError> {
+        use sha2::{Digest, Sha256};
+        if scope.objects.len() > N {
+            return Err(ElfError::BufferTooSmall);
+        }
+        let mut digest = Sha256::new();
+        digest.update((scope.objects.len() as u64).to_le_bytes());
+        for object in scope.objects {
+            digest.update((object.name.len() as u64).to_le_bytes());
+            digest.update(object.name);
+            digest.update(object.bias.to_le_bytes());
+            digest.update((object.image.bytes.len() as u64).to_le_bytes());
+            digest.update(object.image.bytes);
+        }
+        for index in scope.order {
+            digest.update((*index as u64).to_le_bytes());
+        }
+        let identity = digest.finalize().into();
+        if let Some(previous) = self.identity {
+            if previous != identity {
+                return Err(ElfError::Invalid);
+            }
+        } else {
+            validate(scope)?;
+            self.identity = Some(identity);
+        }
+        Ok(Resident {
+            scope,
+            members: &mut self.members[..scope.objects.len()],
+            phase: PhaseSlot::Shared(&mut self.phase),
+        })
+    }
+}
+
+fn validate(scope: &Scope<'_, '_>) -> Result<(), ElfError> {
+    // Late TLS allocation and resolver startup need separate runtime
+    // transactions. Reject before mapping, never publish unresolved code.
+    for object in scope.objects {
+        if object.image.is_fixed()
+            || object.image.tls_template(0)?.is_some()
+            || object.image.requires_indirect_scope()?
+            || object.image.has_copies()?
+            || object.image.lifecycle.preinit.count != 0
+        {
+            return Err(ElfError::Unsupported);
+        }
+    }
+    Ok(())
+}
+
+/// Scratch slots belong to the caller; parsing and mapping require no global
+/// allocator. A failed release retains the exact range for explicit retry.
+pub struct Resident<'owner, 'scope, 'image, B: Backend> {
+    scope: &'owner Scope<'scope, 'image>,
+    members: &'owner mut [Option<Member<B>>],
+    phase: PhaseSlot<'owner>,
+}
+
+impl<'owner, 'scope, 'image, B: Backend> Resident<'owner, 'scope, 'image, B> {
+    pub fn new(
+        scope: &'owner Scope<'scope, 'image>,
+        members: &'owner mut [Option<Member<B>>],
+    ) -> Result<Self, ElfError> {
+        if members.len() != scope.objects.len() || members.iter().any(Option::is_some) {
+            return Err(ElfError::Invalid);
+        }
+        validate(scope)?;
+        Ok(Self {
+            scope,
+            members,
+            phase: PhaseSlot::Local(Phase::Empty),
+        })
+    }
+    pub fn phase(&self) -> Phase {
+        match &self.phase {
+            PhaseSlot::Local(phase) => *phase,
+            PhaseSlot::Shared(phase) => **phase,
+        }
+    }
+    fn set_phase(&mut self, value: Phase) {
+        match &mut self.phase {
+            PhaseSlot::Local(phase) => *phase = value,
+            PhaseSlot::Shared(phase) => **phase = value,
+        }
+    }
+    pub fn retained(&self) -> usize {
+        self.members
+            .iter()
+            .flatten()
+            .filter(|m| m.mapping.retained().is_some())
+            .count()
+    }
     fn failure(&mut self, operation: Operation<B::Error>, rollback: bool) -> Failure<B::Error> {
-        self.phase = Phase::Failed;
+        self.set_phase(Phase::Failed);
         Failure {
             operation,
             cleanup: if rollback { self.release() } else { None },
@@ -119,7 +214,7 @@ impl<'owner, 'scope, 'image, B: Backend> Resident<'owner, 'scope, 'image, B> {
         output: &mut [u8],
         mut backend: impl FnMut() -> B,
     ) -> Result<(), Failure<B::Error>> {
-        if self.phase != Phase::Empty {
+        if self.phase() != Phase::Empty {
             return Err(Failure {
                 operation: Operation::State,
                 cleanup: None,
@@ -136,7 +231,7 @@ impl<'owner, 'scope, 'image, B: Backend> Resident<'owner, 'scope, 'image, B> {
                 cleanup: None,
             });
         }
-        self.phase = Phase::Mapping;
+        self.set_phase(Phase::Mapping);
         for index in 0..self.scope.objects.len() {
             let result = (|| {
                 let length = self.scope.write(index, output).map_err(Operation::Elf)?;
@@ -211,7 +306,7 @@ impl<'owner, 'scope, 'image, B: Backend> Resident<'owner, 'scope, 'image, B> {
                 ));
             }
         }
-        self.phase = Phase::Mapped;
+        self.set_phase(Phase::Mapped);
         Ok(())
     }
 
@@ -269,7 +364,7 @@ impl<'owner, 'scope, 'image, B: Backend> Resident<'owner, 'scope, 'image, B> {
         scratch: &mut [usize],
         mut invoke: impl FnMut(u64) -> Result<(), B::Error>,
     ) -> Result<(), Failure<B::Error>> {
-        if self.phase != Phase::Mapped {
+        if self.phase() != Phase::Mapped {
             return Err(Failure {
                 operation: Operation::State,
                 cleanup: None,
@@ -300,7 +395,7 @@ impl<'owner, 'scope, 'image, B: Backend> Resident<'owner, 'scope, 'image, B> {
                 }
             }
         }
-        self.phase = Phase::Initializing;
+        self.set_phase(Phase::Initializing);
         for &index in plan.order() {
             let object = &self.scope.objects[index];
             let metadata = object.image.lifecycle;
@@ -325,7 +420,7 @@ impl<'owner, 'scope, 'image, B: Backend> Resident<'owner, 'scope, 'image, B> {
                 return Err(self.failure(error, false));
             }
         }
-        self.phase = Phase::Ready;
+        self.set_phase(Phase::Ready);
         Ok(())
     }
 
@@ -334,7 +429,7 @@ impl<'owner, 'scope, 'image, B: Backend> Resident<'owner, 'scope, 'image, B> {
         name: &[u8],
         version: Version<'_>,
     ) -> Result<Option<Symbol<'_, B>>, ElfError> {
-        if self.phase != Phase::Ready {
+        if self.phase() != Phase::Ready {
             return Err(ElfError::Invalid);
         }
         let Some(export) = self.scope.exports().find(name, version)? else {
@@ -365,7 +460,7 @@ impl<'owner, 'scope, 'image, B: Backend> Resident<'owner, 'scope, 'image, B> {
         mut invoke: impl FnMut(u64) -> Result<(), B::Error>,
     ) -> Result<(), Failure<B::Error>> {
         if matches!(
-            self.phase,
+            self.phase(),
             Phase::Empty | Phase::Closed | Phase::Mapping | Phase::Initializing | Phase::Finalizing
         ) {
             return Err(Failure {
@@ -377,7 +472,7 @@ impl<'owner, 'scope, 'image, B: Backend> Resident<'owner, 'scope, 'image, B> {
             operation: Operation::Elf(error),
             cleanup: None,
         })?;
-        self.phase = Phase::Finalizing;
+        self.set_phase(Phase::Finalizing);
         for &index in plan.order().iter().rev() {
             let Some(member) = self.members[index].as_mut() else {
                 continue;
@@ -410,7 +505,7 @@ impl<'owner, 'scope, 'image, B: Backend> Resident<'owner, 'scope, 'image, B> {
         if let Some(error) = self.release() {
             return Err(self.failure(Operation::Memory(vm::Error::Native(error)), false));
         }
-        self.phase = Phase::Closed;
+        self.set_phase(Phase::Closed);
         Ok(())
     }
 }

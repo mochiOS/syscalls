@@ -11,6 +11,7 @@ mochi-user-platform = { path = "../platform", optional = true, default-features 
 mochi-user-syscall = { path = "../syscall", optional = true }
 mochios-posix-protocol = { path = "../posix-protocol" }
 mochios-filesystem-protocol = { path = "../filesystem-protocol" }
+sha2 = { version = "0.10", default-features = false }
 getrandom02 = { package = "getrandom", version = "0.2", optional = true, features = ["custom"] }
 
 [features]
