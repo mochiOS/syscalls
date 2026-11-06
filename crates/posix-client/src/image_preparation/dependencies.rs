@@ -335,18 +335,14 @@ impl<B: Backend> Dependencies<B> {
         });
         Ok(())
     }
-    pub(super) fn build(
+    pub(super) fn discover(
         &mut self,
         root: &[u8],
-        output: &mut Buffer<B>,
-        lifecycle: &mut Buffer<B>,
-        tls: &mut Buffer<B>,
-        indirect: &mut Buffer<B>,
         backend: &B,
         variables: Environment<'_>,
         identity: mochios_posix_client::process_image::Identity,
         runtime: bool,
-    ) -> Result<mochios_posix_client::process_image::Executable, c_int> {
+    ) -> Result<(), c_int> {
         let path = variables.library_path.filter(|value| !value.is_empty());
         let preload = variables.preload.filter(|value| !value.is_empty());
         let audit = variables.audit.filter(|value| !value.is_empty());
@@ -400,49 +396,68 @@ impl<B: Backend> Dependencies<B> {
             self.capture(backend, cursor, &mut total)?;
             cursor += 1;
         }
+        Ok(())
+    }
+    pub(super) fn scope<'a>(
+        &'a mut self,
+        root: &'a [u8],
+        address: u64,
+    ) -> Result<Scope<'a, 'a>, c_int> {
+        let nodes = if self.count() == 0 {
+            &[][..]
+        } else {
+            // The initialized prefix owns each Node and its immutable buffers.
+            unsafe {
+                core::slice::from_raw_parts(self.nodes.pointer.cast::<Node<B>>(), self.count())
+            }
+        };
+        let (_, objects, order) = scope_inputs(
+            root,
+            nodes,
+            &mut self.images,
+            &mut self.objects,
+            &mut self.order,
+            address,
+        )?;
+        Scope::new(objects, order).map_err(|_| ENOEXEC)
+    }
+    pub(super) fn build(
+        &mut self,
+        root: &[u8],
+        output: &mut Buffer<B>,
+        lifecycle: &mut Buffer<B>,
+        tls: &mut Buffer<B>,
+        indirect: &mut Buffer<B>,
+        backend: &B,
+        variables: Environment<'_>,
+        identity: mochios_posix_client::process_image::Identity,
+        runtime: bool,
+    ) -> Result<mochios_posix_client::process_image::Executable, c_int> {
+        self.discover(root, backend, variables, identity, runtime)?;
         let count = self.count().checked_add(1).ok_or(ENOMEM)?;
-        // Backend storage provides alignment for these pointer/integer views.
-        // No view owns a resource or has Drop; the callback owner reclaims the
-        // backing buffers even when a C handler abandons this frame.
-        let images = self
-            .images
-            .slots::<core::mem::MaybeUninit<Pie<'_>>>(count)?;
-        for index in 0..count {
-            let bytes = if index == 0 {
-                root
-            } else {
-                self.node(index - 1).source.bytes()
-            };
-            let image = Pie::parse_object(bytes).map_err(|_| ENOEXEC)?;
-            unsafe { images.add(index).write(core::mem::MaybeUninit::new(image)) };
-        }
-        let images = unsafe { core::slice::from_raw_parts(images.cast::<Pie<'_>>(), count) };
-        let objects = self
-            .objects
-            .slots::<core::mem::MaybeUninit<Object<'_, '_>>>(count)?;
         let mut entropy = [0u8; 8];
         backend.entropy(&mut entropy)?;
-        let mut address = 0x20000000
+        let address = 0x20000000
             + (u64::from_le_bytes(entropy) % (64 * 1024 * 1024 / PAGE_SIZE as u64))
                 * PAGE_SIZE as u64;
-        for (index, image) in images.iter().enumerate() {
-            let (bias, end) = image.placement(address).map_err(|_| ENOEXEC)?;
-            address = address.max(end);
-            let name = if index == 0 {
-                &[][..]
-            } else {
-                self.node(index - 1).name.bytes()
-            };
+        // Each source allocation remains immutable after discovery. Borrow the
+        // node storage independently so disjoint metadata work buffers remain
+        // available while the temporary link scope is in use.
+        let nodes = if self.count() == 0 {
+            &[][..]
+        } else {
             unsafe {
-                objects
-                    .add(index)
-                    .write(core::mem::MaybeUninit::new(Object { name, image, bias }))
-            };
-        }
-        let objects =
-            unsafe { core::slice::from_raw_parts(objects.cast::<Object<'_, '_>>(), count) };
-        let order = self.order.slots::<usize>(count)?;
-        let order = unsafe { core::slice::from_raw_parts_mut(order, count) };
+                core::slice::from_raw_parts(self.nodes.pointer.cast::<Node<B>>(), self.count())
+            }
+        };
+        let (images, objects, order) = scope_inputs(
+            root,
+            nodes,
+            &mut self.images,
+            &mut self.objects,
+            &mut self.order,
+            address,
+        )?;
         let scope = Scope::new(objects, order).map_err(|_| ENOEXEC)?;
         let (region_count, fixup_count) = scope.deferred_counts().map_err(|_| ENOEXEC)?;
         if fixup_count != 0 && !images[0].has_indirect_runtime().map_err(|_| ENOEXEC)? {
@@ -498,13 +513,15 @@ impl<B: Backend> Dependencies<B> {
             .has_writable_relocation_runtime()
             .map_err(|_| ENOEXEC)?;
         if (writable_count != 0 && !v2)
-            || (protection_count != 0 && !v2 && !images[0].has_relro_runtime().map_err(|_| ENOEXEC)?)
+            || (protection_count != 0
+                && !v2
+                && !images[0].has_relro_runtime().map_err(|_| ENOEXEC)?)
         {
             return Err(ENOEXEC);
         }
         let indirect_length = if fixup_count != 0 {
-            let size =
-                crate::indirect_image::encoded_length(region_count, fixup_count).map_err(|_| E2BIG)?;
+            let size = crate::indirect_image::encoded_length(region_count, fixup_count)
+                .map_err(|_| E2BIG)?;
             metadata_size(&images[0], size)?;
             size
         } else {
@@ -591,7 +608,9 @@ impl<B: Backend> Dependencies<B> {
             }
             let regions = unsafe { core::slice::from_raw_parts_mut(regions, region_count) };
             let fixups = unsafe { core::slice::from_raw_parts_mut(fixups, fixup_count) };
-            let mut pending = scope.deferred(regions, fixups, scratch).map_err(|_| ENOEXEC)?;
+            let mut pending = scope
+                .deferred(regions, fixups, scratch)
+                .map_err(|_| ENOEXEC)?;
             let size = pending.encoded_length().map_err(|_| ENOEXEC)?;
             if size != indirect_length {
                 return Err(EIO);
@@ -613,8 +632,13 @@ impl<B: Backend> Dependencies<B> {
             indirect.reserve(protection_length)?;
             let payload =
                 unsafe { core::slice::from_raw_parts_mut(indirect.pointer, protection_length) };
-            indirect.length = crate::relocation_protection::wrap_with_writable(indirect_length, ranges, writable, payload)
-                .map_err(|_| ENOEXEC)?;
+            indirect.length = crate::relocation_protection::wrap_with_writable(
+                indirect_length,
+                ranges,
+                writable,
+                payload,
+            )
+            .map_err(|_| ENOEXEC)?;
         }
         let plan = scope.lifecycle(scratch).map_err(|_| ENOEXEC)?;
         let mut late = false;
@@ -667,7 +691,8 @@ impl<B: Backend> Dependencies<B> {
                 return Err(ENOEXEC);
             }
             lifecycle.reserve(plan_length)?;
-            let payload = unsafe { core::slice::from_raw_parts_mut(lifecycle.pointer, plan_length) };
+            let payload =
+                unsafe { core::slice::from_raw_parts_mut(lifecycle.pointer, plan_length) };
             let encoded = if late {
                 plan.encode_deferred(payload)
             } else {
@@ -681,4 +706,48 @@ impl<B: Backend> Dependencies<B> {
         }
         images[0].executable(objects[0].bias).map_err(|_| ENOEXEC)
     }
+}
+
+fn scope_inputs<'a, B: Backend>(
+    root: &'a [u8],
+    nodes: &'a [Node<B>],
+    images_buffer: &'a mut Buffer<B>,
+    objects_buffer: &'a mut Buffer<B>,
+    order_buffer: &'a mut Buffer<B>,
+    mut address: u64,
+) -> Result<(&'a [Pie<'a>], &'a [Object<'a, 'a>], &'a mut [usize]), c_int> {
+    let count = nodes.len().checked_add(1).ok_or(ENOMEM)?;
+    // Backend storage provides alignment for these pointer/integer views.
+    // No view owns a resource or has Drop; the callback owner reclaims the
+    // backing buffers even when a C handler abandons this frame.
+    let images = images_buffer.slots::<core::mem::MaybeUninit<Pie<'_>>>(count)?;
+    for index in 0..count {
+        let bytes = if index == 0 {
+            root
+        } else {
+            nodes[index - 1].source.bytes()
+        };
+        let image = Pie::parse_object(bytes).map_err(|_| ENOEXEC)?;
+        unsafe { images.add(index).write(core::mem::MaybeUninit::new(image)) };
+    }
+    let images = unsafe { core::slice::from_raw_parts(images.cast::<Pie<'_>>(), count) };
+    let objects = objects_buffer.slots::<core::mem::MaybeUninit<Object<'_, '_>>>(count)?;
+    for (index, image) in images.iter().enumerate() {
+        let (bias, end) = image.placement(address).map_err(|_| ENOEXEC)?;
+        address = address.max(end);
+        let name = if index == 0 {
+            &[][..]
+        } else {
+            nodes[index - 1].name.bytes()
+        };
+        unsafe {
+            objects
+                .add(index)
+                .write(core::mem::MaybeUninit::new(Object { name, image, bias }))
+        };
+    }
+    let objects = unsafe { core::slice::from_raw_parts(objects.cast::<Object<'_, '_>>(), count) };
+    let order = order_buffer.slots::<usize>(count)?;
+    let order = unsafe { core::slice::from_raw_parts_mut(order, count) };
+    Ok((images, objects, order))
 }

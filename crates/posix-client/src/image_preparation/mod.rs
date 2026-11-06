@@ -9,6 +9,7 @@ use core::{ffi::c_int, marker::PhantomData, ptr};
 mod dependencies;
 mod interpreter;
 pub mod scoped;
+pub mod resident;
 
 const PAGE_SIZE: usize = 4096;
 

@@ -123,6 +123,10 @@ impl<'scope, 'image> Scope<'scope, 'image> {
         self.order
     }
 
+    pub fn objects(&self) -> &[Object<'scope, 'image>] {
+        self.objects
+    }
+
     fn definition(
         &self,
         origin: usize,
