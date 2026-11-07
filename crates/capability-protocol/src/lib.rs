@@ -6,6 +6,7 @@ pub mod presentation;
 pub mod application_launch;
 pub mod signed_image;
 pub mod library_image;
+pub mod prepared_exec;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

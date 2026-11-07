@@ -57,9 +57,9 @@ unsafe impl Backend for Runtime {
         Ok(())
     }
     fn validate_captured(&self, _: shared::Source<'_>, _: &[u8]) -> Result<(), c_int> {
-        // Preparation owns untrusted private input. The common execution
-        // broker authenticates the retained output before native replacement.
-        // Transformed output still needs source/dependency attestation there.
+        // Preparation owns untrusted private input. For transformed output,
+        // the execution broker authenticates these recorded captures and
+        // reconstructs the output before permitting native replacement.
         Ok(())
     }
     fn entropy(&self, output: &mut [u8]) -> Result<(), c_int> {
@@ -119,23 +119,37 @@ pub(super) fn with_image(
     image: u32,
     inputs: &exec_inputs::Inputs,
     identity: mochios_posix_client::process_image::Identity,
-    operation: impl FnOnce(shared::Prepared<'_>) -> Result<(), c_int>,
+    operation: impl FnOnce(shared::Prepared<'_>, &[u8]) -> Result<(), c_int>,
 ) -> Result<(), c_int> {
-    let backend = Runtime;
+    use shared::replay::Recording;
     io_resources::with(
-        || Ok(Preparation::<Runtime>::default()),
-        |preparation| {
-            let prepared = preparation.prepare(
-                &backend,
-                image,
+        || {
+            Recording::new(
+                Runtime,
                 Environment {
                     library_path: inputs.environment(b"LD_LIBRARY_PATH"),
                     preload: inputs.environment(b"LD_PRELOAD"),
                     audit: inputs.environment(b"LD_AUDIT"),
                 },
-                identity,
-            )?;
-            operation(prepared)
+            )
+        },
+        |backend| {
+            io_resources::with(
+                || Ok(Preparation::<Recording<Runtime>>::default()),
+                |preparation| {
+                    let prepared = preparation.prepare(
+                        backend,
+                        image,
+                        Environment {
+                            library_path: inputs.environment(b"LD_LIBRARY_PATH"),
+                            preload: inputs.environment(b"LD_PRELOAD"),
+                            audit: inputs.environment(b"LD_AUDIT"),
+                        },
+                        identity,
+                    )?;
+                    backend.with_bytes(|record| operation(prepared, record))
+                },
+            )
         },
     )
 }

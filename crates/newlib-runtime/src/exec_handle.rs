@@ -1,5 +1,6 @@
 //! Execute retained image objects. Neither authorization nor loading reopens a path.
 use super::*;
+use mochios_posix_client::image_preparation::Backend;
 use sha2::{Digest, Sha256};
 
 pub(super) fn with_startup(
@@ -150,39 +151,66 @@ fn replace_image(
             .session_info()
             .map_err(map_posix_client_error)?,
     );
-    exec_image::with_image(
-        image,
-        inputs,
-        credentials,
-        |prepared| {
-            with_startup(
-                inputs,
-                execfn,
-                fds,
-                mochios_posix_client::process_image::Process {
-                    image: prepared.executable,
-                    identity: credentials,
-                    lifecycle: prepared.lifecycle,
-                    tls: prepared.tls,
-                    indirect: prepared.indirect,
-                },
-                |startup| {
-                    // Measure the exact retained output, rather than reading
-                    // either the mutable original or a newly prepared object
-                    // again across callback-capable I/O.
-                    let digest: [u8; 32] = Sha256::digest(prepared.bytes).into();
-                    authorize(prepared.image, identity, &digest)?;
-                    match syscall::image::replace_bounded(prepared.image, identity, startup, ceiling) {
-                        Ok(never) => match never {},
-                        Err(error) => Err(mochios_posix_client::image_error::errno(error.raw())),
-                    }
-                },
-            )
-        },
-    )
+    exec_image::with_image(image, inputs, credentials, |prepared, record| {
+        with_startup(
+            inputs,
+            execfn,
+            fds,
+            mochios_posix_client::process_image::Process {
+                image: prepared.executable,
+                identity: credentials,
+                lifecycle: prepared.lifecycle,
+                tls: prepared.tls,
+                indirect: prepared.indirect,
+            },
+            |startup| {
+                // Measure the exact retained output, rather than reading
+                // either the mutable original or a newly prepared object
+                // again across callback-capable I/O.
+                let digest: [u8; 32] = Sha256::digest(prepared.bytes).into();
+                if prepared.source == prepared.bytes {
+                    authorize(prepared.image, identity, &digest, None)?;
+                } else {
+                    io_resources::with(
+                        || {
+                            exec_image::Runtime::critical(|| {
+                                Ok(OpenImage(exec_image::Runtime.create_image(record.len())?))
+                            })
+                        },
+                        |bundle| {
+                            let mut at = 0;
+                            while at < record.len() {
+                                let n =
+                                    exec_image::Runtime.write_at(bundle.0, &record[at..], at)?;
+                                if n == 0 || n > record.len() - at {
+                                    return Err(EIO);
+                                }
+                                at += n;
+                            }
+                            {
+                                let _delivery = defer_native_delivery();
+                                let readonly = exec_image::Runtime.readonly_image(bundle.0)?;
+                                close_object_handle(core::mem::replace(&mut bundle.0, readonly));
+                            }
+                            authorize(bundle.0, identity, &digest, Some(record.len()))
+                        },
+                    )?;
+                }
+                match syscall::image::replace_bounded(prepared.image, identity, startup, ceiling) {
+                    Ok(never) => match never {},
+                    Err(error) => Err(mochios_posix_client::image_error::errno(error.raw())),
+                }
+            },
+        )
+    })
 }
 
-fn authorize(image: u32, identity: &str, digest: &[u8; 32]) -> Result<(), c_int> {
+fn authorize(
+    image: u32,
+    identity: &str,
+    digest: &[u8; 32],
+    transcript: Option<usize>,
+) -> Result<(), c_int> {
     let endpoint = syscall_errno(syscall::raw_syscall2(
         syscall::SyscallNumber::FindProcessByName,
         CAPABILITY_SERVICE_NAME.as_ptr() as u64,
@@ -191,12 +219,20 @@ fn authorize(image: u32, identity: &str, digest: &[u8; 32]) -> Result<(), c_int>
     if endpoint == 0 {
         return Err(ENOENT);
     }
-    let mut request = [0; 40 + mochios_capability_protocol::MAX_EXECUTABLE_IDENTITY_LEN];
-    let length = mochios_capability_protocol::encode_authorize_exec_object_request(
-        identity,
-        digest,
-        &mut request,
-    )
+    let mut request = [0; mochios_capability_protocol::prepared_exec::MAX_REQUEST];
+    let length = match transcript {
+        Some(length) => mochios_capability_protocol::prepared_exec::encode(
+            identity,
+            length as u64,
+            digest,
+            &mut request,
+        ),
+        None => mochios_capability_protocol::encode_authorize_exec_object_request(
+            identity,
+            digest,
+            &mut request,
+        ),
+    }
     .map_err(|_| EINVAL)?;
     let mut handles = mnu_abi::IpcObjectHandles::default();
     handles.count = 1;
