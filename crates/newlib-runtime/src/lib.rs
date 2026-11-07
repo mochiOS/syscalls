@@ -5646,6 +5646,42 @@ fn credential_id(select: impl FnOnce(posix_protocol::SessionInfo) -> u32) -> cre
     credentials::finish(result, EOVERFLOW, set_errno)
 }
 
+/// 初期イメージと現在の資格情報が環境変数の参照を許す場合だけ値を返します。
+///
+/// 認証済みイメージ開始時のsecure状態とPOSIXサービスの現在の資格情報を使用し、
+/// アプリが書き換えられるauxvから安全性を推測しません。不明・照会失敗・権限差・
+/// ID表現範囲外ではNULLを返します。判定中のerrnoは呼び出し前の値へ戻します。
+///
+/// # Safety
+/// `name`はNULLまたは読み取り可能なNUL終端文字列でなければなりません。
+/// 戻り値はgetenvと同じ借用ポインターで、環境変数の変更後に保持しないでください。
+/// @since Unreleased
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn secure_getenv(name: *const c_char) -> *mut c_char {
+    if name.is_null() || auxiliary::initial_secure_mode() != Some(false) {
+        return ptr::null_mut();
+    }
+    let previous_errno = unsafe { *__errno() };
+    let ids = posix_client()
+        .and_then(|client| client.session_info())
+        .ok()
+        .map(|session| {
+            [
+                session.real_uid,
+                session.effective_uid,
+                session.real_gid,
+                session.effective_gid,
+            ]
+        });
+    let allowed = credentials::allows_environment(auxiliary::initial_secure_mode(), ids);
+    set_errno(previous_errno);
+    if allowed {
+        unsafe { getenv(name) }
+    } else {
+        ptr::null_mut()
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn getuid() -> credentials::Id {
     credential_id(|session| session.real_uid)

@@ -5,6 +5,17 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 static BASE: AtomicUsize = AtomicUsize::new(0);
 static COUNT: AtomicUsize = AtomicUsize::new(0);
+// Unknown until authenticated image reconciliation completes. Never re-read the
+// writable ELF vector to decide whether a secure environment may be consumed.
+static INITIAL_SECURE_MODE: AtomicUsize = AtomicUsize::new(2);
+
+pub(super) fn initial_secure_mode() -> Option<bool> {
+    match INITIAL_SECURE_MODE.load(Ordering::Acquire) {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
 
 // Published once during startup, before constructors or application threads.
 // fork retains the initial stack mappings at their original virtual addresses.
@@ -87,7 +98,9 @@ pub(super) fn install_identity(identity: Identity) -> Result<(), c_int> {
         base: BASE.load(Ordering::Acquire),
         count: COUNT.load(Ordering::Relaxed),
     }
-    .install_identity(identity)
+    .install_identity(identity)?;
+    INITIAL_SECURE_MODE.store(usize::from(identity.is_secure()), Ordering::Release);
+    Ok(())
 }
 
 #[cfg_attr(target_os = "mochios", unsafe(no_mangle))]
