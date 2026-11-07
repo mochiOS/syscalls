@@ -1172,6 +1172,9 @@ pub mod input {
     pub const RAW_INPUT_HANDLE_KEY: u64 = 0x494e_5055_5452_4157;
     pub const RAW_ENDPOINT_OPCODE: u32 = u32::from_le_bytes(*b"IRAW");
     pub const RAW_ENDPOINT_REQUEST: [u8; 8] = [b'I', b'R', b'A', b'W', 1, 0, 0, 0];
+    /// Ask the input authority to warm its dictionary after the first desktop
+    /// frame. This does not change the input mode or transfer input authority.
+    pub const IME_WARMUP_REQUEST: [u8; 4] = *b"IMEW";
     /// Driver-originated synthetic input remains usable, but is not user presence.
     pub const RAW_FLAG_SYNTHETIC: u8 = 1;
 
