@@ -1,6 +1,7 @@
 #![no_std]
 
 extern crate alloc;
+pub mod pci;
 
 #[cfg(feature = "mboot-wifi")]
 pub mod mboot_wifi;
