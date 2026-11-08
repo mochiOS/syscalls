@@ -5,7 +5,9 @@ use crate::{OpenAtRequest, OpenBase, ProtocolError};
 pub const OP_CREATE: u16 = 136;
 pub const OP_INFO: u16 = 137;
 pub const OP_OPEN: u16 = 138;
-/// Empty payload; scope TRANSFER, requester WAIT and child WAIT|SIGNAL.
+/// Empty payload inherits credentials; SessionInfo assigns fresh credentials
+/// under the existing root launcher gate. Scope TRANSFER, requester WAIT and
+/// child WAIT|SIGNAL are always required. No process is selected by a wire PID.
 pub const OP_REGISTER_CHILD: u16 = 139;
 /// Empty request and one scope. Authenticated source metadata, never a PID selector.
 pub const OP_SOURCE_INFO: u16 = 140;

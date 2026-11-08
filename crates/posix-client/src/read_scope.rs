@@ -56,6 +56,18 @@ impl<T: ObjectTransport> Client<T> {
         requester: ObjectHandleAttachment<T::Handle>,
         child: ObjectHandleAttachment<T::Handle>,
     ) -> Result<(), ClientError<T::Error>> {
+        self.register_launched_child_credentials(scope, requester, child, None)
+    }
+
+    /// A privileged userspace launcher may assign the fresh child's POSIX
+    /// credentials. This neither changes the parent nor grants native rights.
+    pub fn register_launched_child_credentials(
+        &self,
+        scope: ObjectHandleAttachment<T::Handle>,
+        requester: ObjectHandleAttachment<T::Handle>,
+        child: ObjectHandleAttachment<T::Handle>,
+        credentials: Option<protocol::SessionInfo>,
+    ) -> Result<(), ClientError<T::Error>> {
         let mut handles = self.read_scope_attachment(scope)?;
         for (source, rights) in [
             (requester, mnu_abi::HANDLE_RIGHT_WAIT),
@@ -71,7 +83,20 @@ impl<T: ObjectTransport> Client<T> {
                 .push(ObjectHandleAttachment { rights, ..source })
                 .map_err(|_| ClientError::RequestTooLarge)?;
         }
-        self.request_without_reply_handles(wire::OP_REGISTER_CHILD, &[], &mut [], &mut handles)?;
+        let mut payload = [0; protocol::SESSION_INFO_LEN];
+        let payload = if let Some(credentials) = credentials {
+            protocol::encode_session_info(credentials, &mut payload)
+                .map_err(ClientError::Protocol)?;
+            &payload[..]
+        } else {
+            &[]
+        };
+        self.request_without_reply_handles(
+            wire::OP_REGISTER_CHILD,
+            payload,
+            &mut [],
+            &mut handles,
+        )?;
         Ok(())
     }
 
