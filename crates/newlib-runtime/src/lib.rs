@@ -145,6 +145,7 @@ mod signal_scope;
 mod signal_jump;
 mod process_accounting;
 mod process_memory;
+mod suspend_signals;
 mod resource_usage_output;
 mod passwd;
 use signal_preparation::Preparation;
@@ -5567,10 +5568,29 @@ pub extern "C" fn ppoll(
 
 fn suspend_with_signal_mask(mask: *const u64) -> Result<c_int, c_int> {
     masked_multiplex(mask, |control, caught| {
-        wait_for_multiplex(&mut [], syscall::HANDLE_WAIT_INFINITE, control, caught)?;
-        // No objects and no deadline can never complete successfully.
-        // Keep a broken backend visible instead of reporting a fake signal.
-        Err(EIO)
+        let client = posix_client().map_err(map_posix_client_error)?;
+        suspend_signals::wait(
+            caught,
+            || control.caught_signal_generation.load(Ordering::Acquire),
+            || {
+                pthread_testcancel();
+                client.thread_signal_epoch().map_err(map_posix_client_error)
+            },
+            drain_pending_signals,
+            |epoch| {
+                // The empty acceptance set never consumes a signal. Pending
+                // unblocked signals or a changed delivery epoch return EINTR.
+                // A retained service reply can wake us even inside an active
+                // native upcall, where the kernel cannot reuse its live stack
+                // for a second asynchronous callback.
+                match client.wait_thread_signal_info_since(0, epoch) {
+                    Err(PosixClientError::Remote(posix_protocol::STATUS_EINTR)) => Ok(()),
+                    Err(error) => Err(map_posix_client_error(error)),
+                    Ok(_) => Err(EIO), // An empty set cannot accept a signal.
+                }
+            },
+        )?;
+        Err(EINTR)
     })
 }
 
