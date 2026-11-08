@@ -9,6 +9,9 @@ pub const TOKEN_RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_DUPLICATE | mnu_abi::HANDLE_
 pub const ATTACH_RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_TRANSFER;
 pub const PROCESS_RIGHTS: u64 = mnu_abi::HANDLE_RIGHT_WAIT;
 pub const MAX_ROOTS: usize = 4;
+/// Launcher-delegated session domain for userspace brokers. The native launch
+/// context transports this opaque key without interpreting session policy.
+pub const LAUNCH_CONTEXT_KEY: u64 = u64::from_le_bytes(*b"POSXDOMN");
 
 pub fn decode_membership(input: &[u8]) -> Result<bool, crate::ProtocolError> {
     match input {
