@@ -103,6 +103,7 @@ mod process_clock;
 mod thread_stack;
 mod thread_join;
 mod pthread_attr;
+mod thread_stack_info;
 mod pthread_concurrency;
 mod credentials;
 mod groups;
@@ -375,6 +376,8 @@ struct ThreadControl {
     result: AtomicUsize,
     stack_base: AtomicUsize,
     stack_size: AtomicUsize,
+    stack_guard_size: AtomicUsize,
+    initial_stack_thread: AtomicU32,
     owns_stack: AtomicU32,
     reent: AtomicUsize,
     reent_mapping_size: AtomicUsize,
@@ -427,6 +430,8 @@ impl ThreadControl {
             result: AtomicUsize::new(0),
             stack_base: AtomicUsize::new(0),
             stack_size: AtomicUsize::new(0),
+            stack_guard_size: AtomicUsize::new(0),
+            initial_stack_thread: AtomicU32::new(0),
             owns_stack: AtomicU32::new(0),
             reent: AtomicUsize::new(0),
             reent_mapping_size: AtomicUsize::new(0),
@@ -1270,6 +1275,8 @@ fn reserve_thread_control()
         control.result.store(0, Ordering::Relaxed);
         control.stack_base.store(0, Ordering::Relaxed);
         control.stack_size.store(0, Ordering::Relaxed);
+        control.stack_guard_size.store(0, Ordering::Relaxed);
+        control.initial_stack_thread.store(0, Ordering::Relaxed);
         control.owns_stack.store(0, Ordering::Relaxed);
         control.reent.store(0, Ordering::Relaxed);
         control.reent_mapping_size.store(0, Ordering::Relaxed);
@@ -1597,6 +1604,7 @@ fn register_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
 
 fn register_initial_thread() -> Option<(Pthread, &'static ThreadControl)> {
     if let Some(current) = current_thread_control() {
+        current.1.initial_stack_thread.store(1, Ordering::Release);
         return Some(current);
     }
     let native_id = native_thread_id().ok()?;
@@ -1614,6 +1622,7 @@ fn register_initial_thread() -> Option<(Pthread, &'static ThreadControl)> {
     control
         .reent
         .store(unsafe { _impure_ptr } as usize, Ordering::Relaxed);
+    control.initial_stack_thread.store(1, Ordering::Relaxed);
     control.state.store(THREAD_RUNNING, Ordering::Release);
     Some((token, control))
 }
@@ -8623,6 +8632,12 @@ pub unsafe extern "C" fn pthread_create(
     let stack_size = attributes.stacksize;
     let guard_size = attributes.guardsize;
     let owns_stack = stack_address.is_null();
+    let actual_guard_size = if owns_stack {
+        match mochios_posix_client::thread_stack::Layout::new(stack_size, guard_size, PAGE_SIZE) {
+            Some(layout) => layout.guard_size,
+            None => return EINVAL,
+        }
+    } else { 0 };
     let detachstate = attributes.detachstate;
     // Owned mappings include the inaccessible guard prefix. Track the whole
     // reservation so every failure, join, detach and fork cleanup releases it.
@@ -8653,6 +8668,7 @@ pub unsafe extern "C" fn pthread_create(
     control.argument.store(argument as usize, Ordering::Relaxed);
     control.stack_base.store(stack_base, Ordering::Relaxed);
     control.stack_size.store(stack_size, Ordering::Relaxed);
+    control.stack_guard_size.store(actual_guard_size, Ordering::Relaxed);
     control
         .owns_stack
         .store(u32::from(owns_stack), Ordering::Relaxed);
@@ -9020,6 +9036,54 @@ fn notify_thread_waiter(control: &ThreadControl) {
     native_counter_wake_all(&control.multiplex_generation);
     control.wait_generation.fetch_add(1, Ordering::Release);
     native_mutex_wake_all(&control.wait_generation);
+}
+
+/// Read the actual stack and detach attributes of a live process-local pthread.
+/// Runtime-owned guards are excluded from its usable stack. Caller-supplied
+/// stacks have no runtime-owned guard. The initial thread uses the kernel's
+/// self-only bounds snapshot; unknown foreign stacks return ENOTSUP. An older
+/// kernel's unsupported-query error is propagated instead of guessing a size.
+/// Returns an error number directly; no attributes are written on query failure.
+///
+/// # Safety
+/// `attributes` must address writable storage for one pthread_attr_t.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_getattr_np(
+    thread: Pthread,
+    attributes: *mut PthreadAttr,
+) -> c_int {
+    if attributes.is_null() {
+        return EINVAL;
+    }
+    let result = (|| {
+        let (observed, detachstate) = thread_reference::with_live_token(thread, |control| {
+            (
+                thread_stack_info::Observed {
+                    base: control.stack_base.load(Ordering::Acquire),
+                    reservation_size: control.stack_size.load(Ordering::Acquire),
+                    guard_size: control.stack_guard_size.load(Ordering::Acquire),
+                    owned: control.owns_stack.load(Ordering::Acquire) != 0,
+                    initial: control.initial_stack_thread.load(Ordering::Acquire) != 0,
+                },
+                if control.joinability.load(Ordering::Acquire) == THREAD_DETACHED {
+                    PTHREAD_CREATE_DETACHED
+                } else {
+                    PTHREAD_CREATE_JOINABLE
+                },
+            )
+        })?;
+        let stack = thread_stack_info::resolve(observed, || {
+            let mut info = mnu_abi::ProcessInitialStackInfo::default();
+            syscall_errno(syscall::raw_syscall2(
+                syscall::SyscallNumber::ProcessInitialStackRead,
+                &mut info as *mut _ as u64,
+                core::mem::size_of_val(&info) as u64,
+            ))?;
+            Ok(info)
+        })?;
+        pthread_attr::install_stack_snapshot(attributes, stack, detachstate)
+    })();
+    result.err().unwrap_or(0)
 }
 
 #[unsafe(no_mangle)]

@@ -80,6 +80,29 @@ pub(super) fn init(attr: *mut PthreadAttr) -> c_int {
     result.err().unwrap_or(0)
 }
 
+/// Encode a fresh observed attribute without copying Rust padding/reserved bytes.
+pub(super) fn install_stack_snapshot(
+    attr: *mut PthreadAttr,
+    stack: super::thread_stack_info::Stack,
+    detachstate: c_int,
+) -> Result<(), c_int> {
+    let destination = address(attr, 0, size_of::<PthreadAttr>())?;
+    let mut bytes = [0; size_of::<PthreadAttr>()];
+    macro_rules! field {
+        ($name:ident, $value:expr) => {{
+            let value = $value.to_ne_bytes();
+            let offset = core::mem::offset_of!(PthreadAttr, $name);
+            bytes[offset..offset + value.len()].copy_from_slice(&value);
+        }};
+    }
+    field!(is_initialized, 1 as c_int);
+    field!(detachstate, detachstate);
+    field!(stackaddr, stack.base);
+    field!(stacksize, stack.size);
+    field!(guardsize, stack.guard_size);
+    user_copy::write(destination as *mut u8, &bytes)
+}
+
 pub(super) fn set_stack(attr: *mut PthreadAttr, stack: *mut c_void, length: usize) -> c_int {
     if stack.is_null() || length < PTHREAD_STACK_MIN {
         return EINVAL;
