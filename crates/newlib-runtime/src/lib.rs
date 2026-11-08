@@ -144,6 +144,7 @@ mod signal_preparation;
 mod signal_scope;
 mod signal_jump;
 mod process_accounting;
+mod process_memory;
 mod resource_usage_output;
 mod passwd;
 use signal_preparation::Preparation;
