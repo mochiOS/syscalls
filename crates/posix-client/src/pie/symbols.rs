@@ -30,6 +30,9 @@ pub(super) enum Definition {
 }
 
 impl<'a> Table<'a> {
+    pub(super) fn inspection(&self) -> (&'a [u8], &'a [u8]) {
+        (self.entries, self.strings)
+    }
     // HASH, STRTAB, SYMTAB, STRSZ, SYMENT, GNU_HASH.
     pub(super) fn parse(
         tags: [Option<u64>; 6],

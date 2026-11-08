@@ -162,6 +162,7 @@ fn replace_image(
                 lifecycle: prepared.lifecycle,
                 tls: prepared.tls,
                 indirect: prepared.indirect,
+                loaded_objects: prepared.loaded_objects,
             },
             |startup| {
                 // Measure the exact retained output, rather than reading

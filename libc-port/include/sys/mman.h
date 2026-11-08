@@ -27,6 +27,14 @@
 #define POSIX_MADV_WILLNEED 3
 #define POSIX_MADV_DONTNEED 4
 
+/* Unix extensions. DONTNEED discards private anonymous contents; unlike
+   POSIX_MADV_DONTNEED it is not merely a placement hint. */
+#define MADV_NORMAL 0
+#define MADV_RANDOM 1
+#define MADV_SEQUENTIAL 2
+#define MADV_WILLNEED 3
+#define MADV_DONTNEED 4
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -36,6 +44,13 @@ int munmap(void *, size_t);
 int mprotect(void *, size_t, int);
 int msync(void *, size_t, int);
 int posix_madvise(void *, size_t, int);
+/* Returns 0 or -1/errno. DONTNEED zeroes private anonymous pages on next
+   access; shared/file/device discard is unsupported. Other listed values
+   are nonbinding hints. Address must be page aligned. */
+int madvise(void *, size_t, int);
+/* Returns 0 or -1/errno. Write ceil(length/page_size) residency bytes without
+   faulting source pages in; only bit zero is defined, and results may age. */
+int mincore(void *, size_t, unsigned char *);
 int shm_open(const char *, int, mode_t);
 int shm_unlink(const char *);
 

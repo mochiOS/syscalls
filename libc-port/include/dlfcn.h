@@ -18,6 +18,16 @@ void *dlopen(const char *, int);
 void *dlsym(void *, const char *);
 int dlclose(void *);
 char *dlerror(void);
+typedef struct {
+    const char *dli_fname;
+    void *dli_fbase;
+    const char *dli_sname;
+    void *dli_saddr;
+} Dl_info;
+/* Returns nonzero for an address inside a loaded object, zero otherwise.
+   Symbol fields can be null. Returned names live only until their image is
+   unloaded; callers must not modify or free the referenced strings. */
+int dladdr(const void *, Dl_info *);
 #ifdef __cplusplus
 }
 #endif

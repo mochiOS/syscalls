@@ -435,6 +435,7 @@ impl<B: Backend> Dependencies<B> {
         lifecycle: &mut Buffer<B>,
         tls: &mut Buffer<B>,
         indirect: &mut Buffer<B>,
+        loaded_objects: &mut Buffer<B>,
         backend: &B,
         variables: Environment<'_>,
         identity: mochios_posix_client::process_image::Identity,
@@ -466,6 +467,11 @@ impl<B: Backend> Dependencies<B> {
             address,
         )?;
         let scope = Scope::new(objects, order).map_err(|_| ENOEXEC)?;
+        let size = crate::loaded_objects::encoded_length(scope.objects(), b"")?;
+        loaded_objects.reserve(size)?;
+        let metadata = unsafe { core::slice::from_raw_parts_mut(loaded_objects.pointer, size) };
+        crate::loaded_objects::encode(scope.objects(), b"", metadata)?;
+        loaded_objects.length = size;
         let (region_count, fixup_count) = scope.deferred_counts().map_err(|_| ENOEXEC)?;
         if fixup_count != 0 && !images[0].has_indirect_runtime().map_err(|_| ENOEXEC)? {
             return Err(ENOEXEC);

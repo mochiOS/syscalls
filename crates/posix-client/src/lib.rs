@@ -2624,3 +2624,5 @@ impl fd::FileOps<mochi_user_platform::handle::Handle> for NativeFileOps {
         mochi_user_platform::handle::seek(handle, offset, basis)
     }
 }
+
+pub mod loaded_objects;

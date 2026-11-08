@@ -7,6 +7,7 @@ mod executable_name;
 mod library_source;
 mod library_identity;
 mod dlfcn;
+mod loader_inspection;
 mod wall_clock;
 mod system_identity;
 mod static_tls;
@@ -105,6 +106,7 @@ mod process_clock;
 mod thread_stack;
 mod thread_join;
 mod pthread_attr;
+mod pthread_schedule;
 mod thread_stack_info;
 mod pthread_concurrency;
 mod credentials;
@@ -123,6 +125,8 @@ mod named_semaphore;
 mod shared_memory;
 mod fd_options;
 mod file_description_flags;
+mod memory_extensions;
+mod whole_file_lock;
 mod socket;
 mod network_byte_order;
 mod internet;
@@ -4340,6 +4344,8 @@ pub unsafe extern "C" fn _start_c(initial_sp: *const usize) -> ! {
     dynamic_lifecycle::prepare()
         .unwrap_or_else(|error| startup_failure(b"newlib: lifecycle capture failed: ", error));
     executable_name::initialize(stack.executable);
+    loader_inspection::initialize()
+        .unwrap_or_else(|error| startup_failure(b"newlib: loader metadata capture failed: ", error));
     dynamic_indirect::initialize()
         .unwrap_or_else(|error| startup_failure(b"newlib: indirect relocation failed: ", error));
     unsafe { __sinit(_impure_ptr) };

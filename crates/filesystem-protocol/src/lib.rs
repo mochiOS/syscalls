@@ -851,3 +851,5 @@ mod tests {
 }
 
 pub mod storage_region;
+
+pub mod whole_file_lock;

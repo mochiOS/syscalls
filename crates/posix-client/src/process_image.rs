@@ -31,6 +31,8 @@ pub const AT_TLS_IMAGE: u64 = 0x6d00_0006;
 /// Deferred userspace resolver plan; the native kernel only relocates its
 /// stack address and never interprets its ELF-specific contents.
 pub const AT_INDIRECT_IMAGE: u64 = 0x6d00_0007;
+/// Immutable userspace loader inspection metadata; no kernel interpretation.
+pub const AT_LOADED_OBJECTS: u64 = 0x6d00_0008;
 pub const INITIAL_HEAP_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,6 +165,7 @@ pub fn encode_initial_stack_for_image(
             lifecycle: &[],
             tls: &[],
             indirect: &[],
+            loaded_objects: &[],
         },
         output,
     )
@@ -211,6 +214,7 @@ pub struct Process<'a> {
     pub lifecycle: &'a [u8],
     pub tls: &'a [u8],
     pub indirect: &'a [u8],
+    pub loaded_objects: &'a [u8],
 }
 
 pub fn encode_initial_stack_for_process(
@@ -260,6 +264,7 @@ fn encode_process(
             || key == AT_LIFECYCLE_IMAGE
             || key == AT_TLS_IMAGE
             || key == AT_INDIRECT_IMAGE
+            || key == AT_LOADED_OBJECTS
             || auxiliary[..index].iter().any(|&(other, _)| other == key)
         {
             return Err(EncodeError::InvalidText);
@@ -298,6 +303,7 @@ fn encode_process(
                 .and_then(|count| count.checked_add(usize::from(!process.lifecycle.is_empty())))
                 .and_then(|count| count.checked_add(usize::from(!process.tls.is_empty())))
                 .and_then(|count| count.checked_add(usize::from(!process.indirect.is_empty())))
+                .and_then(|count| count.checked_add(usize::from(!process.loaded_objects.is_empty())))
                 .and_then(|count| count.checked_mul(2))
                 .and_then(|count| value.checked_add(count))
         })
@@ -338,13 +344,16 @@ fn encode_process(
         .checked_add(7)
         .map(|value| value & !7)
         .ok_or(EncodeError::ImageTooLarge)?;
-    let payload_length = if process.indirect.is_empty() || mapped.is_some() {
+    let indirect_end = if process.indirect.is_empty() || mapped.is_some() {
         tls_end
     } else {
         indirect_offset
             .checked_add(process.indirect.len())
             .ok_or(EncodeError::ImageTooLarge)?
     };
+    let loaded_offset = indirect_end.checked_add(7).map(|n| n & !7).ok_or(EncodeError::ImageTooLarge)?;
+    let payload_length = if process.loaded_objects.is_empty() || mapped.is_some() { indirect_end }
+        else { loaded_offset.checked_add(process.loaded_objects.len()).ok_or(EncodeError::ImageTooLarge)? };
     let stack_length = payload_length
         .checked_add(15)
         .map(|value| value & !15)
@@ -407,6 +416,9 @@ fn encode_process(
             .copy_from_slice(process.indirect);
     }
 
+    if !process.loaded_objects.is_empty() && mapped.is_none() {
+        stack[loaded_offset..loaded_offset + process.loaded_objects.len()].copy_from_slice(process.loaded_objects);
+    }
     for (key, value, relocation) in [
         (AT_PHDR, 0, Some(RelocationKind::ElfProgramHeaders)),
         (AT_PHENT, 0, Some(RelocationKind::ElfProgramHeaderSize)),
@@ -450,6 +462,10 @@ fn encode_process(
         mapped
             .and_then(|m| m.address(2))
             .unwrap_or(indirect_offset as u64),
+        mapped.is_none().then_some(RelocationKind::StackAddress),
+    )))
+    .chain((!process.loaded_objects.is_empty()).then_some((
+        AT_LOADED_OBJECTS, mapped.and_then(|m| m.address(3)).unwrap_or(loaded_offset as u64),
         mapped.is_none().then_some(RelocationKind::StackAddress),
     )))
     .chain(auxiliary.iter().map(|&(key, value)| (key, value, None)))

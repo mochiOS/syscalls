@@ -26,6 +26,7 @@ pub struct Library<B: Backend, M: elf_mapping::Backend, const N: usize> {
     dependencies: dependencies::Dependencies<B>,
     output: Buffer<B>,
     callbacks: Buffer<B>,
+    inspection: Buffer<B>,
     file: u32,
     address: u64,
     captured: bool,
@@ -38,6 +39,7 @@ impl<B: Backend, M: elf_mapping::Backend, const N: usize> Default for Library<B,
             dependencies: dependencies::Dependencies::default(),
             output: Buffer::default(),
             callbacks: Buffer::default(),
+            inspection: Buffer::default(),
             file: 0,
             address: 0,
             captured: false,
@@ -52,6 +54,8 @@ impl<B: Backend, M: elf_mapping::Backend, const N: usize> Drop for Library<B, M,
     }
 }
 impl<B: Backend, M: elf_mapping::Backend, const N: usize> Library<B, M, N> {
+    /// Immutable metadata, valid until this library owner is destroyed.
+    pub fn inspection(&self) -> &[u8] { self.inspection.bytes() }
     pub fn phase(&self) -> Phase {
         self.state.phase()
     }
@@ -165,6 +169,12 @@ impl<B: Backend, M: elf_mapping::Backend, const N: usize> Library<B, M, N> {
         self.address = address;
         let scope = self.dependencies.scope(self.source.bytes(), address)?;
         self.state.bind(&scope).map_err(|_| ENOEXEC)?;
+        let size = crate::loaded_objects::encoded_length(scope.objects(), path)?;
+        self.inspection.reserve(size)?;
+        let metadata = unsafe { core::slice::from_raw_parts_mut(self.inspection.pointer, size) };
+        crate::loaded_objects::encode(scope.objects(), path, metadata)?;
+        self.inspection.length = size;
+
         let mut length = 0;
         for object in scope.objects() {
             length = length.max(object.image.output_length().map_err(|_| ENOEXEC)?);

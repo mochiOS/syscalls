@@ -204,6 +204,16 @@ pub struct Pie<'a> {
     fixed: bool,
 }
 impl<'a> Pie<'a> {
+    /// Captured program headers, dynamic symbols and strings for loader-owned
+    /// inspection metadata. These immutable file bytes grant no VM authority.
+    pub fn inspection(&self) -> (&'a [u8], &'a [u8], &'a [u8]) {
+        let start = u64::from_le_bytes(self.bytes[32..40].try_into().unwrap()) as usize;
+        let end = start + self.count * 56;
+        // parse_mode validated the complete ELF program-header table.
+        let (symbols, strings) = self.symbols.as_ref()
+            .map(|table| table.inspection()).unwrap_or((&[], &[]));
+        (&self.bytes[start..end], symbols, strings)
+    }
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
         Self::parse_mode(bytes, false)
     }

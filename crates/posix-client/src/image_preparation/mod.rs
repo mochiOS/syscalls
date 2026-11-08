@@ -33,6 +33,7 @@ pub struct Prepared<'a> {
     pub lifecycle: &'a [u8],
     pub tls: &'a [u8],
     pub indirect: &'a [u8],
+    pub loaded_objects: &'a [u8],
 }
 
 /// Selection metadata for an immutable input captured by this preparation.
@@ -205,6 +206,7 @@ pub struct Preparation<B: Backend> {
     lifecycle: Buffer<B>,
     tls: Buffer<B>,
     indirect: Buffer<B>,
+    loaded_objects: Buffer<B>,
     original: bool,
     started: bool,
 }
@@ -220,6 +222,7 @@ impl<B: Backend> Default for Preparation<B> {
             lifecycle: Buffer::default(),
             tls: Buffer::default(),
             indirect: Buffer::default(),
+            loaded_objects: Buffer::default(),
             original: false,
             started: false,
         }
@@ -363,6 +366,7 @@ impl<B: Backend> Preparation<B> {
                     &mut self.lifecycle,
                     &mut self.tls,
                     &mut self.indirect,
+                    &mut self.loaded_objects,
                     backend,
                     environment,
                     identity,
@@ -396,6 +400,24 @@ impl<B: Backend> Preparation<B> {
             };
             length
         };
+        // Fixed/native and dependency-free PIE images need inspection data
+        // too. The interpreter path owns a separate graph and is not inferred
+        // from the root's headers here.
+        if self.loaded_objects.length == 0
+            && crate::elf_launch::interpreter(self.source.bytes()).map_err(|_| ENOEXEC)?.is_none()
+        {
+            if let Ok(image) = crate::pie::Pie::parse_object(self.source.bytes()) {
+                let objects = [crate::pie::link_scope::Object {
+                    name: b"", image: &image,
+                    bias: self.executable.map(|image| image.load_bias).unwrap_or(0),
+                }];
+                let size = crate::loaded_objects::encoded_length(&objects, b"")?;
+                self.loaded_objects.reserve(size)?;
+                let metadata = unsafe { core::slice::from_raw_parts_mut(self.loaded_objects.pointer, size) };
+                crate::loaded_objects::encode(&objects, b"", metadata)?;
+                self.loaded_objects.length = size;
+            }
+        }
         B::critical(|| {
             self.handle = backend.create_image(length)?;
             if self.handle == 0 {
@@ -455,6 +477,7 @@ impl<B: Backend> Preparation<B> {
             lifecycle: self.lifecycle.bytes(),
             tls: self.tls.bytes(),
             indirect: self.indirect.bytes(),
+            loaded_objects: self.loaded_objects.bytes(),
         })
     }
 }

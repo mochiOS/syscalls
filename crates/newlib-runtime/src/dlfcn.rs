@@ -70,6 +70,8 @@ struct Entry {
     file: (u64, u64),
     ready: bool,
     order: u64,
+    inspection_address: usize,
+    inspection_length: usize,
 }
 impl Entry {
     const EMPTY: Self = Self {
@@ -79,6 +81,8 @@ impl Entry {
         file: (0, 0),
         ready: false,
         order: 0,
+        inspection_address: 0,
+        inspection_length: 0,
     };
 }
 static TABLE: RuntimeMutex<[Entry; GROUPS]> = RuntimeMutex::new([Entry::EMPTY; GROUPS]);
@@ -151,6 +155,11 @@ impl Drop for Operation {
     fn drop(&mut self) {
         let _delivery = defer_native_delivery();
         if let Some(slot) = self.slot.take() {
+            {
+                let mut table = TABLE.lock();
+                table[slot].inspection_address = 0;
+                table[slot].inspection_length = 0;
+            }
             if self.pointer != 0 {
                 // The operation lease excludes other graph access. An owner
                 // with failed unmaps remains quarantined in the table.
@@ -196,6 +205,33 @@ fn operation<T: Copy>(f: impl FnOnce(&mut Operation) -> Result<T, c_int>) -> Res
             f(operation)
         },
     )
+}
+
+/// Metadata views cannot escape the loader lease. No application callback is
+/// invoked here; a visitor that needs callbacks first copies the metadata.
+pub(super) fn inspect<T: Copy>(
+    visit: impl FnOnce(&[&[u8]]) -> Result<T, c_int>,
+) -> Result<T, c_int> {
+    let read = || {
+        let entries = *TABLE.lock();
+        let mut images = [&[][..]; GROUPS + 1];
+        let initial = loader_inspection::initial();
+        let mut count = 0;
+        if !initial.is_empty() { images[count] = initial; count += 1; }
+        for entry in entries.iter().filter(|entry| entry.inspection_length != 0) {
+            // SAFETY: the loader lease retains this separate immutable buffer.
+            // Do not borrow Library: an initializer may currently own &mut Graph
+            // while calling back into inspection on this same runtime thread.
+            images[count] = unsafe { core::slice::from_raw_parts(
+                entry.inspection_address as *const u8, entry.inspection_length,
+            ) };
+            count += 1;
+        }
+        visit(&images[..count])
+    };
+    let id = native_thread_id().map_err(|e| map_kernel_errno(e.raw()))?;
+    if OWNER.load(Ordering::Acquire) == id { read() }
+    else { operation(|_| read()) }
 }
 fn entry(handle: *mut c_void, allow_failed_close: bool) -> Result<(usize, Entry), c_int> {
     let raw = handle as usize;
@@ -349,6 +385,13 @@ pub extern "C" fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void {
         library
             .install(|| Memory::new(ceiling))
             .map_err(library_error)?;
+        {
+            let metadata = library.inspection();
+            let mut table = TABLE.lock();
+            let entry = &mut table[operation.slot.ok_or(EIO)?];
+            entry.inspection_address = metadata.as_ptr() as usize;
+            entry.inspection_length = metadata.len();
+        }
         if let Err(error) = library.initialize(invoke) {
             let _ = library.close(invoke);
             return Err(library_error(error));

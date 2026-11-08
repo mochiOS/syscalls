@@ -14,7 +14,7 @@ const PAGE: usize = 4096;
 pub struct Layout {
     base: u64,
     length: usize,
-    spans: [(usize, usize); 3],
+    spans: [(usize, usize); 4],
 }
 impl Layout {
     pub fn new(base: u64, process: Process<'_>) -> Result<Self, EncodeError> {
@@ -22,8 +22,8 @@ impl Layout {
             return Err(EncodeError::InvalidText);
         }
         let mut cursor = 0usize;
-        let mut spans = [(0, 0); 3];
-        for (index, bytes) in [process.lifecycle, process.tls, process.indirect]
+        let mut spans = [(0, 0); 4];
+        for (index, bytes) in [process.lifecycle, process.tls, process.indirect, process.loaded_objects]
             .into_iter()
             .enumerate()
         {
@@ -63,7 +63,7 @@ impl Layout {
             .map(|(at, _)| self.base + *at as u64)
     }
     pub(crate) fn matches(self, process: Process<'_>) -> bool {
-        [process.lifecycle, process.tls, process.indirect]
+        [process.lifecycle, process.tls, process.indirect, process.loaded_objects]
             .iter()
             .zip(self.spans)
             .all(|(b, (_, n))| b.len() == n)
@@ -153,7 +153,7 @@ impl<B: Backend> Owner<B> {
             }
             Ok(())
         })?;
-        for (bytes, (offset, _)) in [process.lifecycle, process.tls, process.indirect]
+        for (bytes, (offset, _)) in [process.lifecycle, process.tls, process.indirect, process.loaded_objects]
             .into_iter()
             .zip(layout.spans)
         {
