@@ -48,6 +48,47 @@ pub fn spawn_with_stdio(
     read_scope: ipc::IpcObjectHandle,
     stdio: &[Descriptor; 3],
 ) -> syscall::SysResult<u64> {
+    spawn(
+        destination,
+        path,
+        arguments,
+        environment,
+        read_scope,
+        stdio,
+        false,
+    )
+}
+
+/// Request a fresh protected administrator question before creating this one
+/// child. The caller never receives an elevated UID or a reusable permit.
+pub fn spawn_as_administrator(
+    destination: u32,
+    path: &str,
+    arguments: &[&str],
+    environment: &[&str],
+    read_scope: ipc::IpcObjectHandle,
+    stdio: &[Descriptor; 3],
+) -> syscall::SysResult<u64> {
+    crate::administration::authenticate_broker(destination)?;
+    spawn(
+        destination,
+        path,
+        arguments,
+        environment,
+        read_scope,
+        stdio,
+        true,
+    )
+}
+fn spawn(
+    destination: u32,
+    path: &str,
+    arguments: &[&str],
+    environment: &[&str],
+    read_scope: ipc::IpcObjectHandle,
+    stdio: &[Descriptor; 3],
+    administrator: bool,
+) -> syscall::SysResult<u64> {
     if destination == 0
         || read_scope.handle == 0
         || read_scope.reserved != 0
@@ -55,7 +96,12 @@ pub fn spawn_with_stdio(
     {
         return Err(failure(syscall::NativeError::InvalidArgument));
     }
-    let mut request = [0; wire::MAX_BYTES];
+    let mut request = [0; wire::MAX_BYTES + 8];
+    let offset = if administrator { 8 } else { 0 };
+    if administrator {
+        request[..4].copy_from_slice(&crate::capability::administrator::RUN_OPCODE.to_le_bytes());
+        request[4..8].copy_from_slice(&1u32.to_le_bytes());
+    }
     let length = wire::encode(
         &wire::Request {
             path,
@@ -63,7 +109,7 @@ pub fn spawn_with_stdio(
             environment,
             stdio_metadata: stdio.map(|entry| entry.metadata),
         },
-        &mut request,
+        &mut request[offset..],
     )
     .map_err(|_| failure(syscall::NativeError::InvalidArgument))?;
     let mut owned = Reply {
@@ -87,7 +133,7 @@ pub fn spawn_with_stdio(
     let mut reply = [0; 16];
     let message = ipc::call_object_handles(
         destination,
-        &request[..length],
+        &request[..offset + length],
         &mut reply,
         &mut owned.native,
     )?;

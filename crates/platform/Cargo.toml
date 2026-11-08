@@ -12,6 +12,8 @@ mochios-workspace-protocol = { path = "../workspace-protocol" }
 mochios-package-manifest = { path = "../package-manifest" }
 mboot-protocol = { git = "https://github.com/mochiOS/mBoot", package = "mboot-protocol", optional = true }
 
+zeroize = { version = "1.8", default-features = false, features = ["alloc"] }
+
 [features]
 default = ["runtime"]
 runtime = ["dep:mochi-user-runtime"]

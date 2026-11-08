@@ -11,6 +11,7 @@ pub mod memory_object;
 mod handle_result;
 pub mod workspace;
 pub mod application;
+pub mod administration;
 pub mod execution_peer;
 pub mod presentation;
 #[cfg(any(feature = "std", test))]
@@ -1708,6 +1709,7 @@ pub mod performance {
 }
 
 pub mod capability {
+    pub use mochios_capability_protocol::administrator;
     pub use mochios_capability_protocol::signed_image;
     pub use mochios_capability_protocol::library_image;
     pub use mochios_capability_protocol::prepared_exec;
