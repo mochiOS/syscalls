@@ -175,6 +175,9 @@ fn isolated(executable: &std::path::Path, case: &Case) -> TestResult {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                if output.metadata().map_err(|e| e.to_string())?.len() > 65536 {
+                    return Err("case log exceeded its limit".into());
+                }
                 return if status.success() {
                     Ok(())
                 } else {
@@ -197,7 +200,7 @@ fn isolated(executable: &std::path::Path, case: &Case) -> TestResult {
                 thread::sleep(Duration::from_millis(10))
             }
             state => {
-                // No case can continue mutating state after its timeout.
+                // Stop and reap this case process before proceeding.
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(match state {
@@ -290,7 +293,7 @@ mod tests {
             std::env::temp_dir().join(format!("mochios-test-fixture-{}", std::process::id()));
         std::fs::create_dir(&path).unwrap();
         let program = path.join("child");
-        std::fs::write(&program,b"#!/bin/sh\ncase \"$2\" in fail) echo failure-detail >&2; exit 3;; hang) exec sleep 10;; *) exit 0;; esac\n").unwrap();
+        std::fs::write(&program,b"#!/bin/sh\ncase \"$2\" in fail) echo failure-detail >&2; exit 3;; overflow) head -c 70000 /dev/zero; exit 0;; hang) exec sleep 10;; *) exit 0;; esac\n").unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
         let case = |id| Case {
             id,
@@ -298,6 +301,11 @@ mod tests {
             run: || Ok(()),
         };
         assert!(isolated(&program, &case("pass")).is_ok());
+        assert!(
+            isolated(&program, &case("overflow"))
+                .unwrap_err()
+                .contains("log exceeded")
+        );
         assert!(
             isolated(&program, &case("fail"))
                 .unwrap_err()
