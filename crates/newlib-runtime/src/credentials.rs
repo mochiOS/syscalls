@@ -64,3 +64,13 @@ mod secure_environment_tests {
         assert!(allows_environment(Some(false), Some([0; 4])));
     }
 }
+
+#[cfg(test)]
+mod update_id_tests {
+    use super::*;
+    #[test]
+    fn every_representable_identity_and_unchanged_sentinel_preserve_the_wire_contract() {
+        for id in 0..Id::MAX { assert_eq!(update_id(id), u32::from(id)); }
+        assert_eq!(update_id(Id::MAX), u32::MAX);
+    }
+}

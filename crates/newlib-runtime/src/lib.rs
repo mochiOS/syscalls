@@ -14,6 +14,8 @@ mod child_cleanup;
 mod child_startup;
 mod fd_lease;
 mod fd_creation;
+mod open_variadic;
+mod c_abi_contracts;
 mod record_lock;
 mod record_lock_memory;
 mod record_lock_blocking;
@@ -4675,12 +4677,18 @@ pub unsafe extern "C" fn readv(fd: c_int, iov: *const IoVecMut, iovcnt: c_int) -
     finish_io_cancellation(result_with_errno(result, -1))
 }
 
+/// Open through the existing file policy and descriptor publication path.
+///
+/// # Safety
+/// O_CREAT requires a mode_t value in the variadic arguments. Without O_CREAT,
+/// no optional argument is read. Path memory remains subject to user-copy checks.
 #[unsafe(no_mangle)]
-pub extern "C" fn _open(path: *const c_char, flags: c_int, mode: c_int) -> c_int {
+pub unsafe extern "C" fn _open(path: *const c_char, flags: c_int, mut arguments: ...) -> c_int {
     if path.is_null() {
         set_errno(EFAULT);
         return -1;
     }
+    let mode = open_variadic::mode(flags, || unsafe { arguments.next_arg::<u32>() }) as c_int;
     #[cfg(feature = "trace-io")]
     let trace = io_trace::open(flags);
     let result = match file_mutation::open(path, flags, mode) {
@@ -4702,10 +4710,16 @@ pub extern "C" fn _open(path: *const c_char, flags: c_int, mode: c_int) -> c_int
     result_with_errno(result, -1)
 }
 
+/// Open through the existing file policy and descriptor publication path.
+///
+/// # Safety
+/// O_CREAT requires a mode_t value in the variadic arguments. Without O_CREAT,
+/// no optional argument is read. Path memory remains subject to user-copy checks.
 #[unsafe(no_mangle)]
-pub extern "C" fn open(path: *const c_char, flags: c_int, mode: c_int) -> c_int {
+pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mut arguments: ...) -> c_int {
     pthread_testcancel();
-    let result = _open(path, flags, mode);
+    let mode = open_variadic::mode(flags, || unsafe { arguments.next_arg::<u32>() });
+    let result = unsafe { _open(path, flags, mode) };
     if result < 0 {
         // The internal operation has retired its Handle and FD reservation.
         pthread_testcancel();
@@ -4715,13 +4729,19 @@ pub extern "C" fn open(path: *const c_char, flags: c_int, mode: c_int) -> c_int 
     result
 }
 
+/// Open through the existing file policy and descriptor publication path.
+///
+/// # Safety
+/// O_CREAT requires a mode_t value in the variadic arguments. Without O_CREAT,
+/// no optional argument is read. Path memory remains subject to user-copy checks.
 #[unsafe(no_mangle)]
-pub extern "C" fn openat(dirfd: c_int, path: *const c_char, flags: c_int, mode: c_int) -> c_int {
+pub unsafe extern "C" fn openat(dirfd: c_int, path: *const c_char, flags: c_int, mut arguments: ...) -> c_int {
     pthread_testcancel();
     if path.is_null() {
         set_errno(EFAULT);
         return -1;
     }
+    let mode = open_variadic::mode(flags, || unsafe { arguments.next_arg::<u32>() }) as c_int;
     // A directory Handle, never an expanded pathname or ambient grant, is
     // captured and retained through queued admission and FD publication.
     let result = result_with_errno(file_mutation::open_at(dirfd, path, flags, mode), -1);
@@ -5891,7 +5911,9 @@ pub extern "C" fn fchmod(fd: c_int, mode: u32) -> c_int {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn chown(path: *const c_char, uid: u32, gid: u32) -> c_int {
+pub extern "C" fn chown(path: *const c_char, uid: credentials::Id, gid: credentials::Id) -> c_int {
+    let uid = credentials::update_id(uid);
+    let gid = credentials::update_id(gid);
     if path.is_null() {
         set_errno(EFAULT);
         return -1;
@@ -5915,7 +5937,9 @@ fn chown_posix_at(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn lchown(path: *const c_char, uid: u32, gid: u32) -> c_int {
+pub extern "C" fn lchown(path: *const c_char, uid: credentials::Id, gid: credentials::Id) -> c_int {
+    let uid = credentials::update_id(uid);
+    let gid = credentials::update_id(gid);
     if path.is_null() {
         set_errno(EFAULT);
         return -1;
@@ -5930,10 +5954,12 @@ pub extern "C" fn lchown(path: *const c_char, uid: u32, gid: u32) -> c_int {
 pub extern "C" fn fchownat(
     dirfd: c_int,
     path: *const c_char,
-    uid: u32,
-    gid: u32,
+    uid: credentials::Id,
+    gid: credentials::Id,
     flags: c_int,
 ) -> c_int {
+    let uid = credentials::update_id(uid);
+    let gid = credentials::update_id(gid);
     if path.is_null() {
         set_errno(EFAULT);
         return -1;
@@ -5942,7 +5968,9 @@ pub extern "C" fn fchownat(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn fchown(fd: c_int, uid: u32, gid: u32) -> c_int {
+pub extern "C" fn fchown(fd: c_int, uid: credentials::Id, gid: credentials::Id) -> c_int {
+    let uid = credentials::update_id(uid);
+    let gid = credentials::update_id(gid);
     let result = io_resources::with(
         || with_fd_entry(fd),
         |entry| {
@@ -8381,27 +8409,27 @@ pub extern "C" fn readlinkat(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _mkdir(path: *const c_char, mode: c_int) -> c_int {
+pub extern "C" fn _mkdir(path: *const c_char, mode: u32) -> c_int {
     if path.is_null() {
         set_errno(EFAULT);
         return -1;
     }
-    let result = path_io::mkdir(-2, path, mode as u32).map(|_| 0);
+    let result = path_io::mkdir(-2, path, mode).map(|_| 0);
     result_with_errno(result, -1)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mkdir(path: *const c_char, mode: c_int) -> c_int {
+pub extern "C" fn mkdir(path: *const c_char, mode: u32) -> c_int {
     _mkdir(path, mode)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: c_int) -> c_int {
+pub extern "C" fn mkdirat(dirfd: c_int, path: *const c_char, mode: u32) -> c_int {
     if path.is_null() {
         set_errno(EFAULT);
         return -1;
     }
-    let result = path_io::mkdir(dirfd, path, mode as u32).map(|_| 0);
+    let result = path_io::mkdir(dirfd, path, mode).map(|_| 0);
     result_with_errno(result, -1)
 }
 
