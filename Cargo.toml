@@ -29,6 +29,7 @@ members = [
     "crates/signature-protocol",
     "crates/platform",
     "crates/newlib-runtime",
+    "crates/test-support",
 ]
 
 [workspace.package]

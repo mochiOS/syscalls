@@ -658,6 +658,10 @@ name = "mochios-signature-protocol"
 version = "0.1.0"
 
 [[package]]
+name = "mochios-test-support"
+version = "0.1.0"
+
+[[package]]
 name = "mochios-tls-client"
 version = "0.1.0"
 dependencies = [
@@ -1564,17 +1568,13 @@ dependencies = [
 ]
 
 [[patch.unused]]
+name = "viewkit"
+version = "2.0.0"
+
+[[patch.unused]]
+name = "viewkit"
+version = "2.0.0"
+
+[[patch.unused]]
 name = "mnu"
 version = "0.1.0"
-
-[[patch.unused]]
-name = "viewkit"
-version = "2.0.0"
-
-[[patch.unused]]
-name = "mochios-mdriver-protocol"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "viewkit"
-version = "2.0.0"
