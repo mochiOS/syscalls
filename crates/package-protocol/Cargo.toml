@@ -6,3 +6,6 @@ license = "Apache-2.0"
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+mnu-abi = { git = "https://github.com/mochiOS/mnu", package = "mnu-abi" }

@@ -1,0 +1,10 @@
+[package]
+name = "mochios-package-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mochi-user-platform = { path = "../platform", default-features = false, features = ["std"] }
+mochios-package-protocol = { path = "../package-protocol" }
+mochios-posix-protocol = { path = "../posix-protocol" }
+libc = { git = "https://github.com/mochiOS/libc", package = "libc" }

@@ -1,6 +1,12 @@
 //! Requests and credentials for one broker-owned administrator operation.
 use crate::consent::{self, Correlation, frontend};
 pub const OPERATION_OPCODE: u32 = u32::from_le_bytes(*b"ADM1");
+/// Discover an authenticated, SEND-only package-service endpoint object.
+pub const PACKAGE_CONNECT_OPCODE: u32 = u32::from_le_bytes(*b"ADQ1");
+/// One explicitly attached package transaction; no path or caller-authored label.
+pub const PACKAGE_OPCODE: u32 = u32::from_le_bytes(*b"ADK1");
+/// Consume an approved transaction; only the measured package service may call.
+pub const PACKAGE_CONSUME_OPCODE: u32 = u32::from_le_bytes(*b"ADC1");
 pub const RUN_OPCODE: u32 = u32::from_le_bytes(*b"ADR1");
 pub const AUTHENTICATE_OPCODE: u32 = u32::from_le_bytes(*b"ADP1");
 pub const MAX_OPERATION: usize = 4128;
