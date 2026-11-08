@@ -1,5 +1,5 @@
-//! Persistent group metadata. Group names and membership never grant native
-//! authority; POSIX credentials remain a separate service-owned state.
+//! Persistent group metadata. Membership never grants kernel authority.
+//! user.service evaluates its administrator role in userspace.
 use super::{DatabaseError, UserDatabase, validate_name};
 use alloc::{
     string::{String, ToString},
@@ -9,6 +9,7 @@ use core::fmt;
 
 pub const DATABASE_PATH: &str = "/var/lib/accounts/groups.db";
 pub const MAX_MEMBERS: usize = 64;
+pub const ADMINISTRATOR_GROUP: &str = "admin";
 const MAX_BYTES: usize = 1024 * 1024;
 const MAX_GROUPS: usize = 4096;
 const HEADER: &str = "MGRPDB\t1";
@@ -73,6 +74,51 @@ impl GroupDatabase {
     }
     pub fn groups(&self) -> &[Group] {
         &self.groups
+    }
+    pub fn is_administrator(&self, user: &super::UserRecord) -> bool {
+        user.uid == 0 || self.find_name(ADMINISTRATOR_GROUP)
+            .is_some_and(|group| group.members.iter().any(|name| name == &user.name))
+    }
+    /// One-time migration for installations created before administrator roles.
+    /// An existing empty admin group is deliberate and is never repopulated.
+    pub fn provision_administrators(&mut self, users: &UserDatabase) -> Result<bool, Error> {
+        if self.find_name(ADMINISTRATOR_GROUP).is_some() { return Ok(false); }
+        let gid = (80..super::FIRST_REGULAR_UID).find(|gid| self.find_gid(*gid).is_none()).ok_or(Error::TooLarge)?;
+        let first = users.users().iter().filter(|user| user.uid >= super::FIRST_REGULAR_UID).min_by_key(|user| user.uid);
+        self.add(Group {
+            gid, name: ADMINISTRATOR_GROUP.into(),
+            members: first.map(|user| alloc::vec![user.name.clone()]).unwrap_or_default(),
+        })?;
+        Ok(true)
+    }
+    pub fn add_administrator(&mut self, name: &str) -> Result<(), Error> {
+        validate_name(name).map_err(|_| Error::Invalid)?;
+        let group = self.groups.iter_mut().find(|group| group.name == ADMINISTRATOR_GROUP).ok_or(Error::Invalid)?;
+        if !group.members.iter().any(|member| member == name) {
+            if group.members.len() == MAX_MEMBERS { return Err(Error::TooLarge); }
+            group.members.push(name.into());
+        }
+        Ok(())
+    }
+    /// Revoke memberships before removing an account so name reuse cannot
+    /// inherit a previous account's administrator role.
+    pub fn remove_member(&mut self, name: &str) -> bool {
+        let mut changed = false;
+        for group in &mut self.groups {
+            let old = group.members.len();
+            group.members.retain(|member| member != name);
+            changed |= old != group.members.len();
+        }
+        changed
+    }
+    pub fn prune_members(&mut self, users: &UserDatabase) -> bool {
+        let mut changed = false;
+        for group in &mut self.groups {
+            let old = group.members.len();
+            group.members.retain(|name| users.find_name(name).is_some());
+            changed |= old != group.members.len();
+        }
+        changed
     }
     pub fn add(&mut self, group: Group) -> Result<(), Error> {
         group.validate()?;

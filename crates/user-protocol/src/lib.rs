@@ -27,6 +27,7 @@ pub enum Opcode {
     RemoveUser = 0x0011,
     SetPassword = 0x0012,
     Authenticate = 0x0020,
+    VerifyAdministrator = 0x0021,
     PublicLookup = 0x0030,
     PublicGroupLookup = 0x0031,
     SnapshotInfo = 0x8001,
@@ -339,6 +340,24 @@ impl<'a> Authenticate<'a> {
     }
 }
 
+/// Credential verification for the common administrator broker. Unlike login,
+/// this does not create a session or unlock/change a keychain.
+#[derive(Clone, Copy)]
+pub struct VerifyAdministrator<'a> {
+    pub request_id: u64,
+    pub name: &'a str,
+    pub password: &'a [u8],
+}
+impl<'a> VerifyAdministrator<'a> {
+    pub fn encode(&self, output: &mut [u8]) -> Result<usize, EncodeError> {
+        encode_credentials(output, Opcode::VerifyAdministrator, self.request_id, self.name, self.password)
+    }
+    pub fn decode(input: &'a [u8]) -> Result<Self, DecodeError> {
+        let credentials = decode_credentials(input, Opcode::VerifyAdministrator)?;
+        Ok(Self { request_id: credentials.request_id, name: credentials.name, password: credentials.password })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuthenticationResult<'a> {
     pub request_id: u64,
@@ -616,6 +635,7 @@ fn decode_header(input: &[u8]) -> Result<Header, DecodeError> {
         0x0011 => Opcode::RemoveUser,
         0x0012 => Opcode::SetPassword,
         0x0020 => Opcode::Authenticate,
+        0x0021 => Opcode::VerifyAdministrator,
         0x0030 => Opcode::PublicLookup,
         0x0031 => Opcode::PublicGroupLookup,
         0x8030 => Opcode::PublicAccount,
