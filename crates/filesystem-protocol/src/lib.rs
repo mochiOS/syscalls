@@ -1,4 +1,5 @@
 #![no_std]
+pub mod namespace_policy;
 
 pub mod device_open;
 pub mod device_observation;
@@ -26,7 +27,9 @@ pub const MAX_PATH_LEN: usize = 4096;
 pub const MAX_SUPPLEMENTARY_GROUPS: usize = 32;
 pub const CREDENTIALS_HEADER_LEN: usize = 12;
 pub const CREDENTIALS_MAX_LEN: usize =
-    CREDENTIALS_HEADER_LEN + MAX_SUPPLEMENTARY_GROUPS * core::mem::size_of::<u32>();
+    CREDENTIALS_HEADER_LEN
+        + MAX_SUPPLEMENTARY_GROUPS * core::mem::size_of::<u32>()
+        + namespace_policy::LEN;
 
 /// Opaque LaunchContext key used to pass the filesystem control endpoint to
 /// another user-space service. mnu does not interpret this value.
@@ -385,6 +388,7 @@ pub struct Credentials {
     pub effective_gid: u32,
     supplementary_group_count: u32,
     supplementary_groups: [u32; MAX_SUPPLEMENTARY_GROUPS],
+    pub namespace: namespace_policy::NamespacePolicy,
 }
 
 impl Credentials {
@@ -438,7 +442,8 @@ pub fn decode_credentials_payload(input: &[u8]) -> Result<(Credentials, &[u8]), 
     if input.len() < CREDENTIALS_HEADER_LEN {
         return Err(ProtocolError::InvalidLength);
     }
-    let count = get_u32(input, 8) as usize;
+    let scoped = get_u32(input, 8) & 0x8000_0000 != 0;
+    let count = (get_u32(input, 8) & !0x8000_0000) as usize;
     if count > MAX_SUPPLEMENTARY_GROUPS {
         return Err(ProtocolError::InvalidLength);
     }
@@ -456,15 +461,56 @@ pub fn decode_credentials_payload(input: &[u8]) -> Result<(Credentials, &[u8]), 
     for (index, group) in supplementary_groups.iter_mut().take(count).enumerate() {
         *group = get_u32(input, CREDENTIALS_HEADER_LEN + index * 4);
     }
+    let (namespace, credentials_len) = if scoped {
+        let end = credentials_len
+            .checked_add(namespace_policy::LEN)
+            .ok_or(ProtocolError::InvalidLength)?;
+        (
+            namespace_policy::NamespacePolicy::decode(
+                input
+                    .get(credentials_len..end)
+                    .ok_or(ProtocolError::InvalidLength)?,
+            )?,
+            end,
+        )
+    } else {
+        (
+            namespace_policy::NamespacePolicy::unrestricted(),
+            credentials_len,
+        )
+    };
     Ok((
         Credentials {
             effective_uid: get_u32(input, 0),
             effective_gid: get_u32(input, 4),
             supplementary_group_count: count as u32,
             supplementary_groups,
+            namespace,
         },
         &input[credentials_len..],
     ))
+}
+
+/// Controller-only credentials with an explicit native-caller namespace mask.
+/// Legacy encoding remains reserved for trusted internal/bootstrap operations.
+pub fn encode_scoped_credentials_payload(
+    uid: u32,
+    gid: u32,
+    groups: &[u32],
+    policy: namespace_policy::NamespacePolicy,
+    payload: &[u8],
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    let prefix = encode_credentials_payload(uid, gid, groups, &policy.encode(), output)?;
+    let total = prefix
+        .checked_add(payload.len())
+        .ok_or(ProtocolError::InvalidLength)?;
+    if total > MAX_MESSAGE_LEN - HEADER_LEN || output.len() < total {
+        return Err(ProtocolError::InvalidLength);
+    }
+    put_u32(output, 8, groups.len() as u32 | 0x8000_0000);
+    output[prefix..total].copy_from_slice(payload);
+    Ok(total)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
