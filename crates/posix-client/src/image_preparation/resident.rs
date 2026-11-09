@@ -30,6 +30,7 @@ pub struct Library<B: Backend, M: elf_mapping::Backend, const N: usize> {
     file: u32,
     address: u64,
     captured: bool,
+    external_lookup: Option<pie::link_scope::ExternalLookup>,
 }
 impl<B: Backend, M: elf_mapping::Backend, const N: usize> Default for Library<B, M, N> {
     fn default() -> Self {
@@ -43,6 +44,7 @@ impl<B: Backend, M: elf_mapping::Backend, const N: usize> Default for Library<B,
             file: 0,
             address: 0,
             captured: false,
+            external_lookup: None,
         }
     }
 }
@@ -54,6 +56,14 @@ impl<B: Backend, M: elf_mapping::Backend, const N: usize> Drop for Library<B, M,
     }
 }
 impl<B: Backend, M: elf_mapping::Backend, const N: usize> Library<B, M, N> {
+    /// Set a permanently mapped provider before opening this group. It serves
+    /// only undefined unversioned ordinary imports, never namespace authority.
+    /// Changing the provider after capture/acquisition is rejected.
+    pub fn set_external_lookup(&mut self, lookup: pie::link_scope::ExternalLookup) -> Result<(), c_int> {
+        if self.file != 0 || self.captured { return Err(EINVAL); }
+        self.external_lookup = Some(lookup);
+        Ok(())
+    }
     /// Immutable metadata, valid until this library owner is destroyed.
     pub fn inspection(&self) -> &[u8] { self.inspection.bytes() }
     pub fn phase(&self) -> Phase {
@@ -167,7 +177,8 @@ impl<B: Backend, M: elf_mapping::Backend, const N: usize> Library<B, M, N> {
         self.dependencies
             .discover(self.source.bytes(), backend, variables, identity, true)?;
         self.address = address;
-        let scope = self.dependencies.scope(self.source.bytes(), address)?;
+        let scope = self.dependencies.scope(self.source.bytes(), address)?
+            .with_optional_external_lookup(self.external_lookup);
         self.state.bind(&scope).map_err(|_| ENOEXEC)?;
         let size = crate::loaded_objects::encoded_length(scope.objects(), path)?;
         self.inspection.reserve(size)?;
@@ -195,7 +206,8 @@ impl<B: Backend, M: elf_mapping::Backend, const N: usize> Library<B, M, N> {
         let scope = self
             .dependencies
             .scope(self.source.bytes(), self.address)
-            .map_err(Error::Source)?;
+            .map_err(Error::Source)?
+            .with_optional_external_lookup(self.external_lookup);
         let output =
             unsafe { core::slice::from_raw_parts_mut(self.output.pointer, self.output.length) };
         self.state
@@ -217,7 +229,8 @@ impl<B: Backend, M: elf_mapping::Backend, const N: usize> Library<B, M, N> {
         let scope = self
             .dependencies
             .scope(self.source.bytes(), self.address)
-            .map_err(Error::Source)?;
+            .map_err(Error::Source)?
+            .with_optional_external_lookup(self.external_lookup);
         let scratch = unsafe {
             core::slice::from_raw_parts_mut(
                 self.callbacks.pointer.cast::<usize>(),
@@ -239,7 +252,8 @@ impl<B: Backend, M: elf_mapping::Backend, const N: usize> Library<B, M, N> {
         let scope = self
             .dependencies
             .scope(self.source.bytes(), self.address)
-            .map_err(Error::Source)?;
+            .map_err(Error::Source)?
+            .with_optional_external_lookup(self.external_lookup);
         let loader = self.state.bind(&scope).map_err(Error::Elf)?;
         loader
             .symbol(name, Version::Default)
@@ -256,7 +270,8 @@ impl<B: Backend, M: elf_mapping::Backend, const N: usize> Library<B, M, N> {
         let scope = self
             .dependencies
             .scope(self.source.bytes(), self.address)
-            .map_err(Error::Source)?;
+            .map_err(Error::Source)?
+            .with_optional_external_lookup(self.external_lookup);
         let scratch = unsafe {
             core::slice::from_raw_parts_mut(
                 self.callbacks.pointer.cast::<usize>(),

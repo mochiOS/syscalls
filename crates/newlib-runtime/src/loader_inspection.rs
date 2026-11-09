@@ -5,6 +5,12 @@ use mochios_posix_client::loaded_objects::{self as wire, Image};
 static INITIAL: AtomicUsize = AtomicUsize::new(0);
 static INITIAL_LENGTH: AtomicUsize = AtomicUsize::new(0);
 
+// The initial executable's captured default exports remain mapped until
+// process teardown. Local dlopen groups do not become a global namespace.
+pub(super) fn initial_symbol(name: &[u8]) -> Option<(u64, u64)> {
+    Image::parse(initial()).ok()?.entry(0).ok()?.lookup(name)
+}
+
 pub(super) fn initialize() -> Result<(), c_int> {
     let Some(vector) = auxiliary::vector() else {
         return Ok(());

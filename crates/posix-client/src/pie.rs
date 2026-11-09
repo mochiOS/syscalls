@@ -214,6 +214,13 @@ impl<'a> Pie<'a> {
             .map(|table| table.inspection()).unwrap_or((&[], &[]));
         (&self.bytes[start..end], symbols, strings)
     }
+
+    pub(crate) fn inspection_symbol_is_default(&self, index: u32) -> Result<bool, Error> {
+        let entry = self.symbols.as_ref().ok_or(Error::Invalid)?.entry(index)?;
+        Ok(matches!(entry.version,
+            symbols::Version::Unversioned | symbols::Version::Global
+            | symbols::Version::Named { hidden: false, imported: false, .. }))
+    }
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
         Self::parse_mode(bytes, false)
     }

@@ -47,8 +47,12 @@ views or truncating the object set.
 The initial graph must be produced by a matching native loader. Older launch
 paths without this metadata cannot provide a complete dl_iterate_phdr result
 and return ENOTSUP. PT_INTERP graph inspection is not inferred from the root's
-headers. Dynamic TLS, resolver-result symbol attribution, global namespaces
-and dlopen profile extensions are not implemented by this change.
+headers. Late local groups can resolve undefined, unversioned ordinary imports
+from the initial executable's captured default exports. The provider stays
+mapped for the process lifetime; it is neither mapped again nor finalized by
+dlclose. Hidden/nondefault versions, TLS and IFUNC are excluded from this
+fallback. Named-version imports and global sharing between late groups remain
+unsupported, as do dynamic TLS and resolver-result symbol attribution.
 
 ## SDK and validation
 
@@ -69,3 +73,19 @@ validation and revocation failure; sparse backing observation; hostile loader
 metadata; real ELF dynamic symbols; C layouts; reentrant callbacks; and inline
 versus read-only overflow metadata transport. Host tests and native target
 compilation are not a substitute for a full native VM execution result.
+
+The opt-in `native-unix-extension-probe` feature on service-manager now runs
+`services/posix/tests/native_unix_extensions.c` in a development VM after the
+native filesystem/POSIX services are ready. Its launcher uses normal measured
+application authorization, manifest-declared Capabilities, retained process
+ownership and POSIX child registration. It does not start the desktop/drivers
+or alter their normal boot path. The C launcher execs the actual test through
+the normal loader, and the DSO is included in the built-in verification record.
+
+Native execution passed on 2026-11-09 under x86-64 QEMU TCG: pthread policy and
+errno, lock conversion/dup/fork/exec/CLOEXEC/final-close/process-exit/signal
+interruption, residency/discard/protection/COW/error/file-cache cases, initial
+loader enumeration, constructor reentry, symbol lookup, unloading and dlclose
+inside an enumeration callback. A normal boot reaching idle is not a pass:
+the runner requires the probe's explicit completion marker and result zero.
+SDK publication and a complete WebKit engine build remain separate checks.

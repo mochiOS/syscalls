@@ -18,9 +18,16 @@ pub struct Object<'scope, 'image> {
     pub bias: u64,
 }
 
+/// Lookup an unversioned, ordinary symbol in an already mapped external owner.
+/// Return its absolute address and size. The provider and returned storage must
+/// remain mapped for the entire resident group's lifetime; TLS/IFUNC and named
+/// symbol versions require separate protocols and are not handled here.
+pub type ExternalLookup = fn(&[u8]) -> Option<(u64, u64)>;
+
 pub struct Scope<'scope, 'image> {
     objects: &'scope [Object<'scope, 'image>],
     order: &'scope [usize],
+    external_lookup: Option<ExternalLookup>,
 }
 impl<'scope, 'image> Scope<'scope, 'image> {
     /// Object zero is the root. Derive breadth-first search order from its
@@ -109,6 +116,7 @@ impl<'scope, 'image> Scope<'scope, 'image> {
         let scope = Self {
             objects,
             order: &scratch[..length],
+            external_lookup: None,
         };
         objects[0].image.relocations(|_, value| {
             if let super::Value::Copy { index, .. } = value {
@@ -117,6 +125,19 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             Ok(())
         })?;
         Ok(scope)
+    }
+
+    /// Add a pinned provider for undefined unversioned symbols only. Local,
+    /// hidden, versioned, TLS and group-defined symbols retain existing rules.
+    /// This never maps the provider or runs its constructors/destructors.
+    pub fn with_external_lookup(mut self, lookup: ExternalLookup) -> Self {
+        self.external_lookup = Some(lookup);
+        self
+    }
+
+    pub(crate) fn with_optional_external_lookup(mut self, lookup: Option<ExternalLookup>) -> Self {
+        self.external_lookup = lookup;
+        self
     }
 
     pub fn order(&self) -> &[usize] {
@@ -161,6 +182,17 @@ impl<'scope, 'image> Scope<'scope, 'image> {
                         return Ok(Some((candidate, definition, symbol.size)));
                     }
                 }
+            }
+        }
+        if reference.definition.is_none()
+            && matches!(reference.kind, 0 | 1 | 2)
+            && matches!(reference.version, super::symbols::Version::Unversioned | super::symbols::Version::Global)
+        {
+            if let Some((address, size)) = self.external_lookup.and_then(|lookup| lookup(reference.name)) {
+                if address < USER_MIN || address.checked_add(size.max(1)).is_none_or(|end| end > USER_END) {
+                    return Err(Error::Invalid);
+                }
+                return Ok(Some((origin, super::symbols::Definition::Absolute(address), size)));
             }
         }
         if reference.binding == 2 {

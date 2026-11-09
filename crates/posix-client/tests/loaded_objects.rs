@@ -64,6 +64,8 @@ fn real_shared_elf_dynamic_symbols_resolve_to_their_captured_names_and_addresses
         let address = 0x20000000 + u64::from_str_radix(fields[0], 16).unwrap();
         assert!(entry.contains(address));
         assert_eq!(entry.symbol(address), Some((fields[2].as_bytes(), address)));
+        assert_eq!(entry.lookup(fields[2].as_bytes()).map(|value| value.0), Some(address));
+        assert_eq!(entry.lookup(b"absent_export"), None);
         found += 1;
     }
     assert_eq!(found, 2);
@@ -168,4 +170,36 @@ fn several_objects_preserve_alignment_and_nul_termination() {
         assert_eq!(entry.headers.as_ptr() as usize % 8, 0);
         assert_eq!(unsafe { *entry.name.as_ptr().add(entry.name.len()) }, 0);
     }
+}
+
+#[test]
+fn captured_lookup_never_promotes_hidden_symbol_versions_to_default_exports() {
+    let directory = std::env::temp_dir().join(format!("mochi-default-exports-{}",std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let script = directory.join("versions.map");
+    std::fs::write(&script,"OLD { global: versioned; local: *; }; NEW { global: versioned; } OLD;\n").unwrap();
+    for default in [false,true] {
+        let source = directory.join("symbols.c");
+        let library = directory.join("symbols.so");
+        std::fs::write(&source,format!("int old(void) {{ return 1; }}\n__asm__(\".symver old,versioned@OLD\");\n{}",if default {"int current(void) { return 2; }\n__asm__(\".symver current,versioned@@NEW\");\n"} else {""})).unwrap();
+        let result = std::process::Command::new("cc").args(["-shared","-fPIC","-nostdlib","-Wl,--hash-style=both"])
+            .arg(format!("-Wl,--version-script={}",script.display())).arg(&source).arg("-o").arg(&library).output().unwrap();
+        assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
+        let bytes=std::fs::read(&library).unwrap();
+        let image=Pie::parse_object(&bytes).unwrap();
+        let objects=[Object{name:b"",image:&image,bias:0x20000000}];
+        let mut encoded=vec![0;loaded_objects::encoded_length(&objects,b"versions.so").unwrap()];
+        loaded_objects::encode(&objects,b"versions.so",&mut encoded).unwrap();
+        let parsed=loaded_objects::Image::parse(&encoded).unwrap();
+        let entry=parsed.entry(0).unwrap();
+        assert_eq!(entry.lookup(b"versioned").is_some(),default);
+        if default {
+            let output=std::process::Command::new("nm").args(["-D","--defined-only"]).arg(&library).output().unwrap();
+            let symbols=String::from_utf8(output.stdout).unwrap();
+            let line=symbols.lines().find(|line|line.ends_with(" versioned@@NEW")).unwrap();
+            let value=u64::from_str_radix(line.split_whitespace().next().unwrap(),16).unwrap();
+            assert_eq!(entry.lookup(b"versioned").unwrap().0,0x20000000+value);
+        }
+    }
+    std::fs::remove_dir_all(directory).unwrap();
 }

@@ -345,6 +345,7 @@ pub extern "C" fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void {
             Ok(())
         })?;
         let library = unsafe { &mut *(operation.pointer as *mut Library) };
+        library.set_external_lookup(loader_inspection::initial_symbol)?;
         let address = NEXT_ADDRESS.fetch_add(0x1_0000_0000, Ordering::Relaxed);
         if address >= 0x4000_0000_0000 {
             return Err(ENOMEM);

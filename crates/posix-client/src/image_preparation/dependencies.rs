@@ -1,7 +1,7 @@
 //! Retain all acquisition/capture/work buffers in the callback resource owner.
 //! Raw typed workspaces contain only borrowed ELF views, never resource owners.
 use super::*;
-use mochios_posix_client::pie::{
+use crate::pie::{
     Pie,
     link_scope::{Object, Scope, Step},
 };
@@ -594,7 +594,7 @@ impl<B: Backend> Dependencies<B> {
             return Err(ENOEXEC);
         }
         if tls_runtime && templates.iter().any(Option::is_some) {
-            use mochios_posix_client::static_tls::image;
+            use crate::static_tls::image;
             let length = image::encoded_length(count).ok_or(E2BIG)?;
             metadata_size(&images[0], length)?;
             tls.reserve(length)?;

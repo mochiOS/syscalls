@@ -83,6 +83,16 @@ pub fn encode(objects: &[Object<'_, '_>], root_name: &[u8], output: &mut [u8]) -
                 put(output, at + count_offset, count as u64);
             }
             output[cursor..cursor + bytes.len()].copy_from_slice(bytes);
+            if offset == 40 {
+                // The snapshot exposes default exports, not a GNU version
+                // namespace. Never turn a hidden/nondefault version into an
+                // unversioned provider after discarding its version tables.
+                for (index, symbol) in output[cursor..cursor + bytes.len()].chunks_exact_mut(24).enumerate() {
+                    if !object.image.inspection_symbol_is_default(index as u32).map_err(|_| ENOEXEC)? {
+                        symbol[4] &= 15;
+                    }
+                }
+            }
             cursor += bytes.len();
         }
         cursor += 1; // object name terminator
@@ -189,6 +199,35 @@ impl<'a> Image<'a> {
     }
 }
 impl<'a> Entry<'a> {
+    /// Find a default ordinary export by name in this immutable snapshot.
+    /// TLS, IFUNC, hidden/nondefault versions and ambiguous names are excluded.
+    /// This is informational lookup; the caller must retain the mapped owner.
+    pub fn lookup(&self, name: &[u8]) -> Option<(u64, u64)> {
+        let mut found = None;
+        for symbol in self.symbols.chunks_exact(24) {
+            let info = symbol[4];
+            let section = u16::from_le_bytes(symbol[6..8].try_into().ok()?);
+            if !matches!(info >> 4, 1 | 2) || !matches!(info & 15, 0 | 1 | 2)
+                || !matches!(symbol[5] & 3, 0 | 3) || section == 0 { continue; }
+            let tail = self.strings.get(u32::from_le_bytes(symbol[..4].try_into().ok()?) as usize..)?;
+            let length = tail.iter().position(|byte| *byte == 0)?;
+            if tail.get(..length)? != name { continue; }
+            let value = word(symbol, 8);
+            let address = if section == 0xfff1 { value } else { self.bias.checked_add(value)? };
+            let size = word(symbol, 16);
+            if section != 0xfff1 && !self.headers.chunks_exact(56).any(|header| {
+                u32::from_le_bytes(header[..4].try_into().unwrap()) == 1
+                    && self.bias.checked_add(word(header, 16)).is_some_and(|start| {
+                        address >= start && address.checked_add(size.max(1))
+                            .zip(start.checked_add(word(header, 40)))
+                            .is_some_and(|(end, limit)| end <= limit)
+                    })
+            }) { return None; }
+            if found.is_some() { return None; }
+            found = Some((address, size));
+        }
+        found
+    }
     /// Lowest mapped LOAD address, which differs from relocation bias for
     /// fixed-address ET_EXEC objects and libraries with a nonzero first LOAD.
     pub fn base(&self) -> u64 {
