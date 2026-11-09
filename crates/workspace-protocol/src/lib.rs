@@ -45,6 +45,8 @@ pub const OP_FILE_PANEL_FINISH: u16 = 0x0302;
 pub const OP_FILE_PANEL_RETRY: u16 = 0x0303;
 pub const OP_APPLICATION_REGISTER: u16 = 0x0400;
 pub const OP_APPLICATION_ACTIVATE: u16 = 0x0401;
+/// Launch a currently installed application by package ID (UTF-8 payload).
+pub const OP_APPLICATION_LAUNCH: u16 = 0x0402;
 pub const OP_CONTROL_CENTER_CARD_REGISTER: u16 = 0x0500;
 pub const OP_CONTROL_CENTER_CARD_SNAPSHOT: u16 = 0x0501;
 pub const OP_NOTIFICATION_POST: u16 = 0x0600;

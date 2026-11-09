@@ -166,6 +166,28 @@ pub fn activate_application(process_id: u64) -> SysResult<()> {
     Ok(())
 }
 
+/// Resolve an installed application through the current user's Workspace and
+/// launch it through the common capability authorization path.
+pub fn launch_application(package_id: &str) -> SysResult<u64> {
+    if package_id.is_empty() || package_id.len() > protocol::MAX_BUNDLE_ID_LEN
+        || !package_id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+    { return Err(invalid()); }
+    let endpoint = service()?;
+    let before = crate::execution_peer::capture_builtin(endpoint, b"org.mochios.workspace")?;
+    let id = request_id();
+    let mut request = vec![0; protocol::HEADER_LEN + package_id.len()];
+    let length = protocol::encode(protocol::OP_APPLICATION_LAUNCH, id, 0, package_id.as_bytes(), &mut request)
+        .map_err(|_| invalid())?;
+    let mut reply = [0; protocol::HEADER_LEN + 24];
+    let received = crate::ipc::call(endpoint, &request[..length], &mut reply)?;
+    let after = crate::execution_peer::capture_builtin(endpoint, b"org.mochios.workspace")?;
+    if before.image != after.image || received >> 32 != endpoint { return Err(invalid()); }
+    let message = protocol::decode(reply.get(..received as u32 as usize).ok_or_else(invalid)?)
+        .map_err(|_| invalid())?;
+    if message.request_id != id { return Err(invalid()); }
+    status(message).map(|(_, pid)| pid)
+}
+
 pub fn register_control_center_card(card: &ControlCenterCard) -> SysResult<()> {
     let body = card
         .rows

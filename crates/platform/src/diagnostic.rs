@@ -5,6 +5,7 @@ use crate::syscall::{self, SysError, SysResult};
 pub use mnu_abi::diagnostic::{EXIT_KIND_EXCEPTION, EXIT_KIND_STATUS, EXIT_RECORD_LEN, ExitRecord};
 pub const IMAGE_METADATA_OPCODE: &[u8; 8] = b"MDIAGIM1";
 pub const MAX_IMAGE_METADATA_BYTES: usize = 48 * 1024;
+pub mod reports;
 
 /// Send launcher-owned source/placement metadata alongside an attenuated native
 /// Process reference. The receiver authenticates the launcher and the object.

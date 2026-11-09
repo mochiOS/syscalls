@@ -21,6 +21,23 @@ fn denied() -> SysError {
     SysError::from_raw(NativeError::AccessDenied.into_raw() as i64)
 }
 
+/// Authenticate a system-signed built-in endpoint using its measured image.
+pub fn capture_builtin(endpoint: u64, package: &[u8]) -> Result<MeasuredPeer, SysError> {
+    let peer = capture(endpoint)?;
+    let context = &peer.context;
+    if context.provenance != 1
+        || context.subject_key_id != [0; 32]
+        || context.package_id.get(..context.package_id_len as usize) != Some(package)
+        || context
+            .developer_id
+            .get(..context.developer_id_len as usize)
+            != Some(b"org.mochios.system")
+    {
+        return Err(denied());
+    }
+    Ok(peer)
+}
+
 pub fn capture(endpoint: u64) -> Result<MeasuredPeer, SysError> {
     if endpoint == 0 {
         return Err(denied());
