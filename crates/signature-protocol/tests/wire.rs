@@ -1,6 +1,39 @@
 use mochios_signature_protocol::*;
 
 #[test]
+fn verified_capabilities_accept_scoped_ranges_without_relaxing_identity_names() {
+    fn response<'a>(capabilities: &'a [&'a str]) -> VerifiedResponse<'a> {
+        VerifiedResponse {
+            request_id: 0,
+            provenance: InstallProvenance::BuiltIn,
+            certificate_serial: 0,
+            subject_key_id: [0; 32],
+            manifest_digest: [1; 32],
+            package_digest: [1; 32],
+            developer_id: "org.mochios.system",
+            verified_package_id: "org.mochios.capability",
+            allowed_capabilities: capabilities,
+        }
+    }
+    let caps = ["ipc.client", "io.port@0xcf8:8", "memory.phys.map@0x1000:4096"];
+    let mut bytes = [0; 1024];
+    let length = response(&caps).encode(&mut bytes).unwrap();
+    let view = VerifiedView::decode(&bytes[..length]).unwrap();
+    assert_eq!(view.allowed_capabilities().collect::<Result<Vec<_>, _>>().unwrap(), caps);
+    for invalid in ["io.port@*:8", "io.port@-1:8", "io.port@0xcf8:0",
+        "io.port@1:2:3", "io.port@@1:2", "io.port@18446744073709551616:8",
+        "io.port@1:8\n", "io.port@+1:8", "io.port@:8", "io.port@0x:8"] {
+        let caps = [invalid];
+        let length = response(&caps).encode(&mut bytes).unwrap();
+        assert!(matches!(VerifiedView::decode(&bytes[..length]), Err(DecodeError::InvalidText)), "{invalid}");
+    }
+    let mut message = response(&caps);
+    message.developer_id = "org.mochios@1:8";
+    let length = message.encode(&mut bytes).unwrap();
+    assert!(matches!(VerifiedView::decode(&bytes[..length]), Err(DecodeError::InvalidText)));
+}
+
+#[test]
 fn begin_golden_and_round_trip() {
     let message = VerifyBegin {
         request_id: 0x0807_0605_0403_0201,

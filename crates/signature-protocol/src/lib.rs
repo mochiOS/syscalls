@@ -612,7 +612,7 @@ impl<'a> VerifiedView<'a> {
             remaining: capability_count,
         };
         for capability in iterator.by_ref() {
-            validate_text(capability?)?;
+            validate_capability_text(capability?)?;
         }
         if !iterator.bytes.is_empty() {
             return Err(DecodeError::InvalidCapabilityList);
@@ -756,6 +756,34 @@ fn take_text<'a>(
     *cursor = end;
     core::str::from_utf8(bytes).map_err(|_| DecodeError::InvalidUtf8)
 }
+// Capability scopes are wire syntax, not grants. The authority owner still
+// validates the kind, alignment, bounds and delegating principal. Identity
+// names continue to use the narrower validator below.
+fn validate_capability_text(value: &str) -> Result<(), DecodeError> {
+    let Some((name, scope)) = value.split_once('@') else {
+        return validate_text(value);
+    };
+    validate_text(name)?;
+    let number = |raw: &str| -> Option<u64> {
+        if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+            if hex.is_empty() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return None;
+            }
+            u64::from_str_radix(hex, 16).ok()
+        } else {
+            if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            raw.parse().ok()
+        }
+    };
+    let (base, size) = scope.split_once(':').ok_or(DecodeError::InvalidText)?;
+    let base = number(base).ok_or(DecodeError::InvalidText)?;
+    let size = number(size).filter(|size| *size != 0).ok_or(DecodeError::InvalidText)?;
+    base.checked_add(size).ok_or(DecodeError::InvalidText)?;
+    Ok(())
+}
+
 fn validate_text(value: &str) -> Result<(), DecodeError> {
     if value.is_empty()
         || !value.bytes().all(|byte| {
