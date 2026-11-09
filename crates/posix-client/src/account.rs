@@ -41,6 +41,20 @@ impl<T: ObjectTransport> Client<T> {
     }
 }
 impl<T: Transport> Client<T> {
+    pub fn account_generation(&self, uid: u32) -> Result<u64, ClientError<T::Error>> {
+        use protocol::account as wire;
+        let mut request = [0; wire::MAX_QUERY];
+        let length = wire::encode_query(wire::Query::Generation(uid), &mut request)
+            .map_err(|_| ClientError::MismatchedResponse)?;
+        let mut output = [0; wire::GENERATION_LEN];
+        let length = self.request(
+            protocol::OP_ACCOUNT_LOOKUP,
+            0,
+            &request[..length],
+            &mut output,
+        )?;
+        wire::decode_generation(uid, &output[..length]).map_err(|_| ClientError::MismatchedResponse)
+    }
     pub fn lookup_group(
         &self,
         query: protocol::public_group::Query<'_>,

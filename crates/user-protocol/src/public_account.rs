@@ -7,11 +7,13 @@ pub const MAX_DISPLAY: usize = 128;
 pub const MAX_PATH: usize = 512;
 pub const MAX_QUERY: usize = 8 + MAX_NAME;
 pub const MAX_RECORD: usize = 16 + MAX_NAME + MAX_DISPLAY + 2 * MAX_PATH;
+pub const GENERATION_LEN: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Query<'a> {
     Uid(u32),
     Name(&'a str),
+    Generation(u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +46,7 @@ fn name(bytes: &[u8]) -> Result<&str, DecodeError> {
 pub fn encode_query(query: Query<'_>, output: &mut [u8]) -> Result<usize, EncodeError> {
     let (tag, value, tail) = match query {
         Query::Uid(uid) => (0u32, uid, &[][..]),
+        Query::Generation(uid) => (2u32, uid, &[][..]),
         Query::Name(value) => {
             name(value.as_bytes()).map_err(|_| EncodeError::InvalidLength)?;
             (1, value.len() as u32, value.as_bytes())
@@ -63,6 +66,7 @@ pub fn decode_query(input: &[u8]) -> Result<Query<'_>, DecodeError> {
     let value = u32::from_le_bytes(input[4..8].try_into().unwrap());
     match tag {
         0 if input.len() == 8 => Ok(Query::Uid(value)),
+        2 if input.len() == 8 => Ok(Query::Generation(value)),
         1 if (value as usize).checked_add(8) == Some(input.len()) => {
             Ok(Query::Name(name(&input[8..])?))
         }
@@ -170,3 +174,59 @@ pub fn decode_response(id: u64, input: &[u8]) -> Result<Result<Record<'_>, i32>,
     Ok(Ok(record))
 }
 pub const MAX_MESSAGE: usize = crate::HEADER_LEN + MAX_RECORD;
+
+/// Account incarnation is public metadata, not an authentication credential.
+/// Keep it separate so the passwd record and C ABI remain unchanged.
+pub fn encode_generation(
+    uid: u32,
+    generation: u64,
+    output: &mut [u8],
+) -> Result<usize, EncodeError> {
+    if generation == 0 {
+        return Err(EncodeError::InvalidLength);
+    }
+    crate::require_output(output, GENERATION_LEN)?;
+    output[..4].copy_from_slice(&uid.to_le_bytes());
+    output[4..8].fill(0);
+    output[8..16].copy_from_slice(&generation.to_le_bytes());
+    Ok(GENERATION_LEN)
+}
+pub fn decode_generation(uid: u32, input: &[u8]) -> Result<u64, DecodeError> {
+    if input.len() != GENERATION_LEN || input[..4] != uid.to_le_bytes() || input[4..8] != [0; 4] {
+        return Err(DecodeError::InvalidLength);
+    }
+    let generation = u64::from_le_bytes(input[8..16].try_into().unwrap());
+    if generation == 0 {
+        return Err(DecodeError::InvalidLength);
+    }
+    Ok(generation)
+}
+pub fn encode_generation_reply(
+    id: u64,
+    uid: u32,
+    generation: u64,
+    output: &mut [u8],
+) -> Result<usize, EncodeError> {
+    crate::require_output(output, crate::HEADER_LEN + GENERATION_LEN)?;
+    let length = encode_generation(uid, generation, &mut output[crate::HEADER_LEN..])?;
+    crate::write_header(output, Opcode::PublicAccount, id, length as u32);
+    Ok(crate::HEADER_LEN + length)
+}
+pub fn decode_generation_response(
+    id: u64,
+    uid: u32,
+    input: &[u8],
+) -> Result<Result<u64, i32>, DecodeError> {
+    if crate::decode_opcode(input)? == Opcode::Status {
+        let status = crate::Status::decode(input)?;
+        if status.request_id != id || status.status >= 0 {
+            return Err(DecodeError::InvalidLength);
+        }
+        return Ok(Err(status.status));
+    }
+    let header = crate::expected_header(input, Opcode::PublicAccount)?;
+    if header.request_id != id {
+        return Err(DecodeError::InvalidLength);
+    }
+    Ok(Ok(decode_generation(uid, &input[crate::HEADER_LEN..])?))
+}

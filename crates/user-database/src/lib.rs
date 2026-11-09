@@ -4,15 +4,17 @@ extern crate alloc;
 
 pub mod groups;
 
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
 pub const DATABASE_PATH: &str = "/var/lib/accounts/users.db";
-pub const DATABASE_VERSION: u16 = 1;
+pub const DATABASE_VERSION: u16 = 2;
 pub const FIRST_REGULAR_UID: u32 = 1000;
 
-const HEADER: &str = "MUSRDB\t1";
+const LEGACY_HEADER: &str = "MUSRDB\t1";
+const HEADER: &str = "MUSRDB\t2\t";
 const LOCKED_FLAG: u32 = 1;
 const KNOWN_FLAGS: u32 = LOCKED_FLAG;
 const MAX_DATABASE_BYTES: usize = 1024 * 1024;
@@ -86,6 +88,8 @@ impl UserRecord {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UserDatabase {
     users: Vec<UserRecord>,
+    generations: BTreeMap<u32, u64>,
+    next_generation: u64,
 }
 
 impl Default for UserDatabase {
@@ -107,6 +111,8 @@ impl UserDatabase {
                 password_hash: "!".to_string(),
                 locked: true,
             }],
+            generations: BTreeMap::from([(0, 1)]),
+            next_generation: 2,
         }
     }
 
@@ -116,11 +122,20 @@ impl UserDatabase {
         }
         let text = core::str::from_utf8(bytes).map_err(|_| DatabaseError::InvalidUtf8)?;
         let mut lines = text.lines();
-        if lines.next() != Some(HEADER) {
-            return Err(DatabaseError::InvalidHeader);
-        }
+        let header = lines.next().ok_or(DatabaseError::InvalidHeader)?;
+        let legacy = header == LEGACY_HEADER;
+        let mut next_generation = if legacy {
+            1
+        } else {
+            header
+                .strip_prefix(HEADER)
+                .ok_or(DatabaseError::InvalidHeader)?
+                .parse::<u64>()
+                .map_err(|_| DatabaseError::InvalidNumber)?
+        };
 
         let mut users = Vec::new();
+        let mut generations = BTreeMap::new();
         for line in lines {
             if line.is_empty() {
                 continue;
@@ -128,9 +143,33 @@ impl UserDatabase {
             if users.len() >= MAX_USERS {
                 return Err(DatabaseError::TooManyUsers);
             }
-            users.push(parse_record(line)?);
+            let (generation, line) = if legacy {
+                let generation = next_generation;
+                next_generation = next_generation
+                    .checked_add(1)
+                    .ok_or(DatabaseError::GenerationExhausted)?;
+                (generation, line)
+            } else {
+                let (generation, line) =
+                    line.split_once('\t').ok_or(DatabaseError::InvalidRecord)?;
+                (
+                    generation
+                        .parse::<u64>()
+                        .map_err(|_| DatabaseError::InvalidNumber)?,
+                    line,
+                )
+            };
+            let user = parse_record(line)?;
+            if generations.insert(user.uid, generation).is_some() {
+                return Err(DatabaseError::DuplicateUid);
+            }
+            users.push(user);
         }
-        let database = Self { users };
+        let database = Self {
+            users,
+            generations,
+            next_generation,
+        };
         database.validate()?;
         Ok(database)
     }
@@ -138,8 +177,11 @@ impl UserDatabase {
     pub fn encode(&self) -> Result<Vec<u8>, DatabaseError> {
         self.validate()?;
         let mut output = String::from(HEADER);
+        output.push_str(&self.next_generation.to_string());
         output.push('\n');
         for user in &self.users {
+            output.push_str(&self.generations[&user.uid].to_string());
+            output.push('\t');
             encode_record(user, &mut output);
             output.push('\n');
         }
@@ -165,6 +207,12 @@ impl UserDatabase {
         self.users.iter().find(|user| user.uid == uid)
     }
 
+    /// Persisted account incarnation. Deletion never makes a generation
+    /// available to a later account, even when its UID or name is reused.
+    pub fn account_generation(&self, uid: u32) -> Option<u64> {
+        self.generations.get(&uid).copied()
+    }
+
     pub fn next_regular_uid(&self) -> Result<u32, DatabaseError> {
         let mut candidate = FIRST_REGULAR_UID;
         loop {
@@ -188,6 +236,12 @@ impl UserDatabase {
         if self.find_uid(user.uid).is_some() {
             return Err(DatabaseError::DuplicateUid);
         }
+        let next = self
+            .next_generation
+            .checked_add(1)
+            .ok_or(DatabaseError::GenerationExhausted)?;
+        self.generations.insert(user.uid, self.next_generation);
+        self.next_generation = next;
         self.users.push(user);
         self.users.sort_by_key(|record| record.uid);
         self.validate()
@@ -202,20 +256,32 @@ impl UserDatabase {
             .iter()
             .position(|user| user.name == name)
             .ok_or(DatabaseError::UserNotFound)?;
-        Ok(self.users.remove(index))
+        let user = self.users.remove(index);
+        self.generations.remove(&user.uid);
+        Ok(user)
     }
 
     pub fn validate(&self) -> Result<(), DatabaseError> {
         if self.users.len() > MAX_USERS {
             return Err(DatabaseError::TooManyUsers);
         }
+        if self.next_generation == 0 || self.generations.len() != self.users.len() {
+            return Err(DatabaseError::InvalidRecord);
+        }
         let mut root_count = 0usize;
         for (index, user) in self.users.iter().enumerate() {
             user.validate()?;
+            let generation = self
+                .account_generation(user.uid)
+                .filter(|value| *value != 0 && *value < self.next_generation)
+                .ok_or(DatabaseError::InvalidRecord)?;
             if user.name == "root" {
                 root_count += 1;
             }
             for previous in &self.users[..index] {
+                if self.account_generation(previous.uid) == Some(generation) {
+                    return Err(DatabaseError::InvalidRecord);
+                }
                 if previous.name == user.name {
                     return Err(DatabaseError::DuplicateName);
                 }
@@ -267,6 +333,7 @@ pub enum DatabaseError {
     DuplicateUid,
     TooManyUsers,
     UidExhausted,
+    GenerationExhausted,
     UserNotFound,
     RootRemoval,
 }
@@ -289,6 +356,7 @@ impl fmt::Display for DatabaseError {
             Self::DuplicateUid => "user ID already exists",
             Self::TooManyUsers => "user database contains too many users",
             Self::UidExhausted => "no user ID is available",
+            Self::GenerationExhausted => "no account generation is available",
             Self::UserNotFound => "user was not found",
             Self::RootRemoval => "root user cannot be removed",
         })

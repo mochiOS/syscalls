@@ -68,6 +68,7 @@ pub fn decode_query(input: &[u8]) -> Result<Query<'_>, DecodeError> {
     Ok(match account::decode_query(input)? {
         account::Query::Uid(id) => Query::Gid(id),
         account::Query::Name(name) => Query::Name(name),
+        account::Query::Generation(_) => return Err(DecodeError::InvalidLength),
     })
 }
 pub fn encode_record(record: Record<'_>, output: &mut [u8]) -> Result<usize, EncodeError> {
