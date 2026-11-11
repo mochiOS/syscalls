@@ -9,6 +9,7 @@ pub mod system_identity;
 mod path_limits;
 mod volume_status;
 mod read_scope;
+mod readonly_tree;
 mod process_domain;
 pub mod file_size_limit;
 pub mod file_admission;
