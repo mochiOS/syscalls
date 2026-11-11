@@ -6,9 +6,9 @@ use sha2::{Digest, Sha256};
 pub(super) fn with_startup(
     inputs: &exec_inputs::Inputs,
     execfn: &[u8],
-    fds: &FdTable<FdObject>,
+    _fds: &FdTable<FdObject>,
     process: mochios_posix_client::process_image::Process<'_>,
-    operation: impl FnOnce(&[u8]) -> Result<(), c_int>,
+    operation: impl FnOnce(&mut [u8], usize) -> Result<(), c_int>,
 ) -> Result<(), c_int> {
     let mut arguments = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
     let mut environment = [&[][..]; MAX_EXEC_VECTOR_ENTRIES];
@@ -50,8 +50,7 @@ pub(super) fn with_startup(
                         &mut startup,
                     )?;
                     let length = metadata.attach(&mut startup, length, &plan.mappings())?;
-                    let length = attach_fd_launch_context(fds, &mut startup, length)?;
-                    operation(&startup[..length])
+                    operation(&mut startup, length)
                 },
             )
         },
@@ -164,46 +163,109 @@ fn replace_image(
                 indirect: prepared.indirect,
                 loaded_objects: prepared.loaded_objects,
             },
-            |startup| {
-                // Measure the exact retained output, rather than reading
-                // either the mutable original or a newly prepared object
-                // again across callback-capable I/O.
-                let digest: [u8; 32] = Sha256::digest(prepared.bytes).into();
-                if prepared.source == prepared.bytes {
-                    authorize(prepared.image, identity, &digest, None)?;
-                } else {
-                    io_resources::with(
-                        || {
-                            exec_image::Runtime::critical(|| {
-                                Ok(OpenImage(exec_image::Runtime.create_image(record.len())?))
-                            })
-                        },
-                        |bundle| {
-                            let mut at = 0;
-                            while at < record.len() {
-                                let n =
-                                    exec_image::Runtime.write_at(bundle.0, &record[at..], at)?;
-                                if n == 0 || n > record.len() - at {
-                                    return Err(EIO);
-                                }
-                                at += n;
+            |startup, length| {
+                io_resources::with(
+                    || Ok(ExecResources::default()),
+                    |authorization| {
+                        // Measure the exact retained output, rather than reading
+                        // either the mutable original or a newly prepared object
+                        // again across callback-capable I/O.
+                        let digest: [u8; 32] = Sha256::digest(prepared.bytes).into();
+                        if prepared.source == prepared.bytes {
+                            authorize(prepared.image, identity, &digest, None, authorization)?;
+                        } else {
+                            io_resources::with(
+                                || {
+                                    exec_image::Runtime::critical(|| {
+                                        Ok(OpenImage(
+                                            exec_image::Runtime.create_image(record.len())?,
+                                        ))
+                                    })
+                                },
+                                |bundle| {
+                                    let mut at = 0;
+                                    while at < record.len() {
+                                        let n = exec_image::Runtime.write_at(
+                                            bundle.0,
+                                            &record[at..],
+                                            at,
+                                        )?;
+                                        if n == 0 || n > record.len() - at {
+                                            return Err(EIO);
+                                        }
+                                        at += n;
+                                    }
+                                    {
+                                        let _delivery = defer_native_delivery();
+                                        let readonly =
+                                            exec_image::Runtime.readonly_image(bundle.0)?;
+                                        close_object_handle(core::mem::replace(
+                                            &mut bundle.0,
+                                            readonly,
+                                        ));
+                                    }
+                                    authorize(
+                                        bundle.0,
+                                        identity,
+                                        &digest,
+                                        Some(record.len()),
+                                        authorization,
+                                    )
+                                },
+                            )?;
+                        }
+                        let length = attach_fd_launch_context(
+                            fds,
+                            startup,
+                            length,
+                            &authorization.updates(),
+                        )?;
+                        match syscall::image::replace_bounded(
+                            prepared.image,
+                            identity,
+                            &startup[..length],
+                            ceiling,
+                        ) {
+                            Ok(never) => match never {},
+                            Err(error) => {
+                                Err(mochios_posix_client::image_error::errno(error.raw()))
                             }
-                            {
-                                let _delivery = defer_native_delivery();
-                                let readonly = exec_image::Runtime.readonly_image(bundle.0)?;
-                                close_object_handle(core::mem::replace(&mut bundle.0, readonly));
-                            }
-                            authorize(bundle.0, identity, &digest, Some(record.len()))
-                        },
-                    )?;
-                }
-                match syscall::image::replace_bounded(prepared.image, identity, startup, ceiling) {
-                    Ok(never) => match never {},
-                    Err(error) => Err(mochios_posix_client::image_error::errno(error.raw())),
-                }
+                        }
+                    },
+                )
             },
         )
     })
+}
+
+#[derive(Default)]
+struct ExecResources {
+    handles: [u32; 2],
+}
+impl Drop for ExecResources {
+    fn drop(&mut self) {
+        let _delivery = defer_native_delivery();
+        for handle in self.handles {
+            if handle != 0 {
+                close_object_handle(handle);
+            }
+        }
+    }
+}
+impl ExecResources {
+    fn updates(&self) -> [mnu_abi::process_image::ContextUpdate; 2] {
+        use mnu_abi::process_image::ContextUpdate as U;
+        use mochios_capability_protocol::resources::{CONTROL_KEY, ROOT_KEY};
+        core::array::from_fn(|index| U {
+            kind: if self.handles[index] == 0 {
+                U::REMOVE_HANDLE
+            } else {
+                U::SET_HANDLE
+            },
+            key: [ROOT_KEY, CONTROL_KEY][index],
+            value: self.handles[index] as u64,
+        })
+    }
 }
 
 fn authorize(
@@ -211,6 +273,7 @@ fn authorize(
     identity: &str,
     digest: &[u8; 32],
     transcript: Option<usize>,
+    resources: &mut ExecResources,
 ) -> Result<(), c_int> {
     let endpoint = syscall_errno(syscall::raw_syscall2(
         syscall::SyscallNumber::FindProcessByName,
@@ -222,7 +285,7 @@ fn authorize(
     }
     let mut request = [0; mochios_capability_protocol::prepared_exec::MAX_REQUEST];
     let length = match transcript {
-        Some(length) => mochios_capability_protocol::prepared_exec::encode(
+        Some(length) => mochios_capability_protocol::prepared_exec::encode_with_resources(
             identity,
             length as u64,
             digest,
@@ -255,7 +318,30 @@ fn authorize(
         reply.len() as u64,
         &mut handles as *mut _ as u64,
     ));
-    let unexpected = handles.count != 0;
+    let token_rights = syscall::HANDLE_RIGHT_DUPLICATE | syscall::HANDLE_RIGHT_TRANSFER;
+    let expected = [token_rights, token_rights | syscall::HANDLE_RIGHT_SEND];
+    let valid = transcript.is_some()
+        && matches!(received, Ok(8))
+        && reply == [0; 8]
+        && handles.delivery_flags == 0
+        && handles.count == 2
+        && handles.handles[..2]
+            .iter()
+            .zip(expected)
+            .all(|(object, rights)| {
+                object.handle != 0
+                    && object.handle != image
+                    && object.reserved == 0
+                    && object.rights == rights
+            })
+        && handles.handles[0].handle != handles.handles[1].handle;
+    if valid {
+        for (index, object) in handles.handles[..2].iter().enumerate() {
+            resources.handles[index] = object.handle;
+        }
+        return Ok(());
+    }
+    let unexpected = handles.count != 0 || transcript.is_some();
     let count = (handles.count as usize).min(handles.handles.len());
     for (index, attached) in handles.handles[..count].iter().enumerate() {
         if attached.handle != 0

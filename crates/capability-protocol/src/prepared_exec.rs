@@ -3,6 +3,10 @@
 use super::ProtocolError;
 /// Versioned prepared-exec request selector.
 pub const OPCODE: u32 = 0x4341_4552;
+/// Replay and authorize image replacement, returning two owned startup resource
+/// references (root token and broker endpoint) on success. The legacy opcode
+/// keeps its attachment-free reply. Only native context commit installs them.
+pub const WITH_RESOURCES_OPCODE: u32 = 0x4341_4542;
 /// Fixed header size; followed by a bounded UTF-8 authorization key.
 pub const HEADER: usize = 56;
 /// Maximum request size, including the authorization key.
@@ -28,12 +32,27 @@ pub fn encode(
     b[HEADER..].copy_from_slice(key.as_bytes());
     Ok(n)
 }
+/// Encode the opt-in resource-bearing reply variant without changing the
+/// original request/reply contract used by previously distributed SDKs.
+pub fn encode_with_resources(
+    key: &str,
+    length: u64,
+    digest: &[u8; 32],
+    output: &mut [u8],
+) -> Result<usize, ProtocolError> {
+    let n = encode(key, length, digest, output)?;
+    output[..4].copy_from_slice(&WITH_RESOURCES_OPCODE.to_le_bytes());
+    Ok(n)
+}
 /// Decode strict lengths/reserved fields; attached RAM rights are checked by policy.
 pub fn decode(b: &[u8]) -> Result<(&str, u64, &[u8; 32]), ProtocolError> {
     if b.len() < HEADER || b.len() > MAX_REQUEST {
         return Err(ProtocolError::InvalidLength);
     }
-    if u32::from_le_bytes(b[..4].try_into().unwrap()) != OPCODE {
+    if !matches!(
+        u32::from_le_bytes(b[..4].try_into().unwrap()),
+        OPCODE | WITH_RESOURCES_OPCODE
+    ) {
         return Err(ProtocolError::UnknownOpcode);
     }
     if b[4..8] != 1u32.to_le_bytes() {
@@ -73,5 +92,20 @@ mod tests {
         assert!(encode("", 1, &digest, &mut bytes).is_err());
         assert!(encode("a\0b", 1, &digest, &mut bytes).is_err());
         assert!(encode("execve", 0, &digest, &mut bytes).is_err());
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    #[test]
+    fn resource_reply_is_opt_in_and_keeps_the_legacy_opcode_unchanged() {
+        let mut original = [0; MAX_REQUEST]; let mut resources = [0; MAX_REQUEST];
+        let n = encode("execve", 16, &[3;32], &mut original).unwrap();
+        assert_eq!(encode_with_resources("execve", 16, &[3;32], &mut resources).unwrap(), n);
+        assert_eq!(original[..4], OPCODE.to_le_bytes());
+        assert_eq!(resources[..4], WITH_RESOURCES_OPCODE.to_le_bytes());
+        assert_eq!(original[4..n], resources[4..n]);
+        assert_eq!(decode(&original[..n]), decode(&resources[..n]));
     }
 }

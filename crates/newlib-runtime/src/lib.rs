@@ -2622,13 +2622,14 @@ fn attach_fd_launch_context(
     fds: &FdTable<FdObject>,
     output: &mut [u8],
     length: usize,
+    resources: &[mnu_abi::process_image::ContextUpdate; 2],
 ) -> Result<usize, c_int> {
     use mnu_abi::process_image::ContextUpdate as U;
     let mut updates = [U {
         kind: U::REMOVE_VALUE,
         key: 0,
         value: 0,
-    }; MAX_FDS * 2 + 1];
+    }; MAX_FDS * 2 + 3];
     let count = plan_launch_context(
         fds,
         MAX_FDS,
@@ -2643,7 +2644,8 @@ fn attach_fd_launch_context(
         |object| Some(object.lower_handle),
     )
     .map_err(|_| EIO)?;
-    mnu_abi::process_image::attach_context(output, length, &updates[..count]).map_err(|_| EIO)
+    updates.get_mut(count..count+2).ok_or(E2BIG)?.copy_from_slice(resources);
+    mnu_abi::process_image::attach_context(output, length, &updates[..count+2]).map_err(|_| EIO)
 }
 
 extern "C" fn run_fini_array() {
