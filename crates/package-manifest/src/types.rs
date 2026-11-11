@@ -7,6 +7,10 @@ pub struct PackageBinary {
     pub file: Option<String>,
     pub capability_profile: Option<String>,
     pub requires: Vec<String>,
+    /// Own-package asset exports available to this executable.
+    pub resource_exports: Vec<String>,
+    /// External asset aliases available to this executable.
+    pub resource_dependencies: Vec<String>,
     pub kind: Option<String>,
     pub driver_class: Option<String>,
     pub api_version: Option<u32>,
@@ -85,6 +89,10 @@ pub struct PackageManifest {
     pub package_abi: Option<String>,
     pub files: Vec<PackageFile>,
     pub library_dependencies: Vec<LibraryDependency>,
+    /// Publisher-approved data exports, separate from executable code.
+    pub resource_exports: Vec<crate::ResourceExport>,
+    /// Explicit data dependencies selected per executable.
+    pub resource_dependencies: Vec<crate::ResourceDependency>,
     pub binaries: Vec<PackageBinary>,
     pub application: Option<ApplicationMetadata>,
     pub linux: Option<LinuxApplication>,

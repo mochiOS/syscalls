@@ -130,6 +130,8 @@ pub(super) fn manifest(root: &Table) -> Option<(PackageManifest, Option<String>,
             file: optional_string(table, "file")?,
             capability_profile: optional_string(table, "capability_profile")?,
             requires: requirements(table)?,
+            resource_exports: strings(table, "resource_exports", MAX_REQUIREMENTS)?,
+            resource_dependencies: strings(table, "resource_dependencies", MAX_REQUIREMENTS)?,
             kind: optional_string(table, "kind")?,
             driver_class: optional_string(table, "driver_class")?,
             api_version: match table.get("api_version") {
@@ -181,6 +183,58 @@ pub(super) fn manifest(root: &Table) -> Option<(PackageManifest, Option<String>,
             subject_key_id: string(table, "subject_key_id")?,
             provenance: string(table, "provenance")?,
             abi: string(table, "abi")?,
+        });
+    }
+    for table in tables(root, "resource_export", 256)? {
+        if table
+            .keys()
+            .any(|key| !["name", "files"].contains(&key.as_str()))
+        {
+            return None;
+        }
+        let bindings = table.get("files")?.as_table()?;
+        if bindings.len() > MAX_ENTRIES {
+            return None;
+        }
+        let files = bindings
+            .iter()
+            .map(|(name, value)| {
+                Some(ResourceFile {
+                    name: name.clone(),
+                    file: value.as_str()?.into(),
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        result.resource_exports.push(ResourceExport {
+            name: string(table, "name")?,
+            files,
+        });
+    }
+    for table in tables(root, "resource_dependency", 256)? {
+        if table.keys().any(|key| {
+            ![
+                "alias",
+                "package",
+                "developer",
+                "subject_key_id",
+                "provenance",
+                "abi",
+                "export",
+            ]
+            .contains(&key.as_str())
+        }) {
+            return None;
+        }
+        result.resource_dependencies.push(ResourceDependency {
+            alias: string(table, "alias")?,
+            export: string(table, "export")?,
+            provider: LibraryDependency {
+                package: string(table, "package")?,
+                developer: string(table, "developer")?,
+                subject_key_id: string(table, "subject_key_id")?,
+                provenance: string(table, "provenance")?,
+                abi: string(table, "abi")?,
+            },
         });
     }
     if let Some(value) = root.get("application") {

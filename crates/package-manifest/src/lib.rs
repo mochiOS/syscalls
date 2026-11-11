@@ -4,6 +4,8 @@
 extern crate alloc;
 
 mod parser;
+pub mod resources;
+pub use resources::{ResourceDependency, ResourceExport, ResourceFile};
 mod types;
 mod validation;
 pub use types::*;
