@@ -250,7 +250,7 @@ fn valid_mpkg_path(path: &str) -> bool {
 
 pub use mochios_package_manifest::{
     ApplicationMetadata, LibraryDependency, LinuxApplication, PackageBinary, PackageFile,
-    ResourceDependency, ResourceExport, ResourceFile,
+    ResourceDependency, ResourceExport, ResourceFile, resources,
     PackageManifest, parse_manifest,
 };
 
