@@ -22,6 +22,9 @@ mod record_lock_memory;
 mod record_lock_blocking;
 use fd_creation::PendingFdReservation;
 mod file_handle_import;
+mod bundle;
+mod resource_views;
+mod resource_view_path;
 mod file_handle_export;
 mod callback_resources;
 mod file_mutation;
@@ -804,6 +807,7 @@ struct RuntimeState {
     envp: *mut *mut c_char,
     executable: *const c_char,
     fds: FdTable<FdObject>,
+    resource_views: resource_views::Registry,
     named_semaphores: mochios_posix_client::named_semaphore::Mappings<u32, 128>,
     timer_values: mochios_posix_client::timer_value::Registry<usize, 128>,
     timer_cleanup: process_timer::CleanupBook,
@@ -828,6 +832,7 @@ impl RuntimeState {
             envp: ptr::null_mut(),
             executable: ptr::null(),
             fds: FdTable::new(),
+            resource_views: resource_views::Registry::new(),
             named_semaphores: mochios_posix_client::named_semaphore::Mappings::new(),
             timer_values: mochios_posix_client::timer_value::Registry::new(),
             timer_cleanup: process_timer::CleanupBook::new(),

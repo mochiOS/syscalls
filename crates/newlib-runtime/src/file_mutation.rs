@@ -279,9 +279,14 @@ fn open_prepared(
     let options = posix_open_options(flags)?;
     let (prepared, directory) = {
         let mut snapshot = [0u8; posix_protocol::MAX_PATH_LEN];
-        let length = path_io::capture(path, &mut snapshot)?;
+        let mut length = path_io::capture(path, &mut snapshot)?;
+        let (base, directory) = if let Some((skip, lease)) = resource_views::resolve(&snapshot[..length])? {
+            let base = StatAtBase::Directory(ObjectHandleAttachment { handle: u32::try_from(lease.handle.lower_handle).map_err(|_| EBADF)?, rights: lease.rights });
+            if skip == length { snapshot[0] = b'.'; length = 1; }
+            else { snapshot.copy_within(skip..length, 0); length -= skip; }
+            (base, Some(lease))
+        } else { rename_posix_base(dirfd, &snapshot[..length])? };
         let path = &snapshot[..length];
-        let (base, directory) = rename_posix_base(dirfd, path)?;
         let base = match base {
             StatAtBase::ProcessRoot => OpenAtBase::ProcessRoot,
             StatAtBase::ProcessCwd => OpenAtBase::ProcessCwd,

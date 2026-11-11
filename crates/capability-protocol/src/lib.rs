@@ -1366,3 +1366,5 @@ mod tests {
         assert_eq!(request.capability(), Err(ProtocolError::InvalidUtf8));
     }
 }
+
+pub mod resources;

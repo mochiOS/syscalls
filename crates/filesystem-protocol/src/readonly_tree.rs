@@ -1,6 +1,8 @@
 //! A generic immutable directory built from caller-owned bytes. This protocol
 //! grants no pathname access and has no knowledge of packages or publishers.
+#[cfg(feature = "alloc")]
 extern crate alloc;
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 /// Creation request magic; the sole attachment is a readable anonymous object.
@@ -26,6 +28,7 @@ pub fn valid_name(name: &str) -> bool {
             .all(|p| !p.is_empty() && p != "." && p != ".." && p.len() <= super::MAX_NAME_LEN)
 }
 /// Begin an empty version-one tree. Even an empty directory has a header.
+#[cfg(feature = "alloc")]
 pub fn begin() -> Vec<u8> {
     let mut out = MAGIC.to_vec();
     out.extend_from_slice(&0u64.to_le_bytes());
@@ -33,6 +36,7 @@ pub fn begin() -> Vec<u8> {
 }
 /// Append an explicit file. Final structural validation belongs to the owner;
 /// duplicate names and file/directory collisions must still be rejected there.
+#[cfg(feature = "alloc")]
 pub fn append(output: &mut Vec<u8>, name: &str, bytes: &[u8]) -> Result<(), ()> {
     if !valid_name(name) || output.len() < REQUEST_LEN || output[..8] != MAGIC {
         return Err(());

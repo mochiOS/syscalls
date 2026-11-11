@@ -8,7 +8,7 @@ pub extern "C" fn mochi_fd_from_file_handle(source: u32, flags: c_int) -> c_int 
     result_with_errno(import(source, flags), -1)
 }
 
-fn import(source: u32, flags: c_int) -> Result<c_int, c_int> {
+pub(super) fn import(source: u32, flags: c_int) -> Result<c_int, c_int> {
     if flags & !O_CLOEXEC != 0 {
         return Err(EINVAL);
     }

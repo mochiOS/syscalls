@@ -38,7 +38,7 @@ pub fn valid_resource_name(name: &str) -> bool {
             .any(|b| b == b'\\' || b == 0 || b.is_ascii_control())
         && name
             .split('/')
-            .all(|p| !p.is_empty() && p != "." && p != "..")
+            .all(|p| !p.is_empty() && p != "." && p != ".." && p.len() <= 255)
 }
 /// Check a bounded, single-component dependency/export alias.
 pub fn valid_resource_alias(name: &str) -> bool {
@@ -71,12 +71,13 @@ pub(crate) fn validate(manifest: &PackageManifest) -> Option<()> {
                 return None;
             }
             let file = manifest.files.iter().find(|f| f.id == asset.file)?;
+            let path = target(manifest, &file.path)?;
             if file.mode & !0o666 != 0
                 || !valid_digest(&file.digest)
                 || manifest
                     .binaries
                     .iter()
-                    .any(|b| b.file.as_ref() == Some(&asset.file))
+                    .any(|b| b.file.as_ref() == Some(&asset.file) || b.path == path)
             {
                 return None;
             }
@@ -163,19 +164,20 @@ fn binding(
     name: &str,
     file: &crate::PackageFile,
 ) -> Result<SelectedResource, ResourceError> {
+    let path = target(manifest, &file.path).ok_or(ResourceError::InvalidDeclaration)?;
     if !valid_resource_name(name)
         || !valid_digest(&file.digest)
         || file.mode & !0o666 != 0
         || manifest
             .binaries
             .iter()
-            .any(|b| b.file.as_ref() == Some(&file.id))
+            .any(|b| b.file.as_ref() == Some(&file.id) || b.path == path)
     {
         return Err(ResourceError::InvalidDeclaration);
     }
     Ok(SelectedResource {
         name: name.into(),
-        path: target(manifest, &file.path).ok_or(ResourceError::InvalidDeclaration)?,
+        path,
         size: file.size,
         digest: file.digest.clone(),
     })
@@ -241,8 +243,13 @@ pub fn own_resources(
     let executable = manifest.binary(binary).ok_or(ResourceError::NotAllowed)?;
     let mut selected = Vec::new();
     if let Some(app) = &manifest.application {
-        let entry = alloc::format!("$/{}", app.entry);
-        if target(manifest, &entry).as_deref() == Some(binary) {
+        // Built-in bundles may live on System and their display name need
+        // not equal the directory name. Anchor data to the authenticated
+        // executable's signed entry suffix, never to a guessed install path.
+        if let Some(bundle) = binary
+            .strip_suffix(&app.entry)
+            .filter(|base| base.ends_with(".app/"))
+        {
             for name in app
                 .resources
                 .iter()
@@ -251,13 +258,19 @@ pub fn own_resources(
                 if selected.iter().any(|r: &SelectedResource| r.name == *name) {
                     continue;
                 }
-                let path = target(manifest, &alloc::format!("$/{name}"))
-                    .ok_or(ResourceError::InvalidDeclaration)?;
-                let file = manifest
+                if !valid_resource_name(name) {
+                    return Err(ResourceError::InvalidDeclaration);
+                }
+                let path = alloc::format!("{bundle}{name}");
+                // Older installed manifests authenticated code only. Keep
+                // them launchable, but never grant an unmeasured data file.
+                let Some(file) = manifest
                     .files
                     .iter()
                     .find(|f| target(manifest, &f.path).as_ref() == Some(&path))
-                    .ok_or(ResourceError::InvalidDeclaration)?;
+                else {
+                    continue;
+                };
                 selected.push(binding(manifest, name, file)?);
             }
         }
@@ -265,7 +278,9 @@ pub fn own_resources(
     for name in &executable.resource_exports {
         for mut resource in exported_resources(manifest, name)? {
             resource.name = alloc::format!("{name}/{}", resource.name);
-            if selected.iter().any(|r| r.name == resource.name) {
+            if !valid_resource_name(&resource.name)
+                || selected.iter().any(|r| r.name == resource.name)
+            {
                 return Err(ResourceError::InvalidDeclaration);
             }
             selected.push(resource);

@@ -21,12 +21,15 @@ impl Drop for PendingOutput {
 
 pub(super) fn resolve(path: *const c_char, output: *mut c_char) -> Result<*mut c_char, c_int> {
     let mut canonical = [0u8; posix_protocol::MAX_PATH_LEN];
-    let length = path_io::at(-2, path, |base, path| {
+    let length = match resource_views::canonical(path, &mut canonical)? {
+        Some(length) => length,
+        None => path_io::at(-2, path, |base, path| {
         posix_client()
             .map_err(map_posix_client_error)?
             .canonical_path_at(base, path, &mut canonical)
             .map_err(map_posix_client_error)
-    })?;
+        })?,
+    };
     let canonical = canonical.get(..length).ok_or(EIO)?;
     if canonical.first() != Some(&b'/') || canonical.contains(&0) {
         return Err(EIO);

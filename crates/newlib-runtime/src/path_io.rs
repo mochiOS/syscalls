@@ -34,8 +34,12 @@ impl Resources {
         // caller string survives into a wait or application callback.
         let length = capture(path, &mut resources.path)?;
         resources.length = length;
-        let path = &resources.path[..length];
-        let (base, directory) = rename_posix_base(dirfd, path)?;
+        let (base, directory) = if let Some((skip, lease)) = resource_views::resolve(&resources.path[..length])? {
+            let base = StatAtBase::Directory(ObjectHandleAttachment { handle: u32::try_from(lease.handle.lower_handle).map_err(|_| EBADF)?, rights: lease.rights });
+            if skip == length { resources.path[0] = b'.'; resources.length = 1; }
+            else { resources.path.copy_within(skip..length, 0); resources.length = length-skip; }
+            (base, Some(lease))
+        } else { rename_posix_base(dirfd, &resources.path[..length])? };
         resources.directory = directory;
         resources.base = base;
         Ok(())
