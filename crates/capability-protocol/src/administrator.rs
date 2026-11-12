@@ -160,3 +160,64 @@ pub fn decode_auto_login(input: &[u8]) -> Result<(bool, &str), consent::Error> {
     }
     Ok((input[4] != 0, name))
 }
+
+/// Device privacy choices, applied by the existing administrator broker.
+/// No caller-supplied file path, timestamp, or legal receipt is accepted.
+pub const DEVICE_PRIVACY: [u8; 4] = *b"DPR1";
+/// Encode three explicit choices (usage, crashes, updates), legal confirmation,
+/// and the hash of the exact installed document bundle reviewed by the caller.
+pub fn encode_device_privacy(
+    choices: [bool; 3],
+    legal_confirmed: bool,
+    bundle_hash: &[u8; 32],
+    output: &mut [u8],
+) -> Result<usize, consent::Error> {
+    let out = output.get_mut(..40).ok_or(consent::Error::BufferTooSmall)?;
+    out[..4].copy_from_slice(&DEVICE_PRIVACY);
+    for (i, choice) in choices.into_iter().enumerate() {
+        out[4 + i] = u8::from(choice);
+    }
+    out[7] = u8::from(legal_confirmed);
+    out[8..40].copy_from_slice(bundle_hash);
+    Ok(40)
+}
+/// Decode a bounded privacy operation, rejecting unknown flags and trailing data.
+pub fn decode_device_privacy(input: &[u8]) -> Result<([bool; 3], bool, [u8; 32]), consent::Error> {
+    if input.len() != 40
+        || !input.starts_with(&DEVICE_PRIVACY)
+        || input[4..8].iter().any(|v| *v > 1)
+    {
+        return Err(consent::Error::Invalid);
+    }
+    let mut hash = [0; 32];
+    hash.copy_from_slice(&input[8..40]);
+    Ok((
+        [input[4] != 0, input[5] != 0, input[6] != 0],
+        input[7] != 0,
+        hash,
+    ))
+}
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+    #[test]
+    fn privacy_operation_has_only_explicit_bounded_choices_and_document_binding() {
+        let mut out = [0; 41];
+        assert_eq!(
+            encode_device_privacy([true, false, true], true, &[42; 32], &mut out),
+            Ok(40)
+        );
+        assert_eq!(
+            decode_device_privacy(&out[..40]),
+            Ok(([true, false, true], true, [42; 32]))
+        );
+        assert!(decode_device_privacy(&out).is_err());
+        for i in 4..8 {
+            let mut invalid = out;
+            invalid[i] = 2;
+            assert!(decode_device_privacy(&invalid[..40]).is_err());
+        }
+        assert!(decode_device_privacy(&out[..39]).is_err());
+        assert!(encode_device_privacy([false; 3], false, &[0; 32], &mut out[..39]).is_err());
+    }
+}
