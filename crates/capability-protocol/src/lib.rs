@@ -1368,3 +1368,4 @@ mod tests {
 }
 
 pub mod resources;
+pub mod executables;

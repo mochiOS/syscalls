@@ -100,6 +100,18 @@ impl Resources {
         spawn_output::publish(process_id, handle, output)
     }
 
+    pub(super) fn publish_reference(&mut self, process_id: u64, output: *mut u8) -> c_int {
+        let _delivery = defer_native_delivery();
+        let Some((handle, true)) = self.child else {
+            return EIO;
+        };
+        let Ok(handle) = u32::try_from(handle) else {
+            return EOVERFLOW;
+        };
+        self.track_child(None);
+        spawn_output::publish_reference(process_id, handle, output)
+    }
+
     fn finish_fork(
         &mut self,
         process_id: u64,

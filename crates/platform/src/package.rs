@@ -248,6 +248,7 @@ fn valid_mpkg_path(path: &str) -> bool {
             || path.starts_with("payload/"))
 }
 
+pub use mochios_package_manifest::executables;
 pub use mochios_package_manifest::{
     ApplicationMetadata, LibraryDependency, LinuxApplication, PackageBinary, PackageFile,
     ResourceDependency, ResourceExport, ResourceFile, resources,

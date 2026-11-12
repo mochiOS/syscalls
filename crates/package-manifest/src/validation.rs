@@ -90,6 +90,7 @@ pub(crate) fn validate(
         }
     }
     crate::resources::validate(&package)?;
+    crate::executables::validate(&package)?;
     for (idx, left) in package.files.iter().enumerate() {
         for right in package.files.iter().skip(idx + 1) {
             if left.id == right.id || left.path == right.path {

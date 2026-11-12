@@ -11,6 +11,10 @@ pub struct PackageBinary {
     pub resource_exports: Vec<String>,
     /// External asset aliases available to this executable.
     pub resource_dependencies: Vec<String>,
+    /// Own-package executable exports this binary may select.
+    pub executable_exports: Vec<String>,
+    /// External executable aliases this binary may select.
+    pub executable_dependencies: Vec<String>,
     pub kind: Option<String>,
     pub driver_class: Option<String>,
     pub api_version: Option<u32>,
@@ -93,6 +97,10 @@ pub struct PackageManifest {
     pub resource_exports: Vec<crate::ResourceExport>,
     /// Explicit data dependencies selected per executable.
     pub resource_dependencies: Vec<crate::ResourceDependency>,
+    /// Explicit signed helper entry points, separate from data exports.
+    pub executable_exports: Vec<crate::executables::ExecutableExport>,
+    /// Publisher-pinned executable dependencies selected per binary.
+    pub executable_dependencies: Vec<crate::executables::ExecutableDependency>,
     pub binaries: Vec<PackageBinary>,
     pub application: Option<ApplicationMetadata>,
     pub linux: Option<LinuxApplication>,

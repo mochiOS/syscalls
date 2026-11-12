@@ -144,13 +144,34 @@ fn replace_image(
     fds: &FdTable<FdObject>,
     ceiling: u64,
 ) -> Result<(), c_int> {
+    replace_with_reader(
+        exec_image::Runtime,
+        false,
+        image,
+        identity,
+        execfn,
+        inputs,
+        fds,
+        ceiling,
+    )
+}
+pub(super) fn replace_with_reader<B: Backend>(
+    reader: B,
+    explicit_code: bool,
+    image: u32,
+    identity: &str,
+    execfn: &[u8],
+    inputs: &exec_inputs::Inputs,
+    fds: &FdTable<FdObject>,
+    ceiling: u64,
+) -> Result<(), c_int> {
     let credentials = mochios_posix_client::process_image::Identity::from(
         posix_client()
             .map_err(map_posix_client_error)?
             .session_info()
             .map_err(map_posix_client_error)?,
     );
-    exec_image::with_image(image, inputs, credentials, |prepared, record| {
+    exec_image::with_backend(reader, image, inputs, credentials, |prepared, record| {
         with_startup(
             inputs,
             execfn,
@@ -171,7 +192,7 @@ fn replace_image(
                         // either the mutable original or a newly prepared object
                         // again across callback-capable I/O.
                         let digest: [u8; 32] = Sha256::digest(prepared.bytes).into();
-                        if prepared.source == prepared.bytes {
+                        if prepared.source == prepared.bytes && !explicit_code {
                             authorize(prepared.image, identity, &digest, None, authorization)?;
                         } else {
                             io_resources::with(
@@ -321,7 +342,8 @@ fn authorize(
     let token_rights = syscall::HANDLE_RIGHT_DUPLICATE | syscall::HANDLE_RIGHT_TRANSFER;
     let expected = [token_rights, token_rights | syscall::HANDLE_RIGHT_SEND];
     let valid = transcript.is_some()
-        && matches!(received, Ok(8))
+        // IPC results include sender/delivery metadata above the byte count.
+        && matches!(received, Ok(message) if message as u32 == 8)
         && reply == [0; 8]
         && handles.delivery_flags == 0
         && handles.count == 2

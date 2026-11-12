@@ -141,7 +141,7 @@ pub enum ResourceError {
     NotAllowed,
 }
 
-fn target(manifest: &PackageManifest, path: &str) -> Option<String> {
+pub(crate) fn target(manifest: &PackageManifest, path: &str) -> Option<String> {
     let path = if let Some(relative) = path.strip_prefix("$/") {
         if !valid_resource_name(relative) {
             return None;

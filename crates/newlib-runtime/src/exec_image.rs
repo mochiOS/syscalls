@@ -121,11 +121,20 @@ pub(super) fn with_image(
     identity: mochios_posix_client::process_image::Identity,
     operation: impl FnOnce(shared::Prepared<'_>, &[u8]) -> Result<(), c_int>,
 ) -> Result<(), c_int> {
+    with_backend(Runtime, image, inputs, identity, operation)
+}
+pub(super) fn with_backend<B: Backend>(
+    mechanisms: B,
+    image: u32,
+    inputs: &exec_inputs::Inputs,
+    identity: mochios_posix_client::process_image::Identity,
+    operation: impl FnOnce(shared::Prepared<'_>, &[u8]) -> Result<(), c_int>,
+) -> Result<(), c_int> {
     use shared::replay::Recording;
     io_resources::with(
         || {
             Recording::new(
-                Runtime,
+                mechanisms,
                 Environment {
                     library_path: inputs.environment(b"LD_LIBRARY_PATH"),
                     preload: inputs.environment(b"LD_PRELOAD"),
@@ -135,7 +144,7 @@ pub(super) fn with_image(
         },
         |backend| {
             io_resources::with(
-                || Ok(Preparation::<Recording<Runtime>>::default()),
+                || Ok(Preparation::<Recording<B>>::default()),
                 |preparation| {
                     let prepared = preparation.prepare(
                         backend,

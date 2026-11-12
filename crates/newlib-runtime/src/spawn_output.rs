@@ -15,6 +15,12 @@ impl Drop for UnpublishedChild {
 }
 
 pub(super) fn publish(process_id: u64, handle: u32, output: *mut c_int) -> c_int {
+    publish_impl(process_id, handle, output.cast(), false)
+}
+pub(super) fn publish_reference(process_id: u64, handle: u32, output: *mut u8) -> c_int {
+    publish_impl(process_id, handle, output, true)
+}
+fn publish_impl(process_id: u64, handle: u32, output: *mut u8, retain: bool) -> c_int {
     // The captured closure also owns rollback if scope registration fails.
     let child = UnpublishedChild(Some(handle));
     match io_resources::with(
@@ -46,9 +52,14 @@ pub(super) fn publish(process_id: u64, handle: u32, output: *mut c_int) -> c_int
             {
                 return Err(EIO);
             }
-            user_copy::write(output.cast(), &process_id.to_ne_bytes())?;
+            let mut result = [0; 8];
+            result[..4].copy_from_slice(&process_id.to_ne_bytes());
+            result[4..].copy_from_slice(&handle.to_ne_bytes());
+            user_copy::write(output, &result[..if retain { 8 } else { 4 }])?;
             let handle = child.0.take().expect("unpublished child owner");
-            close_object_handle(handle);
+            if !retain {
+                close_object_handle(handle);
+            }
             Ok(0)
         },
     ) {

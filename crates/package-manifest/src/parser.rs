@@ -132,6 +132,8 @@ pub(super) fn manifest(root: &Table) -> Option<(PackageManifest, Option<String>,
             requires: requirements(table)?,
             resource_exports: strings(table, "resource_exports", MAX_REQUIREMENTS)?,
             resource_dependencies: strings(table, "resource_dependencies", MAX_REQUIREMENTS)?,
+            executable_exports: strings(table, "executable_exports", MAX_REQUIREMENTS)?,
+            executable_dependencies: strings(table, "executable_dependencies", MAX_REQUIREMENTS)?,
             kind: optional_string(table, "kind")?,
             driver_class: optional_string(table, "driver_class")?,
             api_version: match table.get("api_version") {
@@ -233,6 +235,23 @@ pub(super) fn manifest(root: &Table) -> Option<(PackageManifest, Option<String>,
                 developer: string(table, "developer")?,
                 subject_key_id: string(table, "subject_key_id")?,
                 provenance: string(table, "provenance")?,
+                abi: string(table, "abi")?,
+            },
+        });
+    }
+    for table in tables(root, "executable_export", 256)? {
+        if table.keys().any(|key| !["name", "binary"].contains(&key.as_str())) { return None; }
+        result.executable_exports.push(crate::ExecutableExport {
+            name: string(table, "name")?, binary: string(table, "binary")?,
+        });
+    }
+    for table in tables(root, "executable_dependency", 256)? {
+        if table.keys().any(|key| !["alias", "package", "developer", "subject_key_id", "provenance", "abi", "export"].contains(&key.as_str())) { return None; }
+        result.executable_dependencies.push(crate::ExecutableDependency {
+            alias: string(table, "alias")?, export: string(table, "export")?,
+            provider: LibraryDependency {
+                package: string(table, "package")?, developer: string(table, "developer")?,
+                subject_key_id: string(table, "subject_key_id")?, provenance: string(table, "provenance")?,
                 abi: string(table, "abi")?,
             },
         });

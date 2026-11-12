@@ -5,6 +5,8 @@ extern crate alloc;
 
 mod parser;
 pub mod resources;
+pub mod executables;
+pub use executables::{ExecutableExport, ExecutableDependency};
 pub use resources::{ResourceDependency, ResourceExport, ResourceFile};
 mod types;
 mod validation;

@@ -23,6 +23,7 @@ mod record_lock_blocking;
 use fd_creation::PendingFdReservation;
 mod file_handle_import;
 mod bundle;
+mod executable;
 mod resource_views;
 mod resource_view_path;
 mod file_handle_export;
@@ -3141,6 +3142,7 @@ fn clone_registered_process_owned(
         .find(|grant| u64::from(grant.source) == control)
         .ok_or(EBADF)?;
     endpoint.key = posix_protocol::CONTROL_HANDLE_KEY;
+    executable::inherit_context(&mut grants[..count])?;
     let mut metadata = [0u8; mnu_abi::process_create::CAPTURE_HEADER_LEN
         + mnu_abi::process_create::MAX_IDENTITY_BYTES
         + mnu_abi::process_create::MAX_LABEL_BYTES
@@ -3240,6 +3242,9 @@ fn clone_registered_process_owned(
             &grants[..count],
             posix_protocol::CONTROL_HANDLE_KEY,
             |key| {
+                if executable::retained_context_key(key) {
+                    return Ok(());
+                }
                 syscall_errno(syscall::raw_syscall1(
                     syscall::SyscallNumber::ContextHandleRemove,
                     key,
@@ -9731,12 +9736,35 @@ fn spawn_with_resources(
     envp: *const *const c_char,
     resources: &mut spawn_resources::Resources,
 ) -> c_int {
-    let snapshot = SpawnSnapshot {
-        path,
+    spawn_with_resources_target(
+        SpawnOutput::Pid(pid),
+        SpawnTarget::Path(path),
+        actions,
+        attributes,
         argv,
         envp,
-    };
-
+        resources,
+    )
+}
+#[derive(Clone, Copy)]
+enum SpawnTarget {
+    Path(*const c_char),
+    Executable(u32),
+}
+#[derive(Clone, Copy)]
+enum SpawnOutput {
+    Pid(*mut c_int),
+    Reference(*mut u8),
+}
+fn spawn_with_resources_target(
+    output: SpawnOutput,
+    target: SpawnTarget,
+    actions: &spawn_file_actions::Actions,
+    attributes: Option<PosixSpawnAttr>,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+    resources: &mut spawn_resources::Resources,
+) -> c_int {
     let (child_pid, desired_fds, _process_handle) = match resources.clone_registered() {
         Ok(value) => value,
         Err(errno_value) => return errno_value,
@@ -9756,19 +9784,24 @@ fn spawn_with_resources(
         if let Err(errno_value) = apply_spawn_file_actions(actions) {
             resources.fail(errno_value);
         }
-        if let Err(errno_value) =
-            execve_with_launch_context(snapshot.path, snapshot.argv, snapshot.envp)
-        {
+        let replacement = match target {
+            SpawnTarget::Path(path) => execve_with_launch_context(path, argv, envp),
+            SpawnTarget::Executable(reference) => executable::replace(reference, argv, envp),
+        };
+        if let Err(errno_value) = replacement {
             resources.fail(errno_value);
         }
         resources.fail(EIO);
     }
 
     match resources.wait() {
-        Ok(mochios_posix_client::spawn::ExecStatus::Succeeded) => {
-            resources.publish(child_pid, pid)
+        Ok(mochios_posix_client::spawn::ExecStatus::Succeeded) => match output {
+            SpawnOutput::Pid(pid) => resources.publish(child_pid, pid),
+            SpawnOutput::Reference(result) => resources.publish_reference(child_pid, result),
+        },
+        Ok(mochios_posix_client::spawn::ExecStatus::Failed(errno_value)) | Err(errno_value) => {
+            errno_value
         }
-        Ok(mochios_posix_client::spawn::ExecStatus::Failed(errno_value)) | Err(errno_value) => errno_value,
     }
 }
 

@@ -1710,6 +1710,7 @@ pub mod performance {
 
 pub mod capability {
     pub use mochios_capability_protocol::resources;
+    pub use mochios_capability_protocol::executables;
 
     pub use mochios_capability_protocol::administrator;
     pub use mochios_capability_protocol::signed_image;
