@@ -1,4 +1,4 @@
-//! Constant-space merging of independently ordered relocation tables.
+//! Allocation-free validation of relocation write ranges.
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -135,6 +135,64 @@ impl Pie<'_> {
             }
             end = add(target, value.width())?;
             run.advance(self)?;
+        }
+        Ok(true)
+    }
+    // Dense tables with many unsorted runs use exact byte coverage in sparse
+    // 64KiB windows. No heap allocation or scan across absent windows is needed.
+    // Wide COPY writes retain the original exhaustive validation below.
+    #[inline(never)]
+    pub(super) fn validate_windowed_relocation_writes(&self) -> Result<bool, Error> {
+        const WINDOW: u64 = 65536;
+        let mut first = None;
+        let mut wide = false;
+        self.relocations(|target, value| {
+            let width = value.width();
+            wide |= width > 16;
+            if width != 0 {
+                first = Some(first.map_or(target, |old: u64| old.min(target)));
+            }
+            Ok(())
+        })?;
+        if wide {
+            return Ok(false);
+        }
+        let mut next = first;
+        while let Some(address) = next {
+            let start = address & !(WINDOW - 1);
+            let end = add(start, WINDOW)?;
+            let mut occupied = [0u64; WINDOW as usize / 64];
+            next = None;
+            self.relocations(|target, value| {
+                if value.width() == 0 {
+                    return Ok(());
+                }
+                let limit = add(target, value.width())?;
+                if target >= end {
+                    next = Some(next.map_or(target, |old| old.min(target)));
+                    return Ok(());
+                }
+                if limit <= start {
+                    return Ok(());
+                }
+                if limit > end {
+                    next = Some(next.map_or(end, |old| old.min(end)));
+                }
+                let mut bit = (target.max(start) - start) as usize;
+                let last = (limit.min(end) - start) as usize;
+                while bit < last {
+                    let offset = bit % 64;
+                    let count = (last - bit).min(64 - offset);
+                    let mask = (u64::MAX >> (64 - count)) << offset;
+                    let word = &mut occupied[bit / 64];
+                    if *word & mask != 0 {
+                        return Err(Error::Invalid);
+                    }
+                    *word |= mask;
+                    bit += count;
+                }
+                Ok(())
+            })?;
         }
         Ok(true)
     }

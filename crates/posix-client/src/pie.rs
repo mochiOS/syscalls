@@ -339,7 +339,8 @@ impl<'a> Pie<'a> {
         // Only the initialized template must be file-backed; .tbss may extend
         // beyond LOAD memory. TLS relocations require an explicit link scope.
         result.tls_template(0)?;
-        let ordered = result.validate_ordered_relocation_writes()?;
+        let ordered = result.validate_ordered_relocation_writes()?
+            || result.validate_windowed_relocation_writes()?;
         let mut seen = 0usize;
         let mut highest_end = 0;
         result.relocations(|target, value| {
