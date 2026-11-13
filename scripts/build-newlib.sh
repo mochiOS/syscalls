@@ -43,7 +43,7 @@ else
 fi
 mkdir -p "$OUT_ROOT"
 OUT_ROOT="$(cd "$OUT_ROOT" && pwd)"
-for cmd in cargo make nm readelf x86_64-elf-gcc x86_64-elf-ar x86_64-elf-ranlib; do
+for cmd in cargo make nm readelf python3 x86_64-elf-gcc x86_64-elf-ar x86_64-elf-ranlib; do
     command -v "$cmd" >/dev/null || { echo "missing command: $cmd" >&2; exit 1; }
 done
 cargo_args=()
@@ -128,6 +128,7 @@ fi
 
 cd "$USER_ROOT"
 RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build --remap-path-prefix=$USER_ROOT=/src/user" \
+python3 "$USER_ROOT/scripts/cargo-preserve-lock.py" "$USER_ROOT/Cargo.lock" -- \
 cargo "${cargo_args[@]}" build -Z json-target-spec -Z build-std=core,alloc,compiler_builtins \
     --manifest-path "$USER_ROOT/Cargo.toml" --package mochi-user-newlib-runtime \
     --release --target "$USER_ROOT/targets/x86_64-unknown-mochios.json" \
@@ -140,16 +141,16 @@ RUNTIME_ARCHIVE="$OUT_ROOT/hello/libmochi_user_newlib_runtime.a"
 install -C -m 0644 "$TARGET_DIR/x86_64-unknown-mochios/release/libmochi_user_newlib_runtime.a" "$RUNTIME_ARCHIVE"
 x86_64-elf-gcc --sysroot="$SYSROOT" -isystem "$SYSROOT/include" -D__mochios__ -ffreestanding \
     -c "$USER_ROOT/runtime/newlib_reent.c" -o "$OUT_ROOT/hello/newlib_reent.o"
-x86_64-elf-ar r "$RUNTIME_ARCHIVE" "$OUT_ROOT/hello/newlib_reent.o"
+x86_64-elf-ar rD "$RUNTIME_ARCHIVE" "$OUT_ROOT/hello/newlib_reent.o"
 x86_64-elf-gcc --sysroot="$SYSROOT" -isystem "$SYSROOT/include" -I"$USER_ROOT/libc-port/include" \
     -D__mochios__ -ffreestanding -O2 -Wall -Wextra -Werror \
     -c "$USER_ROOT/runtime/newlib_ioctl.c" -o "$OUT_ROOT/hello/newlib_ioctl.o"
-x86_64-elf-ar r "$RUNTIME_ARCHIVE" "$OUT_ROOT/hello/newlib_ioctl.o"
+x86_64-elf-ar rD "$RUNTIME_ARCHIVE" "$OUT_ROOT/hello/newlib_ioctl.o"
 x86_64-elf-gcc --sysroot="$SYSROOT" -isystem "$SYSROOT/include" -I"$USER_ROOT/libc-port/include" \
     -D__mochios__ -ffreestanding -O2 -Wall -Wextra -Werror \
     -c "$USER_ROOT/runtime/newlib_semaphore.c" -o "$OUT_ROOT/hello/newlib_semaphore.o"
-x86_64-elf-ar r "$RUNTIME_ARCHIVE" "$OUT_ROOT/hello/newlib_semaphore.o"
-x86_64-elf-ranlib "$RUNTIME_ARCHIVE"
+x86_64-elf-ar rD "$RUNTIME_ARCHIVE" "$OUT_ROOT/hello/newlib_semaphore.o"
+x86_64-elf-ranlib -D "$RUNTIME_ARCHIVE"
 install -C -m 0644 "$RUNTIME_ARCHIVE" "$SDK/lib/libmochi_user_newlib_runtime.a"
 install -C -m 0644 "$USER_ROOT/runtime/linker.ld" "$SDK/lib/linker.ld"
 install -C -m 0644 "$USER_ROOT/targets/x86_64-unknown-mochios.json" "$SDK/share/x86_64-unknown-mochios.json"
@@ -158,33 +159,35 @@ LIBGCC="$(x86_64-elf-gcc -print-libgcc-file-name)"
 [[ -f "$LIBGCC" ]] || { echo "x86_64-elf-gcc did not provide libgcc.a: $LIBGCC" >&2; exit 1; }
 install -C -m 0644 "$LIBGCC" "$SDK/lib/libgcc.a"
 
-SYSROOT_STAMP="$SDK/sysroot/.newlib-installed"
-
-if [[ ! -f "$SYSROOT_STAMP" ||
-      "$SYSROOT/lib/libc.a" -nt "$SYSROOT_STAMP" ||
-      "$SYSROOT/lib/libm.a" -nt "$SYSROOT_STAMP" ]]; then
-	rm -rf "$SDK/sysroot"
-	mkdir -p "$SDK/sysroot"
-	cp -a "$SYSROOT/include" "$SYSROOT/lib" "$SDK/sysroot/"
-	touch "$SYSROOT_STAMP"
-else
-	echo "[cache] reuse newlib SDK sysroot"
-fi
-cp -a "$USER_ROOT/libc-port/include/." "$SDK/sysroot/include/"
+# `make install` refreshes timestamps even when newlib bytes are unchanged.
+# Apply target adaptations before publishing; std/build.rs watches these
+# archives, so replacing identical files causes every std consumer to rebuild.
+PREPARED_SYSROOT=$(mktemp -d "$OUT_ROOT/.sysroot.XXXXXX")
+trap 'rm -rf -- "$PREPARED_SYSROOT"' EXIT
+cp -a "$SYSROOT/include" "$SYSROOT/lib" "$PREPARED_SYSROOT/"
+cp -a "$USER_ROOT/libc-port/include/." "$PREPARED_SYSROOT/include/"
 # Signal delivery and nonlocal jumps are owned by the runtime. In particular,
 # the generic eight-word setjmp backend cannot initialize our handler ancestry.
 # Retire these objects only from the published copy, never the input sysroot.
 for runtime_library in libc.a libg.a; do
-    runtime_archive="$SDK/sysroot/lib/$runtime_library"
+    runtime_archive="$PREPARED_SYSROOT/lib/$runtime_library"
     [[ -f "$runtime_archive" ]] || continue
     # ar may replace its output inode: do not rely on libg being a hard link.
     for runtime_member in libc_a-raise.o libc_a-setjmp.o; do
         if x86_64-elf-ar t "$runtime_archive" | grep -Fx "$runtime_member" >/dev/null; then
-            x86_64-elf-ar d "$runtime_archive" "$runtime_member"
+            x86_64-elf-ar dD "$runtime_archive" "$runtime_member"
         fi
     done
 done
-perl "$USER_ROOT/scripts/fix-newlib-signal-header.pl" "$SDK/sysroot/include/sys/signal.h"
+# Cross-binutils defaults to nondeterministic archive indexes. Installation
+# runs ranlib again; normalize its timestamp before comparing published inputs.
+for runtime_archive in "$PREPARED_SYSROOT"/lib/*.a; do
+    x86_64-elf-ranlib -D "$runtime_archive"
+done
+perl "$USER_ROOT/scripts/fix-newlib-signal-header.pl" "$PREPARED_SYSROOT/include/sys/signal.h"
+python3 "$USER_ROOT/scripts/sync-sdk-tree.py" "$PREPARED_SYSROOT" "$SDK/sysroot"
+rm -rf -- "$PREPARED_SYSROOT"
+trap - EXIT
 
 "$SDK/bin/mochios-cc" -O2 "$USER_ROOT/libc-port/tests/hello.c" -o "$OUT_ROOT/hello/hello.elf"
 [[ -z "$(nm -u "$OUT_ROOT/hello/hello.elf")" ]] || { echo "unresolved symbols in hello.elf" >&2; exit 1; }
