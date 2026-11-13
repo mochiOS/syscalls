@@ -657,16 +657,6 @@ unsafe fn receive_once(
         }
         let result = {
             let _native = defer_native_delivery();
-            let limit = if maximum == 0 { 0 } else { process_fd_limit()? };
-            receiving.incoming = Some(Incoming {
-                reservation: state()
-                    .fds
-                    .reserve_up_to(0, limit, maximum)
-                    .map_err(|_| EMFILE)?,
-                entries: [None; control::MAX_RIGHTS],
-                count: 0,
-            });
-            let incoming = receiving.incoming.as_ref().unwrap();
             let source = ObjectHandleAttachment {
                 handle: entry.handle.lower_handle as u32,
                 rights: entry.rights,
@@ -682,7 +672,7 @@ unsafe fn receive_once(
                     buffer,
                     0,
                     length as u32,
-                    incoming.reservation.len() as u16,
+                    maximum as u16,
                     &mut response,
                     close_object_handle,
                 )
@@ -693,7 +683,7 @@ unsafe fn receive_once(
                     buffer,
                     0,
                     length as u32,
-                    incoming.reservation.len() as u16,
+                    maximum as u16,
                     &mut response,
                     close_object_handle,
                 )
@@ -723,11 +713,28 @@ unsafe fn receive_once(
             Err(error) => return Err(map_posix_client_error(error)),
         }
     };
+    // The receipt, not local FD numbers, owns the received references. Never
+    // reserve the caller's entire ancillary buffer across broker IPC: another
+    // thread must still be able to open a file or pipe while recvmsg is pending.
+    // Reserve only the actual received count after the reply. If concurrent
+    // opens consumed space, deliver the fitting prefix and report MSG_CTRUNC;
+    // closing the receipt releases every undelivered reference.
+    {
+        let _native = defer_native_delivery();
+        let count = received.message.available_rights as usize;
+        let limit = if count == 0 { 0 } else { process_fd_limit()? };
+        receiving.incoming = Some(Incoming {
+            reservation: state().fds.reserve_up_to(0, limit, count).map_err(|_| EMFILE)?,
+            entries: [None; control::MAX_RIGHTS],
+            count: 0,
+        });
+    }
     let incoming = receiving.incoming.as_mut().unwrap();
+    let deliver_count = incoming.reservation.len();
     if let Some(receipt) = received.receipt {
-        while incoming.count < received.message.available_rights as usize {
+        while incoming.count < deliver_count {
             let _native = defer_native_delivery();
-            let remaining = received.message.available_rights as usize - incoming.count;
+            let remaining = deliver_count - incoming.count;
             let batch = socket_transfer::deliver(
                 &transport,
                 receipt,
