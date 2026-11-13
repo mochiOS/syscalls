@@ -4,6 +4,7 @@
 //! Standalone exec rejects dependencies, interpreters and resolver execution;
 //! acquiring, mapping and initializing a complete object set remains user-space policy.
 mod copy;
+mod ordered;
 mod lifecycle;
 mod relro;
 pub mod link_scope;
@@ -338,6 +339,7 @@ impl<'a> Pie<'a> {
         // Only the initialized template must be file-backed; .tbss may extend
         // beyond LOAD memory. TLS relocations require an explicit link scope.
         result.tls_template(0)?;
+        let ordered = result.validate_ordered_relocation_writes()?;
         let mut seen = 0usize;
         let mut highest_end = 0;
         result.relocations(|target, value| {
@@ -355,7 +357,7 @@ impl<'a> Pie<'a> {
             }
             // Linkers normally emit sorted targets. Validate these in one pass;
             // unsorted tables are allowed but must still have disjoint writes.
-            if target < highest_end {
+            if !ordered && target < highest_end {
                 let mut index = 0;
                 result.relocations(|old, value| {
                     if index < seen
