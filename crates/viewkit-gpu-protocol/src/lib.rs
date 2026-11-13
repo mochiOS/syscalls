@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod continuous_corner;
+pub mod window_decoration;
 
 #[cfg(test)]
 extern crate std;
