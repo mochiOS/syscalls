@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep Cargo's unused-patch reordering from invalidating native builds."""
+"""Keep Cargo's unused-patch diagnostics from invalidating native builds."""
 import os
 from pathlib import Path
 import subprocess
@@ -9,10 +9,14 @@ import tomllib
 
 
 def semantic_lock(data):
-    """Ignore only the unordered list of unused patches, not dependencies."""
+    """Ignore unused-patch diagnostics; retain the entire resolved package graph."""
     value = tomllib.loads(data.decode())
-    unused = value.get('patch', {}).get('unused', [])
-    unused.sort(key=lambda entry: tuple(sorted(entry.items())))
+    # Host and target builds can supply different *unused* patches. These do
+    # not participate in resolution, unlike package versions/sources/checksums.
+    if 'patch' in value:
+        value['patch'].pop('unused', None)
+        if not value['patch']:
+            del value['patch']
     return value
 
 

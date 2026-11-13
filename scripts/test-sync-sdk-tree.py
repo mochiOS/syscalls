@@ -18,20 +18,24 @@ lock_spec.loader.exec_module(lock_module)
 
 
 class SDKTreeTest(unittest.TestCase):
-    def test_cargo_unused_order_does_not_change_inputs(self):
+    def test_cargo_unused_diagnostics_do_not_change_inputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             lock = Path(tmp) / 'Cargo.lock'
-            first = 'version = 4\n[[patch.unused]]\nname="a"\nversion="1"\n'
+            resolved = 'version = 4\n[[package]]\nname="active"\nversion="1"\n'
+            first = resolved + '[[patch.unused]]\nname="a"\nversion="1"\n'
             second = '[[patch.unused]]\nname="b"\nversion="2"\n'
             lock.write_text(first + second)
             before = lock.stat().st_mtime_ns
-            changed = 'version = 4\n' + second + first.split('\n', 1)[1]
+            changed = resolved + second + first[len(resolved):]
             command = [sys.executable, '-c', 'import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2])', str(lock), changed]
             self.assertEqual(lock_module.run(lock, command), 0)
             self.assertEqual(lock.read_text(), first + second)
             self.assertEqual(lock.stat().st_mtime_ns, before)
+            command[-1] = resolved
+            self.assertEqual(lock_module.run(lock, command), 0)
+            self.assertEqual(lock.read_text(), first + second)
             # Real dependency changes and command failures must remain visible.
-            command[-1] = changed.replace('version="2"', 'version="3"')
+            command[-1] = changed.replace('name="active"\nversion="1"', 'name="active"\nversion="3"')
             command[2] += '; sys.exit(7)'
             self.assertEqual(lock_module.run(lock, command), 7)
             self.assertIn('version="3"', lock.read_text())
