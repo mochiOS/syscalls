@@ -20,7 +20,9 @@ pub const CONTROL_ICON_SIZE: u32 = 14;
 pub const CONTROL_REVEAL_MARGIN: u32 = 8;
 /// Fixed-point scale denominator used by decoration messages.
 pub const SCALE_UNIT: u32 = 1024;
+/// Smallest accepted decoration scale: one quarter of the logical size.
 pub const MIN_SCALE: u32 = SCALE_UNIT / 4;
+/// Largest accepted decoration scale: eight times the logical size.
 pub const MAX_SCALE: u32 = SCALE_UNIT * 8;
 
 /// Converts a logical extent to physical pixels, rounding outwards.
