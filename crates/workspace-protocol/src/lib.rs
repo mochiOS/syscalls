@@ -1,4 +1,5 @@
 #![no_std]
+pub mod association_confirmation;
 
 pub const MAGIC: [u8; 4] = *b"MWSP";
 pub const VERSION: u16 = 1;
@@ -39,10 +40,22 @@ pub const OP_ASSOCIATION_REMOVE: u16 = 0x0201;
 pub const OP_ASSOCIATION_RESOLVE: u16 = 0x0202;
 pub const OP_DOCUMENT_OPEN: u16 = 0x0203;
 pub const OP_ASSOCIATION_HANDLERS: u16 = 0x0204;
+pub const OP_ASSOCIATION_REQUEST: u16 = 0x0205;
+pub const OP_ASSOCIATION_CONFIRM: u16 = 0x0206;
+pub const OP_ASSOCIATION_REMOVE_REQUEST: u16 = 0x0207;
 pub const OP_FILE_PANEL: u16 = 0x0300;
 pub const OP_FILE_PANEL_COMPLETE: u16 = 0x0301;
 pub const OP_FILE_PANEL_FINISH: u16 = 0x0302;
 pub const OP_FILE_PANEL_RETRY: u16 = 0x0303;
+/// A panel whose successful reply carries the selected file as a native Handle.
+/// The pathname in the reply is display metadata and never authorizes an open.
+pub const OP_FILE_PANEL_OBJECT: u16 = 0x0304;
+/// These operations require one native CONTROL attachment identifying the
+/// exact save target. No pathname or inline provider ID is accepted.
+pub const OP_FILE_TARGET_BEGIN: u16 = 0x0310;
+pub const OP_FILE_TARGET_COMMIT: u16 = 0x0311;
+pub const OP_FILE_TARGET_ABORT: u16 = 0x0312;
+pub const OP_FILE_TARGET_FILE: u16 = 0x8310;
 pub const OP_APPLICATION_REGISTER: u16 = 0x0400;
 pub const OP_APPLICATION_ACTIVATE: u16 = 0x0401;
 /// Launch a currently installed application by package ID (UTF-8 payload).
@@ -71,6 +84,8 @@ pub const OP_NOTIFICATION_SETTINGS_SNAPSHOT_RESULT: u16 = 0x8605;
 
 pub const FILE_PANEL_MODE_OPEN: u16 = 1;
 pub const FILE_PANEL_MODE_SAVE: u16 = 2;
+/// Open for editing; read-only files may still be opened for viewing.
+pub const FILE_PANEL_MODE_EDIT: u16 = 3;
 pub const FILE_PANEL_REQUEST_PREFIX_LEN: usize = 16;
 pub const FILE_PANEL_RESULT_PREFIX_LEN: usize = 24;
 pub const FILE_PANEL_TOKEN_LEN: usize = 16;
@@ -570,7 +585,7 @@ pub fn decode_file_panel_request(payload: &[u8]) -> Result<FilePanelRequest<'_>,
         read_u16(payload, 10)? as usize,
     ];
     if read_u32(payload, 12)? != 0
-        || !matches!(mode, FILE_PANEL_MODE_OPEN | FILE_PANEL_MODE_SAVE)
+        || !matches!(mode, FILE_PANEL_MODE_OPEN | FILE_PANEL_MODE_SAVE | FILE_PANEL_MODE_EDIT)
         || lengths[0] > MAX_FILE_PANEL_TITLE_LEN
         || lengths[1] > MAX_PATH_LEN
         || lengths[2] > MAX_FILE_PANEL_SUGGESTED_NAME_LEN
@@ -606,7 +621,7 @@ pub fn decode_file_panel_request(payload: &[u8]) -> Result<FilePanelRequest<'_>,
     let suggested_name = next(lengths[2], MAX_FILE_PANEL_SUGGESTED_NAME_LEN, true)?;
     let allowed_content_types = next(lengths[3], MAX_FILE_PANEL_CONTENT_TYPES_LEN, true)?;
     let executable = next(lengths[4], MAX_PATH_LEN, false)?;
-    if mode == FILE_PANEL_MODE_OPEN && !suggested_name.is_empty() {
+    if mode != FILE_PANEL_MODE_SAVE && !suggested_name.is_empty() {
         return Err(ProtocolError::InvalidField);
     }
     Ok(FilePanelRequest {

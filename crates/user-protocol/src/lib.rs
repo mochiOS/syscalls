@@ -3,6 +3,7 @@
 use core::fmt;
 pub mod public_account;
 pub mod public_group;
+pub mod self_account;
 
 pub const MAGIC: u32 = 0x5253_554d;
 pub const VERSION: u16 = 1;
@@ -26,6 +27,8 @@ pub enum Opcode {
     AddUser = 0x0010,
     RemoveUser = 0x0011,
     SetPassword = 0x0012,
+    SelfInfo = 0x0013,
+    ChangeOwnPassword = 0x0014,
     Authenticate = 0x0020,
     VerifyAdministrator = 0x0021,
     PublicLookup = 0x0030,
@@ -36,6 +39,7 @@ pub enum Opcode {
     Status = 0x8000,
     PublicAccount = 0x8030,
     PublicGroup = 0x8031,
+    SelfAccount = 0x8013,
 }
 
 impl Opcode {
@@ -634,12 +638,15 @@ fn decode_header(input: &[u8]) -> Result<Header, DecodeError> {
         0x0010 => Opcode::AddUser,
         0x0011 => Opcode::RemoveUser,
         0x0012 => Opcode::SetPassword,
+        0x0013 => Opcode::SelfInfo,
+        0x0014 => Opcode::ChangeOwnPassword,
         0x0020 => Opcode::Authenticate,
         0x0021 => Opcode::VerifyAdministrator,
         0x0030 => Opcode::PublicLookup,
         0x0031 => Opcode::PublicGroupLookup,
         0x8030 => Opcode::PublicAccount,
         0x8031 => Opcode::PublicGroup,
+        0x8013 => Opcode::SelfAccount,
         0x8000 => Opcode::Status,
         0x8001 => Opcode::SnapshotInfo,
         0x8002 => Opcode::SnapshotData,

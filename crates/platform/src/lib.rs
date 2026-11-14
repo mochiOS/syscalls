@@ -1714,6 +1714,7 @@ pub mod performance {
 }
 
 pub mod capability {
+    pub use mochios_capability_protocol::application_data;
     pub use mochios_capability_protocol::resources;
     pub use mochios_capability_protocol::executables;
 

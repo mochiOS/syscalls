@@ -1,6 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 pub mod consent;
+pub mod application_data;
 pub mod administrator;
 pub mod input_authority;
 pub mod presentation;

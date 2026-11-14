@@ -55,6 +55,7 @@ pub struct NotificationSettings {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FilePanelMode {
     Open,
+    Edit,
     Save,
 }
 
@@ -72,6 +73,123 @@ pub struct FilePanelOptions<'a> {
 pub struct FilePanelSelection {
     pub token: [u8; protocol::FILE_PANEL_TOKEN_LEN],
     pub path: String,
+}
+
+/// Owns the exact selected file. Dropping a selection closes its native Handle.
+/// It grants no authority over a pathname, parent directory or sibling file.
+#[derive(Debug)]
+pub struct FilePanelObject {
+    pub token: [u8; protocol::FILE_PANEL_TOKEN_LEN],
+    pub path: String,
+    pub handle: crate::handle::Handle,
+    pub rights: u64,
+    pub target: Option<FileTarget>,
+}
+
+/// A file returned by a save transaction; it owns no pathname authority.
+#[derive(Debug)]
+pub struct NativeFile { pub handle: crate::handle::Handle, pub rights: u64 }
+impl Drop for NativeFile { fn drop(&mut self) { if self.handle != 0 { let _ = crate::handle::close(self.handle); } } }
+
+/// Native authority for replacing one selected directory entry. Requests carry
+/// this object as an IPC attachment, never as an inline ID or path string.
+#[derive(Debug)]
+pub struct FileTarget { handle: crate::handle::Handle, broker: u32 }
+impl Drop for FileTarget { fn drop(&mut self) { let _ = crate::handle::close(self.handle); } }
+impl FileTarget {
+    pub fn begin(&self) -> SysResult<NativeFile> { self.request(protocol::OP_FILE_TARGET_BEGIN)?.ok_or_else(invalid) }
+    pub fn commit(&self) -> SysResult<()> { self.request(protocol::OP_FILE_TARGET_COMMIT).map(|_| ()) }
+    pub fn abort(&self) -> SysResult<()> { self.request(protocol::OP_FILE_TARGET_ABORT).map(|_| ()) }
+    fn request(&self, opcode: u16) -> SysResult<Option<NativeFile>> {
+        let id = request_id();
+        let mut request = [0; protocol::HEADER_LEN];
+        protocol::encode(opcode, id, 0, &[], &mut request).map_err(|_| invalid())?;
+        let mut reply = [0; protocol::HEADER_LEN + 24];
+        let mut objects = crate::ipc::IpcObjectHandles::default();
+        objects.count = 1;
+        objects.handles[0] = crate::ipc::IpcObjectHandle { handle: self.handle, reserved: 0, rights: crate::handle::HANDLE_RIGHT_CONTROL };
+        let received = crate::ipc::call_object_handles(self.broker, &request, &mut reply, &mut objects);
+        // On a failed exchange the original attachment is still borrowed.
+        if received.is_err() && objects.handles[0].handle == self.handle {
+            objects = Default::default();
+        }
+        let result = (|| {
+            let size = received? as u32 as usize;
+            let message = protocol::decode(reply.get(..size).ok_or_else(invalid)?).map_err(|_| invalid())?;
+            if message.request_id != id || !objects.is_user_delivery() { return Err(invalid()); }
+            if opcode != protocol::OP_FILE_TARGET_BEGIN {
+                if objects.count != 0 { return Err(invalid()); }
+                status(message)?;
+                return Ok(None);
+            }
+            if message.opcode == protocol::OP_STATUS { status(message)?; return Err(invalid()); }
+            let file = objects.handles[0];
+            let required = crate::handle::HANDLE_RIGHT_READ | crate::handle::HANDLE_RIGHT_WRITE | crate::handle::HANDLE_RIGHT_SEEK | crate::handle::HANDLE_RIGHT_DUPLICATE | crate::handle::HANDLE_RIGHT_TRANSFER;
+            if message.opcode != protocol::OP_FILE_TARGET_FILE || !message.payload.is_empty() || objects.count != 1 || file.handle == 0 || file.reserved != 0 || file.rights != required { return Err(invalid()); }
+            objects.handles[0].handle = 0;
+            Ok(Some(NativeFile { handle: file.handle, rights: file.rights }))
+        })();
+        for object in objects.handles.iter().take((objects.count as usize).min(objects.handles.len())) {
+            if object.handle != 0 { let _ = crate::handle::close(object.handle); }
+        }
+        result
+    }
+}
+
+impl Drop for FilePanelObject {
+    fn drop(&mut self) {
+        if self.handle != 0 {
+            let _ = crate::handle::close(self.handle);
+        }
+    }
+}
+
+/// Show the existing system picker and receive an owned file, without an
+/// ambient filesystem capability. Cancel and error replies must contain no
+/// Handles; malformed replies reclaim every received reference.
+pub fn file_panel_object(options: FilePanelOptions<'_>) -> SysResult<Option<FilePanelObject>> {
+    let mut payload = vec![0u8; protocol::MAX_MESSAGE_LEN - protocol::HEADER_LEN];
+    if options.allowed_content_types.iter().any(|s| s.is_empty() || s.len() > protocol::MAX_CONTENT_TYPE_LEN || s.as_bytes().contains(&0x1f)) {
+        return Err(invalid());
+    }
+    let content_types = options.allowed_content_types.join("\x1f");
+    let length = protocol::encode_file_panel_request(protocol::FilePanelRequest {
+        mode: match options.mode { FilePanelMode::Open => protocol::FILE_PANEL_MODE_OPEN, FilePanelMode::Edit => protocol::FILE_PANEL_MODE_EDIT, FilePanelMode::Save => protocol::FILE_PANEL_MODE_SAVE },
+        title: options.title, initial_directory: options.initial_directory,
+        suggested_name: options.suggested_name, allowed_content_types: &content_types,
+        executable: options.executable,
+    }, &mut payload).map_err(|_| invalid())?;
+    let id = request_id();
+    let mut request = vec![0; protocol::HEADER_LEN + length];
+    protocol::encode(protocol::OP_FILE_PANEL_OBJECT, id, 0, &payload[..length], &mut request).map_err(|_| invalid())?;
+    let mut reply = vec![0; protocol::MAX_MESSAGE_LEN];
+    let mut handles = crate::ipc::IpcObjectHandles::default();
+    let broker = u32::try_from(service()?).map_err(|_| invalid())?;
+    let result = (|| {
+        let size = crate::ipc::call_object_handles(broker, &request, &mut reply, &mut handles)? as u32 as usize;
+        let message = protocol::decode(reply.get(..size).ok_or_else(invalid)?).map_err(|_| invalid())?;
+        if message.request_id != id || !handles.is_user_delivery() { return Err(invalid()); }
+        if message.opcode == protocol::OP_STATUS { status(message)?; return Err(invalid()); }
+        if message.opcode != protocol::OP_FILE_PANEL_RESULT { return Err(invalid()); }
+        let selection = protocol::decode_file_panel_result(message.payload).map_err(|_| invalid())?;
+        if selection.status != 0 {
+            if handles.count != 0 { return Err(invalid()); }
+            return if selection.status == 1 { Ok(None) } else { Err(response::status_error(selection.status)) };
+        }
+        let has_target = response::panel_handles(options.mode, &handles)?;
+        let object = handles.handles[0];
+        let target = if has_target {
+            let target = handles.handles[1];
+            Some(FileTarget { handle: target.handle, broker })
+        } else { None };
+        handles.handles[0].handle = 0;
+        if has_target { handles.handles[1].handle = 0; }
+        Ok(Some(FilePanelObject { token: selection.token, path: selection.path.into(), handle: object.handle, rights: object.rights, target }))
+    })();
+    for object in handles.handles.iter().take((handles.count as usize).min(handles.handles.len())) {
+        if object.handle != 0 { let _ = crate::handle::close(object.handle); }
+    }
+    result
 }
 
 fn invalid() -> SysError {
@@ -527,7 +645,7 @@ pub fn set_association(
     payload.extend_from_slice(content_type.as_bytes());
     payload.extend_from_slice(bundle_id.as_bytes());
     let mut reply = [0u8; protocol::HEADER_LEN + 24];
-    status(call(protocol::OP_ASSOCIATION_SET, &payload, &mut reply)?)?;
+    status(call(protocol::OP_ASSOCIATION_REQUEST, &payload, &mut reply)?)?;
     Ok(())
 }
 
@@ -535,7 +653,7 @@ pub fn remove_association(extension: &str, content_type: &str, roles: u16) -> Sy
     validate_association_key(extension, content_type, roles)?;
     let payload = association_key(extension, content_type, roles);
     let mut reply = [0u8; protocol::HEADER_LEN + 24];
-    status(call(protocol::OP_ASSOCIATION_REMOVE, &payload, &mut reply)?)?;
+    status(call(protocol::OP_ASSOCIATION_REMOVE_REQUEST, &payload, &mut reply)?)?;
     Ok(())
 }
 
@@ -671,6 +789,7 @@ pub fn file_panel_begin(options: FilePanelOptions<'_>) -> SysResult<Option<FileP
     let request = protocol::FilePanelRequest {
         mode: match options.mode {
             FilePanelMode::Open => protocol::FILE_PANEL_MODE_OPEN,
+            FilePanelMode::Edit => protocol::FILE_PANEL_MODE_EDIT,
             FilePanelMode::Save => protocol::FILE_PANEL_MODE_SAVE,
         },
         title: options.title,

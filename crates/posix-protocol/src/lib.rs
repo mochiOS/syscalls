@@ -644,6 +644,12 @@ pub const OPEN_CURSOR_RECORDS: u32 = 1 << 9;
 /// Internal image admission: open an existing regular file for reading only
 /// after checking effective execute permission on that same resolved inode.
 pub const OPEN_EXECUTE: u32 = 1 << 10;
+/// Resolve relative to an explicitly attached directory used as the root.
+/// Absolute paths are rejected; symlinks and `..` cannot leave that root.
+pub const OPEN_BENEATH: u32 = 1 << 11;
+/// Mint namespace authority for one writable directory. This is not a byte-I/O
+/// open; ordinary O_RDWR directory opens remain EISDIR.
+pub const OPEN_DIRECTORY_AUTHORITY: u32 = 1 << 12;
 pub const OPEN_OPTIONS_ALL: u32 = OPEN_READ
     | OPEN_WRITE
     | OPEN_CREATE
@@ -654,7 +660,9 @@ pub const OPEN_OPTIONS_ALL: u32 = OPEN_READ
     | OPEN_DIRECTORY
     | OPEN_NOFOLLOW
     | OPEN_CURSOR_RECORDS
-    | OPEN_EXECUTE;
+    | OPEN_EXECUTE
+    | OPEN_BENEATH
+    | OPEN_DIRECTORY_AUTHORITY;
 
 pub const MUTABLE_STATUS_FLAGS: u32 = OPEN_APPEND | OPEN_NONBLOCK;
 

@@ -20,7 +20,7 @@ pub use timestamps::{
 };
 
 pub const MAGIC: [u8; 4] = *b"MFS1";
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const HEADER_LEN: usize = 64;
 pub const MAX_MESSAGE_LEN: usize = 256 * 1024;
 pub const MAX_PATH_LEN: usize = 4096;
@@ -288,6 +288,9 @@ pub const OPEN_AT_EXECUTE: u32 = 1 << 13;
 /// The policy caller must preserve its authenticated admission context; this
 /// metadata-only reference does not independently grant read/write authority.
 pub const OPEN_AT_RETAIN_FIFO: u32 = 1 << 14;
+/// Confine this lookup to its explicitly attached base directory.
+pub const OPEN_AT_BENEATH: u32 = 1 << 15;
+pub const OPEN_AT_DIRECTORY_AUTHORITY: u32 = 1 << 16;
 /// OPEN_AT success only: payload is NodeStatus for the exact retained FIFO.
 pub const OPEN_REPLY_FIFO: u32 = 1;
 pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
@@ -304,7 +307,9 @@ pub const OPEN_AT_FLAGS_ALL: u32 = OPEN_AT_READ
     | OPEN_AT_SEARCH
     | OPEN_AT_CURSOR_RECORDS
     | OPEN_AT_EXECUTE
-    | OPEN_AT_RETAIN_FIFO;
+    | OPEN_AT_RETAIN_FIFO
+    | OPEN_AT_BENEATH
+    | OPEN_AT_DIRECTORY_AUTHORITY;
 
 pub const STAT_AT_NOFOLLOW: u32 = 1 << 0;
 pub const STAT_AT_BASE_ATTACHED: u32 = 1 << 1;

@@ -7,6 +7,8 @@ pub struct NamespacePolicy {
     /// Only explicit directory attachments, never the process cwd/root. A
     /// READ directory reference permits reading descendants, not mutation.
     pub explicit_read_bases: u32,
+    /// Native WRITE directory authority; cwd/root never set these bits.
+    pub explicit_write_bases: u32,
 }
 pub const ALL: u32 = 1;
 pub const USER: u32 = 1 << 1;
@@ -20,13 +22,14 @@ pub const TMP: u32 = 1 << 8;
 pub const REMOVABLE: u32 = 1 << 9;
 pub const APPLICATIONS: u32 = 1 << 10;
 pub const MASK: u32 = (1 << 11) - 1;
-pub const LEN: usize = 12;
+pub const LEN: usize = 16;
 impl NamespacePolicy {
     pub const fn unrestricted() -> Self {
         Self {
             read: ALL,
             write: ALL,
             explicit_read_bases: 0,
+            explicit_write_bases: 0,
         }
     }
     pub const fn denied() -> Self {
@@ -34,13 +37,15 @@ impl NamespacePolicy {
             read: 0,
             write: 0,
             explicit_read_bases: 0,
+            explicit_write_bases: 0,
         }
     }
     pub fn encode(self) -> [u8; LEN] {
         let mut bytes = [0; LEN];
         bytes[..4].copy_from_slice(&self.read.to_le_bytes());
         bytes[4..8].copy_from_slice(&self.write.to_le_bytes());
-        bytes[8..].copy_from_slice(&self.explicit_read_bases.to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.explicit_read_bases.to_le_bytes());
+        bytes[12..].copy_from_slice(&self.explicit_write_bases.to_le_bytes());
         bytes
     }
     pub fn decode(bytes: &[u8]) -> Result<Self, crate::ProtocolError> {
@@ -50,9 +55,10 @@ impl NamespacePolicy {
         let value = Self {
             read: u32::from_le_bytes(bytes[..4].try_into().unwrap()),
             write: u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-            explicit_read_bases: u32::from_le_bytes(bytes[8..].try_into().unwrap()),
+            explicit_read_bases: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+            explicit_write_bases: u32::from_le_bytes(bytes[12..].try_into().unwrap()),
         };
-        if (value.read | value.write) & !MASK != 0 || value.explicit_read_bases & !3 != 0 {
+        if (value.read | value.write) & !MASK != 0 || value.explicit_read_bases & !3 != 0 || value.explicit_write_bases & !value.explicit_read_bases != 0 {
             return Err(crate::ProtocolError::InvalidLength);
         }
         Ok(value)
