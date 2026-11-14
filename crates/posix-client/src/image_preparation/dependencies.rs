@@ -387,7 +387,8 @@ impl<B: Backend> Dependencies<B> {
             let mut discovery_error = ENOEXEC;
             image
                 .dependencies(|name| {
-                    if !(0..self.count()).any(|i| self.node(i).name.bytes() == name) {
+                    if !(runtime && B::resident_library(name))
+                        && !(0..self.count()).any(|i| self.node(i).name.bytes() == name) {
                         self.append(name, cursor).map_err(|error| {
                             discovery_error = error;
                             mochios_posix_client::pie::Error::Invalid
@@ -426,7 +427,9 @@ impl<B: Backend> Dependencies<B> {
             &mut self.order,
             address,
         )?;
-        Scope::new(objects, order).map_err(|_| ENOEXEC)
+        Scope::new_with_resident(objects, order, B::resident_library).map_err(|error| {
+            if error == crate::pie::Error::Unsupported { ENOTSUP } else { ENOEXEC }
+        })
     }
     pub(super) fn build(
         &mut self,

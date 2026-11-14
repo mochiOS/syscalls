@@ -73,6 +73,13 @@ pub unsafe trait Backend {
     /// bind every input to its approved package policy here; a later pathname
     /// read cannot authenticate these bytes. Errors abort preparation intact.
     fn validate_captured(&self, source: Source<'_>, bytes: &[u8]) -> Result<(), c_int>;
+    /// Whether this DT_NEEDED name is already initialized in this process.
+    /// The runtime must pin that exact initial namespace until process exit and
+    /// supply its default exports through the resident scope's external lookup.
+    /// This never authorizes new code or skips authentication of a new mapping.
+    /// Backends without an initial namespace must retain the default `false`.
+    fn resident_library(_name: &[u8]) -> bool { false }
+
     fn entropy(&self, output: &mut [u8]) -> Result<(), c_int>;
     fn create_image(&self, length: usize) -> Result<u32, c_int>;
     fn write_at(&self, image: u32, bytes: &[u8], offset: usize) -> Result<usize, c_int>;

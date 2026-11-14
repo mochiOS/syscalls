@@ -62,13 +62,13 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             let mut dependency = None;
             let mut ordinal = 0;
             self.objects[object].image.dependencies(|name| {
+                let Some(index) = self.objects.iter().position(|candidate| candidate.name == name) else {
+                    // Initial modules are already initialized and remain owned
+                    // by the process. This group must never finalize them.
+                    return if (self.resident)(name) { Ok(()) } else { Err(Error::Invalid) };
+                };
                 if ordinal == next[depth - 1] {
-                    dependency = Some(
-                        self.objects
-                            .iter()
-                            .position(|candidate| candidate.name == name)
-                            .ok_or(Error::Invalid)?,
-                    );
+                    dependency = Some(index);
                 }
                 ordinal += 1;
                 Ok(())

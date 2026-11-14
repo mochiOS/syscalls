@@ -8,7 +8,16 @@ static INITIAL_LENGTH: AtomicUsize = AtomicUsize::new(0);
 // The initial executable's captured default exports remain mapped until
 // process teardown. Local dlopen groups do not become a global namespace.
 pub(super) fn initial_symbol(name: &[u8]) -> Option<(u64, u64)> {
-    Image::parse(initial()).ok()?.entry(0).ok()?.lookup(name)
+    let image = Image::parse(initial()).ok()?;
+    (0..image.count()).find_map(|index| image.entry(index).ok()?.lookup(name))
+}
+
+/// Initial metadata was captured before constructors from the authenticated
+/// startup graph. No pathname lookup or application-supplied header is trusted.
+pub(super) fn initial_library(name: &[u8]) -> bool {
+    let Ok(image) = Image::parse(initial()) else { return false };
+    !name.is_empty() && !name.contains(&b'/') && (1..image.count())
+        .any(|index| image.entry(index).is_ok_and(|entry| entry.name == name))
 }
 
 pub(super) fn initialize() -> Result<(), c_int> {

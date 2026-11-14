@@ -28,6 +28,7 @@ pub struct Scope<'scope, 'image> {
     objects: &'scope [Object<'scope, 'image>],
     order: &'scope [usize],
     external_lookup: Option<ExternalLookup>,
+    resident: fn(&[u8]) -> bool,
 }
 impl<'scope, 'image> Scope<'scope, 'image> {
     /// Object zero is the root. Derive breadth-first search order from its
@@ -35,6 +36,16 @@ impl<'scope, 'image> Scope<'scope, 'image> {
     pub fn new(
         objects: &'scope [Object<'scope, 'image>],
         scratch: &'scope mut [usize],
+    ) -> Result<Self, Error> {
+        Self::new_with_resident(objects, scratch, |_| false)
+    }
+
+    /// Internal late-load scope. The runtime owns every reused initial module
+    /// until process exit. Named ABI versions still require captured providers.
+    pub(crate) fn new_with_resident(
+        objects: &'scope [Object<'scope, 'image>],
+        scratch: &'scope mut [usize],
+        resident: fn(&[u8]) -> bool,
     ) -> Result<Self, Error> {
         if objects.is_empty() || scratch.len() < objects.len() {
             return Err(Error::BufferTooSmall);
@@ -75,10 +86,9 @@ impl<'scope, 'image> Scope<'scope, 'image> {
         let mut cursor = 0;
         while cursor < length {
             objects[scratch[cursor]].image.dependencies(|name| {
-                let index = objects
-                    .iter()
-                    .position(|object| object.name == name)
-                    .ok_or(Error::Unsupported)?;
+                let Some(index) = objects.iter().position(|object| object.name == name) else {
+                    return if resident(name) { Ok(()) } else { Err(Error::Unsupported) };
+                };
                 if !scratch[..length].contains(&index) {
                     scratch[length] = index;
                     length += 1;
@@ -104,7 +114,10 @@ impl<'scope, 'image> Scope<'scope, 'image> {
                             break;
                         }
                     }
-                    let provider = provider.ok_or(Error::Invalid)?;
+                    // Captured initial metadata does not preserve GNU version
+                    // definitions. Never silently satisfy a named requirement
+                    // with an unversioned resident export.
+                    let provider = provider.ok_or(if resident(file) { Error::Unsupported } else { Error::Invalid })?;
                     let available = provider.image.symbols.as_ref().ok_or(Error::Invalid)?;
                     if !available.provides(name, hash)? && !weak {
                         return Err(Error::Unsupported);
@@ -117,6 +130,7 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             objects,
             order: &scratch[..length],
             external_lookup: None,
+            resident,
         };
         objects[0].image.relocations(|_, value| {
             if let super::Value::Copy { index, .. } = value {

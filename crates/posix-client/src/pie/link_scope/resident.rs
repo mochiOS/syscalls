@@ -97,6 +97,7 @@ impl<B: Backend, const N: usize> State<B, N> {
             return Err(ElfError::BufferTooSmall);
         }
         let mut digest = Sha256::new();
+        digest.update((scope.resident as usize).to_le_bytes());
         digest.update(scope.external_lookup.map(|lookup| lookup as usize).unwrap_or(0).to_le_bytes());
         digest.update((scope.objects.len() as u64).to_le_bytes());
         for object in scope.objects {

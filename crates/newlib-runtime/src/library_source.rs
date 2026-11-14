@@ -15,6 +15,10 @@ pub(super) struct Reader {
 // execution reader. Unlike same-domain exec preparation, every captured DSO
 // is authenticated immediately, before any running-process VM installation.
 unsafe impl Backend for Reader {
+    fn resident_library(name: &[u8]) -> bool {
+        loader_inspection::initial_library(name)
+    }
+
     fn critical<T>(f: impl FnOnce() -> T) -> T {
         exec_image::Runtime::critical(f)
     }
