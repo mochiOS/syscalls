@@ -179,6 +179,28 @@ fn open_package(_: &str) -> io::Result<Reference> {
 /// Capture, authenticate and commit exactly one operation. A failed or expired
 /// transaction is never silently retried with a different package/version.
 pub fn mutate(request: Request<'_>, expected: Option<Expected<'_>>) -> io::Result<()> {
+    mutate_inner(request, expected, false)
+}
+
+/// Install one selected release under the OS first-login policy. Only the
+/// measured built-in AppStore holding the worker lease can obtain this grant.
+/// Signature, publisher, immutable source, session and one-shot commit checks
+/// are enforced by the broker and package.service, independently of this API.
+pub fn install_standard_application(path: &str, expected: Expected<'_>) -> io::Result<()> {
+    if !protocol::provisioning::APPLICATIONS
+        .iter()
+        .any(|(id, _)| *id == expected.package_id)
+    {
+        return Err(denied());
+    }
+    mutate_inner(Request::Install(path), Some(expected), true)
+}
+
+fn mutate_inner(
+    request: Request<'_>,
+    expected: Option<Expected<'_>>,
+    provisioning: bool,
+) -> io::Result<()> {
     let (mutation, subject, path) = match request {
         Request::Install(path) => (wire::Mutation::Install, "", Some(path)),
         Request::Update(path) => (wire::Mutation::Update, "", Some(path)),
@@ -253,10 +275,22 @@ pub fn mutate(request: Request<'_>, expected: Option<Expected<'_>>) -> io::Resul
     };
     broker(broker_endpoint)?;
     let mut result = [0; 8];
+    let mut provisioning_request = [0; 16];
+    let normal_request = p::capability::administrator::PACKAGE_OPCODE.to_le_bytes();
+    let approval_request: &[u8] = if provisioning {
+        let n = protocol::provisioning::encode_request(
+            protocol::provisioning::Request::Authorize,
+            &mut provisioning_request,
+        )
+        .map_err(|_| invalid())?;
+        &provisioning_request[..n]
+    } else {
+        &normal_request
+    };
     let receipt = call(
         broker_endpoint,
         u64::from(broker_endpoint),
-        &p::capability::administrator::PACKAGE_OPCODE.to_le_bytes(),
+        approval_request,
         &[object],
         &mut result,
     )?;
@@ -283,6 +317,64 @@ pub fn mutate(request: Request<'_>, expected: Option<Expected<'_>>) -> io::Resul
         status if status < 0 => Err(native(p::syscall::SysError::from_raw(i64::from(status)))),
         _ => Err(invalid()),
     }
+}
+
+/// Owned local progress for one entry in `provisioning::APPLICATIONS`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StandardApplicationProgress {
+    /// Broker-established installation phase.
+    pub phase: protocol::provisioning::Phase,
+    /// Download percentage, between zero and one hundred.
+    pub percent: u8,
+    /// Persisted count of started installation attempts.
+    pub attempts: u32,
+    /// Local failure reason; empty when no failure is recorded.
+    pub error: String,
+}
+
+/// Query progress or maintain the measured background worker lease. Claims,
+/// updates and releases require the exact worker process; ordinary applications
+/// cannot use this endpoint to authorize package changes or forge completion.
+pub fn standard_applications(
+    request: protocol::provisioning::Request<'_>,
+) -> io::Result<Vec<StandardApplicationProgress>> {
+    use protocol::provisioning as wire;
+    if matches!(request, wire::Request::Authorize) {
+        return Err(invalid());
+    }
+    let endpoint = u32::try_from(p::process::find_by_name("capability.service").map_err(native)?)
+        .map_err(|_| invalid())?;
+    broker(endpoint)?;
+    let mut input = [0; 16 + wire::MAX_ERROR];
+    let length = wire::encode_request(request, &mut input).map_err(|_| invalid())?;
+    let mut bytes = [0; wire::MAX_SNAPSHOT];
+    let response = call(
+        endpoint,
+        u64::from(endpoint),
+        &input[..length],
+        &[],
+        &mut bytes,
+    )?;
+    broker(endpoint)?;
+    if response.objects.count != 0 {
+        return Err(invalid());
+    }
+    if response.length == 8 {
+        status(&bytes[..8])?;
+        return Err(invalid());
+    }
+    wire::decode_snapshot(&bytes[..response.length])
+        .map_err(|_| invalid())
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| StandardApplicationProgress {
+                    phase: row.phase,
+                    percent: row.percent,
+                    attempts: row.attempts,
+                    error: row.error.into(),
+                })
+                .collect()
+        })
 }
 
 pub struct InstalledPackage {

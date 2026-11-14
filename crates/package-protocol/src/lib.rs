@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod transaction;
+pub mod provisioning;
 
 pub const MAGIC: [u8; 4] = *b"MPKS";
 pub const VERSION: u16 = 1;
