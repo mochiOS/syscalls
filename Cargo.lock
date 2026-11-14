@@ -1582,6 +1582,14 @@ dependencies = [
 ]
 
 [[patch.unused]]
+name = "bootui"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "ext4plus"
+version = "0.1.0-rc.2"
+
+[[patch.unused]]
 name = "mochios-mdriver-protocol"
 version = "0.1.0"
 
@@ -1594,7 +1602,11 @@ name = "viewkit"
 version = "2.0.0"
 
 [[patch.unused]]
-name = "mochios-fonts"
+name = "mnu"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "plugkit"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -1614,7 +1626,7 @@ name = "mochios-linker-driver"
 version = "0.1.0"
 
 [[patch.unused]]
-name = "bootui"
+name = "mochios-fonts"
 version = "0.1.0"
 
 [[patch.unused]]
@@ -1628,15 +1640,3 @@ version = "0.1.0"
 [[patch.unused]]
 name = "mochios-system-image"
 version = "0.1.0"
-
-[[patch.unused]]
-name = "mnu"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "plugkit"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "ext4plus"
-version = "0.1.0-rc.2"
