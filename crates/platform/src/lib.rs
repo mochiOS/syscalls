@@ -1470,13 +1470,18 @@ pub mod random {
     use super::syscall::{self, SysResult};
 
     pub fn fill(destination: &mut [u8]) -> SysResult<()> {
-        let written = syscall::call2(
-            syscall::SyscallNumber::RandomFill,
-            destination.as_mut_ptr() as u64,
-            destination.len() as u64,
-        )?;
-        if written != destination.len() as u64 {
-            return Err(syscall::NativeError::BackingFailure.into_raw().into());
+        let mut offset = 0;
+        while offset < destination.len() {
+            let remaining = &mut destination[offset..];
+            let written = syscall::call2(
+                syscall::SyscallNumber::RandomFill,
+                remaining.as_mut_ptr() as u64,
+                remaining.len() as u64,
+            )?;
+            if written == 0 || written > remaining.len() as u64 {
+                return Err(syscall::NativeError::BackingFailure.into_raw().into());
+            }
+            offset += written as usize;
         }
         Ok(())
     }
