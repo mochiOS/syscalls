@@ -1,0 +1,32 @@
+{
+  "format": 1,
+  "steps": [
+    "env \"RUSTFLAGS=--remap-path-prefix=$(ROOT)=/src/mochios\" \"MOCHIOS_SDK_CFLAGS=-ffile-prefix-map=$(ROOT)=/src/mochios\" CARGO_HOME=\"${CARGO_HOME:-${HOME}/.cargo}\" CARGO_NET_OFFLINE=true bash $(PROJECT)/scripts/build-newlib.sh --newlib-source $(ROOT)/libraries/newlib --output $(OUT)/newlib-port --abi-source $(ROOT)/core/crates/abi --libc-source $(ROOT)/libraries/libc --mboot-protocol-source $(ROOT)/services/mboot-protocol --syscalls-source $(PROJECT) --toolchain nightly-2026-05-14 --jobs \"${MMAKE_JOBS}\""
+  ],
+  "package": {
+    "name": "runtime",
+    "version": "0.1.0",
+    "target": "x86_64-mochios",
+    "abi": "mochios-1"
+  },
+  "artifact": "out/mdp/runtime.tar.mdp",
+  "exports": [
+    {
+      "source": "$(ROOT)/out/newlib-port/sdk",
+      "area": "sdk",
+      "destination": "native",
+      "exclude": [
+        "app-build.json"
+      ]
+    },
+    {
+      "source": "$(ROOT)/out/newlib-port/hello/hello.elf",
+      "area": "system",
+      "destination": "bin/hello",
+      "mode": 493
+    }
+  ],
+  "bindings": {
+    "SOURCE_SYSCALLS": "$(PROJECT)"
+  }
+}

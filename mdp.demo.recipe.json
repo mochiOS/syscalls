@@ -1,0 +1,40 @@
+{
+  "format": 1,
+  "steps": [
+    "$(MOCHIOS_CARGO) --manifest-path $(PROJECT)/apps/rust-std-demo/Cargo.toml --bin rust-std-demo"
+  ],
+  "package": {
+    "name": "std-demo",
+    "version": "0.1.0",
+    "target": "x86_64-mochios",
+    "abi": "mochios-1"
+  },
+  "artifact": "out/mdp/std-demo.tar.mdp",
+  "exports": [
+    {
+      "source": "$(RUST_TARGET_DIR)/x86_64-unknown-mochios/release/rust-std-demo",
+      "area": "system",
+      "destination": "bin/rust-std-demo",
+      "mode": 493
+    },
+    {
+      "source": "apps/rust-std-demo/manifest.toml",
+      "area": "manifests",
+      "destination": "rust-std-demo.toml"
+    }
+  ],
+  "metadata": {
+    "builtins": [
+      {
+        "manifest": "rust-std-demo.toml",
+        "directory": "rust-std-demo",
+        "maps": [
+          "/bin=/system/bin"
+        ]
+      }
+    ]
+  },
+  "bindings": {
+    "SOURCE_SYSCALLS": "$(PROJECT)"
+  }
+}

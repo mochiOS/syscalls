@@ -1,0 +1,5 @@
+format=1
+[build]
+command=["mdp","pipeline","--recipe","mdp.demo.recipe.json"]
+requires=["native-sdk-context"]
+artifact="out/mdp/std-demo.tar.mdp"

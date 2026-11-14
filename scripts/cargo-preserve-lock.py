@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep Cargo's unused-patch diagnostics from invalidating native builds."""
+"""Compatibility Cargo launcher. Never restore or overwrite Cargo's lock resolution."""
 import os
 from pathlib import Path
 import subprocess
@@ -21,21 +21,11 @@ def semantic_lock(data):
 
 
 def run(lock, command):
+    """Keep every resulting lock change, including diagnostics/order-only changes."""
     before = lock.read_bytes() if lock.exists() else None
-    metadata = lock.stat() if before is not None else None
     result = subprocess.run(command)
-    if before is not None and lock.is_file():
-        after = lock.read_bytes()
-        if after != before and semantic_lock(before) == semantic_lock(after):
-            descriptor, name = tempfile.mkstemp(prefix='.cargo-lock-', dir=lock.parent)
-            try:
-                with os.fdopen(descriptor, 'wb') as stream:
-                    stream.write(before)
-                os.chmod(name, metadata.st_mode & 0o777)
-                os.utime(name, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
-                os.replace(name, lock)
-            finally:
-                Path(name).unlink(missing_ok=True)
+    if lock.is_file() and lock.read_bytes() != before:
+        print(f'Cargo updated {lock}; retain and commit the resulting lockfile.', file=sys.stderr)
     return result.returncode
 
 
