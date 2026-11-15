@@ -1,5 +1,4 @@
-OUTPUT_FORMAT("elf64-x86-64")
-OUTPUT_ARCH(i386:x86-64)
+/* Infer the native ELF machine from crt0.o; reject mixed-CPU inputs in LLD. */
 ENTRY(_start)
 
 PHDRS
