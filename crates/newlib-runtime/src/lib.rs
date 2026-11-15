@@ -8771,7 +8771,8 @@ pub unsafe extern "C" fn pthread_create(
             return EINVAL;
         }
     };
-    let stack_pointer = (stack_end & !0xf).saturating_sub(8);
+    let entry_adjustment = if cfg!(target_arch = "x86_64") { 8 } else { 0 };
+    let stack_pointer = (stack_end & !0xf).saturating_sub(entry_adjustment);
     let context = syscall::ThreadCreateContext {
         entry: pthread_start_trampoline as *const () as u64,
         stack_pointer: stack_pointer as u64,

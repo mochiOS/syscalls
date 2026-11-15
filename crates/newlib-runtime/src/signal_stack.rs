@@ -1,8 +1,9 @@
 use super::*;
-use mochios_posix_client::{
-    signal_context::{Stack, REG_RSP},
-    signal_stack as stack,
-};
+#[cfg(target_arch = "x86_64")]
+use mochios_posix_client::signal_context::REG_RSP as REG_STACK;
+#[cfg(target_arch = "aarch64")]
+use mochios_posix_client::signal_context::REG_SP as REG_STACK;
+use mochios_posix_client::{signal_context::Stack, signal_stack as stack};
 
 fn error(error: stack::StackError) -> c_int {
     match error {
@@ -123,7 +124,7 @@ pub(super) fn invoke(
     let mask = service_signal_mask(control, posix_protocol::SIGNAL_MASK_BLOCK, u64::MAX)?;
     let selected = control.alternate_stack.select(
         stack::current_pointer(),
-        context.uc_mcontext.gregs[REG_RSP] as usize,
+        context.uc_mcontext.gregs[REG_STACK] as usize,
         action.sa_flags & SA_ONSTACK != 0,
         native,
     );

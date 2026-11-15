@@ -2,11 +2,17 @@ use super::*;
 use mochios_posix_client::upcall_guard::Guard;
 
 const MAGIC: u64 = 0x6d6f_6368_736a_6d70;
+#[cfg(target_arch = "x86_64")]
+const REGISTER_WORDS: usize = 8;
+#[cfg(target_arch = "aarch64")]
+const REGISTER_WORDS: usize = 21;
+const RED_ZONE: usize = if cfg!(target_arch = "x86_64") { 128 } else { 0 };
 
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct JumpBuffer {
-    registers: [u64; 8], // rbx rbp r12 r13 r14 r15 rsp rip
+    // x86: RBX/RBP/R12..R15/SP/PC. ARM: X19..X30/SP/D8..D15.
+    registers: [u64; REGISTER_WORDS],
     mask: u64,
     thread: u64,
     scope: u64,
@@ -17,12 +23,24 @@ struct JumpBuffer {
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<JumpBuffer>() == 120);
-    assert!(core::mem::offset_of!(JumpBuffer, mask) == 64);
-    assert!(core::mem::offset_of!(JumpBuffer, magic) == 112);
+    assert!(core::mem::size_of::<JumpBuffer>() == (REGISTER_WORDS + 7) * 8);
+    assert!(core::mem::offset_of!(JumpBuffer, mask) == REGISTER_WORDS * 8);
+    assert!(core::mem::offset_of!(JumpBuffer, magic) == (REGISTER_WORDS + 6) * 8);
 };
 
+impl JumpBuffer {
+    fn stack(&self) -> usize {
+        self.registers[if cfg!(target_arch = "x86_64") { 6 } else { 12 }] as usize
+    }
+    fn instruction(&self) -> u64 {
+        self.registers[if cfg!(target_arch = "x86_64") { 7 } else { 11 }]
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
 core::arch::global_asm!(include_str!("signal_jump_x86_64.S"));
+#[cfg(target_arch = "aarch64")]
+core::arch::global_asm!(include_str!("signal_jump_aarch64.S"));
 unsafe extern "C" {
     fn __mochios_sigjump_restore(
         buffer: *const JumpBuffer,
@@ -120,7 +138,25 @@ fn leave_native(token: u64, top: usize, destination: NativeDestination<'_>) -> !
     // longjmp does not restore a saved floating-point environment. Preserve
     // the jump caller's current one rather than the pre-handler FXSAVE image.
     unsafe {
+        #[cfg(target_arch = "x86_64")]
         core::arch::asm!("fxsave64 [{}]", in(reg) saved.fx_state.as_mut_ptr(), options(nostack));
+        #[cfg(target_arch = "aarch64")]
+        {
+            core::arch::asm!(
+                "stp q0, q1, [{base}, #0]", "stp q2, q3, [{base}, #32]",
+                "stp q4, q5, [{base}, #64]", "stp q6, q7, [{base}, #96]",
+                "stp q8, q9, [{base}, #128]", "stp q10, q11, [{base}, #160]",
+                "stp q12, q13, [{base}, #192]", "stp q14, q15, [{base}, #224]",
+                "stp q16, q17, [{base}, #256]", "stp q18, q19, [{base}, #288]",
+                "stp q20, q21, [{base}, #320]", "stp q22, q23, [{base}, #352]",
+                "stp q24, q25, [{base}, #384]", "stp q26, q27, [{base}, #416]",
+                "stp q28, q29, [{base}, #448]", "stp q30, q31, [{base}, #480]",
+                "mrs {fpcr}, fpcr", "mrs {fpsr}, fpsr",
+                base = in(reg) saved.fp_state.as_mut_ptr(),
+                fpcr = out(reg) saved.fpcr, fpsr = out(reg) saved.fpsr,
+                options(nostack, preserves_flags),
+            );
+        }
     }
     match destination {
         NativeDestination::Direct {
@@ -133,19 +169,33 @@ fn leave_native(token: u64, top: usize, destination: NativeDestination<'_>) -> !
             // mapped buffer before changing RSP, and never pushes to scratch.
             saved.instruction = __mochios_sigjump_restore as *const () as u64;
             saved.argument = buffer as *const JumpBuffer as u64;
-            saved.registers.rsi = value as u64;
-            saved.registers.rdx = defer as u64;
-            saved.registers.rcx = u64::from(depth);
+            #[cfg(target_arch = "x86_64")]
+            {
+                saved.registers.rsi = value as u64;
+                saved.registers.rdx = defer as u64;
+                saved.registers.rcx = u64::from(depth);
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                saved.registers.x[0] = value as u64;
+                saved.registers.x[1] = defer as u64;
+                saved.registers.x[2] = u64::from(depth);
+            }
         }
         NativeDestination::Cleanup { transition } => {
             saved.instruction = finish_jump as *const () as u64;
             saved.argument = transition as u64;
+            #[cfg(target_arch = "x86_64")]
             unsafe {
                 ((top - 8) as *mut u64).write(0);
             }
+            #[cfg(target_arch = "aarch64")]
+            {
+                saved.registers.x[29] = 0;
+            }
         }
     }
-    saved.stack_pointer = (top - 8) as u64;
+    saved.stack_pointer = (top - if cfg!(target_arch = "x86_64") { 8 } else { 0 }) as u64;
     let result = syscall::raw_syscall3(
         syscall::SyscallNumber::ThreadUpcallReturnContext,
         token,
@@ -178,10 +228,12 @@ unsafe extern "C" fn siglongjmp(buffer: *const JumpBuffer, value: c_int) -> ! {
             || buffer.thread != u64::from(thread)
             || buffer.save_mask > 1
             || buffer.defer_depth >= u32::MAX as u64
-            || buffer.registers[6] < 144
-            || buffer.registers[6] >> 47 != 0
-            || buffer.registers[7] == 0
-            || buffer.registers[7] >> 47 != 0
+            || buffer.stack() < RED_ZONE + 16
+            || buffer.stack() >> 47 != 0
+            || buffer.instruction() == 0
+            || buffer.instruction() >> 47 != 0
+            || (cfg!(target_arch = "aarch64")
+                && (buffer.stack() & 15 != 0 || buffer.instruction() & 3 != 0))
         {
             return Err(EINVAL);
         }
@@ -193,7 +245,7 @@ unsafe extern "C" fn siglongjmp(buffer: *const JumpBuffer, value: c_int) -> ! {
         core::mem::forget(guard);
         unsafe { signal_scope::validate_target(control, buffer.scope) }?;
         let owner = native_process_id().map_err(|error| map_kernel_errno(error.raw()))?;
-        let top = (buffer.registers[6] as usize - 128) & !15;
+        let top = (buffer.stack() - RED_ZONE) & !15;
         let mut has_orphans = false;
         let mut token = None;
         unsafe {
