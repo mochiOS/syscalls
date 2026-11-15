@@ -1,13 +1,13 @@
 //! Initial static TLS modules, in root-first object order. No allocation,
 //! path lookup, native VM operations or ELF symbol resolution happens here.
-use super::{Layout, Template, distance_after, dtv};
+use super::{Layout, Template, dtv, module_address, module_after};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Module {
     /// Object index, including objects without a TLS segment in the numbering.
     pub index: usize,
     pub template: Template,
-    /// Positive distance from the thread pointer to this module's first byte.
+    /// Offset magnitude from TP: before TP on x86, after TP on ARM.
     pub distance: usize,
 }
 
@@ -29,9 +29,12 @@ impl<'a> Plan<'a> {
     pub fn new(templates: &'a [Option<Template>], page_size: usize) -> Option<Self> {
         let mut distance = 0;
         let mut alignment = 1;
+        let mut first_module = None;
         for template in templates.iter().flatten() {
             template.source.checked_add(template.file_size)?;
-            distance = distance_after(distance, *template)?;
+            let (offset, extent) = module_after(distance, *template)?;
+            first_module.get_or_insert(offset);
+            distance = extent;
             alignment = alignment.max(template.alignment);
         }
         Some(Self {
@@ -40,9 +43,14 @@ impl<'a> Plan<'a> {
                 distance,
                 alignment,
                 page_size,
-                dtv::TCB_BYTES
-                    .checked_add(dtv::HEADER_BYTES)?
-                    .checked_add(templates.len().checked_mul(dtv::MODULE_BYTES)?)?,
+                (if cfg!(target_arch = "aarch64") {
+                    0usize
+                } else {
+                    dtv::TCB_BYTES
+                })
+                .checked_add(dtv::HEADER_BYTES)?
+                .checked_add(templates.len().checked_mul(dtv::MODULE_BYTES)?)?,
+                first_module.unwrap_or(0),
             )?,
         })
     }
@@ -60,11 +68,12 @@ impl<'a> Plan<'a> {
                 let template = (*template)?;
                 // Plan construction validated the same immutable templates and
                 // cumulative arithmetic. A missing segment changes no offsets.
-                distance = distance_after(distance, template)?;
+                let (offset, extent) = module_after(distance, template)?;
+                distance = extent;
                 Some(Module {
                     index,
                     template,
-                    distance,
+                    distance: offset,
                 })
             })
     }
@@ -90,7 +99,8 @@ impl<'a> Plan<'a> {
         let mut bytes = [0u8; 512];
         for module in self.modules() {
             // These subtractions and extents are validated by Plan and place.
-            let destination = placed.thread_pointer - module.distance;
+            let destination = module_address(placed.thread_pointer, module.distance)
+                .ok_or(InitializeError::InvalidMapping)?;
             let mut offset = 0;
             while offset < module.template.file_size {
                 let size = bytes.len().min(module.template.file_size - offset);
@@ -100,11 +110,18 @@ impl<'a> Plan<'a> {
                 offset += size;
             }
         }
-        let table = placed.thread_pointer + dtv::TCB_BYTES;
+        let table = self
+            .layout
+            .dtv(placed.thread_pointer)
+            .ok_or(InitializeError::InvalidMapping)?;
         write(table, &self.templates.len().to_le_bytes()).map_err(InitializeError::Write)?;
         for module in self.modules() {
             let mut entry = [0u8; dtv::MODULE_BYTES];
-            entry[..8].copy_from_slice(&(placed.thread_pointer - module.distance).to_le_bytes());
+            entry[..8].copy_from_slice(
+                &module_address(placed.thread_pointer, module.distance)
+                    .ok_or(InitializeError::InvalidMapping)?
+                    .to_le_bytes(),
+            );
             entry[8..].copy_from_slice(&module.template.memory_size.to_le_bytes());
             write(
                 table + dtv::HEADER_BYTES + module.index * dtv::MODULE_BYTES,

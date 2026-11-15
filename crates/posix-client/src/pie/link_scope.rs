@@ -251,15 +251,17 @@ impl<'scope, 'image> Scope<'scope, 'image> {
             16 => Ok((object + 1) as u64),
             17 => Ok(offset),
             18 => {
+                let mut extent = 0;
                 let mut distance = 0;
                 for member in &self.objects[..=object] {
                     if let Some(template) = member.image.tls_template(0)? {
-                        distance = crate::static_tls::distance_after(distance, template)
+                        let (start, end) = crate::static_tls::module_after(extent, template)
                             .ok_or(Error::Overflow)?;
+                        distance = start;
+                        extent = end;
                     }
                 }
-                i64::try_from(distance).map_err(|_| Error::Overflow)?;
-                Ok(offset.wrapping_sub(distance as u64))
+                crate::static_tls::relative_offset(offset, distance).ok_or(Error::Overflow)
             }
             _ => Err(Error::Unsupported),
         }

@@ -1,4 +1,5 @@
-//! ELF static TLS policy for x86-64 (Variant II). No kernel TLS ABI is involved.
+//! ELF static TLS layout: x86 Variant II and AArch64 Variant I.
+//! Template/DTV storage is process policy, never a kernel TLS ABI.
 
 #[path = "static_tls/dtv.rs"]
 pub mod dtv;
@@ -153,7 +154,10 @@ pub fn template<E>(
 pub struct Layout {
     pub mapping_size: usize,
     pub alignment: usize,
+    /// Byte extent around TP occupied by TLS blocks (before TP on x86,
+    /// after TP including its TCB on ARM). Module offsets come from Plan.
     pub distance: usize,
+    first_module: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,52 +167,124 @@ pub struct Placement {
 }
 
 impl Layout {
-    /// The first TCB word is its own address, as expected by x86-64 codegen.
-    /// Match lld/ELF/InputSection.cpp:getTlsTpOffset, including p_vaddr residue.
+    /// Match LLD's target TP offset, including the PT_TLS alignment residue.
     pub fn new(template: Option<Template>, page_size: usize) -> Option<Self> {
-        let (distance, alignment) = match template {
-            Some(t) => (distance_after(0, t)?, t.alignment),
-            None => (0, 1),
+        let (first, extent, alignment) = match template {
+            Some(t) => {
+                let (first, extent) = module_after(0, t)?;
+                (first, extent, t.alignment)
+            }
+            None => (0, 0, 1),
         };
-        Self::from_extent(distance, alignment, page_size)
+        let tail = if cfg!(target_arch = "aarch64") {
+            0
+        } else {
+            core::mem::size_of::<usize>()
+        };
+        Self::with_tail(extent, alignment, page_size, tail, first)
     }
 
-    fn from_extent(distance: usize, alignment: usize, page_size: usize) -> Option<Self> {
-        Self::with_tail(
-            distance,
-            alignment,
-            page_size,
-            core::mem::size_of::<usize>(),
-        )
-    }
-    fn with_tail(distance: usize, alignment: usize, page_size: usize, tail: usize) -> Option<Self> {
+    fn with_tail(
+        distance: usize,
+        alignment: usize,
+        page_size: usize,
+        tail: usize,
+        first_module: usize,
+    ) -> Option<Self> {
         if !page_size.is_power_of_two() || !alignment.is_power_of_two() {
             return None;
         }
         let alignment = alignment.max(core::mem::size_of::<usize>());
-        let size = distance.checked_add(alignment - 1)?.checked_add(tail)?;
+        let body = if cfg!(target_arch = "aarch64") {
+            arm_body(distance)?
+        } else {
+            distance
+        };
+        let size = body.checked_add(alignment - 1)?.checked_add(tail)?;
         let mapping_size = size.checked_add(page_size - 1)? & !(page_size - 1);
         Some(Self {
             mapping_size,
             alignment,
             distance,
+            first_module,
         })
     }
 
     pub fn place(self, base: usize) -> Option<Placement> {
         let end = base.checked_add(self.mapping_size)?;
-        let thread_pointer = base
-            .checked_add(self.distance)?
-            .checked_add(self.alignment - 1)?
-            & !(self.alignment - 1);
-        if thread_pointer.checked_add(core::mem::size_of::<usize>())? > end {
+        let prefix = if cfg!(target_arch = "aarch64") {
+            0
+        } else {
+            self.distance
+        };
+        let thread_pointer =
+            base.checked_add(prefix)?.checked_add(self.alignment - 1)? & !(self.alignment - 1);
+        let required = if cfg!(target_arch = "aarch64") {
+            arm_body(self.distance)?
+        } else {
+            core::mem::size_of::<usize>()
+        };
+        if thread_pointer.checked_add(required)? > end {
             return None;
         }
         Some(Placement {
-            data: thread_pointer.checked_sub(self.distance)?,
+            data: if cfg!(target_arch = "aarch64") {
+                thread_pointer.checked_add(self.first_module)?
+            } else {
+                thread_pointer.checked_sub(self.distance)?
+            },
             thread_pointer,
         })
     }
+
+    pub(crate) fn dtv(self, thread_pointer: usize) -> Option<usize> {
+        thread_pointer.checked_add(if cfg!(target_arch = "aarch64") {
+            arm_body(self.distance)?
+        } else {
+            dtv::TCB_BYTES
+        })
+    }
+}
+
+fn arm_body(extent: usize) -> Option<usize> {
+    Some(extent.max(dtv::TCB_BYTES).checked_add(7)? & !7)
+}
+
+/// Root-first placement without changing a preceding module's TP offset.
+/// Returns (module offset magnitude, new occupied extent).
+pub(crate) fn module_after(preceding: usize, template: Template) -> Option<(usize, usize)> {
+    if cfg!(target_arch = "aarch64") {
+        if !template.alignment.is_power_of_two()
+            || template.residue >= template.alignment
+            || template.file_size > template.memory_size
+        {
+            return None;
+        }
+        let cursor = preceding.max(dtv::TCB_BYTES);
+        let padding = template.residue.wrapping_sub(cursor) & (template.alignment - 1);
+        let start = cursor.checked_add(padding)?;
+        Some((start, start.checked_add(template.memory_size)?))
+    } else {
+        let distance = distance_after(preceding, template)?;
+        Some((distance, distance))
+    }
+}
+
+pub(crate) fn module_address(tp: usize, distance: usize) -> Option<usize> {
+    if cfg!(target_arch = "aarch64") {
+        tp.checked_add(distance)
+    } else {
+        tp.checked_sub(distance)
+    }
+}
+
+pub(crate) fn relative_offset(symbol: u64, distance: usize) -> Option<u64> {
+    i64::try_from(distance).ok()?;
+    Some(if cfg!(target_arch = "aarch64") {
+        symbol.wrapping_add(distance as u64)
+    } else {
+        symbol.wrapping_sub(distance as u64)
+    })
 }
 
 // Place the next module before all preceding blocks, preserving the root's

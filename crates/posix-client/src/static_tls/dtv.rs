@@ -22,7 +22,11 @@ pub fn address(
         return None;
     }
     let table = word(thread_pointer.checked_add(8)?)?;
-    if table != thread_pointer.checked_add(TCB_BYTES)? {
+    if if cfg!(target_arch = "aarch64") {
+        table < thread_pointer.checked_add(TCB_BYTES)? || table & 7 != 0
+    } else {
+        table != thread_pointer.checked_add(TCB_BYTES)?
+    } {
         return None;
     }
     let count = word(table)?;
@@ -35,7 +39,13 @@ pub fn address(
     let entry = table + HEADER_BYTES + (module - 1) * MODULE_BYTES;
     let data = word(entry)?;
     let size = word(entry + 8)?;
-    if data == 0 || data < base || data.checked_add(size)? > thread_pointer || offset > size {
+    let data_end = data.checked_add(size)?;
+    let in_block = if cfg!(target_arch = "aarch64") {
+        data >= thread_pointer.checked_add(TCB_BYTES)? && data_end <= table
+    } else {
+        data >= base && data_end <= thread_pointer
+    };
+    if data == 0 || !in_block || offset > size {
         return None;
     }
     data.checked_add(offset)
