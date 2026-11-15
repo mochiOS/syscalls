@@ -5,6 +5,7 @@ pub mod coverage;
 pub mod raster_quality;
 pub mod window_decoration;
 pub mod window_management;
+pub mod window_motion;
 
 #[cfg(test)]
 extern crate std;
