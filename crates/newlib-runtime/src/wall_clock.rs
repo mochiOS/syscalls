@@ -1,6 +1,14 @@
 //! newlib's wall-clock adapter. The checked clock reader remains native-fast.
 use super::*;
 
+// Generic newlib reentrant adapters use the underscored syscall symbol;
+// some machine ports call the public name. Both share checked user copies,
+// clock selection and errno handling.
+#[cfg_attr(target_os = "mochios", unsafe(no_mangle))]
+pub extern "C" fn _gettimeofday(output: *mut Timeval, timezone: *mut c_void) -> c_int {
+    gettimeofday(output, timezone)
+}
+
 #[cfg_attr(target_os = "mochios", unsafe(no_mangle))]
 pub extern "C" fn gettimeofday(output: *mut Timeval, _timezone: *mut c_void) -> c_int {
     if output.is_null() {
