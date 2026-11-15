@@ -1,8 +1,11 @@
-//! Allocation-free x86-64 ELF preparation. Dynamic linking policy lives
+//! Allocation-free native ELF64 preparation. Dynamic linking policy lives
 //! in user space; this produces an ordinary fixed-address ELF for native exec.
 //! Explicit captured object sets can use link_scope for inter-object binding.
 //! Standalone exec rejects dependencies, interpreters and resolver execution;
 //! acquiring, mapping and initializing a complete object set remains user-space policy.
+mod architecture;
+use architecture::{Relocation, TlsValue};
+
 mod copy;
 mod ordered;
 mod lifecycle;
@@ -17,14 +20,14 @@ enum Value {
     Indirect(u64),
     Symbol { index: u32, addend: u64 },
     Size { index: u32, addend: u64, width: u8 },
-    Tls { index: u32, kind: u32, addend: u64 },
+    Tls { index: u32, kind: TlsValue, addend: u64 },
     Copy { index: u32, size: u64 },
 }
 impl Value {
     fn width(self) -> u64 {
         match self {
             Self::Copy { size, .. } => size,
-            Self::Tls { kind: 36, .. } => 16,
+            Self::Tls { kind: TlsValue::Descriptor, .. } => 16,
             Self::Size { width, .. } => u64::from(width),
             _ => 8,
         }
@@ -53,7 +56,7 @@ impl Value {
             Self::Copy { .. } => return Err(Error::Unsupported),
             Self::Tls {
                 index,
-                kind: 36,
+                kind: TlsValue::Descriptor,
                 addend,
             } => {
                 let (function, argument) = descriptor(index, addend)?;
@@ -79,7 +82,7 @@ impl Value {
                 index,
                 kind,
                 addend,
-            } => resolve(index, kind)?.wrapping_add(addend),
+            } => resolve(index, kind as u32)?.wrapping_add(addend),
             value => value.at(bias)?,
         };
         bytes[..8].copy_from_slice(&value.to_le_bytes());
@@ -235,7 +238,7 @@ impl<'a> Pie<'a> {
         if bytes.len() < 64
             || bytes[..7] != [0x7f, b'E', b'L', b'F', 2, 1, 1]
             || !(u16_at(bytes, 16)? == 3 || (linkable && u16_at(bytes, 16)? == 2))
-            || u16_at(bytes, 18)? != 62
+            || u16_at(bytes, 18)? != mnu_abi::NATIVE_ELF_MACHINE
             || u32_at(bytes, 20)? != 1
             || u16_at(bytes, 52)? != 64
             || u16_at(bytes, 54)? != 56
@@ -651,17 +654,17 @@ impl<'a> Pie<'a> {
     fn relocation(&self, o: usize) -> Result<(u64, Option<Value>), Error> {
         let target = u64_at(self.bytes, o)?;
         let info = u64_at(self.bytes, o + 8)?;
-        let kind = info as u32;
+        let kind = architecture::decode(info as u32)?;
         let symbol = (info >> 32) as u32;
         let addend = u64_at(self.bytes, o + 16)?;
         let value = match kind {
-            0 => return Ok((target, None)),
-            8 if symbol == 0 => Value::Relative(addend),
-            37 if symbol == 0 && self.linkable => {
+            Relocation::None => return Ok((target, None)),
+            Relocation::Relative if symbol == 0 => Value::Relative(addend),
+            Relocation::Indirect if symbol == 0 && self.linkable => {
                 self.resolver_source(addend, 0)?;
                 Value::Indirect(addend)
             }
-            32 | 33 => {
+            Relocation::Size(width) => {
                 let reference = self.symbols.as_ref().ok_or(Error::Invalid)?.entry(symbol)?;
                 if let Some(definition) = reference.definition {
                     self.definition_size(definition, reference.size)?;
@@ -671,10 +674,10 @@ impl<'a> Pie<'a> {
                 Value::Size {
                     index: symbol,
                     addend,
-                    width: if kind == 32 { 4 } else { 8 },
+                    width,
                 }
             }
-            5 if self.linkable => {
+            Relocation::Copy if self.linkable => {
                 let reference = self.symbols.as_ref().ok_or(Error::Invalid)?.entry(symbol)?;
                 let symbols::Definition::Image { value, size } =
                     reference.definition.ok_or(Error::Invalid)?
@@ -700,7 +703,7 @@ impl<'a> Pie<'a> {
                     size,
                 }
             }
-            1 | 6 | 7 => {
+            Relocation::Symbol { addend: uses_addend } => {
                 let table = self.symbols.as_ref().ok_or(Error::Unsupported)?;
                 let reference = table.entry(symbol)?;
                 if reference.is_tls {
@@ -725,10 +728,10 @@ impl<'a> Pie<'a> {
                 }
                 Value::Symbol {
                     index: symbol,
-                    addend: if kind == 1 { addend } else { 0 },
+                    addend: if uses_addend { addend } else { 0 },
                 }
             }
-            16..=18 | 36 if self.linkable => {
+            Relocation::Tls(kind) if self.linkable => {
                 if symbol == 0 {
                     self.tls_template(0)?.ok_or(Error::Invalid)?;
                 } else {
@@ -747,7 +750,7 @@ impl<'a> Pie<'a> {
                 Value::Tls {
                     index: symbol,
                     kind,
-                    addend: if kind == 16 { 0 } else { addend },
+                    addend: if kind == TlsValue::Module { 0 } else { addend },
                 }
             }
             _ => return Err(Error::Unsupported),

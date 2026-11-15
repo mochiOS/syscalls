@@ -85,7 +85,7 @@ impl<'a> Image<'a> {
         if bytes.len() < 64
             || bytes[..7] != [0x7f, b'E', b'L', b'F', 2, 1, 1]
             || !matches!(u16::from_le_bytes(bytes[16..18].try_into().unwrap()), 2 | 3)
-            || u16::from_le_bytes(bytes[18..20].try_into().unwrap()) != 62
+            || u16::from_le_bytes(bytes[18..20].try_into().unwrap()) != mnu_abi::NATIVE_ELF_MACHINE
             || bytes[20..24] != 1u32.to_le_bytes()
             || bytes[52..54] != 64u16.to_le_bytes()
             || bytes[54..56] != 56u16.to_le_bytes()
