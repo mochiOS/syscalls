@@ -63,7 +63,19 @@ pub(super) fn local_base() -> Option<u64> {
     (base != 0).then_some(base)
 }
 
-#[cfg(not(all(target_arch = "x86_64", target_os = "mochios")))]
+#[cfg(all(target_arch = "aarch64", target_os = "mochios"))]
+pub(super) fn local_base() -> Option<u64> {
+    let base: u64;
+    unsafe {
+        core::arch::asm!("mrs {}, tpidr_el0", out(reg) base, options(nostack, nomem, preserves_flags));
+    }
+    (base != 0).then_some(base)
+}
+
+#[cfg(not(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    target_os = "mochios"
+)))]
 pub(super) fn local_base() -> Option<u64> {
     None
 }
