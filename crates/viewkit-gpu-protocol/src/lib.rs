@@ -1,6 +1,8 @@
 #![no_std]
 
 pub mod continuous_corner;
+pub mod coverage;
+pub mod raster_quality;
 pub mod window_decoration;
 pub mod window_management;
 
