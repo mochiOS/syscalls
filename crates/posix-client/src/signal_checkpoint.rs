@@ -6,6 +6,7 @@
 use crate::signal_context::*;
 use core::ffi::c_void;
 
+#[cfg(target_arch = "x86_64")]
 const _: () = {
     assert!(core::mem::size_of::<MachineContext>() == 656);
     assert!(core::mem::align_of::<MachineContext>() == 16);
@@ -18,7 +19,17 @@ const _: () = {
     assert!(REG_RSP == 15 && REG_RIP == 16 && REG_EFL == 17 && NGREG == 18);
 };
 
+#[cfg(target_arch = "x86_64")]
 core::arch::global_asm!(include_str!("signal_checkpoint_x86_64.S"));
+#[cfg(target_arch = "aarch64")]
+core::arch::global_asm!(include_str!("signal_checkpoint_aarch64.S"));
+#[cfg(target_arch = "aarch64")]
+const _: () = {
+    assert!(core::mem::size_of::<MachineContext>() == 800);
+    assert!(core::mem::offset_of!(MachineContext, fpregs) == 272);
+    assert!(core::mem::offset_of!(MachineContext, fpcr) == 784);
+    assert!(core::mem::offset_of!(MachineContext, fpsr) == 792);
+};
 
 unsafe extern "C" {
     fn mochios_posix_signal_checkpoint(
@@ -28,15 +39,19 @@ unsafe extern "C" {
 }
 
 /// Runs `callback` with a stack-owned CPU continuation, then resumes it.
-/// RAX initially contains zero (the normal return value); its selected value
-/// becomes this call's result. GPRs, flags, x87/SSE state and MXCSR are restored
-/// from the continuation after the callback returns. TLS is not changed.
+/// The result register initially contains zero; its selected value
+/// becomes this call's result. GPRs, flags and base FP/SIMD state are restored
+/// from the continuation after the callback returns. On AArch64 IP0 (x16)
+/// holds the final branch target, as allowed at this C call boundary; all
+/// callee-saved registers and the complete FP/SIMD image are restored.
+/// Native asynchronous upcall return restores x16 as well. TLS is not changed.
 ///
 /// # Safety
 /// The callback must return normally, never retain the context pointer, and
 /// supply valid CPU state. Changing the continuation must respect the caller's
 /// live stack, register assumptions and C ABI. In particular, the selected
-/// stack must allow a return-address/flags pair below RSP. This is a synchronous
+/// stack must allow any ABI return storage (a PC/flags pair below RSP on x86).
+/// This is a synchronous
 /// call boundary, not a red-zone-safe asynchronous signal-return mechanism.
 /// POSIX mask/stack bookkeeping and handler-token completion must finish in
 /// the callback before a changed continuation takes effect.

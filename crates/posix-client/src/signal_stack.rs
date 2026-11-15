@@ -9,6 +9,7 @@ pub const SS_ONSTACK: i32 = 1;
 pub const SS_DISABLE: i32 = 2;
 pub const MIN_SIZE: usize = 2048;
 pub const SA_ONSTACK: i32 = 8;
+const RED_ZONE: usize = if cfg!(target_arch = "x86_64") { 128 } else { 0 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StackError {
@@ -82,8 +83,8 @@ impl AlternateStack {
     }
 
     /// Choose a stack before unblocking signals. Native callbacks execute on
-    /// private runtime storage, so also inspect the actual interrupted RSP.
-    /// Preserve the x86-64 red zone if that RSP already uses the alternate area.
+    /// private runtime storage, so also inspect the interrupted SP. Preserve
+    /// the x86 red zone; AAPCS64 has no storage reserved below the active SP.
     pub fn select(
         &self,
         current: usize,
@@ -107,7 +108,7 @@ impl AlternateStack {
             let top = if native {
                 Some(
                     interrupted
-                        .checked_sub(128)
+                        .checked_sub(RED_ZONE)
                         .filter(|top| *top >= 16)
                         .ok_or(StackError::Range)?
                         & !15,
@@ -118,7 +119,9 @@ impl AlternateStack {
             return Ok((previous, top));
         }
         let top = if interrupted_on_stack {
-            interrupted.checked_sub(128).ok_or(StackError::TooSmall)?
+            interrupted
+                .checked_sub(RED_ZONE)
+                .ok_or(StackError::TooSmall)?
         } else {
             previous.ss_sp + previous.ss_size
         } & !15;
@@ -131,13 +134,21 @@ impl AlternateStack {
 
 pub fn current_pointer() -> usize {
     let pointer;
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::asm!("mov {}, rsp", out(reg) pointer, options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("mov {}, sp", out(reg) pointer, options(nomem, nostack, preserves_flags));
     }
     pointer
 }
 
+#[cfg(target_arch = "x86_64")]
 core::arch::global_asm!(include_str!("signal_stack_x86_64.S"));
+#[cfg(target_arch = "aarch64")]
+core::arch::global_asm!(include_str!("signal_stack_aarch64.S"));
 unsafe extern "C" {
     fn mochios_posix_enter_on_stack(
         top: usize,

@@ -4,7 +4,10 @@ use mnu_abi::ThreadCreateContext;
 
 // The assembly is deliberately tied to the explicit native wire layout.
 const _: () = {
+    #[cfg(target_arch = "x86_64")]
     assert!(core::mem::size_of::<ThreadCreateContext>() == 176);
+    #[cfg(target_arch = "aarch64")]
+    assert!(core::mem::size_of::<ThreadCreateContext>() == 304);
     assert!(core::mem::offset_of!(ThreadCreateContext, entry) == 0);
     assert!(core::mem::offset_of!(ThreadCreateContext, stack_pointer) == 8);
     assert!(core::mem::offset_of!(ThreadCreateContext, argument) == 16);
@@ -14,7 +17,10 @@ const _: () = {
     assert!(core::mem::offset_of!(ThreadCreateContext, registers) == 64);
 };
 
+#[cfg(target_arch = "x86_64")]
 core::arch::global_asm!(include_str!("snapshot_x86_64.S"));
+#[cfg(target_arch = "aarch64")]
+core::arch::global_asm!(include_str!("snapshot_aarch64.S"));
 
 unsafe extern "C" {
     fn mochios_posix_capture_snapshot(
@@ -57,8 +63,7 @@ pub unsafe fn capture_with(
 #[cfg(feature = "syscall-endpoint")]
 pub unsafe fn capture_native(context: &mut ThreadCreateContext, thread_local_base: u64) -> u64 {
     unsafe extern "C" fn clone_current() -> u64 {
-        mochi_user_syscall::raw_syscall0(mochi_user_syscall::SyscallNumber::AddressSpaceClone)
-            .raw()
+        mochi_user_syscall::raw_syscall0(mochi_user_syscall::SyscallNumber::AddressSpaceClone).raw()
     }
     unsafe { capture_with(context, thread_local_base, clone_current) }
 }

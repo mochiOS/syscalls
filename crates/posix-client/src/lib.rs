@@ -45,7 +45,7 @@ mod resource_policy;
 pub mod random;
 pub mod signal;
 pub mod signal_context;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod snapshot;
 pub mod signal_checkpoint;
 pub mod signal_stack;
