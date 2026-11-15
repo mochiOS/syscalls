@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 SDK="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CC="${MOCHIOS_CC:-x86_64-elf-gcc}"
+target=x86_64-unknown-mochios
+if [[ -f "$SDK/share/native-target" ]]; then
+    target="$(<"$SDK/share/native-target")"
+fi
+case "$target" in
+    x86_64-unknown-mochios) compiler=x86_64-elf-gcc ;;
+    aarch64-unknown-mochios) compiler=aarch64-elf-gcc ;;
+    *) echo "unsupported native SDK target: $target" >&2; exit 2 ;;
+esac
+CC="${MOCHIOS_CC:-$compiler}"
 link=1
 for arg in "$@"; do
     case "$arg" in -c|-S|-E|-M|-MM|-fsyntax-only|--version|-dumpmachine|-print-*) link=0 ;; esac

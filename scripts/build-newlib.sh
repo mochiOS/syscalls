@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 USER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_ROOT="$USER_ROOT/target/newlib-sdk"
+OUT_ROOT=""
+ARCH=x86_64
 NEWLIB_SOURCE=""
 NEWLIB_SYSROOT=""
 ABI_SOURCE=""
@@ -12,6 +13,7 @@ TOOLCHAIN=""
 JOBS="${JOBS:-8}"
 while (($#)); do
     case "$1" in
+        --arch) ARCH="$2"; shift 2 ;;
         --newlib-source) NEWLIB_SOURCE="$2"; shift 2 ;;
         --newlib-sysroot) NEWLIB_SYSROOT="$2"; shift 2 ;;
         --output) OUT_ROOT="$2"; shift 2 ;;
@@ -22,13 +24,23 @@ while (($#)); do
         --toolchain) TOOLCHAIN="$2"; shift 2 ;;
         --jobs) JOBS="$2"; shift 2 ;;
         --help)
-            echo "Usage: $0 (--newlib-source DIR | --newlib-sysroot DIR) [--output DIR] [--abi-source DIR] [--libc-source DIR] [--mboot-protocol-source DIR] [--syscalls-source DIR] [--toolchain NAME] [--jobs N]"
+            echo "Usage: $0 (--newlib-source DIR | --newlib-sysroot DIR) [--arch x86_64|aarch64] [--output DIR] [--abi-source DIR] [--libc-source DIR] [--mboot-protocol-source DIR] [--syscalls-source DIR] [--toolchain NAME] [--jobs N]"
             echo "Builds a relocatable C SDK without a kernel or mochiOS workspace."
-            echo "Requires Cargo with rust-src and x86_64-elf GCC. CARGO_NET_OFFLINE=true enables offline builds."
+            echo "Requires Cargo with rust-src and the selected target's ELF cross compiler. CARGO_NET_OFFLINE=true enables offline builds."
             exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+case "$ARCH" in
+    x86_64) OUT_ROOT="${OUT_ROOT:-$USER_ROOT/target/newlib-sdk}" ;;
+    aarch64) OUT_ROOT="${OUT_ROOT:-$USER_ROOT/target/newlib-sdk/aarch64}" ;;
+    *) echo "unsupported native architecture: $ARCH" >&2; exit 2 ;;
+esac
+TARGET_TRIPLE="$ARCH-elf"
+RUST_TARGET="$ARCH-unknown-mochios"
+TARGET_CC="$TARGET_TRIPLE-gcc"
+TARGET_AR="$TARGET_TRIPLE-ar"
+TARGET_RANLIB="$TARGET_TRIPLE-ranlib"
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || { echo "invalid jobs" >&2; exit 2; }
 if [[ -n "$NEWLIB_SOURCE" && -z "$NEWLIB_SYSROOT" ]]; then
     [[ -f "$NEWLIB_SOURCE/configure" ]] || { echo "--newlib-source must contain configure" >&2; exit 2; }
@@ -43,7 +55,7 @@ else
 fi
 mkdir -p "$OUT_ROOT"
 OUT_ROOT="$(cd "$OUT_ROOT" && pwd)"
-for cmd in cargo make nm readelf python3 x86_64-elf-gcc x86_64-elf-ar x86_64-elf-ranlib; do
+for cmd in cargo make nm readelf python3 "$TARGET_CC" "$TARGET_AR" "$TARGET_RANLIB"; do
     command -v "$cmd" >/dev/null || { echo "missing command: $cmd" >&2; exit 1; }
 done
 cargo_args=()
@@ -75,11 +87,27 @@ if [[ -n "$SYSCALLS_SOURCE" ]]; then
 fi
 # Separate objects from older builds that embedded host paths.
 BUILD_DIR="$OUT_ROOT/build-newlib-dynamic-reent"
+[[ "$ARCH" == x86_64 ]] || BUILD_DIR+="-$ARCH"
 INSTALL_ROOT="$OUT_ROOT/toolchain"
-SYSROOT="${NEWLIB_SYSROOT:-$INSTALL_ROOT/x86_64-elf}"
+SYSROOT="${NEWLIB_SYSROOT:-$INSTALL_ROOT/$TARGET_TRIPLE}"
 TARGET_DIR="$OUT_ROOT/cargo-target"
 SDK="$OUT_ROOT/sdk"
 mkdir -p "$BUILD_DIR" "$INSTALL_ROOT" "$TARGET_DIR" "$SDK/bin" "$SDK/lib" "$SDK/share" "$OUT_ROOT/hello"
+# An output belongs to one CPU. Inspect the installed startup object too so
+# older x86 SDK outputs without the target marker cannot be overwritten by ARM.
+if [[ -f "$SDK/share/native-target" && "$(<"$SDK/share/native-target")" != "$RUST_TARGET" ]]; then
+    echo "SDK output belongs to another target; select a separate --output" >&2; exit 2
+fi
+if [[ -f "$SDK/lib/crt0.o" ]]; then
+    python3 - "$SDK/lib/crt0.o" "$ARCH" <<'PYELF'
+import sys
+with open(sys.argv[1], 'rb') as stream:
+    header=stream.read(64)
+expected={'x86_64':62,'aarch64':183}[sys.argv[2]]
+if len(header)!=64 or header[:6]!=b'\x7fELF\x02\x01' or int.from_bytes(header[18:20],'little')!=expected:
+    raise SystemExit('SDK output startup object has another or invalid CPU; select a separate --output')
+PYELF
+fi
 # Source builds use make's dependency tracking; a supplied sysroot is immutable input.
 if [[ -n "$NEWLIB_SOURCE" ]]; then
     # A desktop libc must support standard integer, size, positional and long
@@ -94,7 +122,7 @@ if [[ -n "$NEWLIB_SOURCE" ]]; then
         --enable-newlib-io-pos-args=yes --enable-newlib-io-long-double=yes
     )
     configure_stamp="$BUILD_DIR/.mochios-configure-options"
-    configure_profile="${configure_options[*]}"
+    configure_profile="$TARGET_TRIPLE ${configure_options[*]}"
     if [[ -f "$BUILD_DIR/Makefile" ]] && ! grep -Fqx "srcdir = $NEWLIB_SOURCE" "$BUILD_DIR/Makefile"; then
         echo "newlib source changed; select a separate --output to preserve the existing build" >&2
         exit 2
@@ -106,10 +134,10 @@ if [[ -n "$NEWLIB_SOURCE" ]]; then
         fi
         # The target configure cache records CFLAGS and the old feature set.
         # clean-target-newlib removes objects, not this generated cache.
-        rm -f "$BUILD_DIR/x86_64-elf/newlib/config.cache"
+        rm -f "$BUILD_DIR/$TARGET_TRIPLE/newlib/config.cache"
         (cd "$BUILD_DIR"
-         CC_FOR_TARGET=x86_64-elf-gcc AR_FOR_TARGET=x86_64-elf-ar RANLIB_FOR_TARGET=x86_64-elf-ranlib \
-         "$NEWLIB_SOURCE/configure" --target=x86_64-elf --prefix="$INSTALL_ROOT" \
+         CC_FOR_TARGET="$TARGET_CC" AR_FOR_TARGET="$TARGET_AR" RANLIB_FOR_TARGET="$TARGET_RANLIB" \
+         "$NEWLIB_SOURCE/configure" --target="$TARGET_TRIPLE" --prefix="$INSTALL_ROOT" \
              "${configure_options[@]}")
         printf '%s\n' "$configure_profile" >"$configure_stamp"
     fi
@@ -117,7 +145,7 @@ if [[ -n "$NEWLIB_SOURCE" ]]; then
     flags_stamp="$BUILD_DIR/.mochios-target-cflags"
     if [[ ! -f "$flags_stamp" ]] || [[ "$(<"$flags_stamp")" != "$target_cflags" ]]; then
         make -C "$BUILD_DIR" clean-target-newlib
-        rm -f "$BUILD_DIR/x86_64-elf/newlib/config.cache"
+        rm -f "$BUILD_DIR/$TARGET_TRIPLE/newlib/config.cache"
         printf '%s\n' "$target_cflags" >"$flags_stamp"
     fi
     make -C "$BUILD_DIR" -j"$JOBS" CFLAGS_FOR_TARGET="$target_cflags" all-target-newlib
@@ -131,32 +159,33 @@ RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/build --remap-path-prefix=$
 python3 "$USER_ROOT/scripts/cargo-preserve-lock.py" "$USER_ROOT/Cargo.lock" -- \
 cargo "${cargo_args[@]}" build -Z json-target-spec -Z build-std=core,alloc,compiler_builtins \
     --manifest-path "$USER_ROOT/Cargo.toml" --package mochi-user-newlib-runtime \
-    --release --target "$USER_ROOT/targets/x86_64-unknown-mochios.json" \
+    --release --target "$USER_ROOT/targets/$RUST_TARGET.json" \
     --target-dir "$TARGET_DIR" "${patch_args[@]}"
-x86_64-elf-gcc -c "$USER_ROOT/runtime/crt0.S" -o "$OUT_ROOT/hello/crt0.o"
+"$TARGET_CC" -c "$USER_ROOT/runtime/crt0.S" -o "$OUT_ROOT/hello/crt0.o"
 install -C -m 0644 "$OUT_ROOT/hello/crt0.o" "$SDK/lib/crt0.o"
 # Compose the complete archive outside the SDK. Publishing unchanged bytes
 # must not trigger every Rust std consumer to relink again.
 RUNTIME_ARCHIVE="$OUT_ROOT/hello/libmochi_user_newlib_runtime.a"
-install -C -m 0644 "$TARGET_DIR/x86_64-unknown-mochios/release/libmochi_user_newlib_runtime.a" "$RUNTIME_ARCHIVE"
-x86_64-elf-gcc --sysroot="$SYSROOT" -isystem "$SYSROOT/include" -D__mochios__ -ffreestanding \
+install -C -m 0644 "$TARGET_DIR/$RUST_TARGET/release/libmochi_user_newlib_runtime.a" "$RUNTIME_ARCHIVE"
+"$TARGET_CC" --sysroot="$SYSROOT" -isystem "$SYSROOT/include" -D__mochios__ -ffreestanding \
     -c "$USER_ROOT/runtime/newlib_reent.c" -o "$OUT_ROOT/hello/newlib_reent.o"
-x86_64-elf-ar rD "$RUNTIME_ARCHIVE" "$OUT_ROOT/hello/newlib_reent.o"
-x86_64-elf-gcc --sysroot="$SYSROOT" -isystem "$SYSROOT/include" -I"$USER_ROOT/libc-port/include" \
+"$TARGET_AR" rD "$RUNTIME_ARCHIVE" "$OUT_ROOT/hello/newlib_reent.o"
+"$TARGET_CC" --sysroot="$SYSROOT" -isystem "$SYSROOT/include" -I"$USER_ROOT/libc-port/include" \
     -D__mochios__ -ffreestanding -O2 -Wall -Wextra -Werror \
     -c "$USER_ROOT/runtime/newlib_ioctl.c" -o "$OUT_ROOT/hello/newlib_ioctl.o"
-x86_64-elf-ar rD "$RUNTIME_ARCHIVE" "$OUT_ROOT/hello/newlib_ioctl.o"
-x86_64-elf-gcc --sysroot="$SYSROOT" -isystem "$SYSROOT/include" -I"$USER_ROOT/libc-port/include" \
+"$TARGET_AR" rD "$RUNTIME_ARCHIVE" "$OUT_ROOT/hello/newlib_ioctl.o"
+"$TARGET_CC" --sysroot="$SYSROOT" -isystem "$SYSROOT/include" -I"$USER_ROOT/libc-port/include" \
     -D__mochios__ -ffreestanding -O2 -Wall -Wextra -Werror \
     -c "$USER_ROOT/runtime/newlib_semaphore.c" -o "$OUT_ROOT/hello/newlib_semaphore.o"
-x86_64-elf-ar rD "$RUNTIME_ARCHIVE" "$OUT_ROOT/hello/newlib_semaphore.o"
-x86_64-elf-ranlib -D "$RUNTIME_ARCHIVE"
+"$TARGET_AR" rD "$RUNTIME_ARCHIVE" "$OUT_ROOT/hello/newlib_semaphore.o"
+"$TARGET_RANLIB" -D "$RUNTIME_ARCHIVE"
 install -C -m 0644 "$RUNTIME_ARCHIVE" "$SDK/lib/libmochi_user_newlib_runtime.a"
 install -C -m 0644 "$USER_ROOT/runtime/linker.ld" "$SDK/lib/linker.ld"
-install -C -m 0644 "$USER_ROOT/targets/x86_64-unknown-mochios.json" "$SDK/share/x86_64-unknown-mochios.json"
+install -C -m 0644 "$USER_ROOT/targets/$RUST_TARGET.json" "$SDK/share/$RUST_TARGET.json"
 install -C -m 0755 "$USER_ROOT/scripts/mochios-cc" "$SDK/bin/mochios-cc"
-LIBGCC="$(x86_64-elf-gcc -print-libgcc-file-name)"
-[[ -f "$LIBGCC" ]] || { echo "x86_64-elf-gcc did not provide libgcc.a: $LIBGCC" >&2; exit 1; }
+printf '%s\n' "$RUST_TARGET" >"$SDK/share/native-target"
+LIBGCC="$("$TARGET_CC" -print-libgcc-file-name)"
+[[ -f "$LIBGCC" ]] || { echo "$TARGET_CC did not provide libgcc.a: $LIBGCC" >&2; exit 1; }
 install -C -m 0644 "$LIBGCC" "$SDK/lib/libgcc.a"
 
 # `make install` refreshes timestamps even when newlib bytes are unchanged.
@@ -174,15 +203,15 @@ for runtime_library in libc.a libg.a; do
     [[ -f "$runtime_archive" ]] || continue
     # ar may replace its output inode: do not rely on libg being a hard link.
     for runtime_member in libc_a-raise.o libc_a-setjmp.o; do
-        if x86_64-elf-ar t "$runtime_archive" | grep -Fx "$runtime_member" >/dev/null; then
-            x86_64-elf-ar dD "$runtime_archive" "$runtime_member"
+        if "$TARGET_AR" t "$runtime_archive" | grep -Fx "$runtime_member" >/dev/null; then
+            "$TARGET_AR" dD "$runtime_archive" "$runtime_member"
         fi
     done
 done
 # Cross-binutils defaults to nondeterministic archive indexes. Installation
 # runs ranlib again; normalize its timestamp before comparing published inputs.
 for runtime_archive in "$PREPARED_SYSROOT"/lib/*.a; do
-    x86_64-elf-ranlib -D "$runtime_archive"
+    "$TARGET_RANLIB" -D "$runtime_archive"
 done
 perl "$USER_ROOT/scripts/fix-newlib-signal-header.pl" "$PREPARED_SYSROOT/include/sys/signal.h"
 python3 "$USER_ROOT/scripts/sync-sdk-tree.py" "$PREPARED_SYSROOT" "$SDK/sysroot"
