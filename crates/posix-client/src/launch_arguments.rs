@@ -22,6 +22,7 @@ pub enum EncodeError {
     TooLarge,
     InvalidEntry,
     Startup(crate::process_image::EncodeError),
+    Metadata(i32),
     Creation(mnu_abi::process_create::Error),
 }
 
@@ -52,6 +53,67 @@ pub fn encode_native_launch_for_process(
     items: &[String],
     random: [u8; 16],
     process: crate::process_image::Process<'_>,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_launch(
+        identity,
+        argument_zero,
+        items,
+        |arguments, environment, output| {
+            crate::process_image::encode_initial_stack_for_process(
+                arguments,
+                environment,
+                identity.as_bytes(),
+                random,
+                &[],
+                process,
+                output,
+            )
+            .map_err(EncodeError::Startup)
+        },
+    )
+}
+
+/// Keep loader metadata beyond the bounded initial stack in read-only objects.
+/// The caller retains `owner` through native creation; handle/value arguments
+/// still pass through the same ownership and attenuation encoder.
+pub fn encode_native_launch_with_metadata<B: crate::image_preparation::Backend>(
+    identity: &str,
+    argument_zero: &str,
+    items: &[String],
+    random: [u8; 16],
+    process: crate::process_image::Process<'_>,
+    owner: &mut crate::startup_metadata::Owner<B>,
+    backend: &B,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_launch(
+        identity,
+        argument_zero,
+        items,
+        |arguments, environment, output| {
+            let length = owner
+                .encode(
+                    backend,
+                    arguments,
+                    environment,
+                    identity.as_bytes(),
+                    random,
+                    &[],
+                    process,
+                    output,
+                )
+                .map_err(EncodeError::Metadata)?;
+            owner
+                .attach(output, length, &[])
+                .map_err(EncodeError::Metadata)
+        },
+    )
+}
+
+fn encode_launch(
+    identity: &str,
+    argument_zero: &str,
+    items: &[String],
+    encode_startup: impl FnOnce(&[&[u8]], &[&[u8]], &mut [u8]) -> Result<usize, EncodeError>,
 ) -> Result<Vec<u8>, EncodeError> {
     use mnu_abi::process_create::{self, HandleGrant, Value};
 
@@ -115,16 +177,7 @@ pub fn encode_native_launch_for_process(
         }
     }
     let mut startup = vec![0; process_create::MAX_REQUEST_BYTES];
-    let length = crate::process_image::encode_initial_stack_for_process(
-        &arguments,
-        &environment,
-        identity.as_bytes(),
-        random,
-        &[],
-        process,
-        &mut startup,
-    )
-    .map_err(EncodeError::Startup)?;
+    let length = encode_startup(&arguments, &environment, &mut startup)?;
     let mut metadata = vec![0; process_create::MAX_REQUEST_BYTES];
     let length = process_create::encode(
         identity,
