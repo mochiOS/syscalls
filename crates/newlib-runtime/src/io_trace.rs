@@ -29,11 +29,29 @@ fn emit(arguments: fmt::Arguments<'_>) {
         length: 0,
     };
     let _ = buffer.write_fmt(arguments);
-    let _ = syscall::raw_syscall2(
+    if syscall::raw_syscall2(
         syscall::SyscallNumber::DebugWrite,
         buffer.bytes.as_ptr() as u64,
         buffer.length as u64,
-    );
+    ).into_result().is_ok() { return; }
+    // Ordinary services do not need kernel.debug for opt-in diagnostics.
+    // The existing logger protocol accepts bounded text through normal IPC;
+    // keep libc, allocation and POSIX calls out of this failure path.
+    let name = b"logger.service";
+    if let Ok(endpoint) = syscall::raw_syscall2(
+        syscall::SyscallNumber::FindProcessByName,
+        name.as_ptr() as u64,
+        name.len() as u64,
+    ).into_result() {
+        if endpoint != 0 {
+            let _ = syscall::raw_syscall3(
+                syscall::SyscallNumber::IpcSend,
+                endpoint,
+                buffer.bytes.as_ptr() as u64,
+                buffer.length as u64,
+            );
+        }
+    }
 }
 
 pub(super) fn thread_failure(stage: &'static str, error: c_int) {
