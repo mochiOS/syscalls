@@ -1580,7 +1580,11 @@ fn register_current_thread() -> Option<(Pthread, &'static ThreadControl)> {
     if current.1.signal_upcall_stack.load(Ordering::Acquire) == 0
         && has_posix_environment().ok()?
     {
-        setup_signal_delivery(current.1, None).ok()?;
+        setup_signal_delivery(current.1, None).inspect_err(|error| {
+            #[cfg(feature = "trace-io")]
+            io_trace::thread_failure("signal-environment", *error);
+            let _ = error;
+        }).ok()?;
     }
     Some(current)
 }
@@ -1595,20 +1599,28 @@ fn register_thread_control() -> Option<(Pthread, &'static ThreadControl)> {
     control.native_id.store(native_id, Ordering::Relaxed);
     control.newlib_lock_identity.store(native_id, Ordering::Relaxed);
     control.state.store(THREAD_RUNNING, Ordering::Release);
-    if allocate_thread_reent(control).is_err() {
+    if let Err(error) = allocate_thread_reent(control) {
+        #[cfg(feature = "trace-io")]
+        io_trace::thread_failure("reentrancy", error);
+        let _ = error;
         control.state.store(THREAD_REAPING, Ordering::Relaxed);
         release_thread_control(control);
         return None;
     }
-    if setup_signal_delivery(control, None).is_err() {
+    if let Err(error) = setup_signal_delivery(control, None) {
+        #[cfg(feature = "trace-io")]
+        io_trace::thread_failure("signal-registration", error);
+        let _ = error;
         control.state.store(THREAD_REAPING, Ordering::Relaxed);
         release_thread_control(control);
         return None;
     }
-    if static_tls::allocate(control)
+    if let Err(error) = static_tls::allocate(control)
         .and_then(|()| static_tls::activate(control))
-        .is_err()
     {
+        #[cfg(feature = "trace-io")]
+        io_trace::thread_failure("tls", error);
+        let _ = error;
         control.state.store(THREAD_REAPING, Ordering::Relaxed);
         release_thread_control(control);
         return None;

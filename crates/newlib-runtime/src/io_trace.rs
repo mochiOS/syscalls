@@ -36,6 +36,10 @@ fn emit(arguments: fmt::Arguments<'_>) {
     );
 }
 
+pub(super) fn thread_failure(stage: &'static str, error: c_int) {
+    emit(format_args!("runtime: thread initialization failed stage={stage} errno={error}\n"));
+}
+
 pub(super) struct Trace {
     kind: &'static str,
     id: u64,
