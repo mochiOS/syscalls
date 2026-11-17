@@ -115,6 +115,40 @@ fn encode_launch(
     items: &[String],
     encode_startup: impl FnOnce(&[&[u8]], &[&[u8]], &mut [u8]) -> Result<usize, EncodeError>,
 ) -> Result<Vec<u8>, EncodeError> {
+    use mnu_abi::process_create;
+    let Arguments {
+        arguments,
+        environment,
+        handles,
+        values,
+    } = collect_arguments(argument_zero, items)?;
+    let mut startup = vec![0; process_create::MAX_REQUEST_BYTES];
+    let length = encode_startup(&arguments, &environment, &mut startup)?;
+    let mut metadata = vec![0; process_create::MAX_REQUEST_BYTES];
+    let length = process_create::encode(
+        identity,
+        argument_zero,
+        &startup[..length],
+        &handles,
+        &values,
+        &mut metadata,
+    )
+    .map_err(EncodeError::Creation)?;
+    metadata.truncate(length);
+    Ok(metadata)
+}
+
+pub(crate) struct Arguments<'a> {
+    pub arguments: Vec<&'a [u8]>,
+    pub environment: Vec<&'a [u8]>,
+    pub handles: Vec<mnu_abi::process_create::HandleGrant>,
+    pub values: Vec<mnu_abi::process_create::Value>,
+}
+
+pub(crate) fn collect_arguments<'a>(
+    argument_zero: &'a str,
+    items: &'a [String],
+) -> Result<Arguments<'a>, EncodeError> {
     use mnu_abi::process_create::{self, HandleGrant, Value};
 
     if argument_zero.is_empty() || argument_zero.as_bytes().contains(&0) {
@@ -176,20 +210,12 @@ fn encode_launch(
             arguments.push(item.as_bytes());
         }
     }
-    let mut startup = vec![0; process_create::MAX_REQUEST_BYTES];
-    let length = encode_startup(&arguments, &environment, &mut startup)?;
-    let mut metadata = vec![0; process_create::MAX_REQUEST_BYTES];
-    let length = process_create::encode(
-        identity,
-        argument_zero,
-        &startup[..length],
-        &handles,
-        &values,
-        &mut metadata,
-    )
-    .map_err(EncodeError::Creation)?;
-    metadata.truncate(length);
-    Ok(metadata)
+    Ok(Arguments {
+        arguments,
+        environment,
+        handles,
+        values,
+    })
 }
 
 fn decimal(field: Option<&str>) -> Result<u64, EncodeError> {

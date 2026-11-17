@@ -9,6 +9,7 @@ pub mod application_launch;
 pub mod signed_image;
 pub mod library_image;
 pub mod prepared_exec;
+pub mod native_launch;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

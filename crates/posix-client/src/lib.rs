@@ -22,6 +22,8 @@ pub mod directory;
 pub mod io_vector;
 #[cfg(feature = "launch-arguments")]
 pub mod launch_arguments;
+#[cfg(feature = "native-launch")]
+pub mod native_launch;
 #[cfg(feature = "fd-table")]
 pub mod fd;
 #[cfg(feature = "fd-table")]

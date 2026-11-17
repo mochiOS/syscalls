@@ -20,6 +20,7 @@ endpoint = ["dep:mochi-user-platform"]
 syscall-endpoint = ["dep:mochi-user-syscall"]
 fd-table = []
 launch-arguments = []
+native-launch = ["launch-arguments", "endpoint"]
 getrandom02 = ["dep:getrandom02", "syscall-endpoint"]
 
 [lib]

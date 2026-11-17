@@ -1723,6 +1723,7 @@ pub mod capability {
     pub use mochios_capability_protocol::library_image;
     pub use mochios_capability_protocol::prepared_exec;
     pub use mochios_capability_protocol::application_launch;
+    pub use mochios_capability_protocol::native_launch;
     pub use mochios_capability_protocol::input_authority;
     pub use mochios_capability_protocol::presentation;
     mod prepared_image;
