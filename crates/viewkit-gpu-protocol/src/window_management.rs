@@ -269,6 +269,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn software_keys_are_scalars_with_only_editor_control_keys() {
+        let request = software_key_request(9, 'か');
+        assert_eq!(get(&request, 0), Some(SEND_SOFTWARE_KEY));
+        assert_eq!(get64(&request, 4), Some(9));
+        assert_eq!(get(&request, 12).and_then(software_key), Some('か'));
+        assert_eq!(software_key(8), Some('\u{8}'));
+        assert_eq!(software_key(10), Some('\n'));
+        assert_eq!(software_key(0x1b), None);
+        assert_eq!(software_key(0xd800), None);
+    }
+
+    #[test]
     fn deferred_input_and_preview_reject_invalid_lengths() {
         let region = DeferredInput {
             bounds: Bounds {
