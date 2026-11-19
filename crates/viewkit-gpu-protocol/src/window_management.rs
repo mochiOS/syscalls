@@ -6,6 +6,11 @@ pub const PRESENT: u32 = 113;
 pub const CLOSE: u32 = 114;
 pub const SET_DEFERRED_INPUT: u32 = 115;
 pub const PREVIEW: u32 = 116;
+pub const SEND_SOFTWARE_KEY: u32 = 117;
+pub const QUERY_TEXT_INPUT: u32 = 118;
+pub const SET_TEXT_INPUT: u32 = 16;
+pub const EVENT_SOFTWARE_KEY: u32 = 17;
+pub const EVENT_TEXT_INPUT_CHANGED: u32 = 18;
 pub const VERSION: u32 = 1;
 pub const MAX_WINDOWS: usize = 8;
 pub const HEADER_LEN: usize = 16;
@@ -71,6 +76,30 @@ pub fn preview_request(window: u64) -> [u8; 12] {
     request
 }
 
+pub fn text_input_request(surface: u64, active: bool) -> [u8; 16] {
+    text_message(SET_TEXT_INPUT, surface, u32::from(active))
+}
+
+pub fn software_key_request(window: u64, key: char) -> [u8; 16] {
+    text_message(SEND_SOFTWARE_KEY, window, key as u32)
+}
+
+pub fn text_input_query(window: u64) -> [u8; 16] {
+    text_message(QUERY_TEXT_INPUT, window, 0)
+}
+
+fn text_message(operation: u32, token: u64, value: u32) -> [u8; 16] {
+    let mut bytes = [0; 16];
+    put(&mut bytes, 0, operation);
+    bytes[4..12].copy_from_slice(&token.to_le_bytes());
+    put(&mut bytes, 12, value);
+    bytes
+}
+
+pub fn software_key(scalar: u32) -> Option<char> {
+    let key = char::from_u32(scalar)?;
+    (!key.is_control() || matches!(key, '\u{8}' | '\n' | '\t')).then_some(key)
+}
 pub fn preview_header(header: &mut [u8], width: u32, height: u32) -> Option<()> {
     if header.len() != HEADER_LEN || preview_pixel_len(width, height).is_none() {
         return None;
